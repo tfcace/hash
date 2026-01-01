@@ -1,0 +1,19 @@
+# Design documents (internal only)
+docs/plans/
+
+# Build artifacts
+/hash
+*.exe
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Go
+/vendor/

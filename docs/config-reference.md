@@ -1,0 +1,1018 @@
+# Hash Configuration Reference
+
+Hash is configured via TOML files in `~/.config/hash/`.
+
+## File Locations
+
+| File | Purpose |
+|------|---------|
+| `~/.config/hash/config.toml` | Main configuration |
+| `~/.config/hash/aliases.toml` | Command aliases |
+| `~/.local/share/hash/history.db` | Command history (SQLite) |
+
+---
+
+## [shell]
+
+Core shell behavior settings.
+
+### shell.editor
+
+**Type:** `string`
+**Default:** `$EDITOR` or `"nano"`
+
+The editor launched when pressing Tab to edit a suggested command, or for
+multi-line editing. Supports any terminal editor.
+
+```toml
+editor = "micro"      # Lightweight, user-friendly
+editor = "hx"         # Helix
+editor = "nvim"       # Neovim
+editor = "$EDITOR"    # Use environment variable
+```
+
+### shell.keybindings
+
+**Type:** `"emacs"` | `"vim"` | `"helix"`
+**Default:** `"emacs"`
+
+The keybinding style for command-line editing.
+
+- **emacs**: Traditional readline bindings. Ctrl+A/E for line start/end,
+  Ctrl+W to delete word, Ctrl+R for history search.
+
+- **vim**: Modal editing. Starts in insert mode, Esc to normal mode.
+  hjkl navigation, w/b for word movement, standard vim operators.
+
+- **helix**: Selection-first modal editing. Like vim, but movements in
+  select mode (v) extend the selection. Actions operate on selections.
+  Uses `gh`/`gl` for line start/end instead of `0`/`$`.
+
+```toml
+keybindings = "helix"
+```
+
+### shell.init_commands
+
+**Type:** `array of strings`
+**Default:** `[]`
+
+Commands executed when Hash starts. Use for sourcing additional configs,
+setting environment variables, or running startup checks.
+
+```toml
+init_commands = [
+    "source ~/.config/hash/aliases.sh",
+    "export GPG_TTY=$(tty)",
+]
+```
+
+---
+
+## [prompt]
+
+Prompt appearance and behavior.
+
+### prompt.mode
+
+**Type:** `"starship"` | `"built-in"` | `"none"`
+**Default:** `"starship"` if installed, otherwise `"built-in"`
+
+Which prompt engine to use.
+
+- **starship**: Use the [Starship](https://starship.rs) prompt. Recommended.
+  Starship must be installed separately. Configured via `~/.config/starship.toml`.
+
+- **built-in**: Hash's native prompt engine. Supports colors, Nerd Font symbols,
+  and Powerline-style segments. Configured in `[prompt.theme]` and `[prompt.format]`.
+
+- **none**: Minimal prompt showing only `$ `. Useful for scripting or
+  embedding Hash.
+
+```toml
+mode = "starship"
+```
+
+### prompt.starship_path
+
+**Type:** `string`
+**Default:** auto-detected from `$PATH`
+
+Explicit path to the Starship binary. Only needed if Starship is installed
+in a non-standard location.
+
+```toml
+starship_path = "/opt/homebrew/bin/starship"
+```
+
+---
+
+## [prompt.theme]
+
+Color theme for the built-in prompt engine. Ignored if `prompt.mode = "starship"`.
+
+All colors accept:
+- Hex codes: `"#F4AE59"`
+- ANSI color names: `"red"`, `"bright-blue"`
+- ANSI 256 codes: `"178"`
+
+### Available theme keys
+
+```toml
+[prompt.theme]
+# Segment backgrounds
+bg_user = "#241417"       # Username segment
+bg_dir = "#F4AE59"        # Directory segment
+bg_git = "#20352A"        # Git branch segment
+bg_kube = "#1F2E2B"       # Kubernetes context segment
+bg_time = "#1A1F1B"       # Time segment
+
+# Segment foregrounds
+fg_user = "#c27166"
+fg_dir = "#0F1B1D"
+fg_git = "#e0f0ef"
+fg_kube = "#e09785"
+fg_time = "#e0f0ef"
+
+# Status indicators
+success = "#8dac8b"       # Prompt character on exit 0
+error = "#c27166"         # Prompt character on non-zero exit
+```
+
+---
+
+## [prompt.format]
+
+Layout for the built-in prompt engine.
+
+### prompt.format.left
+
+**Type:** `string`
+**Default:** `"[ {cwd} ][ {git_branch} ]"`
+
+Left-side prompt format. Supports Powerline transitions with `[](fg:X bg:Y)`.
+
+**Available variables:**
+
+| Variable | Description |
+|----------|-------------|
+| `{cwd}` | Current working directory |
+| `{cwd_basename}` | Only the current directory name |
+| `{git_branch}` | Current git branch |
+| `{git_status}` | Git status indicators (+, !, ?) |
+| `{user}` | Current username |
+| `{host}` | Hostname |
+| `{kube_context}` | Kubernetes context name |
+| `{kube_namespace}` | Kubernetes namespace |
+| `{time}` | Current time (HH:MM) |
+| `{duration}` | Last command duration |
+| `{exit_code}` | Last command exit code |
+| `{jobs}` | Background job count |
+
+**Powerline example:**
+
+```toml
+left = """
+[](bg:bg_dir)\
+[ {cwd} ](bg:bg_dir fg:fg_dir)\
+[](bg:bg_git fg:bg_dir)\
+[ {git_branch} ](bg:bg_git fg:fg_git)\
+[](fg:bg_git)"""
+```
+
+### prompt.format.right
+
+**Type:** `string`
+**Default:** `""`
+
+Right-side prompt format. Same variables as `left`. Rendered at terminal's
+right edge.
+
+```toml
+right = "[ {kube_context} ]  [ {time} ]"
+```
+
+### prompt.format.newline
+
+**Type:** `boolean`
+**Default:** `false`
+
+Whether to print the prompt character on a new line below the info segments.
+
+```toml
+newline = true
+```
+
+Produces:
+```
+~/projects/hash  main
+❯
+```
+
+### prompt.format.character
+
+**Type:** `string`
+**Default:** `"❯"`
+
+The prompt character shown before user input. Colored by `success`/`error`
+theme colors based on last command's exit code.
+
+```toml
+character = "λ"
+```
+
+---
+
+## [agent]
+
+AI agent configuration for `??` commands.
+
+### agent.default
+
+**Type:** `string`
+**Default:** `"claude"`
+
+Which configured agent to use by default. Must match a key in `[agent.<name>]`.
+
+```toml
+default = "claude"
+```
+
+### agent.timeout
+
+**Type:** `duration string`
+**Default:** `"30s"`
+
+Maximum time to wait for an agent response before timing out.
+
+```toml
+timeout = "30s"
+timeout = "1m"
+timeout = "2m30s"
+```
+
+---
+
+## [agent.<name>]
+
+Configure individual agents. Create multiple sections for different agents.
+
+### agent.<name>.transport
+
+**Type:** `"stdio"` | `"http"`
+**Required**
+
+How to communicate with the agent.
+
+- **stdio**: Launch agent as subprocess, communicate via JSON-RPC over
+  stdin/stdout. Used for Claude Code, Gemini CLI, local wrappers.
+
+- **http**: Communicate via HTTP API. Used for Ollama, LM Studio, vLLM,
+  and other HTTP-based inference servers.
+
+### agent.<name>.command (stdio only)
+
+**Type:** `string`
+**Required for stdio transport**
+
+The command to launch the agent subprocess.
+
+```toml
+[agent.claude]
+transport = "stdio"
+command = "claude"
+```
+
+### agent.<name>.args (stdio only)
+
+**Type:** `array of strings`
+**Default:** `[]`
+
+Arguments passed to the agent command.
+
+```toml
+[agent.claude]
+transport = "stdio"
+command = "claude"
+args = ["--chat", "--no-banner"]
+```
+
+### agent.<name>.url (http only)
+
+**Type:** `string (URL)`
+**Required for http transport**
+
+The base URL for the agent's HTTP API.
+
+```toml
+[agent.ollama]
+transport = "http"
+url = "http://localhost:11434/api/generate"
+```
+
+### agent.<name>.model (http only)
+
+**Type:** `string`
+**Default:** agent-specific
+
+The model name to use with HTTP-based agents.
+
+```toml
+[agent.ollama]
+transport = "http"
+url = "http://localhost:11434/api/generate"
+model = "codellama:13b"
+```
+
+### agent.<name>.headers (http only)
+
+**Type:** `table of strings`
+**Default:** `{}`
+
+Additional HTTP headers for API requests. Useful for authentication.
+
+```toml
+[agent.custom]
+transport = "http"
+url = "https://api.example.com/v1/chat"
+model = "gpt-4"
+headers = { Authorization = "Bearer ${OPENAI_API_KEY}" }
+```
+
+---
+
+## [agent.context]
+
+Default context sent to agents with `??` requests.
+
+### agent.context.include_cwd
+
+**Type:** `boolean`
+**Default:** `true`
+
+Include the current working directory.
+
+### agent.context.include_git_branch
+
+**Type:** `boolean`
+**Default:** `true`
+
+Include the current git branch (if in a git repository).
+
+### agent.context.include_kube_context
+
+**Type:** `boolean`
+**Default:** `true`
+
+Include the current Kubernetes context (if kubectl is configured).
+
+### agent.context.include_env_vars
+
+**Type:** `array of strings`
+**Default:** `["KUBECONFIG", "AWS_PROFILE", "NODE_ENV"]`
+
+Environment variables to include in agent context. Only variables listed
+here are sent — not your entire environment.
+
+```toml
+include_env_vars = [
+    "KUBECONFIG",
+    "AWS_PROFILE",
+    "AWS_REGION",
+    "NODE_ENV",
+    "RAILS_ENV",
+    "GOPATH",
+]
+```
+
+### agent.context.history_count
+
+**Type:** `integer`
+**Default:** `5`
+
+Number of recent commands to include in agent context.
+
+```toml
+history_count = 10
+```
+
+---
+
+## [completions]
+
+Tab completion behavior.
+
+### completions.fuzzy
+
+**Type:** `boolean`
+**Default:** `true`
+
+Enable fuzzy matching in completions. With fuzzy enabled, typing `kgp`
+matches `kubectl get pods`.
+
+```toml
+fuzzy = true
+```
+
+### completions.file_icons
+
+**Type:** `boolean`
+**Default:** `true`
+
+Show file type icons in completion menus. Requires a Nerd Font.
+
+```toml
+file_icons = true
+```
+
+Icons shown:
+-  directories
+-  text/code files
+-  executables
+-  symlinks
+
+### completions.show_hidden
+
+**Type:** `boolean`
+**Default:** `false`
+
+Show hidden files (dotfiles) in completions by default. Toggle with
+Ctrl+H during completion regardless of this setting.
+
+```toml
+show_hidden = false
+```
+
+---
+
+## [completions.<tool>]
+
+Tool-specific completion settings.
+
+### completions.<tool>.cache_ttl
+
+**Type:** `duration string`
+**Default:** varies by tool
+
+How long to cache dynamic completions (pod names, container IDs, etc.).
+
+```toml
+[completions.kubectl]
+cache_ttl = "5m"      # Pod names don't change often
+
+[completions.docker]
+cache_ttl = "30s"     # Containers change more frequently
+
+[completions.aws]
+cache_ttl = "15m"     # AWS resources are slow to query
+```
+
+### completions.<tool>.enabled
+
+**Type:** `boolean`
+**Default:** `true`
+
+Disable completions for a specific tool.
+
+```toml
+[completions.terraform]
+enabled = false       # Terraform completions are slow, disable them
+```
+
+---
+
+## [history]
+
+Command history storage and retention.
+
+### history.enabled
+
+**Type:** `boolean`
+**Default:** `true`
+
+Enable command history recording.
+
+```toml
+enabled = true
+```
+
+### history.path
+
+**Type:** `string (path)`
+**Default:** `"~/.local/share/hash/history.db"`
+
+Path to the SQLite history database.
+
+```toml
+path = "~/.local/share/hash/history.db"
+```
+
+### history.max_entries
+
+**Type:** `integer` | `"unlimited"`
+**Default:** `"unlimited"`
+
+Maximum number of history entries to retain. Oldest entries are pruned
+first when limit is reached.
+
+```toml
+max_entries = "unlimited"    # Never prune by count
+max_entries = 100000         # Keep last 100k commands
+```
+
+### history.max_age
+
+**Type:** `duration string` | `"forever"`
+**Default:** `"forever"`
+
+Maximum age of history entries. Entries older than this are pruned.
+
+```toml
+max_age = "forever"          # Never prune by age
+max_age = "365d"             # Prune entries older than 1 year
+max_age = "90d"              # Prune entries older than 90 days
+```
+
+### history.store_agent_interactions
+
+**Type:** `boolean`
+**Default:** `true`
+
+Store `??` prompts and agent responses in history. Enables queries like
+"what did I ask the agent about docker?"
+
+```toml
+store_agent_interactions = true
+```
+
+### history.import_system_sudo
+
+**Type:** `boolean`
+**Default:** `false`
+
+Attempt to import sudo commands from system logs. Captures privileged
+commands run in other shells. Requires read access to sudo logs.
+
+```toml
+import_system_sudo = true
+```
+
+### history.sudo_log_path
+
+**Type:** `string (path)`
+**Default:** auto-detected
+
+Path to system sudo log. Only used if `import_system_sudo = true`.
+
+```toml
+sudo_log_path = "/var/log/auth.log"     # Debian/Ubuntu
+sudo_log_path = "/var/log/secure"       # RHEL/CentOS
+```
+
+### history.exclude_patterns
+
+**Type:** `array of regex strings`
+**Default:** `[".*password.*", ".*secret.*", ".*token.*"]`
+
+Commands matching these patterns are not recorded in history. Patterns
+are case-insensitive regex matched against the full command.
+
+```toml
+exclude_patterns = [
+    ".*password.*",
+    ".*secret.*",
+    ".*token.*",
+    "^export .*=",         # Don't log exports (may contain secrets)
+    ".*--apikey.*",
+    "^vault .*",           # Don't log Vault commands
+]
+```
+
+---
+
+## [errors]
+
+Error handling and agent assistance on command failure.
+
+### errors.auto_prompt
+
+**Type:** `boolean`
+**Default:** `true`
+
+Show a prompt to invoke the agent after command failures. Displays
+"?? to explain" after non-zero exit codes.
+
+```toml
+auto_prompt = true
+```
+
+### errors.ignore_exit_codes
+
+**Type:** `array of integers`
+**Default:** `[1]`
+
+Exit codes that should not trigger the agent prompt. Exit code 1 is
+commonly used for "not found" (grep, find) which isn't really an error.
+
+```toml
+ignore_exit_codes = [1, 2]    # 1 = not found, 2 = misuse (for some tools)
+```
+
+### errors.ignore_commands
+
+**Type:** `array of strings`
+**Default:** `["grep", "diff", "test", "["]`
+
+Commands that should never trigger the agent prompt on failure. These
+tools commonly exit non-zero for non-error conditions.
+
+```toml
+ignore_commands = [
+    "grep",      # Exit 1 = no match
+    "diff",      # Exit 1 = files differ
+    "test",      # Exit 1 = condition false
+    "[",         # Same as test
+    "rg",        # Same as grep
+]
+```
+
+---
+
+## [learning]
+
+Adaptive error fix suggestions based on past behavior.
+
+### learning.enabled
+
+**Type:** `boolean`
+**Default:** `true`
+
+Enable learning from user fix patterns. When you fix an error, Hash
+remembers and suggests the same fix for similar errors in the future.
+
+```toml
+enabled = true
+```
+
+### learning.min_occurrences
+
+**Type:** `integer`
+**Default:** `2`
+
+Minimum times a fix must succeed before Hash suggests it automatically.
+Prevents suggesting one-off fixes.
+
+```toml
+min_occurrences = 2
+```
+
+### learning.suggestion_threshold
+
+**Type:** `float (0.0 - 1.0)`
+**Default:** `0.7`
+
+Confidence score required to suggest a learned fix without calling the
+agent. Higher values require more consistent success history.
+
+```toml
+suggestion_threshold = 0.7
+```
+
+### learning.auto_apply
+
+**Type:** `boolean`
+**Default:** `false`
+
+**Dangerous.** Automatically apply learned fixes without confirmation
+when confidence exceeds `auto_apply_threshold`. Not recommended.
+
+```toml
+auto_apply = false
+```
+
+### learning.auto_apply_threshold
+
+**Type:** `float (0.0 - 1.0)`
+**Default:** `0.95`
+
+Confidence score required for auto-applying fixes. Only used if
+`auto_apply = true`.
+
+```toml
+auto_apply_threshold = 0.95
+```
+
+---
+
+## [clipboard]
+
+Clipboard integration for copying commands and output.
+
+### clipboard.max_output_size
+
+**Type:** `size string`
+**Default:** `"1MB"`
+
+Maximum output size to keep in memory per command. Larger outputs are
+truncated.
+
+```toml
+max_output_size = "1MB"
+max_output_size = "512KB"
+```
+
+### clipboard.buffer_size
+
+**Type:** `integer`
+**Default:** `100`
+
+Number of recent commands (with outputs) to keep in memory for copying.
+
+```toml
+buffer_size = 100
+```
+
+### clipboard.preserve_colors
+
+**Type:** `boolean`
+**Default:** `false`
+
+Include ANSI escape codes when copying output. Useful if pasting into
+another terminal, but may cause issues in other applications.
+
+```toml
+preserve_colors = false
+```
+
+### clipboard.keys
+
+Keybindings for clipboard operations.
+
+```toml
+[clipboard.keys]
+copy_command = "alt+c"
+copy_output = "alt+o"
+copy_both = "alt+shift+c"
+```
+
+---
+
+## [ui]
+
+User interface settings.
+
+### ui.context_picker_key
+
+**Type:** `string (key binding)`
+**Default:** `"ctrl+e"`
+
+Key to open the context picker before sending a `??` request.
+
+```toml
+context_picker_key = "ctrl+e"
+```
+
+### ui.completion_max_height
+
+**Type:** `integer`
+**Default:** `10`
+
+Maximum number of rows shown in completion menus.
+
+```toml
+completion_max_height = 15
+```
+
+---
+
+## [ui.colors]
+
+UI element colors (outside of prompt).
+
+### ui.colors.suggestion
+
+**Type:** `color string`
+**Default:** `"#888888"`
+
+Color for agent suggestions and ghost text.
+
+### ui.colors.error
+
+**Type:** `color string`
+**Default:** `"#c27166"`
+
+Color for error messages.
+
+### ui.colors.success
+
+**Type:** `color string`
+**Default:** `"#8dac8b"`
+
+Color for success messages.
+
+### ui.colors.info
+
+**Type:** `color string`
+**Default:** `"#93bfc2"`
+
+Color for informational messages.
+
+```toml
+[ui.colors]
+suggestion = "#888888"
+error = "#c27166"
+success = "#8dac8b"
+info = "#93bfc2"
+```
+
+---
+
+## [keybindings]
+
+Custom keybinding configuration.
+
+### keybindings.style
+
+**Type:** `"emacs"` | `"vim"` | `"helix"`
+**Default:** same as `shell.keybindings`
+
+Base keybinding style. Can be overridden from `shell.keybindings` if you
+want different behavior for navigation vs. editing.
+
+### keybindings.overrides
+
+**Type:** `table of key = action`
+**Default:** `{}`
+
+Override specific keybindings regardless of style.
+
+```toml
+[keybindings]
+style = "helix"
+
+[keybindings.overrides]
+"ctrl+e" = "context_picker"
+"ctrl+r" = "history_search"
+"ctrl+g" = "cancel"
+"ctrl+l" = "clear_screen"
+"ctrl+d" = "exit"
+```
+
+**Available actions:**
+
+| Action | Description |
+|--------|-------------|
+| `context_picker` | Open agent context picker |
+| `history_search` | Open history search |
+| `clear_screen` | Clear terminal |
+| `cancel` | Cancel current input |
+| `exit` | Exit shell |
+| `complete` | Trigger completion |
+| `accept_suggestion` | Accept agent suggestion |
+| `edit_suggestion` | Edit suggestion in $EDITOR |
+
+---
+
+## Aliases File
+
+**File:** `~/.config/hash/aliases.toml`
+
+Define command aliases separately from main config.
+
+```toml
+[aliases]
+# Simple aliases
+k = "kubectl"
+g = "git"
+dc = "docker compose"
+tf = "terraform"
+
+# Multi-word aliases
+kgp = "kubectl get pods"
+kgs = "kubectl get services"
+gst = "git status"
+gco = "git checkout"
+
+# Clipboard shortcuts
+cc = "copy cmd"
+co = "copy out"
+
+# Aliases can include ??
+explain = "?? explain this error"
+howto = "?? how do I"
+
+# Aliases with arguments use $@ for all args, $1, $2 for positional
+kex = "kubectl exec -it $1 -- /bin/sh"
+```
+
+---
+
+## Environment Variables
+
+These environment variables override config file settings.
+
+| Variable | Overrides | Example |
+|----------|-----------|---------|
+| `HASH_CONFIG` | Config file path | `/path/to/config.toml` |
+| `HASH_AGENT` | `agent.default` | `ollama` |
+| `HASH_KEYBINDINGS` | `shell.keybindings` | `vim` |
+| `HASH_HISTORY` | `history.path` | `/tmp/hash_history.db` |
+| `EDITOR` | `shell.editor` | `nvim` |
+
+---
+
+## Example Complete Config
+
+```toml
+# ~/.config/hash/config.toml
+
+[shell]
+editor = "hx"
+keybindings = "helix"
+init_commands = []
+
+[prompt]
+mode = "starship"
+
+[agent]
+default = "claude"
+timeout = "30s"
+
+[agent.claude]
+transport = "stdio"
+command = "claude"
+args = ["--chat"]
+
+[agent.ollama]
+transport = "http"
+url = "http://localhost:11434/api/generate"
+model = "codellama:13b"
+
+[agent.context]
+include_cwd = true
+include_git_branch = true
+include_kube_context = true
+include_env_vars = ["KUBECONFIG", "AWS_PROFILE", "NODE_ENV"]
+history_count = 5
+
+[completions]
+fuzzy = true
+file_icons = true
+show_hidden = false
+
+[completions.kubectl]
+cache_ttl = "5m"
+
+[completions.docker]
+cache_ttl = "30s"
+
+[history]
+enabled = true
+max_entries = "unlimited"
+max_age = "forever"
+store_agent_interactions = true
+import_system_sudo = false
+exclude_patterns = [
+    ".*password.*",
+    ".*secret.*",
+    ".*token.*",
+]
+
+[errors]
+auto_prompt = true
+ignore_exit_codes = [1]
+ignore_commands = ["grep", "diff", "test", "["]
+
+[learning]
+enabled = true
+min_occurrences = 2
+suggestion_threshold = 0.7
+auto_apply = false
+
+[clipboard]
+max_output_size = "1MB"
+buffer_size = 100
+preserve_colors = false
+
+[clipboard.keys]
+copy_command = "alt+c"
+copy_output = "alt+o"
+copy_both = "alt+shift+c"
+
+[ui]
+context_picker_key = "ctrl+e"
+completion_max_height = 10
+
+[ui.colors]
+suggestion = "#888888"
+error = "#c27166"
+success = "#8dac8b"
+info = "#93bfc2"
+
+[keybindings]
+style = "helix"
+
+[keybindings.overrides]
+"ctrl+e" = "context_picker"
+"ctrl+r" = "history_search"
+```
