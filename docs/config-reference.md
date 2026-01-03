@@ -67,6 +67,93 @@ init_commands = [
 ]
 ```
 
+### shell.disable_builtins
+
+**Type:** `array of strings`
+**Default:** `[]`
+
+Built-in commands to disable. When disabled, Hash falls through to external
+command execution, allowing tools like zoxide, eza, or custom wrappers.
+
+```toml
+disable_builtins = ["cd"]        # Use zoxide for cd
+disable_builtins = ["cd", "pwd"] # Use external implementations
+```
+
+Currently disableable builtins:
+- `cd` — change directory (for zoxide, z, etc.)
+- `pwd` — print working directory
+- `exit` — exit shell (not recommended to disable)
+
+### shell.profile
+
+**Type:** `array of strings`
+**Default:** `[]`
+
+Commands executed when Hash starts as a login shell (before rc_commands).
+Use for environment setup that should only happen once per login session.
+
+```toml
+profile = [
+    "export PATH=$HOME/.local/bin:$PATH",
+    "export EDITOR=hx",
+]
+```
+
+### shell.rc_commands
+
+**Type:** `array of strings`
+**Default:** `[]`
+
+Commands executed when Hash starts as an interactive shell.
+Use for aliases, prompt customization, and per-shell setup.
+
+```toml
+rc_commands = [
+    "alias ll='ls -la'",
+    "alias g='git'",
+]
+```
+
+### shell.startup_files
+
+**Type:** `table`
+**Default:** See below
+
+Files to source at startup, depending on shell mode.
+
+```toml
+[shell.startup_files]
+# Login shell files (sourced in order)
+login = [
+    "/etc/profile",
+    "~/.profile",
+    "~/.hash_profile",
+]
+
+# Interactive shell files (sourced after login files if applicable)
+interactive = [
+    "~/.hashrc",
+]
+```
+
+**Startup Order:**
+
+1. **Login shell** (`hash -l` or via `/etc/passwd`):
+   - Source files in `startup_files.login`
+   - Run `shell.profile` commands
+   - (If also interactive) Source files in `startup_files.interactive`
+   - (If also interactive) Run `shell.rc_commands`
+   - Run `shell.init_commands` (always)
+
+2. **Interactive shell** (non-login):
+   - Source files in `startup_files.interactive`
+   - Run `shell.rc_commands`
+   - Run `shell.init_commands` (always)
+
+3. **Non-interactive shell** (`hash -c "command"`):
+   - Run `shell.init_commands` only
+
 ---
 
 ## [prompt]
@@ -103,6 +190,33 @@ in a non-standard location.
 
 ```toml
 starship_path = "/opt/homebrew/bin/starship"
+```
+
+### prompt.dev_mode
+
+**Type:** `boolean`
+**Default:** `false`
+
+Show a development/non-production indicator chip in the prompt. The chip
+appears on the opposite side of the prompt alignment:
+- Left-aligned prompt → chip on right
+- Right-aligned prompt → chip on left
+
+```toml
+dev_mode = true
+```
+
+### prompt.dev_mode_label
+
+**Type:** `string`
+**Default:** `"dev"`
+
+Text shown in the dev mode chip.
+
+```toml
+dev_mode_label = "dev"
+dev_mode_label = "DEV"
+dev_mode_label = "⚠ dev"
 ```
 
 ---
@@ -783,6 +897,23 @@ Maximum number of rows shown in completion menus.
 completion_max_height = 15
 ```
 
+### ui.progress_bar_delay
+
+**Type:** `duration string`
+**Default:** `"2s"`
+
+How long a command must run before showing progress indication (OSC 9;4).
+Set to `"0s"` to always show, or a high value to effectively disable.
+
+Requires a supporting terminal (Windows Terminal, ConEmu, iTerm2).
+
+```toml
+progress_bar_delay = "2s"     # Show after 2 seconds
+progress_bar_delay = "5s"     # Wait longer before showing
+progress_bar_delay = "0s"     # Always show progress
+progress_bar_delay = "1h"     # Effectively disable
+```
+
 ---
 
 ## [ui.colors]
@@ -930,9 +1061,12 @@ These environment variables override config file settings.
 editor = "hx"
 keybindings = "helix"
 init_commands = []
+disable_builtins = []
 
 [prompt]
 mode = "starship"
+dev_mode = false
+dev_mode_label = "dev"
 
 [agent]
 default = "claude"
@@ -1002,6 +1136,7 @@ copy_both = "alt+shift+c"
 [ui]
 context_picker_key = "ctrl+e"
 completion_max_height = 10
+progress_bar_delay = "2s"
 
 [ui.colors]
 suggestion = "#888888"

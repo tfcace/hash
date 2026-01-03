@@ -1,0 +1,168 @@
+package completion
+
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"strings"
+)
+
+// FileCompleter completes filesystem paths.
+type FileCompleter struct {
+	showHidden bool
+}
+
+// NewFileCompleter creates a new filesystem completer.
+func NewFileCompleter() *FileCompleter {
+	return &FileCompleter{
+		showHidden: false,
+	}
+}
+
+// Name returns the completer name.
+func (c *FileCompleter) Name() string {
+	return "file"
+}
+
+// SetShowHidden toggles hidden file visibility.
+func (c *FileCompleter) SetShowHidden(show bool) {
+	c.showHidden = show
+}
+
+// Complete returns filesystem completions.
+func (c *FileCompleter) Complete(ctx context.Context, line string, pos int) (Result, error) {
+	// Extract the word being completed
+	word := extractWord(line, pos)
+	if word == "" {
+		word = "."
+	}
+
+	// Expand tilde
+	expandedWord := expandTilde(word)
+
+	// Determine directory and prefix to match
+	dir := filepath.Dir(expandedWord)
+	prefix := filepath.Base(expandedWord)
+
+	// If word ends with /, list that directory
+	if strings.HasSuffix(word, "/") || strings.HasSuffix(word, string(os.PathSeparator)) {
+		dir = expandedWord
+		prefix = ""
+	}
+
+	// Handle "." specially
+	if word == "." || word == "" {
+		dir = "."
+		prefix = ""
+	}
+
+	// Read directory
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return Result{}, nil // Return empty on error, not an error
+	}
+
+	var items []Item
+	for _, entry := range entries {
+		name := entry.Name()
+
+		// Skip hidden files unless enabled
+		if !c.showHidden && strings.HasPrefix(name, ".") {
+			continue
+		}
+
+		// Skip if doesn't match prefix
+		if prefix != "" && !strings.HasPrefix(strings.ToLower(name), strings.ToLower(prefix)) {
+			continue
+		}
+
+		// Build completion value
+		value := name
+		if entry.IsDir() {
+			value += "/"
+		}
+
+		items = append(items, Item{
+			Value:   value,
+			Display: name,
+			Icon:    getFileIcon(entry),
+		})
+	}
+
+	return Result{
+		Items:  items,
+		Prefix: getCompletionPrefix(word, prefix),
+	}, nil
+}
+
+// extractWord extracts the word at position from the line.
+func extractWord(line string, pos int) string {
+	if pos > len(line) {
+		pos = len(line)
+	}
+
+	// Find start of word (go backwards until space or start)
+	start := pos
+	for start > 0 && line[start-1] != ' ' && line[start-1] != '\t' {
+		start--
+	}
+
+	return line[start:pos]
+}
+
+// expandTilde expands ~ to home directory.
+func expandTilde(path string) string {
+	if strings.HasPrefix(path, "~") {
+		home := os.Getenv("HOME")
+		if home != "" {
+			return filepath.Join(home, path[1:])
+		}
+	}
+	return path
+}
+
+// getCompletionPrefix calculates the prefix to preserve.
+func getCompletionPrefix(original, matched string) string {
+	if matched == "" {
+		return original
+	}
+	// Return the directory part of original
+	dir := filepath.Dir(original)
+	if dir == "." {
+		return ""
+	}
+	return dir + "/"
+}
+
+// getFileIcon returns a Nerd Font icon for the file type.
+func getFileIcon(entry os.DirEntry) string {
+	if entry.IsDir() {
+		return ""
+	}
+
+	name := entry.Name()
+	ext := strings.ToLower(filepath.Ext(name))
+
+	switch ext {
+	case ".go":
+		return ""
+	case ".py":
+		return ""
+	case ".js", ".ts":
+		return ""
+	case ".md":
+		return ""
+	case ".json":
+		return ""
+	case ".yaml", ".yml":
+		return ""
+	case ".sh", ".bash", ".zsh":
+		return ""
+	case ".txt":
+		return ""
+	case ".git":
+		return ""
+	default:
+		return ""
+	}
+}

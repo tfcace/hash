@@ -1,0 +1,86 @@
+// internal/editor/key_test.go
+package editor
+
+import "testing"
+
+func TestParseKey_Printable(t *testing.T) {
+	key := ParseKey([]byte{'a'})
+	if key.Rune != 'a' {
+		t.Errorf("Rune = %q, want 'a'", key.Rune)
+	}
+	if key.Special != KeyNone {
+		t.Errorf("Special = %v, want KeyNone", key.Special)
+	}
+}
+
+func TestParseKey_Enter(t *testing.T) {
+	key := ParseKey([]byte{'\r'})
+	if key.Special != KeyEnter {
+		t.Errorf("Special = %v, want KeyEnter", key.Special)
+	}
+}
+
+func TestParseKey_Escape(t *testing.T) {
+	key := ParseKey([]byte{0x1b})
+	if key.Special != KeyEscape {
+		t.Errorf("Special = %v, want KeyEscape", key.Special)
+	}
+}
+
+func TestParseKey_ArrowUp(t *testing.T) {
+	key := ParseKey([]byte{0x1b, '[', 'A'})
+	if key.Special != KeyUp {
+		t.Errorf("Special = %v, want KeyUp", key.Special)
+	}
+}
+
+func TestParseKey_ArrowDown(t *testing.T) {
+	key := ParseKey([]byte{0x1b, '[', 'B'})
+	if key.Special != KeyDown {
+		t.Errorf("Special = %v, want KeyDown", key.Special)
+	}
+}
+
+func TestParseKey_CtrlA(t *testing.T) {
+	key := ParseKey([]byte{0x01})
+	if !key.Ctrl || key.Rune != 'a' {
+		t.Errorf("Expected Ctrl+a, got Ctrl=%v Rune=%q", key.Ctrl, key.Rune)
+	}
+}
+
+func TestParseKey_AltLeft(t *testing.T) {
+	// Alt+Left: ESC [ 1 ; 3 D
+	key := ParseKey([]byte{0x1b, '[', '1', ';', '3', 'D'})
+	if !key.Alt || key.Special != KeyLeft {
+		t.Errorf("Expected Alt+Left, got Alt=%v Special=%v", key.Alt, key.Special)
+	}
+}
+
+func TestParseKey_Backspace(t *testing.T) {
+	key := ParseKey([]byte{0x7f})
+	if key.Special != KeyBackspace {
+		t.Errorf("Special = %v, want KeyBackspace", key.Special)
+	}
+}
+
+func TestParseKey_ShiftEnter_CSIu(t *testing.T) {
+	// Shift+Enter in CSI u encoding: ESC [ 13 ; 2 u
+	key := ParseKey([]byte{0x1b, '[', '1', '3', ';', '2', 'u'})
+	if key.Special != KeyEnter {
+		t.Errorf("Special = %v, want KeyEnter", key.Special)
+	}
+	if !key.Shift {
+		t.Error("Shift = false, want true")
+	}
+}
+
+func TestParseKey_CtrlEnter_CSIu(t *testing.T) {
+	// Ctrl+Enter in CSI u encoding: ESC [ 13 ; 5 u
+	key := ParseKey([]byte{0x1b, '[', '1', '3', ';', '5', 'u'})
+	if key.Special != KeyEnter {
+		t.Errorf("Special = %v, want KeyEnter", key.Special)
+	}
+	if !key.Ctrl {
+		t.Error("Ctrl = false, want true")
+	}
+}

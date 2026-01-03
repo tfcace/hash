@@ -22,21 +22,34 @@ go vet ./...                      # Lint
 hash/
 ├── cmd/hash/          # Main entry point
 ├── internal/
-│   ├── parser/        # mvdan/sh wrapper + ?? detection
-│   ├── executor/      # Command execution via PTY, job control
-│   ├── readline/      # Input handling, completions, keybindings (emacs/vim/helix)
-│   ├── agent/         # ACP client with transport abstraction
-│   ├── history/       # SQLite storage with FTS5, sudo tracking
-│   ├── learning/      # Error pattern matching and fix scoring
-│   ├── clipboard/     # Cross-platform copy command/output
-│   ├── prompt/        # Starship integration + built-in Lipgloss engine
-│   └── config/        # TOML configuration parsing
+│   ├── agent/         # ACP client, StdioTransport, HTTPTransport
+│   ├── clipboard/     # Copy command/output buffer
+│   ├── completion/    # Three-tier completion router
+│   ├── config/        # TOML configuration parsing
+│   ├── context/       # Context picker TUI
+│   ├── executor/      # POSIX interpreter (mvdan/sh), PTY-on-demand
+│   ├── history/       # SQLite history, sudo tracking
+│   ├── learning/      # Error pattern learning, fix suggestions
+│   ├── parser/        # ?? detection and command parsing
+│   ├── progress/      # OSC 9;4 progress bar support
+│   ├── prompt/        # Starship + built-in with dev mode chip
+│   ├── readline/      # Input, Emacs/Vim/Helix keybindings
+│   └── shell/         # REPL, builtins, agent integration
 └── go.mod
 ```
 
+### Agent Invocation
+
+Use `??` to invoke the agent:
+- `?? find large files` - Full agent request
+- `cmd | ?? filter output` - Pipe command output to agent
+- `cmd --flag=?? description` - Inline completion
+
 ### Key Design Decisions
 
-**Agent invocation**: `??` prefix (not `#`). Supports both `?? <prompt>` at line start and `cmd | ?? <prompt>` for pipe completion.
+**Agent invocation**: `??` prefix (not `#`). Supports `?? <prompt>` at line start, `cmd | ?? <prompt>` for pipe completion, and `cmd ?? <prompt>` for inline completion.
+
+**Agent lifecycle**: Agent-per-shell-session. Lazy init on first `??`, kept alive for session, closed on shell exit. No sharing between shell instances.
 
 **Transport abstraction**: `AgentTransport` interface with `StdioTransport` (Claude Code, Gemini CLI) and `HTTPTransport` (Ollama, local models).
 
@@ -45,6 +58,14 @@ hash/
 **Learning system**: Extracts normalized error signatures, scores fixes by success rate + recency + frequency. Suggests learned fixes when score >= 0.7.
 
 **History**: SQLite with unlimited entries, tracks sudo commands separately, stores agent interactions for recall.
+
+**Shell identity**: Sets `$0` to "hash", `$HASH_SHELL=1` as marker, and `$SHELL` when used as login shell.
+
+**Configurable builtins**: Builtins like `cd` can be disabled via config to allow external tools (zoxide, eza).
+
+**Progress bars**: OSC 9;4 escape sequences shown after 2s of command execution in supporting terminals.
+
+**SSH**: Not supported. Hash is designed for local terminal use only.
 
 ## Key Dependencies
 
