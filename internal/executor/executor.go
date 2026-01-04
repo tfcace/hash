@@ -41,6 +41,52 @@ func (l *limitedWriter) Write(p []byte) (int, error) {
 	return n, err
 }
 
+type deadlineReader interface {
+	SetReadDeadline(time.Time) error
+}
+
+const stdinCopyPoll = 50 * time.Millisecond
+
+func supportsReadDeadline(r io.Reader) (deadlineReader, bool) {
+	dr, ok := r.(deadlineReader)
+	if !ok {
+		return nil, false
+	}
+	if err := dr.SetReadDeadline(time.Now()); err != nil {
+		_ = dr.SetReadDeadline(time.Time{})
+		return nil, false
+	}
+	_ = dr.SetReadDeadline(time.Time{})
+	return dr, true
+}
+
+func copyWithDeadline(dst io.Writer, src io.Reader, dr deadlineReader, done <-chan struct{}) {
+	buf := make([]byte, 4096)
+	for {
+		select {
+		case <-done:
+			_ = dr.SetReadDeadline(time.Time{})
+			return
+		default:
+		}
+
+		_ = dr.SetReadDeadline(time.Now().Add(stdinCopyPoll))
+		n, err := src.Read(buf)
+		_ = dr.SetReadDeadline(time.Time{})
+		if n > 0 {
+			if _, werr := dst.Write(buf[:n]); werr != nil {
+				return
+			}
+		}
+		if err != nil {
+			if os.IsTimeout(err) {
+				continue
+			}
+			return
+		}
+	}
+}
+
 // Result contains the outcome of a command execution.
 type Result struct {
 	ExitCode       int
@@ -270,8 +316,29 @@ func (e *Executor) runWithPTY(ctx context.Context, cmd *exec.Cmd, hc interp.Hand
 		}
 	}()
 
-	go io.Copy(ptmx, hc.Stdin)
+	// Stop stdin->PTY copy on command exit so it doesn't consume the next prompt.
+	done := make(chan struct{})
+	stdinDone := make(chan struct{})
+	cancelable := false
+	if dr, ok := supportsReadDeadline(hc.Stdin); ok {
+		cancelable = true
+		go func() {
+			copyWithDeadline(ptmx, hc.Stdin, dr, done)
+			close(stdinDone)
+		}()
+	} else {
+		go func() {
+			io.Copy(ptmx, hc.Stdin)
+			close(stdinDone)
+		}()
+	}
+
 	io.Copy(hc.Stdout, ptmx)
+
+	close(done)
+	if cancelable {
+		<-stdinDone
+	}
 
 	return cmd.Wait()
 }
