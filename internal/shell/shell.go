@@ -78,7 +78,11 @@ func New(cfg *config.Config) (*Shell, error) {
 
 	// Set up completion router
 	router := completion.NewRouter()
-	router.Register(completion.NewFileCompleter(), completion.PriorityFilesystem)
+	router.SetFuzzy(cfg.Completions.Fuzzy)
+
+	fileCompleter := completion.NewFileCompleter()
+	fileCompleter.SetFuzzyMode(cfg.Completions.Fuzzy)
+	router.Register(fileCompleter, completion.PriorityFilesystem)
 
 	if cfg.Completions.CobraEnabled {
 		router.Register(completion.NewCobraCompleter(), completion.PriorityToolNative)
