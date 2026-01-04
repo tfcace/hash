@@ -103,3 +103,60 @@ func TestRouter_PriorityOrdering(t *testing.T) {
 		t.Errorf("Value = %q, want %q (high priority)", result.Items[0].Value, "high")
 	}
 }
+
+func TestRouter_FuzzyFiltering(t *testing.T) {
+	router := NewRouter()
+	router.SetFuzzy(true)
+
+	// Create a mock completer that returns fixed items
+	mock := &MockCompleter{
+		name: "mock",
+		items: []Item{
+			{Value: "config.toml"},
+			{Value: "context.go"},
+			{Value: "container.yaml"},
+			{Value: "readme.md"},
+		},
+	}
+	router.Register(mock, PriorityFilesystem)
+
+	// Complete with query "cont" - should fuzzy match context and container
+	result, err := router.Complete(context.Background(), "cat cont", 8)
+	if err != nil {
+		t.Fatalf("Complete() error = %v", err)
+	}
+
+	// Should get fuzzy matches sorted by score
+	if len(result.Items) < 2 {
+		t.Errorf("Expected at least 2 fuzzy matches, got %d", len(result.Items))
+	}
+
+	// First result should be best match (container or context)
+	if result.Items[0].Value != "container.yaml" && result.Items[0].Value != "context.go" {
+		t.Errorf("First result should be container or context, got %q", result.Items[0].Value)
+	}
+}
+
+func TestRouter_FuzzyDisabled(t *testing.T) {
+	router := NewRouter()
+	router.SetFuzzy(false)
+
+	mock := &MockCompleter{
+		name: "mock",
+		items: []Item{
+			{Value: "config.toml"},
+			{Value: "readme.md"},
+		},
+	}
+	router.Register(mock, PriorityFilesystem)
+
+	// With fuzzy disabled, should return items as-is
+	result, err := router.Complete(context.Background(), "cat ", 4)
+	if err != nil {
+		t.Fatalf("Complete() error = %v", err)
+	}
+
+	if len(result.Items) != 2 {
+		t.Errorf("Expected 2 items unchanged, got %d", len(result.Items))
+	}
+}

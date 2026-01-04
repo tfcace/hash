@@ -8,6 +8,7 @@ import (
 // Router dispatches completion requests to registered completers.
 type Router struct {
 	completers []registeredCompleter
+	fuzzy      bool
 }
 
 type registeredCompleter struct {
@@ -18,6 +19,16 @@ type registeredCompleter struct {
 // NewRouter creates a new completion router.
 func NewRouter() *Router {
 	return &Router{}
+}
+
+// SetFuzzy enables or disables fuzzy filtering of results.
+func (r *Router) SetFuzzy(enabled bool) {
+	r.fuzzy = enabled
+}
+
+// Fuzzy returns whether fuzzy filtering is enabled.
+func (r *Router) Fuzzy() bool {
+	return r.fuzzy
 }
 
 // Register adds a completer with the given priority.
@@ -36,6 +47,9 @@ func (r *Router) Register(c Completer, priority Priority) {
 
 // Complete tries each completer in priority order until one returns results.
 func (r *Router) Complete(ctx context.Context, line string, pos int) (Result, error) {
+	// Extract the query (word being completed) for fuzzy filtering
+	query := extractCompletionQuery(line, pos)
+
 	for _, rc := range r.completers {
 		result, err := rc.completer.Complete(ctx, line, pos)
 		if err != nil {
@@ -43,11 +57,30 @@ func (r *Router) Complete(ctx context.Context, line string, pos int) (Result, er
 		}
 
 		if len(result.Items) > 0 {
+			// Apply fuzzy filtering if enabled
+			if r.fuzzy && query != "" {
+				result.Items = FuzzyFilter(result.Items, query)
+			}
 			return result, nil
 		}
 	}
 
 	return Result{}, nil
+}
+
+// extractCompletionQuery extracts the word being completed.
+func extractCompletionQuery(line string, pos int) string {
+	if pos > len(line) {
+		pos = len(line)
+	}
+
+	// Find start of word (go backwards until space or start)
+	start := pos
+	for start > 0 && line[start-1] != ' ' && line[start-1] != '\t' {
+		start--
+	}
+
+	return line[start:pos]
 }
 
 // Completers returns the registered completers for inspection.
