@@ -10,13 +10,20 @@ import (
 // FileCompleter completes filesystem paths.
 type FileCompleter struct {
 	showHidden bool
+	fuzzyMode  bool
 }
 
 // NewFileCompleter creates a new filesystem completer.
 func NewFileCompleter() *FileCompleter {
 	return &FileCompleter{
 		showHidden: false,
+		fuzzyMode:  false,
 	}
+}
+
+// SetFuzzyMode sets whether to return all candidates (for router-level fuzzy filtering).
+func (c *FileCompleter) SetFuzzyMode(enabled bool) {
+	c.fuzzyMode = enabled
 }
 
 // Name returns the completer name.
@@ -71,8 +78,8 @@ func (c *FileCompleter) Complete(ctx context.Context, line string, pos int) (Res
 			continue
 		}
 
-		// Skip if doesn't match prefix
-		if prefix != "" && !strings.HasPrefix(strings.ToLower(name), strings.ToLower(prefix)) {
+		// Skip if doesn't match prefix (unless fuzzy mode - let router filter)
+		if !c.fuzzyMode && prefix != "" && !strings.HasPrefix(strings.ToLower(name), strings.ToLower(prefix)) {
 			continue
 		}
 

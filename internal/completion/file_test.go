@@ -95,3 +95,56 @@ func TestFileCompleter_Name(t *testing.T) {
 		t.Errorf("Name() = %q, want %q", completer.Name(), "file")
 	}
 }
+
+func TestFileCompleter_FuzzyMode(t *testing.T) {
+	// Create temp directory with test files
+	tmpDir := t.TempDir()
+	os.WriteFile(filepath.Join(tmpDir, "config.toml"), []byte(""), 0644)
+	os.WriteFile(filepath.Join(tmpDir, "context.go"), []byte(""), 0644)
+	os.WriteFile(filepath.Join(tmpDir, "container.yaml"), []byte(""), 0644)
+	os.WriteFile(filepath.Join(tmpDir, "readme.md"), []byte(""), 0644)
+
+	completer := NewFileCompleter()
+	completer.SetFuzzyMode(true)
+
+	// Change to temp dir for completion
+	oldDir, _ := os.Getwd()
+	os.Chdir(tmpDir)
+	defer os.Chdir(oldDir)
+
+	// With fuzzy mode, "cont" should return ALL files (router will filter)
+	result, err := completer.Complete(context.Background(), "cat cont", 8)
+	if err != nil {
+		t.Fatalf("Complete() error = %v", err)
+	}
+
+	// Should return all 4 files, not just prefix matches
+	if len(result.Items) != 4 {
+		t.Errorf("FuzzyMode should return all candidates, got %d items: %v", len(result.Items), result.Items)
+	}
+}
+
+func TestFileCompleter_PrefixMode(t *testing.T) {
+	tmpDir := t.TempDir()
+	os.WriteFile(filepath.Join(tmpDir, "config.toml"), []byte(""), 0644)
+	os.WriteFile(filepath.Join(tmpDir, "context.go"), []byte(""), 0644)
+	os.WriteFile(filepath.Join(tmpDir, "readme.md"), []byte(""), 0644)
+
+	completer := NewFileCompleter()
+	completer.SetFuzzyMode(false) // Default - prefix only
+
+	oldDir, _ := os.Getwd()
+	os.Chdir(tmpDir)
+	defer os.Chdir(oldDir)
+
+	// Without fuzzy mode, "con" should only return prefix matches
+	result, err := completer.Complete(context.Background(), "cat con", 7)
+	if err != nil {
+		t.Fatalf("Complete() error = %v", err)
+	}
+
+	// Should only return config.toml and context.go (prefix matches)
+	if len(result.Items) != 2 {
+		t.Errorf("PrefixMode should return only prefix matches, got %d items", len(result.Items))
+	}
+}
