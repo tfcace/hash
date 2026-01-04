@@ -828,11 +828,14 @@ Clipboard integration for copying commands and output.
 **Default:** `"1MB"`
 
 Maximum output size to keep in memory per command. Larger outputs are
-truncated.
+truncated. Use `unlimited` to keep the full output (can grow large), or `0`
+to disable output capture.
 
 ```toml
 max_output_size = "1MB"
 max_output_size = "512KB"
+max_output_size = "unlimited"
+max_output_size = "0"
 ```
 
 ### clipboard.buffer_size
@@ -1048,6 +1051,7 @@ These environment variables override config file settings.
 | `HASH_AGENT` | `agent.default` | `ollama` |
 | `HASH_KEYBINDINGS` | `shell.keybindings` | `vim` |
 | `HASH_HISTORY` | `history.path` | `/tmp/hash_history.db` |
+| `HASH_CLIPBOARD_MAX_OUTPUT_SIZE` | `clipboard.max_output_size` | `unlimited` |
 | `EDITOR` | `shell.editor` | `nvim` |
 
 ---

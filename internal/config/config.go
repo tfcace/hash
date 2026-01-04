@@ -15,6 +15,7 @@ type Config struct {
 	Agent       AgentConfig       `toml:"agent"`
 	History     HistoryConfig     `toml:"history"`
 	Completions CompletionsConfig `toml:"completions"`
+	Clipboard   ClipboardConfig   `toml:"clipboard"`
 }
 
 type ShellConfig struct {
@@ -71,6 +72,12 @@ type CompletionsConfig struct {
 	CobraEnabled bool `toml:"cobra_enabled"`
 }
 
+type ClipboardConfig struct {
+	MaxOutputSize  string `toml:"max_output_size"`
+	BufferSize     int    `toml:"buffer_size"`
+	PreserveColors bool   `toml:"preserve_colors"`
+}
+
 // Default returns a Config with default values.
 func Default() *Config {
 	return &Config{
@@ -110,6 +117,11 @@ func Default() *Config {
 			Fuzzy:        true,
 			FileIcons:    true,
 			CobraEnabled: true,
+		},
+		Clipboard: ClipboardConfig{
+			MaxOutputSize:  "1MB",
+			BufferSize:     100,
+			PreserveColors: false,
 		},
 	}
 }

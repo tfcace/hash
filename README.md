@@ -285,6 +285,40 @@ go vet ./...                    # Lint
 
 This project uses [jj (Jujutsu)](https://github.com/martinvonz/jj) for version control.
 
+## Advanced
+
+### Debug Environment Variables
+
+These environment variables are for debugging and advanced use cases:
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `HASH_CLIPBOARD_MAX_OUTPUT_SIZE` | Maximum output capture per command. Accepts sizes like `1MB`, `512KB`, `unlimited`, or `0` to disable capture. | `1MB` |
+| `HASH_PTY_TRACE` | Enable PTY I/O tracing for debugging hangs. Set to `1` or `true` to enable. | Disabled |
+| `HASH_PTY_TRACE_PATH` | Path for PTY trace log file when tracing is enabled. | `./hash-pty-trace.log` |
+
+**Example: Debugging PTY issues**
+
+```bash
+# Enable PTY tracing to diagnose hangs
+export HASH_PTY_TRACE=1
+export HASH_PTY_TRACE_PATH=/tmp/hash-pty.log
+./hash
+
+# After reproducing the issue, check the log
+cat /tmp/hash-pty.log
+```
+
+**Example: Adjust output capture**
+
+```bash
+# Disable output capture entirely
+export HASH_CLIPBOARD_MAX_OUTPUT_SIZE=0
+
+# Capture unlimited output (use with caution)
+export HASH_CLIPBOARD_MAX_OUTPUT_SIZE=unlimited
+```
+
 ## Status & Limitations
 
 Hash is under active development. Here's what to expect:

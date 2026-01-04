@@ -48,6 +48,15 @@ func (b *Buffer) SetOutput(output string) {
 		return
 	}
 
+	if b.maxOutputSize < 0 {
+		b.entries[len(b.entries)-1].output = output
+		return
+	}
+	if b.maxOutputSize == 0 {
+		b.entries[len(b.entries)-1].output = ""
+		return
+	}
+
 	// Truncate if too large
 	if len(output) > b.maxOutputSize {
 		output = output[:b.maxOutputSize]

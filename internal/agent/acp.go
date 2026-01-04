@@ -98,7 +98,7 @@ type contentBlock struct {
 func NewACPTransport(cfg ACPConfig) *ACPTransport {
 	return &ACPTransport{
 		config:   cfg,
-		messages: make(chan []byte, 100),
+		messages: make(chan []byte, 1024),
 		done:     make(chan struct{}),
 	}
 }
@@ -120,7 +120,7 @@ func (t *ACPTransport) connectLocked(ctx context.Context) error {
 		return nil // Already connected
 	}
 
-	t.cmd = exec.CommandContext(ctx, t.config.Command, t.config.Args...)
+	t.cmd = exec.Command(t.config.Command, t.config.Args...)
 
 	var err error
 	t.stdin, err = t.cmd.StdinPipe()
@@ -163,11 +163,8 @@ func (t *ACPTransport) readLoop() {
 		if err != nil {
 			return
 		}
-		// Send to channel, drop if full
-		select {
-		case t.messages <- line:
-		default:
-		}
+		// Send to channel; backpressure avoids dropping responses.
+		t.messages <- line
 	}
 }
 

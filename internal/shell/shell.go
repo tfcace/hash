@@ -37,8 +37,8 @@ type Shell struct {
 	prompt       *prompt.Prompt
 	readline     *readline.Readline
 	inputHandler *readline.InputHandler // For Ctrl+R search
-	editorCfg    editor.Config           // Editor configuration
-	useEditor    bool                    // Use editor instead of readline
+	editorCfg    editor.Config          // Editor configuration
+	useEditor    bool                   // Use editor instead of readline
 	agentHandler *AgentHandler
 	responseUI   *ResponseUI
 	history      *history.Store
@@ -50,7 +50,7 @@ type Shell struct {
 	lastDuration time.Duration
 
 	// History navigation state for editor mode
-	historyIndex   int    // -1 means current line (not in history)
+	historyIndex     int    // -1 means current line (not in history)
 	historySavedLine string // Saved current line when navigating into history
 }
 
@@ -163,9 +163,30 @@ func New(cfg *config.Config) (*Shell, error) {
 		fmt.Fprintf(os.Stderr, "hash: warning: learning unavailable: %v\n", err)
 	}
 
-	// Initialize clipboard buffer (100 entries, 1MB max per output)
-	clipboardBuf := clipboard.NewBuffer(100)
-	clipboardBuf.SetMaxOutputSize(1024 * 1024) // 1MB
+	// Initialize clipboard buffer (configurable size and output limit)
+	clipboardBuf := clipboard.NewBuffer(cfg.Clipboard.BufferSize)
+	maxOutputSizeStr := cfg.Clipboard.MaxOutputSize
+	if env := strings.TrimSpace(os.Getenv("HASH_CLIPBOARD_MAX_OUTPUT_SIZE")); env != "" {
+		maxOutputSizeStr = env
+	}
+	if maxOutputSizeStr != "" {
+		maxOutputSize, err := config.ParseSize(maxOutputSizeStr)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "hash: warning: invalid clipboard max_output_size %q: %v\n", maxOutputSizeStr, err)
+		} else {
+			exec.SetCaptureLimit(maxOutputSize)
+			if maxOutputSize < 0 {
+				clipboardBuf.SetMaxOutputSize(-1)
+			} else {
+				maxInt := int(^uint(0) >> 1)
+				if maxOutputSize > int64(maxInt) {
+					clipboardBuf.SetMaxOutputSize(maxInt)
+				} else {
+					clipboardBuf.SetMaxOutputSize(int(maxOutputSize))
+				}
+			}
+		}
+	}
 
 	// Set clipboard buffer on input handler for Ctrl+R output cross-referencing
 	inputHandler.SetClipboard(clipboardBuf)

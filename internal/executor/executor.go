@@ -3,11 +3,15 @@ package executor
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -20,8 +24,8 @@ import (
 	"mvdan.cc/sh/v3/syntax"
 )
 
-// maxCaptureSize limits how much output we capture (1MB).
-const maxCaptureSize = 1024 * 1024
+// defaultCaptureSize limits how much output we capture by default (1MB).
+const defaultCaptureSize = 1024 * 1024
 
 // limitedWriter wraps a writer and stops writing after n bytes.
 type limitedWriter struct {
@@ -33,19 +37,36 @@ func (l *limitedWriter) Write(p []byte) (int, error) {
 	if l.n <= 0 {
 		return len(p), nil
 	}
-	if int64(len(p)) > l.n {
+	origLen := len(p)
+	if int64(origLen) > l.n {
 		p = p[:l.n]
 	}
 	n, err := l.w.Write(p)
-	l.n -= int64(n)
-	return n, err
+	if n > 0 {
+		l.n -= int64(n)
+	}
+	if err != nil {
+		return n, err
+	}
+	if origLen > n {
+		return origLen, nil
+	}
+	return n, nil
 }
 
 type deadlineReader interface {
 	SetReadDeadline(time.Time) error
 }
 
-const stdinCopyPoll = 50 * time.Millisecond
+const (
+	stdinCopyPoll   = 50 * time.Millisecond
+	ctrlCByte       = 0x03
+	doubleCtrlCWait = 750 * time.Millisecond
+	ptyStopGrace    = 200 * time.Millisecond
+	ptyTraceTick    = 5 * time.Second
+)
+
+var errCopyDone = errors.New("copy done")
 
 func supportsReadDeadline(r io.Reader) (deadlineReader, bool) {
 	dr, ok := r.(deadlineReader)
@@ -60,13 +81,214 @@ func supportsReadDeadline(r io.Reader) (deadlineReader, bool) {
 	return dr, true
 }
 
-func copyWithDeadline(dst io.Writer, src io.Reader, dr deadlineReader, done <-chan struct{}) {
+type ptyTrace struct {
+	path         string
+	f            *os.File
+	mu           sync.Mutex
+	lastInRead   int64
+	lastInWrite  int64
+	lastOutRead  int64
+	lastOutWrite int64
+}
+
+func ptyTraceEnabled() bool {
+	v := strings.TrimSpace(strings.ToLower(os.Getenv("HASH_PTY_TRACE")))
+	if v == "" || v == "0" || v == "false" || v == "no" {
+		return false
+	}
+	return true
+}
+
+func ptyTracePath() string {
+	if path := strings.TrimSpace(os.Getenv("HASH_PTY_TRACE_PATH")); path != "" {
+		return path
+	}
+	wd, err := os.Getwd()
+	if err != nil {
+		return "hash-pty-trace.log"
+	}
+	return filepath.Join(wd, "hash-pty-trace.log")
+}
+
+func newPTYTrace(cmd *exec.Cmd, ptmx *os.File) *ptyTrace {
+	if !ptyTraceEnabled() {
+		return nil
+	}
+
+	path := ptyTracePath()
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return nil
+	}
+
+	t := &ptyTrace{path: path, f: f}
+	pid := 0
+	if cmd != nil && cmd.Process != nil {
+		pid = cmd.Process.Pid
+	}
+	cmdPath := ""
+	args := []string(nil)
+	if cmd != nil {
+		cmdPath = cmd.Path
+		args = cmd.Args
+	}
+	ptyName := ""
+	if ptmx != nil {
+		ptyName = ptmx.Name()
+	}
+	t.logf("=== pty trace start pid=%d cmd=%q args=%q pty=%q path=%q", pid, cmdPath, args, ptyName, path)
+	return t
+}
+
+func (t *ptyTrace) Close() {
+	if t == nil {
+		return
+	}
+	t.logStatus("trace end")
+	t.logf("=== pty trace end")
+	_ = t.f.Close()
+}
+
+func (t *ptyTrace) logf(format string, args ...interface{}) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	ts := time.Now().Format(time.RFC3339Nano)
+	fmt.Fprintf(t.f, "%s %s\n", ts, fmt.Sprintf(format, args...))
+}
+
+func (t *ptyTrace) formatTime(ns int64) string {
+	if ns == 0 {
+		return "never"
+	}
+	ts := time.Unix(0, ns)
+	age := time.Since(ts).Round(time.Millisecond)
+	return fmt.Sprintf("%s (%s ago)", ts.Format(time.RFC3339Nano), age)
+}
+
+func (t *ptyTrace) logStatus(prefix string) {
+	if t == nil {
+		return
+	}
+	t.logf("%s in_read=%s in_write=%s out_read=%s out_write=%s", prefix,
+		t.formatTime(atomic.LoadInt64(&t.lastInRead)),
+		t.formatTime(atomic.LoadInt64(&t.lastInWrite)),
+		t.formatTime(atomic.LoadInt64(&t.lastOutRead)),
+		t.formatTime(atomic.LoadInt64(&t.lastOutWrite)),
+	)
+}
+
+func (t *ptyTrace) monitor(stop <-chan struct{}, stopped chan<- struct{}) {
+	if t == nil {
+		return
+	}
+	ticker := time.NewTicker(ptyTraceTick)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-stop:
+			t.logStatus("trace stop")
+			if stopped != nil {
+				close(stopped)
+			}
+			return
+		case <-ticker.C:
+			t.logStatus("trace tick")
+		}
+	}
+}
+
+func (t *ptyTrace) markInRead(n int) {
+	if t == nil || n == 0 {
+		return
+	}
+	atomic.StoreInt64(&t.lastInRead, time.Now().UnixNano())
+}
+
+func (t *ptyTrace) markInWrite(n int) {
+	if t == nil || n == 0 {
+		return
+	}
+	atomic.StoreInt64(&t.lastInWrite, time.Now().UnixNano())
+}
+
+func (t *ptyTrace) markOutRead(n int) {
+	if t == nil || n == 0 {
+		return
+	}
+	atomic.StoreInt64(&t.lastOutRead, time.Now().UnixNano())
+}
+
+func (t *ptyTrace) markOutWrite(n int) {
+	if t == nil || n == 0 {
+		return
+	}
+	atomic.StoreInt64(&t.lastOutWrite, time.Now().UnixNano())
+}
+
+func describeCopyEnd(err error) string {
+	switch {
+	case err == nil:
+		return "ok"
+	case errors.Is(err, errCopyDone):
+		return "done"
+	case errors.Is(err, io.EOF):
+		return "eof"
+	case errors.Is(err, os.ErrClosed):
+		return "closed"
+	case errors.Is(err, syscall.EIO):
+		return "eio"
+	case errors.Is(err, context.Canceled):
+		return "canceled"
+	default:
+		return err.Error()
+	}
+}
+
+func isRetryableIO(err error) bool {
+	if err == nil {
+		return false
+	}
+	if os.IsTimeout(err) {
+		return true
+	}
+	if errors.Is(err, syscall.EINTR) {
+		return true
+	}
+	if errors.Is(err, syscall.EAGAIN) || errors.Is(err, syscall.EWOULDBLOCK) {
+		return true
+	}
+	return false
+}
+
+func writeAll(dst io.Writer, buf []byte) error {
+	for len(buf) > 0 {
+		n, err := dst.Write(buf)
+		if n > 0 {
+			buf = buf[n:]
+		}
+		if err != nil {
+			if isRetryableIO(err) {
+				continue
+			}
+			return err
+		}
+		if n == 0 {
+			return io.ErrShortWrite
+		}
+	}
+	return nil
+}
+
+func copyWithDeadline(dst io.Writer, src io.Reader, dr deadlineReader, done <-chan struct{}, onInput func([]byte), onWrite func(int)) error {
 	buf := make([]byte, 4096)
 	for {
 		select {
 		case <-done:
 			_ = dr.SetReadDeadline(time.Time{})
-			return
+			return errCopyDone
 		default:
 		}
 
@@ -74,16 +296,146 @@ func copyWithDeadline(dst io.Writer, src io.Reader, dr deadlineReader, done <-ch
 		n, err := src.Read(buf)
 		_ = dr.SetReadDeadline(time.Time{})
 		if n > 0 {
-			if _, werr := dst.Write(buf[:n]); werr != nil {
-				return
+			if onInput != nil {
+				onInput(buf[:n])
+			}
+			if werr := writeAll(dst, buf[:n]); werr != nil {
+				if isRetryableIO(werr) {
+					continue
+				}
+				return werr
+			}
+			if onWrite != nil {
+				onWrite(n)
 			}
 		}
 		if err != nil {
-			if os.IsTimeout(err) {
+			if isRetryableIO(err) {
 				continue
 			}
-			return
+			return err
 		}
+	}
+}
+
+func copyWithPoll(dst io.Writer, src *os.File, done <-chan struct{}, onInput func([]byte), onWrite func(int)) error {
+	buf := make([]byte, 4096)
+	fd := int(src.Fd())
+	for {
+		select {
+		case <-done:
+			return errCopyDone
+		default:
+		}
+
+		if !hasDataAvailable(fd, stdinCopyPoll) {
+			continue
+		}
+
+		n, err := src.Read(buf)
+		if n > 0 {
+			if onInput != nil {
+				onInput(buf[:n])
+			}
+			if werr := writeAll(dst, buf[:n]); werr != nil {
+				if isRetryableIO(werr) {
+					continue
+				}
+				return werr
+			}
+			if onWrite != nil {
+				onWrite(n)
+			}
+		}
+		if err != nil {
+			if isRetryableIO(err) {
+				continue
+			}
+			return err
+		}
+	}
+}
+
+func copyWithOnInput(dst io.Writer, src io.Reader, onInput func([]byte), onWrite func(int)) error {
+	buf := make([]byte, 4096)
+	for {
+		n, err := src.Read(buf)
+		if n > 0 {
+			if onInput != nil {
+				onInput(buf[:n])
+			}
+			if werr := writeAll(dst, buf[:n]); werr != nil {
+				if isRetryableIO(werr) {
+					continue
+				}
+				return werr
+			}
+			if onWrite != nil {
+				onWrite(n)
+			}
+		}
+		if err != nil {
+			if isRetryableIO(err) {
+				continue
+			}
+			return err
+		}
+	}
+}
+
+func copyWithRetry(dst io.Writer, src io.Reader, onRead func(int), onWrite func(int)) error {
+	buf := make([]byte, 4096)
+	for {
+		n, err := src.Read(buf)
+		if n > 0 {
+			if onRead != nil {
+				onRead(n)
+			}
+			if werr := writeAll(dst, buf[:n]); werr != nil {
+				if isRetryableIO(werr) {
+					continue
+				}
+				return werr
+			}
+			if onWrite != nil {
+				onWrite(n)
+			}
+		}
+		if err != nil {
+			if isRetryableIO(err) {
+				continue
+			}
+			if errors.Is(err, io.EOF) || errors.Is(err, os.ErrClosed) || errors.Is(err, syscall.EIO) {
+				return nil
+			}
+			return err
+		}
+	}
+}
+
+func hasDataAvailable(fd int, timeout time.Duration) bool {
+	var readSet syscall.FdSet
+	readSet.Bits[fd/64] |= 1 << (uint(fd) % 64)
+
+	tv := syscall.NsecToTimeval(timeout.Nanoseconds())
+
+	if err := syscall.Select(fd+1, &readSet, nil, nil, &tv); err != nil {
+		return false
+	}
+
+	return (readSet.Bits[fd/64] & (1 << (uint(fd) % 64))) != 0
+}
+
+func signalProcessGroup(cmd *exec.Cmd, sig syscall.Signal) {
+	if cmd == nil || cmd.Process == nil {
+		return
+	}
+	pid := cmd.Process.Pid
+	if pid <= 0 {
+		return
+	}
+	if err := syscall.Kill(-pid, sig); err != nil {
+		_ = cmd.Process.Signal(sig)
 	}
 }
 
@@ -102,8 +454,9 @@ type Executor struct {
 	progressOSC       *progress.OSC
 	progressThreshold time.Duration
 	env               *envStore
-	positionalArgs    []string // $0, $1, $2, etc. for -c execution
+	positionalArgs    []string    // $0, $1, $2, etc. for -c execution
 	ptyActive         atomic.Bool // set when PTY is in use, disables progress
+	captureLimit      int64
 }
 
 // New creates a new Executor.
@@ -116,6 +469,7 @@ func New() *Executor {
 		progressOSC:       progress.NewOSC(os.Stdout),
 		progressThreshold: 2 * time.Second,
 		env:               env,
+		captureLimit:      defaultCaptureSize,
 	}
 	exec.ensureShellEnv()
 	exec.syncProcessEnv()
@@ -130,6 +484,12 @@ func (e *Executor) SetProgressThreshold(d time.Duration) {
 // SetProgressEnabled enables or disables progress bar.
 func (e *Executor) SetProgressEnabled(enabled bool) {
 	e.progressOSC.SetEnabled(enabled)
+}
+
+// SetCaptureLimit sets the maximum number of bytes to capture.
+// Use a negative value for unlimited capture, or 0 to disable capture.
+func (e *Executor) SetCaptureLimit(limit int64) {
+	e.captureLimit = limit
 }
 
 // SetShellName sets the shell name for $0.
@@ -189,14 +549,22 @@ func (e *Executor) Execute(ctx context.Context, command string, stdout, stderr i
 
 	// Set up capture buffer
 	var captureBuf bytes.Buffer
-	limitedCapture := &limitedWriter{w: &captureBuf, n: maxCaptureSize}
+	var captureWriter io.Writer = &captureBuf
+	switch {
+	case e.captureLimit == 0:
+		captureWriter = io.Discard
+	case e.captureLimit > 0:
+		captureWriter = &limitedWriter{w: &captureBuf, n: e.captureLimit}
+	default:
+		captureWriter = &captureBuf
+	}
 
 	// Set up output writers with capture
 	var actualStdout io.Writer = io.Discard
 	if stdout != nil {
-		actualStdout = io.MultiWriter(stdout, limitedCapture)
+		actualStdout = io.MultiWriter(stdout, captureWriter)
 	} else {
-		actualStdout = limitedCapture
+		actualStdout = captureWriter
 	}
 
 	actualStderr := stderr
@@ -283,6 +651,11 @@ func (e *Executor) runWithPTY(ctx context.Context, cmd *exec.Cmd, hc interp.Hand
 	}
 	defer ptmx.Close()
 
+	trace := newPTYTrace(cmd, ptmx)
+	if trace != nil {
+		defer trace.Close()
+	}
+
 	// Signal PTY is active to disable progress indicator
 	e.ptyActive.Store(true)
 
@@ -290,6 +663,9 @@ func (e *Executor) runWithPTY(ctx context.Context, cmd *exec.Cmd, hc interp.Hand
 	// character-by-character to the PTY, rather than being line-buffered.
 	// This is required for interactive programs like vim, helix, claude, etc.
 	stdinFd := int(os.Stdin.Fd())
+	if trace != nil {
+		trace.logf("terminal stdin fd=%d is_tty=%t", stdinFd, term.IsTerminal(stdinFd))
+	}
 	if term.IsTerminal(stdinFd) {
 		oldState, err := term.MakeRaw(stdinFd)
 		if err == nil {
@@ -305,6 +681,9 @@ func (e *Executor) runWithPTY(ctx context.Context, cmd *exec.Cmd, hc interp.Hand
 	// Set initial PTY size
 	if w, h, err := term.GetSize(stdinFd); err == nil {
 		pty.Setsize(ptmx, &pty.Winsize{Rows: uint16(h), Cols: uint16(w)})
+		if trace != nil {
+			trace.logf("pty size set rows=%d cols=%d", h, w)
+		}
 	}
 
 	// Handle resize signals
@@ -320,27 +699,143 @@ func (e *Executor) runWithPTY(ctx context.Context, cmd *exec.Cmd, hc interp.Hand
 	done := make(chan struct{})
 	stdinDone := make(chan struct{})
 	cancelable := false
+	var traceStop chan struct{}
+	var traceStopped chan struct{}
+	if trace != nil {
+		traceStop = make(chan struct{})
+		traceStopped = make(chan struct{})
+		go trace.monitor(traceStop, traceStopped)
+	}
+	var lastCtrlC time.Time
+	onInput := func(buf []byte) {
+		if trace != nil {
+			trace.markInRead(len(buf))
+		}
+		for _, b := range buf {
+			if b != ctrlCByte {
+				continue
+			}
+			now := time.Now()
+			if !lastCtrlC.IsZero() && now.Sub(lastCtrlC) <= doubleCtrlCWait {
+				signalProcessGroup(cmd, syscall.SIGINT)
+			}
+			lastCtrlC = now
+		}
+	}
+	onStdinWrite := func(n int) {
+		if trace != nil {
+			trace.markInWrite(n)
+		}
+	}
 	if dr, ok := supportsReadDeadline(hc.Stdin); ok {
 		cancelable = true
 		go func() {
-			copyWithDeadline(ptmx, hc.Stdin, dr, done)
+			err := copyWithDeadline(ptmx, hc.Stdin, dr, done, onInput, onStdinWrite)
+			if trace != nil {
+				trace.logf("stdin->pty copy (deadline) stopped: %s", describeCopyEnd(err))
+			}
+			close(stdinDone)
+		}()
+	} else if f, ok := hc.Stdin.(*os.File); ok {
+		cancelable = true
+		go func() {
+			err := copyWithPoll(ptmx, f, done, onInput, onStdinWrite)
+			if trace != nil {
+				trace.logf("stdin->pty copy (poll) stopped: %s", describeCopyEnd(err))
+			}
 			close(stdinDone)
 		}()
 	} else {
 		go func() {
-			io.Copy(ptmx, hc.Stdin)
+			err := copyWithOnInput(ptmx, hc.Stdin, onInput, onStdinWrite)
+			if trace != nil {
+				trace.logf("stdin->pty copy stopped: %s", describeCopyEnd(err))
+			}
 			close(stdinDone)
 		}()
 	}
 
-	io.Copy(hc.Stdout, ptmx)
+	stdoutDone := make(chan error, 1)
+	go func() {
+		err := copyWithRetry(hc.Stdout, ptmx,
+			func(n int) {
+				if trace != nil {
+					trace.markOutRead(n)
+				}
+			},
+			func(n int) {
+				if trace != nil {
+					trace.markOutWrite(n)
+				}
+			},
+		)
+		if trace != nil {
+			trace.logf("pty->stdout copy stopped: %s", describeCopyEnd(err))
+		}
+		stdoutDone <- err
+	}()
 
+	cmdDone := make(chan error, 1)
+	go func() {
+		err := cmd.Wait()
+		if trace != nil {
+			trace.logf("cmd.Wait returned err=%v", err)
+		}
+		cmdDone <- err
+	}()
+
+	var cmdErr error
+	var stdoutErr error
+	stdoutFinished := false
+
+	select {
+	case cmdErr = <-cmdDone:
+	case stdoutErr = <-stdoutDone:
+		stdoutFinished = true
+		select {
+		case cmdErr = <-cmdDone:
+		case <-time.After(ptyStopGrace):
+			if trace != nil {
+				trace.logf("pty->stdout ended early; sending SIGTERM to process group")
+			}
+			signalProcessGroup(cmd, syscall.SIGTERM)
+			cmdErr = <-cmdDone
+			if cmdErr == nil && stdoutErr != nil {
+				cmdErr = stdoutErr
+			}
+		}
+	}
+
+	if trace != nil {
+		trace.logf("closing stdin copy")
+	}
 	close(done)
 	if cancelable {
 		<-stdinDone
 	}
+	if traceStop != nil {
+		close(traceStop)
+		<-traceStopped
+	}
 
-	return cmd.Wait()
+	if !stdoutFinished {
+		select {
+		case stdoutErr = <-stdoutDone:
+			stdoutFinished = true
+		case <-time.After(ptyStopGrace):
+			if trace != nil {
+				trace.logf("pty->stdout still running; closing ptmx")
+			}
+			_ = ptmx.Close()
+			stdoutErr = <-stdoutDone
+			stdoutFinished = true
+		}
+	}
+
+	if cmdErr == nil && stdoutErr != nil {
+		return stdoutErr
+	}
+	return cmdErr
 }
 
 // environToSlice converts expand.Environ to []string.
