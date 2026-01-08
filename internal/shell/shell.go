@@ -706,7 +706,7 @@ func makeEditorCompleteFunc(router *completion.Router) func(string, int) []edito
 		items := make([]editor.Completion, len(result.Items))
 		for i, item := range result.Items {
 			items[i] = editor.Completion{
-				Text:        item.Value,
+				Text:        result.Prefix + item.Value,
 				Description: item.Description,
 			}
 		}

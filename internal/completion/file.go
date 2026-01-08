@@ -85,7 +85,14 @@ func (c *FileCompleter) Complete(ctx context.Context, line string, pos int) (Res
 
 		// Build completion value
 		value := name
-		if entry.IsDir() {
+		isDir := entry.IsDir()
+		// For symlinks, check if the target is a directory
+		if entry.Type()&os.ModeSymlink != 0 {
+			if target, err := os.Stat(filepath.Join(dir, name)); err == nil {
+				isDir = target.IsDir()
+			}
+		}
+		if isDir {
 			value += "/"
 		}
 

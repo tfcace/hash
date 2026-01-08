@@ -148,3 +148,178 @@ func TestFileCompleter_PrefixMode(t *testing.T) {
 		t.Errorf("PrefixMode should return only prefix matches, got %d items", len(result.Items))
 	}
 }
+
+func TestFileCompleter_SymlinkToDirectory(t *testing.T) {
+	// Create temp directory with a subdirectory and a symlink to it
+	tmpDir := t.TempDir()
+	subDir := filepath.Join(tmpDir, "actual_dir")
+	os.Mkdir(subDir, 0755)
+	symlink := filepath.Join(tmpDir, "symlink_dir")
+	if err := os.Symlink(subDir, symlink); err != nil {
+		t.Skipf("Cannot create symlink: %v", err)
+	}
+
+	completer := NewFileCompleter()
+
+	oldDir, _ := os.Getwd()
+	os.Chdir(tmpDir)
+	defer os.Chdir(oldDir)
+
+	result, err := completer.Complete(context.Background(), "cd ", 3)
+	if err != nil {
+		t.Fatalf("Complete() error = %v", err)
+	}
+
+	// Both actual_dir and symlink_dir should have trailing slashes
+	// because symlink_dir points to a directory
+	for _, item := range result.Items {
+		if item.Value == "symlink_dir/" {
+			return // Found it with trailing slash - success
+		}
+		if item.Value == "symlink_dir" {
+			t.Errorf("Symlink to directory should have trailing slash, got %q", item.Value)
+			return
+		}
+	}
+	t.Error("symlink_dir not found in completions")
+}
+
+func TestFileCompleter_HiddenFiles(t *testing.T) {
+	tmpDir := t.TempDir()
+	os.WriteFile(filepath.Join(tmpDir, ".hidden"), []byte{}, 0644)
+	os.WriteFile(filepath.Join(tmpDir, "visible.txt"), []byte{}, 0644)
+
+	oldDir, _ := os.Getwd()
+	os.Chdir(tmpDir)
+	defer os.Chdir(oldDir)
+
+	completer := NewFileCompleter()
+	ctx := context.Background()
+
+	// Default: hidden files should NOT be shown
+	result, _ := completer.Complete(ctx, "cat ", 4)
+	for _, item := range result.Items {
+		if item.Value == ".hidden" {
+			t.Error("Hidden files should not be shown by default")
+		}
+	}
+
+	// Enable hidden files
+	completer.SetShowHidden(true)
+	result2, _ := completer.Complete(ctx, "cat ", 4)
+	found := false
+	for _, item := range result2.Items {
+		if item.Value == ".hidden" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("Hidden files should be shown when enabled")
+	}
+}
+
+func TestFileCompleter_AbsolutePath(t *testing.T) {
+	tmpDir := t.TempDir()
+	os.WriteFile(filepath.Join(tmpDir, "target.txt"), []byte{}, 0644)
+
+	completer := NewFileCompleter()
+	ctx := context.Background()
+
+	// Complete with absolute path
+	result, err := completer.Complete(ctx, "cat "+tmpDir+"/tar", len("cat "+tmpDir+"/tar"))
+	if err != nil {
+		t.Fatalf("Complete() error = %v", err)
+	}
+
+	if len(result.Items) != 1 {
+		t.Errorf("Expected 1 completion for absolute path, got %d", len(result.Items))
+	}
+	if len(result.Items) > 0 && result.Items[0].Value != "target.txt" {
+		t.Errorf("Value = %q, want %q", result.Items[0].Value, "target.txt")
+	}
+}
+
+func TestFileCompleter_DirectoryWithTrailingSlash(t *testing.T) {
+	tmpDir := t.TempDir()
+	subDir := filepath.Join(tmpDir, "mydir")
+	os.Mkdir(subDir, 0755)
+	os.WriteFile(filepath.Join(subDir, "inner.txt"), []byte{}, 0644)
+
+	oldDir, _ := os.Getwd()
+	os.Chdir(tmpDir)
+	defer os.Chdir(oldDir)
+
+	completer := NewFileCompleter()
+	ctx := context.Background()
+
+	// Complete "cd mydir/" should list contents of mydir
+	result, err := completer.Complete(ctx, "cd mydir/", 9)
+	if err != nil {
+		t.Fatalf("Complete() error = %v", err)
+	}
+
+	if len(result.Items) != 1 {
+		t.Errorf("Expected 1 file in mydir/, got %d", len(result.Items))
+	}
+	if len(result.Items) > 0 && result.Items[0].Value != "inner.txt" {
+		t.Errorf("Value = %q, want %q", result.Items[0].Value, "inner.txt")
+	}
+}
+
+func TestFileCompleter_EmptyDirectory(t *testing.T) {
+	tmpDir := t.TempDir()
+	emptyDir := filepath.Join(tmpDir, "empty")
+	os.Mkdir(emptyDir, 0755)
+
+	oldDir, _ := os.Getwd()
+	os.Chdir(tmpDir)
+	defer os.Chdir(oldDir)
+
+	completer := NewFileCompleter()
+	ctx := context.Background()
+
+	// Complete "cd empty/" should return no items (empty dir)
+	result, err := completer.Complete(ctx, "cd empty/", 9)
+	if err != nil {
+		t.Fatalf("Complete() error = %v", err)
+	}
+
+	if len(result.Items) != 0 {
+		t.Errorf("Empty directory should have no completions, got %d", len(result.Items))
+	}
+}
+
+func TestFileCompleter_NonexistentDirectory(t *testing.T) {
+	completer := NewFileCompleter()
+	ctx := context.Background()
+
+	// Complete path to nonexistent directory should return empty, not error
+	result, err := completer.Complete(ctx, "cd /nonexistent/path/", 21)
+	if err != nil {
+		t.Fatalf("Should not error on nonexistent path, got %v", err)
+	}
+
+	if len(result.Items) != 0 {
+		t.Errorf("Nonexistent path should have no completions, got %d", len(result.Items))
+	}
+}
+
+func TestFileCompleter_CaseInsensitivePrefix(t *testing.T) {
+	tmpDir := t.TempDir()
+	os.WriteFile(filepath.Join(tmpDir, "README.md"), []byte{}, 0644)
+	os.WriteFile(filepath.Join(tmpDir, "readme.txt"), []byte{}, 0644)
+
+	oldDir, _ := os.Getwd()
+	os.Chdir(tmpDir)
+	defer os.Chdir(oldDir)
+
+	completer := NewFileCompleter()
+	ctx := context.Background()
+
+	// "read" should match both "README.md" and "readme.txt" (case insensitive)
+	result, _ := completer.Complete(ctx, "cat read", 8)
+	if len(result.Items) != 2 {
+		t.Errorf("Case-insensitive prefix should match 2 files, got %d", len(result.Items))
+	}
+}

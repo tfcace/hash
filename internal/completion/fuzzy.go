@@ -50,9 +50,22 @@ func fuzzyScore(target, query string) int {
 		return 800 + (100 - len(target)) // Shorter = better
 	}
 
-	// Contains match
-	if strings.Contains(target, query) {
-		return 600 + (100 - len(target))
+	// For path completion (query ends with /), only allow exact and prefix matches.
+	// This prevents "Drive/" from matching "Google Drive/" which would cause
+	// an infinite loop when pressing TAB repeatedly on paths with spaces.
+	if strings.HasSuffix(query, "/") {
+		return 0
+	}
+
+	// Contains match - only if query starts at a word boundary
+	// (start of string, after space, or after /)
+	if idx := strings.Index(target, query); idx > 0 {
+		// Check if the match starts at a word boundary
+		prevChar := target[idx-1]
+		if prevChar == ' ' || prevChar == '/' {
+			return 600 + (100 - len(target))
+		}
+		// Not at word boundary - don't count as a contains match
 	}
 
 	// Subsequence match

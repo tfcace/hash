@@ -38,6 +38,7 @@ type Display struct {
 	inputBgCode    string // ANSI code for input background color
 	finalizedLines int    // Lines rendered by last Finalize call
 	scrollbarCode  string // ANSI code for scrollbar foreground color
+	lastMenuItems  int    // Number of items in last rendered completion menu
 }
 
 // NewDisplay creates a new display.
@@ -119,12 +120,6 @@ func (d *Display) Render(buf *Buffer, cur *Cursor, hasSelection bool) {
 	// Hide cursor during render for flicker-free updates
 	sb.WriteString(ansiHideCursor)
 
-	// Calculate how many lines we need to clear (max of previous and current)
-	linesToClear := d.lastLines
-	if linesToClear == 0 {
-		linesToClear = 1 // First render
-	}
-
 	// Move up from where cursor was left to first line of our content
 	if d.lastCursorRow > 0 {
 		fmt.Fprintf(&sb, ansiCursorUp, d.lastCursorRow)
@@ -136,46 +131,35 @@ func (d *Display) Render(buf *Buffer, cur *Cursor, hasSelection bool) {
 		gutterPrefix = "│ "
 	}
 
-	// Render each line (clear as we go)
-	maxLines := linesToClear
-	if buf.LineCount() > maxLines {
-		maxLines = buf.LineCount()
-	}
-
-	for i := 0; i < maxLines; i++ {
+	for i := 0; i < buf.LineCount(); i++ {
 		if i > 0 {
 			sb.WriteString("\r\n")
 		}
 		sb.WriteString(ansiClearLine)
 
-		// Only render content for lines that exist in buffer
-		if i < buf.LineCount() {
-			line := buf.Line(i)
+		line := buf.Line(i)
 
-			// First line has prompt, others have gutter
-			if i == 0 {
-				if d.prompt != "" {
-					sb.WriteString(d.prompt)
-				} else {
-					sb.WriteString(gutterPrefix)
-				}
+		// First line has prompt, others have gutter
+		if i == 0 {
+			if d.prompt != "" {
+				sb.WriteString(d.prompt)
 			} else {
 				sb.WriteString(gutterPrefix)
 			}
+		} else {
+			sb.WriteString(gutterPrefix)
+		}
 
-			// Render line content with optional selection highlighting
-			if hasSelection && cur.HasSelection() {
-				d.renderLineWithSelection(&sb, line, i, cur)
-			} else {
-				sb.WriteString(line)
-			}
+		// Render line content with optional selection highlighting
+		if hasSelection && cur.HasSelection() {
+			d.renderLineWithSelection(&sb, line, i, cur)
+		} else {
+			sb.WriteString(line)
 		}
 	}
 
-	// If we rendered more lines than buffer has, move back up
-	if maxLines > buf.LineCount() {
-		fmt.Fprintf(&sb, ansiCursorUp, maxLines-buf.LineCount())
-	}
+	// Clear everything below the buffer (including any old menu)
+	sb.WriteString(ansiClearToEnd)
 
 	d.lastLines = buf.LineCount()
 
@@ -401,12 +385,6 @@ func (d *Display) RenderCompletionMenu(items []CompletionItem, selected, startCo
 
 	var sb strings.Builder
 
-	// Save cursor position
-	sb.WriteString("\x1b[s")
-
-	// Move down one line for menu
-	sb.WriteString("\r\n")
-
 	// Calculate max width for alignment
 	maxTextWidth := 0
 	for _, item := range items {
@@ -450,7 +428,8 @@ func (d *Display) RenderCompletionMenu(items []CompletionItem, selected, startCo
 		item := items[i]
 		rowIndex := i - scrollOffset // 0-based index within visible area
 
-		// Clear line and position at startCol
+		// Move to next line, then clear it and position at startCol
+		sb.WriteString("\r\n")
 		sb.WriteString(ansiClearLine)
 		if startCol > 0 {
 			fmt.Fprintf(&sb, ansiCursorForward, startCol)
@@ -507,17 +486,17 @@ func (d *Display) RenderCompletionMenu(items []CompletionItem, selected, startCo
 		if i == selected {
 			sb.WriteString(ansiReset)
 		}
-
-		// Move to next line (except last)
-		if i < scrollOffset+maxVisible-1 && i < len(items)-1 {
-			sb.WriteString("\r\n")
-		}
 	}
 
-	// Restore cursor position
-	sb.WriteString("\x1b[u")
+	// Move cursor back up to where we started (before the menu)
+	// We moved down maxVisible lines total
+	fmt.Fprintf(&sb, ansiCursorUp, maxVisible)
+	sb.WriteString("\r")
 
 	d.out.Write([]byte(sb.String()))
+
+	// Track menu size for clearing on next render
+	d.lastMenuItems = len(items)
 }
 
 // ClearCompletionMenu removes the completion menu from display.
@@ -527,9 +506,6 @@ func (d *Display) ClearCompletionMenu(numItems int) {
 	}
 
 	var sb strings.Builder
-
-	// Save cursor
-	sb.WriteString("\x1b[s")
 
 	// Move down and clear each menu line
 	maxVisible := 6
@@ -542,8 +518,12 @@ func (d *Display) ClearCompletionMenu(numItems int) {
 		sb.WriteString(ansiClearLine)
 	}
 
-	// Restore cursor
-	sb.WriteString("\x1b[u")
+	// Move cursor back up
+	fmt.Fprintf(&sb, ansiCursorUp, maxVisible)
+	sb.WriteString("\r")
 
 	d.out.Write([]byte(sb.String()))
+
+	// Reset tracked menu size
+	d.lastMenuItems = 0
 }

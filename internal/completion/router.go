@@ -3,6 +3,7 @@ package completion
 import (
 	"context"
 	"sort"
+	"strings"
 )
 
 // Router dispatches completion requests to registered completers.
@@ -58,8 +59,17 @@ func (r *Router) Complete(ctx context.Context, line string, pos int) (Result, er
 
 		if len(result.Items) > 0 {
 			// Apply fuzzy filtering if enabled
-			if r.fuzzy && query != "" {
-				result.Items = FuzzyFilter(result.Items, query)
+			// Skip if query ends with "/" - we're listing directory contents, not filtering
+			if r.fuzzy && query != "" && !strings.HasSuffix(query, "/") {
+				// For paths like "~/Go", only filter on the basename "Go"
+				// The prefix (directory path) is handled by the completer
+				filterQuery := query
+				if lastSlash := strings.LastIndex(query, "/"); lastSlash >= 0 {
+					filterQuery = query[lastSlash+1:]
+				}
+				if filterQuery != "" {
+					result.Items = FuzzyFilter(result.Items, filterQuery)
+				}
 			}
 			return result, nil
 		}
