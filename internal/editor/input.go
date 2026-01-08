@@ -37,25 +37,23 @@ func (r *InputReader) supportsDeadlines() bool {
 	return ok
 }
 
-// readWithTimeout reads with a timeout if the reader supports it.
+// readWithTimeout reads with a timeout using select().
 // Returns (n, err, timedOut).
 func (r *InputReader) readWithTimeout(buf []byte, timeout time.Duration) (int, error, bool) {
-	// Check if reader supports deadlines (e.g., *os.File for terminals)
-	if dr, ok := r.in.(deadlineReader); ok {
-		dr.SetReadDeadline(time.Now().Add(timeout))
-		n, err := r.in.Read(buf)
-		dr.SetReadDeadline(time.Time{}) // Clear deadline
-
-		// Check for timeout
-		if err != nil {
-			if os.IsTimeout(err) {
-				return 0, nil, true
-			}
+	// For *os.File (TTYs), use select() with timeout since SetReadDeadline
+	// doesn't work on TTYs ("file type does not support deadline").
+	if f, ok := r.in.(*os.File); ok {
+		fd := int(f.Fd())
+		if hasDataAvailableWithTimeout(fd, timeout) {
+			n, err := r.in.Read(buf)
+			return n, err, false
 		}
-		return n, err, false
+		// Timeout - no data available
+		return 0, nil, true
 	}
 
-	// No deadline support (e.g., bytes.Reader in tests) - just read
+	// For non-file readers (e.g., bytes.Reader in tests), just read immediately.
+	// These don't support timeouts, so we read whatever is available.
 	n, err := r.in.Read(buf)
 	return n, err, false
 }
@@ -95,11 +93,21 @@ func (r *InputReader) DrainPending() {
 
 // hasDataAvailable checks if there's data ready to read on fd without blocking.
 func hasDataAvailable(fd int) bool {
+	return hasDataAvailableWithTimeout(fd, 0)
+}
+
+// hasDataAvailableWithTimeout checks if data is ready within the timeout duration.
+// A timeout of 0 means poll immediately without waiting.
+func hasDataAvailableWithTimeout(fd int, timeout time.Duration) bool {
 	var readSet syscall.FdSet
 	readSet.Bits[fd/64] |= 1 << (uint(fd) % 64)
 
-	// Zero timeout = poll (return immediately)
-	tv := syscall.Timeval{Sec: 0, Usec: 0}
+	// Convert timeout to timeval
+	var tv syscall.Timeval
+	if timeout > 0 {
+		tv.Sec = int64(timeout / time.Second)
+		tv.Usec = int32((timeout % time.Second) / time.Microsecond)
+	}
 
 	err := syscall.Select(fd+1, &readSet, nil, nil, &tv)
 	if err != nil {

@@ -42,6 +42,7 @@ func TestDisplay_Render_WithGutter(t *testing.T) {
 	var out bytes.Buffer
 	d := NewDisplay(&out, 80, 24)
 	d.SetGutter(true)
+	d.SetMode("insert")
 
 	buf := NewBufferFromString("hello")
 	cur := NewCursor()
@@ -49,8 +50,35 @@ func TestDisplay_Render_WithGutter(t *testing.T) {
 	d.Render(buf, cur, false)
 
 	output := out.String()
-	if !strings.Contains(output, "│") {
-		t.Errorf("Output should contain gutter, got %q", output)
+	// Gutter shows "i│" with dim styling for insert mode
+	if !strings.Contains(output, "i│") {
+		t.Errorf("Output should contain mode indicator 'i│', got %q", output)
+	}
+	// Insert mode uses dim styling (\x1b[2m)
+	if !strings.Contains(output, "\x1b[2m") {
+		t.Errorf("Output should contain dim styling for insert mode, got %q", output)
+	}
+}
+
+func TestDisplay_Render_WithGutter_NormalMode(t *testing.T) {
+	var out bytes.Buffer
+	d := NewDisplay(&out, 80, 24)
+	d.SetGutter(true)
+	d.SetMode("normal")
+
+	buf := NewBufferFromString("hello")
+	cur := NewCursor()
+
+	d.Render(buf, cur, false)
+
+	output := out.String()
+	// Gutter shows "n│" with bold yellow styling for normal mode
+	if !strings.Contains(output, "n│") {
+		t.Errorf("Output should contain mode indicator 'n│', got %q", output)
+	}
+	// Normal mode uses bold yellow styling (\x1b[33;1m)
+	if !strings.Contains(output, "\x1b[33;1m") {
+		t.Errorf("Output should contain bold yellow styling for normal mode, got %q", output)
 	}
 }
 

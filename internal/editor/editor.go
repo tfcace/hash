@@ -335,6 +335,7 @@ func (e *Editor) Run(ctx context.Context) (Result, error) {
 
 func (e *Editor) render() {
 	hasSelection := e.state.Cursor.HasSelection()
+	e.display.SetMode(e.mode.Name())
 	e.display.Render(e.state.Buffer, e.state.Cursor, hasSelection)
 
 	// Render completion menu if active

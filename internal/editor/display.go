@@ -31,6 +31,7 @@ type Display struct {
 	width          int
 	height         int
 	gutter         bool
+	mode           string // Current editor mode ("insert", "normal")
 	prompt         string // Prompt to display before first line
 	promptWidth    int
 	lastLines      int    // Number of lines rendered last time
@@ -53,6 +54,11 @@ func NewDisplay(out io.Writer, width, height int) *Display {
 // SetGutter enables/disables the gutter indicator.
 func (d *Display) SetGutter(enabled bool) {
 	d.gutter = enabled
+}
+
+// SetMode sets the current editor mode for gutter display.
+func (d *Display) SetMode(mode string) {
+	d.mode = mode
 }
 
 // SetPromptWidth sets the prompt width for cursor positioning.
@@ -126,9 +132,17 @@ func (d *Display) Render(buf *Buffer, cur *Cursor, hasSelection bool) {
 	}
 	sb.WriteString("\r")
 
-	gutterPrefix := " " // Minimal indent for continuation lines
+	// Mode indicator: letter + vertical bar with color
+	// Insert mode: dim "i│" (unobtrusive, normal typing)
+	// Normal mode: bold yellow "n│" (attention, command mode)
+	modeBar := ""
 	if d.gutter {
-		gutterPrefix = "│ "
+		switch d.mode {
+		case "normal":
+			modeBar = "\x1b[33;1mn│\x1b[0m" // Bold yellow "n│"
+		default: // "insert" or empty
+			modeBar = "\x1b[2mi│\x1b[0m" // Dim "i│"
+		}
 	}
 
 	for i := 0; i < buf.LineCount(); i++ {
@@ -139,15 +153,18 @@ func (d *Display) Render(buf *Buffer, cur *Cursor, hasSelection bool) {
 
 		line := buf.Line(i)
 
-		// First line has prompt, others have gutter
+		// Show mode bar on all lines, then prompt on first line
+		if d.gutter {
+			sb.WriteString(modeBar)
+		}
 		if i == 0 {
 			if d.prompt != "" {
 				sb.WriteString(d.prompt)
 			} else {
-				sb.WriteString(gutterPrefix)
+				sb.WriteString(" ") // Space after bar if no prompt
 			}
 		} else {
-			sb.WriteString(gutterPrefix)
+			sb.WriteString(" ") // Space after bar for continuation
 		}
 
 		// Render line content with optional selection highlighting
@@ -173,14 +190,17 @@ func (d *Display) Render(buf *Buffer, cur *Cursor, hasSelection bool) {
 	}
 
 	// Calculate prefix width for cursor positioning
-	// First line uses prompt if available, otherwise gutter prefix
-	// Other lines always use gutter prefix
-	prefixWidth := 1 // Default gutter width (single space)
+	// Structure: [mode bar "i│" or "n│" if gutter] + [prompt on line 0, space on others]
+	prefixWidth := 0
 	if d.gutter {
-		prefixWidth = 2 // "│ "
+		prefixWidth = 2 // Mode bar "i│" or "n│"
 	}
 	if cursorRow == 0 && d.promptWidth > 0 {
-		prefixWidth = d.promptWidth
+		prefixWidth += d.promptWidth
+	} else if cursorRow == 0 {
+		prefixWidth += 1 // Space after bar when no prompt
+	} else {
+		prefixWidth += 1 // Space for continuation lines
 	}
 
 	sb.WriteString("\r")
@@ -254,13 +274,6 @@ func (d *Display) Finalize(buf *Buffer) {
 	}
 	sb.WriteString("\r")
 
-	gutterPrefix := " " // Minimal indent for continuation lines
-	gutterWidth := 1
-	if d.gutter {
-		gutterPrefix = "│ "
-		gutterWidth = 2
-	}
-
 	// Re-render each line with background highlight
 	for i := 0; i < buf.LineCount(); i++ {
 		sb.WriteString(ansiClearLine)
@@ -271,17 +284,24 @@ func (d *Display) Finalize(buf *Buffer) {
 		}
 
 		var contentWidth int
+
+		// Show gutter bar on all lines (neutral style for finalized)
+		if d.gutter {
+			sb.WriteString("│")
+			contentWidth = 1
+		}
+
 		if i == 0 {
 			if d.prompt != "" {
 				sb.WriteString(d.prompt)
-				contentWidth = d.promptWidth
+				contentWidth += d.promptWidth
 			} else {
-				sb.WriteString(gutterPrefix)
-				contentWidth = gutterWidth
+				sb.WriteString(" ")
+				contentWidth += 1
 			}
 		} else {
-			sb.WriteString(gutterPrefix)
-			contentWidth = gutterWidth
+			sb.WriteString(" ")
+			contentWidth += 1
 		}
 
 		// Bold the command text

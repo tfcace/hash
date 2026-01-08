@@ -98,7 +98,7 @@ func Default() *Config {
 		Input: InputConfig{
 			Mode:        "editor",
 			Keybindings: "helix",
-			Gutter:      false,
+			Gutter:      true,
 		},
 		Prompt: PromptConfig{
 			Mode: "starship",
