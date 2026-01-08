@@ -21,6 +21,7 @@ type ModeResult struct {
 	HistoryPrev   bool // True = navigate to previous history
 	HistoryNext   bool // True = navigate to next history
 	HistorySearch bool // True = launch history search (Ctrl+R)
+	ContextPicker bool // True = launch context picker (Ctrl+P)
 	Yank          bool // True = yank selection to clipboard
 	Paste         bool // True = paste from clipboard
 	PasteBefore   bool // True = paste before cursor (P)

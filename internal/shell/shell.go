@@ -14,6 +14,7 @@ import (
 	"github.com/tfcace/hash/internal/clipboard"
 	"github.com/tfcace/hash/internal/completion"
 	"github.com/tfcace/hash/internal/config"
+	hashcontext "github.com/tfcace/hash/internal/context"
 	"github.com/tfcace/hash/internal/editor"
 	"github.com/tfcace/hash/internal/executor"
 	"github.com/tfcace/hash/internal/history"
@@ -52,6 +53,9 @@ type Shell struct {
 	// History navigation state for editor mode
 	historyIndex     int    // -1 means current line (not in history)
 	historySavedLine string // Saved current line when navigating into history
+
+	// Context picker state
+	selectedContext *hashcontext.Collection // nil = use auto-detect defaults
 }
 
 // New creates a new Shell instance.
@@ -464,6 +468,14 @@ func (s *Shell) readLineWithEditor(ctx context.Context) (string, error) {
 			s.printPromptPrefix()
 			continue
 		}
+		if result.ContextPicker {
+			// Launch context picker
+			s.runContextPicker()
+			// Re-run editor with previous text
+			initialText = result.Text
+			s.printPromptPrefix()
+			continue
+		}
 		return result.Text, nil
 	}
 }
@@ -492,6 +504,45 @@ func (s *Shell) runHistoryPicker() string {
 		return ""
 	}
 	return selected
+}
+
+// runContextPicker launches the context picker TUI and stores selections.
+func (s *Shell) runContextPicker() {
+	// Build collection with available context
+	builder := hashcontext.NewBuilder().AutoDetect()
+
+	// Add recent history if available
+	if s.history != nil {
+		entries, _ := s.history.Search(history.SearchOptions{Limit: 10})
+		commands := make([]string, len(entries))
+		for i, e := range entries {
+			commands[i] = e.Command
+		}
+		builder.WithHistory(commands)
+	}
+
+	// Add last output/error from clipboard buffer
+	if s.clipboard != nil {
+		if output := s.clipboard.LastOutput(); output != "" {
+			builder.WithLastOutput(output)
+		}
+	}
+
+	// Add common env vars as options
+	builder.WithEnvVars([]string{"GOPATH", "HOME", "PATH", "EDITOR"})
+
+	collection := builder.Build()
+
+	// Run the picker UI
+	picker := hashcontext.NewPickerUI(collection)
+	_, err := picker.Run()
+	if err != nil {
+		// Picker cancelled or errored, keep existing selection
+		return
+	}
+
+	// Store the collection (with user's selections)
+	s.selectedContext = collection
 }
 
 // navigateHistory handles Up/Down arrow history navigation.
@@ -554,6 +605,9 @@ func (s *Shell) handleAgentRequest(ctx context.Context, parsed parser.ParseResul
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+
+	// Pass selected context to agent handler
+	s.agentHandler.SetSelectedContext(s.selectedContext)
 
 	// Get model name for display
 	modelName := s.config.Agent.Model

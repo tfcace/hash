@@ -3,16 +3,19 @@ package shell
 import (
 	"context"
 	"fmt"
+	"os"
 
 	"github.com/tfcace/hash/internal/agent"
 	"github.com/tfcace/hash/internal/clipboard"
+	hashcontext "github.com/tfcace/hash/internal/context"
 	"github.com/tfcace/hash/internal/parser"
 )
 
 // AgentHandler handles agent requests.
 type AgentHandler struct {
-	client       *agent.Client
-	clipboardBuf *clipboard.Buffer
+	client          *agent.Client
+	clipboardBuf    *clipboard.Buffer
+	selectedContext *hashcontext.Collection
 }
 
 // NewAgentHandler creates a new agent handler.
@@ -25,22 +28,35 @@ func (h *AgentHandler) SetClipboard(buf *clipboard.Buffer) {
 	h.clipboardBuf = buf
 }
 
+// SetSelectedContext sets the user-selected context.
+func (h *AgentHandler) SetSelectedContext(ctx *hashcontext.Collection) {
+	h.selectedContext = ctx
+}
+
 // HandleRequest processes a parsed agent request and returns the response.
 func (h *AgentHandler) HandleRequest(ctx context.Context, parsed parser.ParseResult) (agent.Response, error) {
 	if h.client == nil {
 		return agent.Response{}, fmt.Errorf("no agent configured")
 	}
 
-	// Build context with auto-detected info and clipboard data
-	ctxBuilder := agent.NewContextBuilder().
-		DetectGitBranch().
-		DetectKubeContext()
+	// Build context - use selected context if available, otherwise auto-detect
+	var agentCtx agent.Context
+	if h.selectedContext != nil && len(h.selectedContext.SelectedItems()) > 0 {
+		// Use user-selected context from picker
+		agentCtx = h.buildContextFromSelection()
+	} else {
+		// Default auto-detect behavior
+		ctxBuilder := agent.NewContextBuilder().
+			DetectGitBranch().
+			DetectKubeContext()
 
-	// Add last output/error from clipboard buffer if available
-	if h.clipboardBuf != nil {
-		if lastOutput := h.clipboardBuf.LastOutput(); lastOutput != "" {
-			ctxBuilder.WithLastOutput(lastOutput)
+		// Add last output/error from clipboard buffer if available
+		if h.clipboardBuf != nil {
+			if lastOutput := h.clipboardBuf.LastOutput(); lastOutput != "" {
+				ctxBuilder.WithLastOutput(lastOutput)
+			}
 		}
+		agentCtx = ctxBuilder.Build()
 	}
 
 	// Build the prompt based on parse type
@@ -67,8 +83,41 @@ Respond with ONLY the value to append.
 	req := agent.Request{
 		Prompt:      prompt,
 		CommandLine: parsed.Command,
-		Context:     ctxBuilder.Build(),
+		Context:     agentCtx,
 	}
 
 	return h.client.Ask(ctx, req)
+}
+
+// buildContextFromSelection converts user-selected context to agent.Context.
+func (h *AgentHandler) buildContextFromSelection() agent.Context {
+	cwd, _ := os.Getwd()
+	agentCtx := agent.Context{
+		Cwd:     cwd,
+		EnvVars: make(map[string]string),
+	}
+
+	for _, item := range h.selectedContext.SelectedItems() {
+		switch item.Key {
+		case "cwd":
+			agentCtx.Cwd = item.Value
+		case "git branch":
+			agentCtx.GitBranch = item.Value
+		case "kube context":
+			agentCtx.KubeContext = item.Value
+		case "last output":
+			agentCtx.LastOutput = item.Value
+		case "last error":
+			agentCtx.LastError = item.Value
+		default:
+			// History or env items go to appropriate fields
+			if item.Category == hashcontext.CategoryHistory {
+				agentCtx.History = append(agentCtx.History, item.Value)
+			} else if item.Category == hashcontext.CategoryEnv {
+				agentCtx.EnvVars[item.Key] = item.Value
+			}
+		}
+	}
+
+	return agentCtx
 }

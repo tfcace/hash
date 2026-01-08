@@ -38,6 +38,7 @@ type Result struct {
 	Cancelled     bool // Ctrl+C - interrupt
 	EOF           bool // Ctrl+D - exit shell
 	HistorySearch bool // Ctrl+R - launch history search
+	ContextPicker bool // Ctrl+P - launch context picker
 }
 
 // Editor is the main editor instance.
@@ -282,6 +283,12 @@ func (e *Editor) Run(ctx context.Context) (Result, error) {
 		if result.HistorySearch {
 			e.display.Clear()
 			return Result{Text: e.state.Buffer.Content(), HistorySearch: true}, nil
+		}
+
+		// Handle context picker (Ctrl+P) - return to shell to launch picker
+		if result.ContextPicker {
+			e.display.Clear()
+			return Result{Text: e.state.Buffer.Content(), ContextPicker: true}, nil
 		}
 
 		// Handle history navigation

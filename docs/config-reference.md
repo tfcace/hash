@@ -881,12 +881,12 @@ User interface settings.
 ### ui.context_picker_key
 
 **Type:** `string (key binding)`
-**Default:** `"ctrl+e"`
+**Default:** `"ctrl+p"`
 
 Key to open the context picker before sending a `??` request.
 
 ```toml
-context_picker_key = "ctrl+e"
+context_picker_key = "ctrl+p"
 ```
 
 ### ui.completion_max_height
@@ -985,7 +985,7 @@ Override specific keybindings regardless of style.
 style = "helix"
 
 [keybindings.overrides]
-"ctrl+e" = "context_picker"
+"ctrl+p" = "context_picker"
 "ctrl+r" = "history_search"
 "ctrl+g" = "cancel"
 "ctrl+l" = "clear_screen"
@@ -1138,7 +1138,7 @@ copy_output = "alt+o"
 copy_both = "alt+shift+c"
 
 [ui]
-context_picker_key = "ctrl+e"
+context_picker_key = "ctrl+p"
 completion_max_height = 10
 progress_bar_delay = "2s"
 
@@ -1152,6 +1152,6 @@ info = "#93bfc2"
 style = "helix"
 
 [keybindings.overrides]
-"ctrl+e" = "context_picker"
+"ctrl+p" = "context_picker"
 "ctrl+r" = "history_search"
 ```

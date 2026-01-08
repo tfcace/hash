@@ -115,3 +115,15 @@ func TestNormalMode_Yank_y(t *testing.T) {
 	}
 	_ = result // Yank to clipboard handled externally
 }
+
+func TestNormalMode_CtrlP_ContextPicker(t *testing.T) {
+	mode := NewNormalMode()
+	state := NewEditorState()
+
+	key := Key{Ctrl: true, Rune: 'p'}
+	result := mode.HandleKey(key, state)
+
+	if !result.ContextPicker {
+		t.Error("Ctrl+P should set ContextPicker=true in normal mode")
+	}
+}

@@ -286,6 +286,9 @@ func (t *ACPTransport) Send(ctx context.Context, req Request) (<-chan Response, 
 	go func() {
 		defer close(respCh)
 
+		// Build prompt with context
+		promptText := buildPromptWithContext(req)
+
 		// Send prompt request
 		id := t.requestID.Add(1)
 		rpcReq := jsonRPCRequest{
@@ -295,7 +298,7 @@ func (t *ACPTransport) Send(ctx context.Context, req Request) (<-chan Response, 
 			Params: promptParams{
 				SessionID: sessionID,
 				Prompt: []promptPart{
-					{Type: "text", Text: req.Prompt},
+					{Type: "text", Text: promptText},
 				},
 			},
 		}
@@ -356,6 +359,8 @@ func (t *ACPTransport) Send(ctx context.Context, req Request) (<-chan Response, 
 					text := textBuilder.String()
 					if text != "" {
 						respCh <- parseAgentResponse(text)
+					} else {
+						respCh <- Response{Type: ResponseTypeError, Error: "agent returned empty response"}
 					}
 					return
 				}
@@ -394,6 +399,58 @@ func parseAgentResponse(text string) Response {
 		Type:        ResponseTypeExplanation,
 		Explanation: text,
 	}
+}
+
+// buildPromptWithContext builds a prompt that includes context information.
+func buildPromptWithContext(req Request) string {
+	var b strings.Builder
+
+	ctx := req.Context
+	hasContext := false
+
+	// Add context section if there's anything to include
+	if ctx.Cwd != "" || ctx.GitBranch != "" || ctx.KubeContext != "" ||
+		len(ctx.History) > 0 || len(ctx.EnvVars) > 0 ||
+		ctx.LastOutput != "" || ctx.LastError != "" {
+
+		b.WriteString("Context:\n")
+		hasContext = true
+
+		if ctx.Cwd != "" {
+			fmt.Fprintf(&b, "- Working directory: %s\n", ctx.Cwd)
+		}
+		if ctx.GitBranch != "" {
+			fmt.Fprintf(&b, "- Git branch: %s\n", ctx.GitBranch)
+		}
+		if ctx.KubeContext != "" {
+			fmt.Fprintf(&b, "- Kubernetes context: %s\n", ctx.KubeContext)
+		}
+		if len(ctx.History) > 0 {
+			b.WriteString("- Recent commands:\n")
+			for _, cmd := range ctx.History {
+				fmt.Fprintf(&b, "  - %s\n", cmd)
+			}
+		}
+		if len(ctx.EnvVars) > 0 {
+			b.WriteString("- Environment:\n")
+			for k, v := range ctx.EnvVars {
+				fmt.Fprintf(&b, "  - %s=%s\n", k, v)
+			}
+		}
+		if ctx.LastOutput != "" {
+			fmt.Fprintf(&b, "- Last command output:\n%s\n", ctx.LastOutput)
+		}
+		if ctx.LastError != "" {
+			fmt.Fprintf(&b, "- Last error:\n%s\n", ctx.LastError)
+		}
+	}
+
+	if hasContext {
+		b.WriteString("\nUser request: ")
+	}
+	b.WriteString(req.Prompt)
+
+	return b.String()
 }
 
 // Close terminates the agent process.

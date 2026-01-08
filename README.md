@@ -58,9 +58,15 @@ bash: ./deploy.sh: Permission denied
   [Enter: run] [Tab: edit] [?: ask agent] [Esc: dismiss]
 ```
 
-### Context Picker (Ctrl+E)
+### Context Picker (Ctrl+P)
 
 Control exactly what context goes to the agent with an interactive TUI:
+- Press **Ctrl+P** to open the context picker
+- Toggle items with **Space**, select all with **a**, none with **n**
+- Auto-detected context (cwd, git branch, kube context) is pre-selected
+- Add history commands, environment variables, or last output as needed
+- Your selections persist for the shell session
+- Press **Enter** to confirm, **Esc** to cancel
 
 ```
 ┌─ Context for Agent ─────────────────────────────────────┐

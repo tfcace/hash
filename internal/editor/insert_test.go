@@ -98,3 +98,22 @@ func TestInsertMode_CtrlE_LineEnd(t *testing.T) {
 		t.Errorf("Cursor col = %d, want 5", state.Cursor.Pos.Col)
 	}
 }
+
+func TestInsertMode_CtrlP_ContextPicker(t *testing.T) {
+	mode := NewInsertMode()
+	state := NewEditorState()
+	state.Buffer.Insert(0, 0, "hello")
+	state.Cursor.MoveTo(0, 5)
+
+	// Ctrl+P should trigger context picker
+	key := Key{Ctrl: true, Rune: 'p'}
+	result := mode.HandleKey(key, state)
+
+	if !result.ContextPicker {
+		t.Error("Ctrl+P should set ContextPicker=true")
+	}
+	// Cursor should not move
+	if state.Cursor.Pos.Col != 5 {
+		t.Errorf("cursor should stay at col 5, got %d", state.Cursor.Pos.Col)
+	}
+}

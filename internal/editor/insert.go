@@ -99,6 +99,8 @@ func (m *InsertMode) handleCtrl(key Key, state *EditorState) ModeResult {
 		state.Cursor.Pos.Col = 0
 	case 'e': // Ctrl+E: line end
 		state.Cursor.Pos.Col = len(state.Buffer.Line(state.Cursor.Pos.Row))
+	case 'p': // Ctrl+P: context picker
+		return ModeResult{ContextPicker: true}
 	case 'w': // Ctrl+W: delete word back
 		m.deleteWordBack(state)
 		return ModeResult{Action: ActionDelete}

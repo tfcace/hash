@@ -154,6 +154,8 @@ func (m *NormalMode) handleCtrl(key Key, state *EditorState) ModeResult {
 		state.Cursor.Pos.Col = 0
 	case 'e':
 		state.Cursor.Pos.Col = len(state.Buffer.Line(state.Cursor.Pos.Row))
+	case 'p': // Ctrl+P: context picker
+		return ModeResult{ContextPicker: true}
 	case 'r': // Ctrl+R: history search
 		return ModeResult{HistorySearch: true}
 	}
