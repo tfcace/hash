@@ -609,6 +609,85 @@ func (s *Shell) handleAgentRequest(ctx context.Context, parsed parser.ParseResul
 	// Pass selected context to agent handler
 	s.agentHandler.SetSelectedContext(s.selectedContext)
 
+	// Use streaming ghost text UX for editor mode
+	if s.useEditor {
+		s.handleAgentRequestStreaming(ctx, parsed)
+		return
+	}
+
+	// Fallback to legacy blocking UX for readline mode
+	s.handleAgentRequestBlocking(ctx, parsed)
+}
+
+// handleAgentRequestStreaming uses inline ghost text streaming for a modern UX.
+// The agent response streams in as ghost text that the user can accept with Tab.
+func (s *Shell) handleAgentRequestStreaming(ctx context.Context, parsed parser.ParseResult) {
+	// Start streaming request
+	textCh, errCh := s.agentHandler.StreamRequest(ctx, parsed)
+
+	// Build initial text for editor (the command prefix for inline completions)
+	initialText := ""
+	if parsed.Type == parser.CommandTypeAgentInline {
+		initialText = parsed.Command
+	}
+
+	// Reset history navigation
+	s.historyIndex = -1
+	s.historySavedLine = ""
+
+	// Configure editor with ghost text streaming
+	cfg := s.editorCfg
+	cfg.Prompt = s.currentPromptLine()
+
+	ed := editor.New(cfg, os.Stdin, os.Stdout)
+	if initialText != "" {
+		ed.SetInitialText(initialText)
+	}
+
+	// Set up streaming ghost text
+	ed.SetGhostTextStreaming(textCh, errCh)
+
+	// Run editor - user can type, see ghost text stream in, accept with Tab
+	result, err := ed.Run(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "hash: editor error: %v\n", err)
+		s.lastExitCode = 1
+		s.updatePrompt()
+		return
+	}
+
+	if result.Cancelled {
+		s.updatePrompt()
+		return
+	}
+
+	if result.EOF {
+		fmt.Println("exit")
+		os.Exit(0)
+	}
+
+	// User accepted the command (pressed Enter)
+	command := strings.TrimSpace(result.Text)
+	if command == "" {
+		s.updatePrompt()
+		return
+	}
+
+	// Execute the command
+	execResult, err := s.executor.Execute(ctx, command, os.Stdout, os.Stderr)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "hash: %v\n", err)
+		s.lastExitCode = 1
+	} else {
+		s.lastExitCode = execResult.ExitCode
+		s.lastDuration = execResult.Duration
+	}
+	s.recordCommand(command, s.lastExitCode, s.lastDuration)
+	s.updatePrompt()
+}
+
+// handleAgentRequestBlocking uses the legacy "Thinking..." UX for readline mode.
+func (s *Shell) handleAgentRequestBlocking(ctx context.Context, parsed parser.ParseResult) {
 	// Get model name for display
 	modelName := s.config.Agent.Model
 	if modelName == "" {
@@ -654,15 +733,8 @@ func (s *Shell) handleAgentRequest(ctx context.Context, parsed parser.ParseResul
 			return
 
 		case ConfirmEdit:
-			// Put the command in the input line for editing
-			if s.useEditor {
-				// For editor mode, we'll need to pass the text back
-				// For now, just print it so user can copy
-				fmt.Printf("Edit: %s\n", resp.Command)
-			} else {
-				// For readline mode, set the line buffer
-				s.readline.SetBuffer(resp.Command)
-			}
+			// For readline mode, set the line buffer
+			s.readline.SetBuffer(resp.Command)
 			s.updatePrompt()
 			return
 

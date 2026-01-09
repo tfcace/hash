@@ -41,6 +41,9 @@ type Result struct {
 	ContextPicker bool // Ctrl+P - launch context picker
 }
 
+// GhostTextChan is a channel that receives ghost text updates.
+type GhostTextChan <-chan string
+
 // Editor is the main editor instance.
 type Editor struct {
 	config  Config
@@ -64,6 +67,11 @@ type Editor struct {
 	completionIndex  int    // Selected item in menu
 	completionPrefix string // Text being completed (for replacement)
 	completionCol    int    // Column where completion started
+
+	// Ghost text state (inline suggestions)
+	ghost         *GhostText
+	ghostTextChan GhostTextChan // Channel for streaming ghost text updates
+	ghostErrChan  <-chan error  // Channel for ghost text errors
 }
 
 // New creates a new editor.
@@ -103,7 +111,29 @@ func New(cfg Config, in io.Reader, out io.Writer) *Editor {
 		mode:    mode,
 		in:      in,
 		out:     out,
+		ghost:   NewGhostText(),
 	}
+}
+
+// SetGhostText sets inline suggestion text that appears after the cursor.
+func (e *Editor) SetGhostText(text string) {
+	e.ghost.Set(text)
+}
+
+// SetGhostTextStreaming sets up streaming ghost text from channels.
+// Text chunks arrive on textCh, errors on errCh.
+func (e *Editor) SetGhostTextStreaming(textCh <-chan string, errCh <-chan error) {
+	e.ghostTextChan = textCh
+	e.ghostErrChan = errCh
+	e.ghost.Clear()
+	e.ghost.SetStreaming(true)
+}
+
+// ClearGhostText removes any ghost text.
+func (e *Editor) ClearGhostText() {
+	e.ghost.Clear()
+	e.ghostTextChan = nil
+	e.ghostErrChan = nil
 }
 
 // SetPromptWidth sets the prompt width for cursor positioning.
@@ -214,129 +244,161 @@ func (e *Editor) Run(ctx context.Context) (Result, error) {
 	// Initial render
 	e.render()
 
+	// Channel for keyboard input (enables non-blocking ghost text handling)
+	keyCh := make(chan Key, 1)
+	keyErrCh := make(chan error, 1)
+	go func() {
+		for {
+			key, err := e.input.ReadKey()
+			if err != nil {
+				keyErrCh <- err
+				return
+			}
+			keyCh <- key
+		}
+	}()
+
 	for {
+		// Check for ghost text streaming updates (non-blocking)
+		e.processGhostTextUpdates()
+
 		select {
 		case <-ctx.Done():
 			return Result{Cancelled: true}, ctx.Err()
 		case <-sigCh:
 			e.handleResize()
 			continue
-		default:
-		}
-
-		key, err := e.input.ReadKey()
-		if err != nil {
+		case err := <-keyErrCh:
 			if err == io.EOF {
 				return Result{Text: e.state.Buffer.Content(), Cancelled: true}, nil
 			}
 			return Result{}, err
-		}
-
-		// Handle Ctrl+C
-		if key.Ctrl && key.Rune == 'c' {
-			e.dismissCompletion()
-			if e.state.Buffer.Content() == "" {
-				return Result{Cancelled: true}, nil
-			}
-			// Clear buffer
-			e.state.Buffer = NewBuffer()
-			e.state.Cursor = NewCursor()
-			e.render()
-			continue
-		}
-
-		// Handle Ctrl+D - exit shell (EOF)
-		if key.Ctrl && key.Rune == 'd' {
-			if e.state.Buffer.Content() == "" {
-				return Result{EOF: true}, nil
-			}
-			continue
-		}
-
-		// If completion menu is active, intercept keys
-		if e.completionActive {
-			if e.handleCompletionKey(key) {
+		case key := <-keyCh:
+			// Handle Ctrl+C
+			if key.Ctrl && key.Rune == 'c' {
+				e.dismissCompletion()
+				e.ghost.Clear()
+				if e.state.Buffer.Content() == "" {
+					return Result{Cancelled: true}, nil
+				}
+				// Clear buffer
+				e.state.Buffer = NewBuffer()
+				e.state.Cursor = NewCursor()
 				e.render()
 				continue
 			}
-			// Key not handled by completion, continue to normal processing
-		}
 
-		// Delegate to mode
-		result := e.mode.HandleKey(key, e.state)
-
-		// Handle mode switch
-		if result.NewMode != nil {
-			e.mode = result.NewMode
-		}
-
-		// Handle action for undo grouping
-		e.handleAction(result.Action)
-
-		// Handle submit
-		if result.Submit {
-			e.display.Finalize(e.state.Buffer)
-			return Result{Text: e.state.Buffer.Content()}, nil
-		}
-
-		// Handle history search (Ctrl+R) - return to shell to launch picker
-		if result.HistorySearch {
-			e.display.Clear()
-			return Result{Text: e.state.Buffer.Content(), HistorySearch: true}, nil
-		}
-
-		// Handle context picker (Ctrl+P) - return to shell to launch picker
-		if result.ContextPicker {
-			e.display.Clear()
-			return Result{Text: e.state.Buffer.Content(), ContextPicker: true}, nil
-		}
-
-		// Handle history navigation
-		if result.HistoryPrev && e.config.HistoryFunc != nil {
-			currentLine := e.state.Buffer.Content()
-			if entry := e.config.HistoryFunc(-1, currentLine); entry != "" {
-				e.state.Buffer = NewBufferFromString(entry)
-				e.state.Cursor.MoveTo(0, len(e.state.Buffer.Line(0)))
+			// Handle Ctrl+D - exit shell (EOF)
+			if key.Ctrl && key.Rune == 'd' {
+				if e.state.Buffer.Content() == "" {
+					return Result{EOF: true}, nil
+				}
+				continue
 			}
-		}
-		if result.HistoryNext && e.config.HistoryFunc != nil {
-			currentLine := e.state.Buffer.Content()
-			if entry := e.config.HistoryFunc(1, currentLine); entry != "" {
-				e.state.Buffer = NewBufferFromString(entry)
-				e.state.Cursor.MoveTo(0, len(e.state.Buffer.Line(0)))
+
+			// If ghost text is active, intercept keys
+			if e.ghost.Active && !e.ghost.IsEmpty() {
+				if e.handleGhostTextKey(key) {
+					e.render()
+					continue
+				}
+				// Key not handled by ghost text, clear it and continue to normal processing
+				e.ghost.Clear()
 			}
-		}
 
-		// Handle completion
-		if result.Complete {
-			e.triggerCompletion()
-		}
+			// If completion menu is active, intercept keys
+			if e.completionActive {
+				if e.handleCompletionKey(key) {
+					e.render()
+					continue
+				}
+				// Key not handled by completion, continue to normal processing
+			}
 
-		// Handle clipboard operations
-		if result.Yank {
-			e.yank()
-		}
-		if result.Paste {
-			e.handleAction(ActionPaste)
-			e.paste(false)
-		}
-		if result.PasteBefore {
-			e.handleAction(ActionPaste)
-			e.paste(true)
-		}
+			// Delegate to mode
+			result := e.mode.HandleKey(key, e.state)
 
-		// Clamp cursor
-		e.state.Cursor.Clamp(e.state.Buffer)
+			// Handle mode switch
+			if result.NewMode != nil {
+				e.mode = result.NewMode
+			}
 
-		// Render
-		e.render()
+			// Handle action for undo grouping
+			e.handleAction(result.Action)
+
+			// Handle submit
+			if result.Submit {
+				e.display.Finalize(e.state.Buffer)
+				return Result{Text: e.state.Buffer.Content()}, nil
+			}
+
+			// Handle history search (Ctrl+R) - return to shell to launch picker
+			if result.HistorySearch {
+				e.display.Clear()
+				return Result{Text: e.state.Buffer.Content(), HistorySearch: true}, nil
+			}
+
+			// Handle context picker (Ctrl+P) - return to shell to launch picker
+			if result.ContextPicker {
+				e.display.Clear()
+				return Result{Text: e.state.Buffer.Content(), ContextPicker: true}, nil
+			}
+
+			// Handle history navigation
+			if result.HistoryPrev && e.config.HistoryFunc != nil {
+				currentLine := e.state.Buffer.Content()
+				if entry := e.config.HistoryFunc(-1, currentLine); entry != "" {
+					e.state.Buffer = NewBufferFromString(entry)
+					e.state.Cursor.MoveTo(0, len(e.state.Buffer.Line(0)))
+				}
+			}
+			if result.HistoryNext && e.config.HistoryFunc != nil {
+				currentLine := e.state.Buffer.Content()
+				if entry := e.config.HistoryFunc(1, currentLine); entry != "" {
+					e.state.Buffer = NewBufferFromString(entry)
+					e.state.Cursor.MoveTo(0, len(e.state.Buffer.Line(0)))
+				}
+			}
+
+			// Handle completion
+			if result.Complete {
+				e.triggerCompletion()
+			}
+
+			// Handle clipboard operations
+			if result.Yank {
+				e.yank()
+			}
+			if result.Paste {
+				e.handleAction(ActionPaste)
+				e.paste(false)
+			}
+			if result.PasteBefore {
+				e.handleAction(ActionPaste)
+				e.paste(true)
+			}
+
+			// Clamp cursor
+			e.state.Cursor.Clamp(e.state.Buffer)
+
+			// Render
+			e.render()
+		}
 	}
 }
 
 func (e *Editor) render() {
 	hasSelection := e.state.Cursor.HasSelection()
 	e.display.SetMode(e.mode.Name())
-	e.display.Render(e.state.Buffer, e.state.Cursor, hasSelection)
+
+	// Pass ghost text to display for inline rendering
+	ghostText := ""
+	ghostStreaming := false
+	if e.ghost.Active && !e.ghost.IsEmpty() {
+		ghostText = e.ghost.Remaining()
+		ghostStreaming = e.ghost.Streaming
+	}
+	e.display.RenderWithGhost(e.state.Buffer, e.state.Cursor, hasSelection, ghostText, ghostStreaming)
 
 	// Render completion menu if active
 	if e.completionActive && len(e.completionItems) > 0 {
@@ -349,6 +411,107 @@ func (e *Editor) render() {
 		}
 		e.display.RenderCompletionMenu(displayItems, e.completionIndex, e.completionCol)
 	}
+}
+
+// processGhostTextUpdates checks for streaming ghost text updates (non-blocking).
+func (e *Editor) processGhostTextUpdates() {
+	if e.ghostTextChan == nil {
+		return
+	}
+
+	// Non-blocking check for updates
+	for {
+		select {
+		case text, ok := <-e.ghostTextChan:
+			if !ok {
+				// Channel closed, streaming complete
+				e.ghost.SetStreaming(false)
+				e.ghostTextChan = nil
+				e.render()
+				return
+			}
+			// Append text and re-render
+			e.ghost.Append(text)
+			e.render()
+		case err := <-e.ghostErrChan:
+			if err != nil {
+				// Error occurred, clear ghost text
+				e.ghost.Clear()
+				e.ghostTextChan = nil
+				e.ghostErrChan = nil
+			}
+			return
+		default:
+			// No updates available, return
+			return
+		}
+	}
+}
+
+// handleGhostTextKey processes keys when ghost text is active.
+// Returns true if the key was handled.
+func (e *Editor) handleGhostTextKey(key Key) bool {
+	switch key.Special {
+	case KeyTab:
+		// Tab accepts the full ghost text
+		text := e.ghost.AcceptAll()
+		if text != "" {
+			e.insertText(text)
+		}
+		return true
+
+	case KeyRight:
+		// Right arrow accepts one character
+		text := e.ghost.AcceptChar()
+		if text != "" {
+			e.insertText(text)
+		}
+		return true
+
+	case KeyEscape:
+		// Escape dismisses ghost text
+		e.ghost.Clear()
+		return true
+
+	case KeyEnter:
+		// Enter accepts and submits (if ghost is a command)
+		text := e.ghost.AcceptAll()
+		if text != "" {
+			e.insertText(text)
+		}
+		// Don't return true - let Enter propagate to submit
+		return false
+	}
+
+	// Alt+Tab or Ctrl+Tab could accept word-by-word
+	if key.Special == KeyTab && (key.Alt || key.Ctrl) {
+		text := e.ghost.AcceptWord()
+		if text != "" {
+			e.insertText(text)
+		}
+		return true
+	}
+
+	// Any other key clears ghost text (handled by caller)
+	return false
+}
+
+// insertText inserts text at the cursor position.
+func (e *Editor) insertText(text string) {
+	row, col := e.state.Cursor.Pos.Row, e.state.Cursor.Pos.Col
+	e.state.Buffer.Insert(row, col, text)
+
+	// Move cursor to end of inserted text
+	for _, r := range text {
+		if r == '\n' {
+			row++
+			col = 0
+		} else {
+			col++
+		}
+	}
+	e.state.Cursor.Pos.Row = row
+	e.state.Cursor.Pos.Col = col
 }
 
 func (e *Editor) handleResize() {

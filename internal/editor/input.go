@@ -106,10 +106,10 @@ func hasDataAvailableWithTimeout(fd int, timeout time.Duration) bool {
 	var tv syscall.Timeval
 	if timeout > 0 {
 		tv.Sec = int64(timeout / time.Second)
-		tv.Usec = int32((timeout % time.Second) / time.Microsecond)
+		tv.Usec = int64((timeout % time.Second) / time.Microsecond)
 	}
 
-	err := syscall.Select(fd+1, &readSet, nil, nil, &tv)
+	_, err := syscall.Select(fd+1, &readSet, nil, nil, &tv)
 	if err != nil {
 		return false
 	}
