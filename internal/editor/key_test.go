@@ -84,3 +84,47 @@ func TestParseKey_CtrlEnter_CSIu(t *testing.T) {
 		t.Error("Ctrl = false, want true")
 	}
 }
+
+func TestParseKey_PlainEnter_CSIu(t *testing.T) {
+	// Plain Enter in CSI u encoding: ESC [ 13 u (no modifier)
+	key := ParseKey([]byte{0x1b, '[', '1', '3', 'u'})
+	if key.Special != KeyEnter {
+		t.Errorf("Special = %v, want KeyEnter", key.Special)
+	}
+	if key.Shift || key.Alt || key.Ctrl {
+		t.Errorf("Expected no modifiers, got Shift=%v Alt=%v Ctrl=%v", key.Shift, key.Alt, key.Ctrl)
+	}
+}
+
+func TestParseKey_PlainTab_CSIu(t *testing.T) {
+	// Plain Tab in CSI u encoding: ESC [ 9 u (no modifier)
+	key := ParseKey([]byte{0x1b, '[', '9', 'u'})
+	if key.Special != KeyTab {
+		t.Errorf("Special = %v, want KeyTab", key.Special)
+	}
+	if key.Shift || key.Alt || key.Ctrl {
+		t.Errorf("Expected no modifiers, got Shift=%v Alt=%v Ctrl=%v", key.Shift, key.Alt, key.Ctrl)
+	}
+}
+
+func TestParseKey_ShiftTab_CSIu(t *testing.T) {
+	// Shift+Tab in CSI u encoding: ESC [ 9 ; 2 u
+	key := ParseKey([]byte{0x1b, '[', '9', ';', '2', 'u'})
+	if key.Special != KeyTab {
+		t.Errorf("Special = %v, want KeyTab", key.Special)
+	}
+	if !key.Shift {
+		t.Error("Shift = false, want true")
+	}
+}
+
+func TestParseKey_CtrlTab_CSIu(t *testing.T) {
+	// Ctrl+Tab in CSI u encoding: ESC [ 9 ; 5 u
+	key := ParseKey([]byte{0x1b, '[', '9', ';', '5', 'u'})
+	if key.Special != KeyTab {
+		t.Errorf("Special = %v, want KeyTab", key.Special)
+	}
+	if !key.Ctrl {
+		t.Error("Ctrl = false, want true")
+	}
+}

@@ -11,6 +11,7 @@ import (
 	"github.com/tfcace/hash/internal/config"
 	"github.com/tfcace/hash/internal/executor"
 	"github.com/tfcace/hash/internal/shell"
+	"github.com/tfcace/hash/internal/trace"
 )
 
 const version = "0.1.0"
@@ -115,6 +116,12 @@ func runCommand(command string, positionalArgs []string, mode ShellMode) int {
 }
 
 func run(mode ShellMode) error {
+	// Initialize tracing (before anything else)
+	if err := trace.Init(); err != nil {
+		fmt.Fprintf(os.Stderr, "hash: trace init failed: %v\n", err)
+	}
+	defer trace.Close()
+
 	// Load configuration
 	configDir := getConfigDir()
 	cfg, err := config.Load(configDir)

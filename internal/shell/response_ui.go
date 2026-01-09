@@ -22,6 +22,15 @@ const (
 	ConfirmCancel                      // User pressed Esc - cancel
 )
 
+// ConfirmationType determines which confirmation options to show.
+type ConfirmationType int
+
+const (
+	ConfirmTypeCommand     ConfirmationType = iota // ↵ run · ⇥ edit · esc
+	ConfirmTypeExplanation                         // ↵ ok · ⇥ copy · esc
+	ConfirmTypeError                               // ↵ retry · esc
+)
+
 // ResponseUI handles displaying agent responses.
 type ResponseUI struct {
 	out      io.Writer
@@ -91,6 +100,16 @@ func (u *ResponseUI) ClearThinking() {
 	u.progress.Done()
 }
 
+// StartProgress starts the OSC 9;4 progress bar without showing text.
+func (u *ResponseUI) StartProgress() {
+	u.progress.Start()
+}
+
+// StopProgress stops the OSC 9;4 progress bar.
+func (u *ResponseUI) StopProgress() {
+	u.progress.Done()
+}
+
 // WaitForConfirmation waits for user to press Enter, Tab, or Esc.
 func (u *ResponseUI) WaitForConfirmation() ConfirmAction {
 	fd := int(u.in.Fd())
@@ -133,5 +152,89 @@ func (u *ResponseUI) WaitForConfirmation() ConfirmAction {
 			return ConfirmCancel
 		}
 		// Ignore other keys
+	}
+}
+
+// ShowThinkingInline displays thinking indicator (for streaming modes).
+// Unlike ShowThinking, this doesn't start progress bar (caller manages that).
+func (u *ResponseUI) ShowThinkingInline(model string) {
+	if model != "" {
+		fmt.Fprintf(u.out, "\033[90m⟳ thinking (%s)...\033[0m", model)
+	} else {
+		fmt.Fprintf(u.out, "\033[90m⟳ thinking...\033[0m")
+	}
+}
+
+// ClearLine clears the current line (for replacing thinking with response).
+func (u *ResponseUI) ClearLine() {
+	fmt.Fprintf(u.out, "\r\033[K")
+}
+
+// ShowStreamedResponse displays a streamed response with dim styling.
+// The response appears tentative until confirmed.
+func (u *ResponseUI) ShowStreamedResponse(text string, isCommand bool) {
+	// Dim styling for tentative response
+	fmt.Fprintf(u.out, "\033[90m%s\033[0m\n", text)
+}
+
+// ShowError displays an error message in the response area.
+func (u *ResponseUI) ShowError(errMsg string) {
+	fmt.Fprintf(u.out, "\033[31m✗ %s\033[0m\n", errMsg)
+}
+
+// ShowConfirmation displays the compact confirmation UI below the response.
+func (u *ResponseUI) ShowConfirmation(ct ConfirmationType) {
+	var hint string
+	switch ct {
+	case ConfirmTypeCommand:
+		hint = "↵ run · ⇥ edit · esc"
+	case ConfirmTypeExplanation:
+		hint = "↵ ok · ⇥ copy · esc"
+	case ConfirmTypeError:
+		hint = "↵ retry · esc"
+	}
+	fmt.Fprintf(u.out, "  \033[90m%s\033[0m\n", hint)
+}
+
+// WaitForConfirmationByType waits for confirmation based on response type.
+// Returns ConfirmAction appropriate for the confirmation type.
+func (u *ResponseUI) WaitForConfirmationByType(ct ConfirmationType) ConfirmAction {
+	fd := int(u.in.Fd())
+	if !term.IsTerminal(fd) {
+		return ConfirmCancel
+	}
+
+	oldState, err := term.MakeRaw(fd)
+	if err != nil {
+		return ConfirmCancel
+	}
+	defer term.Restore(fd, oldState)
+
+	buf := make([]byte, 3)
+	for {
+		n, err := u.in.Read(buf[:1])
+		if err != nil || n == 0 {
+			return ConfirmCancel
+		}
+
+		switch buf[0] {
+		case '\r', '\n': // Enter
+			return ConfirmRun // ConfirmRun means "primary action" (run/ok/retry)
+		case '\t': // Tab
+			if ct == ConfirmTypeError {
+				continue // No Tab action for errors
+			}
+			return ConfirmEdit // ConfirmEdit means "secondary action" (edit/copy)
+		case 0x1b: // Escape
+			u.in.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
+			n, _ = u.in.Read(buf[1:])
+			u.in.SetReadDeadline(time.Time{})
+			if n == 0 {
+				return ConfirmCancel
+			}
+			continue
+		case 0x03: // Ctrl+C
+			return ConfirmCancel
+		}
 	}
 }

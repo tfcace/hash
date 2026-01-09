@@ -81,3 +81,28 @@ func TestAgentError(t *testing.T) {
 		t.Errorf("expected 'test error', got %q", err.Error())
 	}
 }
+
+func TestLooksLikeCommand(t *testing.T) {
+	tests := []struct {
+		text     string
+		expected bool
+	}{
+		{"find . -type f -size +100M", true},
+		{"git push origin main", true},
+		{"The largest files are config.db and logs.tar", false},
+		{"ls -la | sort -k5 -h | head", true},
+		{"This is a multi-line\nexplanation of how to do something.", false},
+	}
+	for _, tt := range tests {
+		name := tt.text
+		if len(name) > 20 {
+			name = name[:20]
+		}
+		t.Run(name, func(t *testing.T) {
+			got := looksLikeCommand(tt.text)
+			if got != tt.expected {
+				t.Errorf("looksLikeCommand(%q) = %v, want %v", tt.text, got, tt.expected)
+			}
+		})
+	}
+}

@@ -2,10 +2,14 @@
 package editor
 
 import (
+	"context"
 	"io"
 	"os"
-	"syscall"
+	"strings"
 	"time"
+
+	"github.com/tfcace/hash/internal/trace"
+	"golang.org/x/sys/unix"
 )
 
 // InputReader reads keys from a terminal.
@@ -99,23 +103,17 @@ func hasDataAvailable(fd int) bool {
 // hasDataAvailableWithTimeout checks if data is ready within the timeout duration.
 // A timeout of 0 means poll immediately without waiting.
 func hasDataAvailableWithTimeout(fd int, timeout time.Duration) bool {
-	var readSet syscall.FdSet
-	readSet.Bits[fd/64] |= 1 << (uint(fd) % 64)
+	var readSet unix.FdSet
+	readSet.Set(fd)
 
-	// Convert timeout to timeval
-	var tv syscall.Timeval
-	if timeout > 0 {
-		tv.Sec = int64(timeout / time.Second)
-		tv.Usec = int64((timeout % time.Second) / time.Microsecond)
-	}
+	tv := unix.NsecToTimeval(timeout.Nanoseconds())
 
-	_, err := syscall.Select(fd+1, &readSet, nil, nil, &tv)
+	_, err := unix.Select(fd+1, &readSet, nil, nil, &tv)
 	if err != nil {
 		return false
 	}
 
-	// Check if fd is still set in readSet (meaning data is available)
-	return (readSet.Bits[fd/64] & (1 << (uint(fd) % 64))) != 0
+	return readSet.IsSet(fd)
 }
 
 // drainEscapeSequence reads an escape sequence during drain.
@@ -141,10 +139,22 @@ func (r *InputReader) drainEscapeSequence(fd int) Key {
 
 // ReadKey reads and parses the next key.
 func (r *InputReader) ReadKey() (Key, error) {
+	return r.ReadKeyInterruptible(nil)
+}
+
+// ReadKeyInterruptible reads and parses the next key, checking done channel periodically.
+// If done is closed, returns context.Canceled error.
+// This prevents goroutines from blocking indefinitely on stdin when the editor exits.
+func (r *InputReader) ReadKeyInterruptible(done <-chan struct{}) (Key, error) {
 	// Return any keys that were drained during mode transition
 	if len(r.pendingKeys) > 0 {
 		key := r.pendingKeys[0]
 		r.pendingKeys = r.pendingKeys[1:]
+		trace.Editor("key_read", map[string]any{
+			"source":  "pending",
+			"parsed":  keyString(key),
+			"pending": len(r.pendingKeys),
+		})
 		return key, nil
 	}
 
@@ -152,24 +162,118 @@ func (r *InputReader) ReadKey() (Key, error) {
 	if r.hasPending {
 		r.buf[0] = r.pending
 		r.hasPending = false
-		return ParseKey(r.buf[:1]), nil
+		key := ParseKey(r.buf[:1])
+		trace.Editor("key_read", map[string]any{
+			"source": "pending_byte",
+			"raw":    []byte{r.pending},
+			"parsed": keyString(key),
+		})
+		return key, nil
+	}
+
+	// For TTY file descriptors, use polling to allow checking done channel
+	if f, ok := r.in.(*os.File); ok && done != nil {
+		fd := int(f.Fd())
+		pollInterval := 50 * time.Millisecond
+		for {
+			// Check done channel first
+			select {
+			case <-done:
+				return Key{}, context.Canceled
+			default:
+			}
+
+			// Poll for available data with timeout
+			if hasDataAvailableWithTimeout(fd, pollInterval) {
+				break // Data available, proceed to read
+			}
+			// No data, loop back to check done channel
+		}
 	}
 
 	// Read first byte
 	n, err := r.in.Read(r.buf[:1])
 	if err != nil {
+		trace.Editor("key_read", map[string]any{
+			"error": err.Error(),
+		})
 		return Key{}, err
 	}
 	if n == 0 {
+		trace.Editor("key_read", map[string]any{
+			"error": "EOF",
+		})
 		return Key{}, io.EOF
 	}
 
 	// If it's an escape, try to read more for a sequence
 	if r.buf[0] == 0x1b {
-		return r.readEscapeSequence()
+		key, err := r.readEscapeSequence()
+		trace.Editor("key_read", map[string]any{
+			"source": "escape_seq",
+			"raw":    r.buf[:1],
+			"parsed": keyString(key),
+		})
+		return key, err
 	}
 
-	return ParseKey(r.buf[:1]), nil
+	key := ParseKey(r.buf[:1])
+	trace.Editor("key_read", map[string]any{
+		"source": "direct",
+		"raw":    r.buf[:1],
+		"parsed": keyString(key),
+	})
+	return key, nil
+}
+
+// keyString returns a human-readable string for a Key.
+func keyString(k Key) string {
+	var parts []string
+	if k.Ctrl {
+		parts = append(parts, "Ctrl")
+	}
+	if k.Alt {
+		parts = append(parts, "Alt")
+	}
+	if k.Shift {
+		parts = append(parts, "Shift")
+	}
+
+	switch k.Special {
+	case KeyEnter:
+		parts = append(parts, "Enter")
+	case KeyTab:
+		parts = append(parts, "Tab")
+	case KeyBackspace:
+		parts = append(parts, "Backspace")
+	case KeyDelete:
+		parts = append(parts, "Delete")
+	case KeyEscape:
+		parts = append(parts, "Escape")
+	case KeyUp:
+		parts = append(parts, "Up")
+	case KeyDown:
+		parts = append(parts, "Down")
+	case KeyLeft:
+		parts = append(parts, "Left")
+	case KeyRight:
+		parts = append(parts, "Right")
+	case KeyHome:
+		parts = append(parts, "Home")
+	case KeyEnd:
+		parts = append(parts, "End")
+	case KeyNone:
+		if k.Rune != 0 {
+			parts = append(parts, string(k.Rune))
+		}
+	default:
+		parts = append(parts, "Unknown")
+	}
+
+	if len(parts) == 0 {
+		return "None"
+	}
+	return strings.Join(parts, "+")
 }
 
 func (r *InputReader) readEscapeSequence() (Key, error) {

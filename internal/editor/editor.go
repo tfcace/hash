@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/tfcace/hash/internal/trace"
 	"golang.design/x/clipboard"
 	"golang.org/x/term"
 )
@@ -69,9 +70,10 @@ type Editor struct {
 	completionCol    int    // Column where completion started
 
 	// Ghost text state (inline suggestions)
-	ghost         *GhostText
-	ghostTextChan GhostTextChan // Channel for streaming ghost text updates
-	ghostErrChan  <-chan error  // Channel for ghost text errors
+	ghost            *GhostText
+	ghostTextChan    GhostTextChan // Channel for streaming ghost text updates
+	ghostErrChan     <-chan error  // Channel for ghost text errors
+	streamingModel   string        // Model name for "Thinking..." display
 }
 
 // New creates a new editor.
@@ -127,6 +129,13 @@ func (e *Editor) SetGhostTextStreaming(textCh <-chan string, errCh <-chan error)
 	e.ghostErrChan = errCh
 	e.ghost.Clear()
 	e.ghost.SetStreaming(true)
+	// Dismiss any active completion menu - ghost text takes precedence
+	e.dismissCompletion()
+}
+
+// SetStreamingModel sets the model name for "Thinking..." display.
+func (e *Editor) SetStreamingModel(model string) {
+	e.streamingModel = model
 }
 
 // ClearGhostText removes any ghost text.
@@ -245,23 +254,36 @@ func (e *Editor) Run(ctx context.Context) (Result, error) {
 	e.render()
 
 	// Channel for keyboard input (enables non-blocking ghost text handling)
+	// done channel signals the reader goroutine to exit when editor returns.
+	// This prevents orphaned goroutines from consuming stdin after the editor exits.
 	keyCh := make(chan Key, 1)
 	keyErrCh := make(chan error, 1)
+	done := make(chan struct{})
+	defer close(done) // Signal reader goroutine to exit
+
 	go func() {
 		for {
-			key, err := e.input.ReadKey()
+			key, err := e.input.ReadKeyInterruptible(done)
 			if err != nil {
-				keyErrCh <- err
+				// context.Canceled means done was closed - exit silently
+				if err == context.Canceled {
+					return
+				}
+				select {
+				case keyErrCh <- err:
+				case <-done:
+				}
 				return
 			}
-			keyCh <- key
+			select {
+			case keyCh <- key:
+			case <-done:
+				return
+			}
 		}
 	}()
 
 	for {
-		// Check for ghost text streaming updates (non-blocking)
-		e.processGhostTextUpdates()
-
 		select {
 		case <-ctx.Done():
 			return Result{Cancelled: true}, ctx.Err()
@@ -273,10 +295,54 @@ func (e *Editor) Run(ctx context.Context) (Result, error) {
 				return Result{Text: e.state.Buffer.Content(), Cancelled: true}, nil
 			}
 			return Result{}, err
+		case text, ok := <-e.ghostTextChan:
+			// Ghost text streaming update
+			if !ok {
+				// Channel closed, streaming complete
+				e.ghost.SetStreaming(false)
+				e.ghostTextChan = nil
+				e.ghostErrChan = nil // Both channels close together
+				e.render()
+				continue
+			}
+			e.ghost.Append(text)
+			// Dismiss completion menu when ghost text arrives - they shouldn't coexist
+			if e.completionActive {
+				e.dismissCompletion()
+			}
+			e.render()
+			continue
+		case err, ok := <-e.ghostErrChan:
+			// Ghost text error (or channel closed)
+			if !ok {
+				e.ghostErrChan = nil
+				continue
+			}
+			if err != nil {
+				e.ghost.Clear()
+				e.ghostTextChan = nil
+				e.ghostErrChan = nil
+			}
+			continue
 		case key := <-keyCh:
+			trace.EditorDetailed("key_dispatch", map[string]any{
+				"key":               keyString(key),
+				"ghost_active":      e.ghost.Active && !e.ghost.IsEmpty(),
+				"ghost_streaming":   e.ghost.Streaming,
+				"completion_active": e.completionActive,
+				"mode":              e.mode.Name(),
+			})
+
 			// Handle Ctrl+C
 			if key.Ctrl && key.Rune == 'c' {
 				e.dismissCompletion()
+				// If ghost text is streaming, cancel and return immediately
+				if e.ghost.Streaming || e.ghostTextChan != nil {
+					e.ghost.Clear()
+					e.ghostTextChan = nil
+					e.ghostErrChan = nil
+					return Result{Cancelled: true}, nil
+				}
 				e.ghost.Clear()
 				if e.state.Buffer.Content() == "" {
 					return Result{Cancelled: true}, nil
@@ -304,6 +370,8 @@ func (e *Editor) Run(ctx context.Context) (Result, error) {
 				}
 				// Key not handled by ghost text, clear it and continue to normal processing
 				e.ghost.Clear()
+				// Also dismiss completion - ghost text and completion shouldn't coexist
+				e.dismissCompletion()
 			}
 
 			// If completion menu is active, intercept keys
@@ -360,8 +428,8 @@ func (e *Editor) Run(ctx context.Context) (Result, error) {
 				}
 			}
 
-			// Handle completion
-			if result.Complete {
+			// Handle completion (but not while ghost text is streaming)
+			if result.Complete && !e.ghost.Streaming {
 				e.triggerCompletion()
 			}
 
@@ -393,12 +461,11 @@ func (e *Editor) render() {
 
 	// Pass ghost text to display for inline rendering
 	ghostText := ""
-	ghostStreaming := false
+	ghostStreaming := e.ghost.Streaming
 	if e.ghost.Active && !e.ghost.IsEmpty() {
 		ghostText = e.ghost.Remaining()
-		ghostStreaming = e.ghost.Streaming
 	}
-	e.display.RenderWithGhost(e.state.Buffer, e.state.Cursor, hasSelection, ghostText, ghostStreaming)
+	e.display.RenderWithGhost(e.state.Buffer, e.state.Cursor, hasSelection, ghostText, ghostStreaming, e.streamingModel)
 
 	// Render completion menu if active
 	if e.completionActive && len(e.completionItems) > 0 {
@@ -413,72 +480,64 @@ func (e *Editor) render() {
 	}
 }
 
-// processGhostTextUpdates checks for streaming ghost text updates (non-blocking).
-func (e *Editor) processGhostTextUpdates() {
-	if e.ghostTextChan == nil {
-		return
-	}
-
-	// Non-blocking check for updates
-	for {
-		select {
-		case text, ok := <-e.ghostTextChan:
-			if !ok {
-				// Channel closed, streaming complete
-				e.ghost.SetStreaming(false)
-				e.ghostTextChan = nil
-				e.render()
-				return
-			}
-			// Append text and re-render
-			e.ghost.Append(text)
-			e.render()
-		case err := <-e.ghostErrChan:
-			if err != nil {
-				// Error occurred, clear ghost text
-				e.ghost.Clear()
-				e.ghostTextChan = nil
-				e.ghostErrChan = nil
-			}
-			return
-		default:
-			// No updates available, return
-			return
-		}
-	}
-}
-
 // handleGhostTextKey processes keys when ghost text is active.
 // Returns true if the key was handled.
 func (e *Editor) handleGhostTextKey(key Key) bool {
 	switch key.Special {
 	case KeyTab:
-		// Tab accepts the full ghost text
+		// Tab accepts the full ghost text and stops streaming
 		text := e.ghost.AcceptAll()
+		trace.AgentHigh("ghost_accept", map[string]any{
+			"key":      "Tab",
+			"accepted": text,
+			"action":   "accept_all",
+		})
 		if text != "" {
 			e.insertText(text)
 		}
+		// Stop any active streaming
+		e.ghostTextChan = nil
+		e.ghostErrChan = nil
 		return true
 
 	case KeyRight:
 		// Right arrow accepts one character
 		text := e.ghost.AcceptChar()
+		trace.Agent("ghost_accept", map[string]any{
+			"key":      "Right",
+			"accepted": text,
+			"action":   "accept_char",
+		})
 		if text != "" {
 			e.insertText(text)
 		}
 		return true
 
 	case KeyEscape:
-		// Escape dismisses ghost text
+		// Escape dismisses ghost text and stops streaming
+		trace.AgentHigh("ghost_accept", map[string]any{
+			"key":    "Escape",
+			"action": "dismiss",
+		})
 		e.ghost.Clear()
+		e.ghostTextChan = nil
+		e.ghostErrChan = nil
 		return true
 
 	case KeyEnter:
 		// Enter accepts and submits (if ghost is a command)
 		text := e.ghost.AcceptAll()
+		trace.AgentHigh("ghost_accept", map[string]any{
+			"key":      "Enter",
+			"accepted": text,
+			"action":   "accept_and_submit",
+		})
 		if text != "" {
 			e.insertText(text)
 		}
+		// Stop any active streaming
+		e.ghostTextChan = nil
+		e.ghostErrChan = nil
 		// Don't return true - let Enter propagate to submit
 		return false
 	}
@@ -486,6 +545,11 @@ func (e *Editor) handleGhostTextKey(key Key) bool {
 	// Alt+Tab or Ctrl+Tab could accept word-by-word
 	if key.Special == KeyTab && (key.Alt || key.Ctrl) {
 		text := e.ghost.AcceptWord()
+		trace.Agent("ghost_accept", map[string]any{
+			"key":      "Alt/Ctrl+Tab",
+			"accepted": text,
+			"action":   "accept_word",
+		})
 		if text != "" {
 			e.insertText(text)
 		}
@@ -493,6 +557,11 @@ func (e *Editor) handleGhostTextKey(key Key) bool {
 	}
 
 	// Any other key clears ghost text (handled by caller)
+	trace.AgentDetailed("accept_blocked", map[string]any{
+		"key":    keyString(key),
+		"reason": "unhandled_key",
+		"state":  "ghost_active",
+	})
 	return false
 }
 

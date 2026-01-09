@@ -219,7 +219,7 @@ func (d *Display) Render(buf *Buffer, cur *Cursor, hasSelection bool) {
 
 // RenderWithGhost draws the buffer with inline ghost text suggestion.
 // Ghost text appears after the cursor in dim gray, showing the suggested completion.
-func (d *Display) RenderWithGhost(buf *Buffer, cur *Cursor, hasSelection bool, ghostText string, streaming bool) {
+func (d *Display) RenderWithGhost(buf *Buffer, cur *Cursor, hasSelection bool, ghostText string, streaming bool, modelName string) {
 	var sb strings.Builder
 
 	// Hide cursor during render for flicker-free updates
@@ -275,22 +275,33 @@ func (d *Display) RenderWithGhost(buf *Buffer, cur *Cursor, hasSelection bool, g
 		}
 
 		// Render ghost text on the cursor's line, after the cursor position
-		if ghostText != "" && i == cursorRow {
-			// Get the first line of ghost text (for single-line display)
-			ghostFirstLine := ghostText
-			newlineIdx := strings.Index(ghostText, "\n")
-			if newlineIdx >= 0 {
-				ghostFirstLine = ghostText[:newlineIdx]
-			}
+		if i == cursorRow && (ghostText != "" || streaming) {
+			if ghostText == "" && streaming {
+				// Show "Thinking..." while waiting for first chunk
+				if modelName != "" {
+					fmt.Fprintf(&sb, "\x1b[90;3m Thinking (%s)...\x1b[0m", modelName)
+				} else {
+					sb.WriteString("\x1b[90;3m Thinking...\x1b[0m")
+				}
+			} else if ghostText != "" {
+				// Get the first line of ghost text (for single-line display)
+				ghostFirstLine := ghostText
+				newlineIdx := strings.Index(ghostText, "\n")
+				if newlineIdx >= 0 {
+					ghostFirstLine = ghostText[:newlineIdx]
+				}
 
-			// Render ghost text in dim gray with italic
-			sb.WriteString("\x1b[90;3m") // Dim + italic
-			sb.WriteString(ghostFirstLine)
-			sb.WriteString(ansiReset)
+				// Render ghost text in dim gray with italic
+				sb.WriteString("\x1b[90;3m") // Dim + italic
+				sb.WriteString(ghostFirstLine)
+				sb.WriteString(ansiReset)
 
-			// Show streaming indicator if still receiving
-			if streaming {
-				sb.WriteString("\x1b[90m▌\x1b[0m") // Blinking cursor-like indicator
+				// Show streaming indicator if still receiving, otherwise show accept hint
+				if streaming {
+					sb.WriteString("\x1b[90m▌\x1b[0m")
+				} else {
+					sb.WriteString("\x1b[90m   [enter]run  [tab]edit  [esc]\x1b[0m")
+				}
 			}
 		}
 	}
