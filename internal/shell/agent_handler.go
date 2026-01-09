@@ -9,6 +9,7 @@ import (
 	"github.com/tfcace/hash/internal/clipboard"
 	hashcontext "github.com/tfcace/hash/internal/context"
 	"github.com/tfcace/hash/internal/parser"
+	"github.com/tfcace/hash/internal/trace"
 )
 
 // AgentHandler handles agent requests.
@@ -72,10 +73,11 @@ func (h *AgentHandler) HandleRequest(ctx context.Context, parsed parser.ParseRes
 Partial command: %s
 What the user wants: %s
 
-Respond with ONLY the value to append.
-- No explanations
+Respond with ONLY the completion to append (single line).
+- No explanations or multiple lines
 - Quote values with spaces (e.g., '%%h %%s' not %%h %%s)
-- Shell-safe output only`, parsed.Command, parsed.AgentPrompt)
+- Shell-safe output only
+- Single line response required`, parsed.Command, parsed.AgentPrompt)
 	default:
 		return agent.Response{}, fmt.Errorf("not an agent request")
 	}
@@ -92,10 +94,20 @@ Respond with ONLY the value to append.
 // StreamRequest processes a parsed agent request and returns streaming channels.
 // Text chunks arrive on the text channel, errors on the error channel.
 func (h *AgentHandler) StreamRequest(ctx context.Context, parsed parser.ParseResult) (<-chan string, <-chan error) {
+	trace.AgentHigh("ghost_start", map[string]any{
+		"type":   parsed.Type.String(),
+		"prompt": parsed.AgentPrompt,
+	})
+
 	if h.client == nil {
 		errCh := make(chan error, 1)
 		errCh <- fmt.Errorf("no agent configured")
 		close(errCh)
+		trace.AgentHigh("ghost_state", map[string]any{
+			"from":   "init",
+			"to":     "error",
+			"reason": "no_client",
+		})
 		return nil, errCh
 	}
 
@@ -129,10 +141,11 @@ func (h *AgentHandler) StreamRequest(ctx context.Context, parsed parser.ParseRes
 Partial command: %s
 What the user wants: %s
 
-Respond with ONLY the value to append.
-- No explanations
+Respond with ONLY the completion to append (single line).
+- No explanations or multiple lines
 - Quote values with spaces (e.g., '%%h %%s' not %%h %%s)
-- Shell-safe output only`, parsed.Command, parsed.AgentPrompt)
+- Shell-safe output only
+- Single line response required`, parsed.Command, parsed.AgentPrompt)
 	default:
 		errCh := make(chan error, 1)
 		errCh <- fmt.Errorf("not an agent request")
@@ -146,7 +159,45 @@ Respond with ONLY the value to append.
 		Context:     agentCtx,
 	}
 
-	return h.client.StreamRequest(ctx, req)
+	textCh, errCh := h.client.StreamRequest(ctx, req)
+
+	// Wrap channels to add tracing
+	tracedTextCh := make(chan string, 1)
+	tracedErrCh := make(chan error, 1)
+
+	go func() {
+		defer close(tracedTextCh)
+		totalLen := 0
+		for text := range textCh {
+			totalLen += len(text)
+			trace.Agent("ghost_chunk", map[string]any{
+				"text":      text,
+				"total_len": totalLen,
+			})
+			tracedTextCh <- text
+		}
+		trace.AgentDetailed("ghost_state", map[string]any{
+			"from":      "streaming",
+			"to":        "complete",
+			"total_len": totalLen,
+		})
+	}()
+
+	go func() {
+		defer close(tracedErrCh)
+		for err := range errCh {
+			if err != nil {
+				trace.AgentHigh("ghost_state", map[string]any{
+					"from":   "streaming",
+					"to":     "error",
+					"reason": err.Error(),
+				})
+			}
+			tracedErrCh <- err
+		}
+	}()
+
+	return tracedTextCh, tracedErrCh
 }
 
 // buildContextFromSelection converts user-selected context to agent.Context.

@@ -2,6 +2,8 @@ package parser
 
 import (
 	"strings"
+
+	"github.com/tfcace/hash/internal/trace"
 )
 
 // CommandType indicates how the input should be processed.
@@ -15,6 +17,23 @@ const (
 	CommandTypeAgentInline                    // cmd ?? prompt - inline agent completion
 )
 
+func (t CommandType) String() string {
+	switch t {
+	case CommandTypeEmpty:
+		return "empty"
+	case CommandTypeRegular:
+		return "regular"
+	case CommandTypeAgent:
+		return "agent"
+	case CommandTypeAgentPipe:
+		return "agent_pipe"
+	case CommandTypeAgentInline:
+		return "agent_inline"
+	default:
+		return "unknown"
+	}
+}
+
 // ParseResult contains the parsed command components.
 type ParseResult struct {
 	Type        CommandType
@@ -24,41 +43,78 @@ type ParseResult struct {
 
 // Parse analyzes a command line and determines how to process it.
 func Parse(line string) ParseResult {
+	trace.ParserDetailed("parse_start", map[string]any{
+		"input": line,
+	})
+
 	line = strings.TrimSpace(line)
 
 	if line == "" {
-		return ParseResult{Type: CommandTypeEmpty}
+		result := ParseResult{Type: CommandTypeEmpty}
+		trace.ParserDetailed("parse_result", map[string]any{
+			"type": result.Type.String(),
+		})
+		return result
 	}
 
 	// Pattern 1: ?? prefix (full agent request)
 	if strings.HasPrefix(line, "??") {
 		prompt := strings.TrimSpace(line[2:])
-		return ParseResult{
+		result := ParseResult{
 			Type:        CommandTypeAgent,
 			AgentPrompt: prompt,
 		}
+		trace.ParserHigh("detect_agent", map[string]any{
+			"pattern":  "prefix",
+			"position": 0,
+		})
+		trace.ParserDetailed("parse_result", map[string]any{
+			"type":   result.Type.String(),
+			"prompt": result.AgentPrompt,
+		})
+		return result
 	}
 
 	// Pattern 2: pipe to agent (cmd | ?? prompt)
 	if idx := strings.Index(line, "| ??"); idx != -1 {
 		cmd := strings.TrimSpace(line[:idx])
 		prompt := strings.TrimSpace(line[idx+4:])
-		return ParseResult{
+		result := ParseResult{
 			Type:        CommandTypeAgentPipe,
 			Command:     cmd,
 			AgentPrompt: prompt,
 		}
+		trace.ParserHigh("detect_agent", map[string]any{
+			"pattern":  "pipe_space",
+			"position": idx,
+		})
+		trace.ParserDetailed("parse_result", map[string]any{
+			"type":    result.Type.String(),
+			"command": result.Command,
+			"prompt":  result.AgentPrompt,
+		})
+		return result
 	}
 
 	// Also check without space: cmd |?? prompt
 	if idx := strings.Index(line, "|??"); idx != -1 {
 		cmd := strings.TrimSpace(line[:idx])
 		prompt := strings.TrimSpace(line[idx+3:])
-		return ParseResult{
+		result := ParseResult{
 			Type:        CommandTypeAgentPipe,
 			Command:     cmd,
 			AgentPrompt: prompt,
 		}
+		trace.ParserHigh("detect_agent", map[string]any{
+			"pattern":  "pipe_nospace",
+			"position": idx,
+		})
+		trace.ParserDetailed("parse_result", map[string]any{
+			"type":    result.Type.String(),
+			"command": result.Command,
+			"prompt":  result.AgentPrompt,
+		})
+		return result
 	}
 
 	// Pattern 3: inline agent (cmd ?? prompt) - but not at start
@@ -71,27 +127,52 @@ func Parse(line string) ParseResult {
 			cmd = line[:idx]
 		}
 		prompt := strings.TrimSpace(line[idx+3:])
-		return ParseResult{
+		result := ParseResult{
 			Type:        CommandTypeAgentInline,
 			Command:     cmd,
 			AgentPrompt: prompt,
 		}
+		trace.ParserHigh("detect_agent", map[string]any{
+			"pattern":  "inline_space",
+			"position": idx,
+		})
+		trace.ParserDetailed("parse_result", map[string]any{
+			"type":    result.Type.String(),
+			"command": result.Command,
+			"prompt":  result.AgentPrompt,
+		})
+		return result
 	}
 
 	// Check for ?? without leading space (like --sort-by=??)
 	if idx := strings.Index(line, "??"); idx != -1 && idx > 0 {
 		cmd := line[:idx]
 		prompt := strings.TrimSpace(line[idx+2:])
-		return ParseResult{
+		result := ParseResult{
 			Type:        CommandTypeAgentInline,
 			Command:     cmd,
 			AgentPrompt: prompt,
 		}
+		trace.ParserHigh("detect_agent", map[string]any{
+			"pattern":  "inline_nospace",
+			"position": idx,
+		})
+		trace.ParserDetailed("parse_result", map[string]any{
+			"type":    result.Type.String(),
+			"command": result.Command,
+			"prompt":  result.AgentPrompt,
+		})
+		return result
 	}
 
 	// Regular command
-	return ParseResult{
+	result := ParseResult{
 		Type:    CommandTypeRegular,
 		Command: line,
 	}
+	trace.ParserDetailed("parse_result", map[string]any{
+		"type":    result.Type.String(),
+		"command": result.Command,
+	})
+	return result
 }

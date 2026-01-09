@@ -148,12 +148,34 @@ func parseEscapeSequence(b []byte) Key {
 		return Key{Special: KeyDelete}
 	}
 
-	// CSI u encoding for Enter with modifiers: ESC [ 13 ; <mod> u
+	// CSI u encoding for Enter: ESC [ 13 u or ESC [ 13 ; <mod> u
 	// mod: 2=Shift, 3=Alt, 5=Ctrl, etc.
-	if len(b) >= 6 && b[2] == '1' && b[3] == '3' && b[len(b)-1] == 'u' {
+	if len(b) >= 5 && b[2] == '1' && b[3] == '3' && b[len(b)-1] == 'u' {
 		key := Key{Special: KeyEnter}
 		// Parse modifier between semicolon and 'u'
 		for i := 4; i < len(b)-1; i++ {
+			if b[i] == ';' && i+1 < len(b)-1 {
+				mod := b[i+1] - '0'
+				if mod == 2 || mod == 4 || mod == 6 || mod == 8 {
+					key.Shift = true
+				}
+				if mod == 3 || mod == 4 || mod == 7 || mod == 8 {
+					key.Alt = true
+				}
+				if mod >= 5 {
+					key.Ctrl = true
+				}
+				break
+			}
+		}
+		return key
+	}
+
+	// CSI u encoding for Tab: ESC [ 9 u or ESC [ 9 ; <mod> u
+	if len(b) >= 4 && b[2] == '9' && b[len(b)-1] == 'u' {
+		key := Key{Special: KeyTab}
+		// Parse modifier between semicolon and 'u'
+		for i := 3; i < len(b)-1; i++ {
 			if b[i] == ';' && i+1 < len(b)-1 {
 				mod := b[i+1] - '0'
 				if mod == 2 || mod == 4 || mod == 6 || mod == 8 {

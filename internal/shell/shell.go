@@ -22,6 +22,7 @@ import (
 	"github.com/tfcace/hash/internal/parser"
 	"github.com/tfcace/hash/internal/prompt"
 	"github.com/tfcace/hash/internal/readline"
+	"github.com/tfcace/hash/internal/trace"
 )
 
 // Mode represents the shell's startup mode.
@@ -285,6 +286,9 @@ func (s *Shell) Run(ctx context.Context) error {
 		return err
 	}
 	s.updatePrompt()
+	trace.ShellHigh("prompt_start", map[string]any{
+		"mode": "editor",
+	})
 
 	for {
 		select {
@@ -301,6 +305,12 @@ func (s *Shell) Run(ctx context.Context) error {
 		} else {
 			line, err = s.inputHandler.ReadLine()
 		}
+
+		trace.ShellDetailed("input_ready", map[string]any{
+			"line":   line,
+			"error":  errStr(err),
+			"editor": s.useEditor,
+		})
 
 		if err != nil {
 			if readline.IsInterrupt(err) || errors.Is(err, ErrEditorCancelled) {
@@ -322,6 +332,12 @@ func (s *Shell) Run(ctx context.Context) error {
 
 		// Parse the line
 		parsed := parser.Parse(line)
+
+		trace.ShellHigh("dispatch", map[string]any{
+			"type":    parsed.Type.String(),
+			"command": parsed.Command,
+			"prompt":  parsed.AgentPrompt,
+		})
 
 		switch parsed.Type {
 		case parser.CommandTypeEmpty:
@@ -597,10 +613,10 @@ func (s *Shell) handleAgentRequest(ctx context.Context, parsed parser.ParseResul
 	}
 
 	// Apply agent timeout
-	timeout := 30 * time.Second // default
+	timeout := 30 * time.Second
 	if s.config.Agent.Timeout != "" {
-		if parsed, err := time.ParseDuration(s.config.Agent.Timeout); err == nil {
-			timeout = parsed
+		if parsedDur, err := time.ParseDuration(s.config.Agent.Timeout); err == nil {
+			timeout = parsedDur
 		}
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
@@ -609,27 +625,17 @@ func (s *Shell) handleAgentRequest(ctx context.Context, parsed parser.ParseResul
 	// Pass selected context to agent handler
 	s.agentHandler.SetSelectedContext(s.selectedContext)
 
-	// Use streaming ghost text UX for editor mode
-	if s.useEditor {
-		s.handleAgentRequestStreaming(ctx, parsed)
-		return
-	}
-
-	// Fallback to legacy blocking UX for readline mode
-	s.handleAgentRequestBlocking(ctx, parsed)
+	// Use unified streaming handler for all modes
+	s.handleAgentRequestUnified(ctx, parsed)
 }
 
-// handleAgentRequestStreaming uses inline ghost text streaming for a modern UX.
-// The agent response streams in as ghost text that the user can accept with Tab.
-func (s *Shell) handleAgentRequestStreaming(ctx context.Context, parsed parser.ParseResult) {
+// handleAgentInlineStreaming uses ghost text for inline completions.
+func (s *Shell) handleAgentInlineStreaming(ctx context.Context, parsed parser.ParseResult, modelName string) {
 	// Start streaming request
 	textCh, errCh := s.agentHandler.StreamRequest(ctx, parsed)
 
-	// Build initial text for editor (the command prefix for inline completions)
-	initialText := ""
-	if parsed.Type == parser.CommandTypeAgentInline {
-		initialText = parsed.Command
-	}
+	// Build initial text for editor
+	initialText := parsed.Command
 
 	// Reset history navigation
 	s.historyIndex = -1
@@ -644,10 +650,11 @@ func (s *Shell) handleAgentRequestStreaming(ctx context.Context, parsed parser.P
 		ed.SetInitialText(initialText)
 	}
 
-	// Set up streaming ghost text
+	// Set up streaming ghost text with model name
 	ed.SetGhostTextStreaming(textCh, errCh)
+	ed.SetStreamingModel(modelName)
 
-	// Run editor - user can type, see ghost text stream in, accept with Tab
+	// Run editor
 	result, err := ed.Run(ctx)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "hash: editor error: %v\n", err)
@@ -666,12 +673,15 @@ func (s *Shell) handleAgentRequestStreaming(ctx context.Context, parsed parser.P
 		os.Exit(0)
 	}
 
-	// User accepted the command (pressed Enter)
+	// User accepted the command
 	command := strings.TrimSpace(result.Text)
 	if command == "" {
 		s.updatePrompt()
 		return
 	}
+
+	// Stop progress bar before executing (defer in caller will be a no-op)
+	s.responseUI.StopProgress()
 
 	// Execute the command
 	execResult, err := s.executor.Execute(ctx, command, os.Stdout, os.Stderr)
@@ -686,40 +696,142 @@ func (s *Shell) handleAgentRequestStreaming(ctx context.Context, parsed parser.P
 	s.updatePrompt()
 }
 
-// handleAgentRequestBlocking uses the legacy "Thinking..." UX for readline mode.
-func (s *Shell) handleAgentRequestBlocking(ctx context.Context, parsed parser.ParseResult) {
-	// Get model name for display
+// executePipeCommand runs the pipe command and captures its output.
+// Returns the captured output string, or error if execution failed.
+func (s *Shell) executePipeCommand(ctx context.Context, command string) (string, error) {
+	var outputBuf strings.Builder
+
+	// Execute with output captured but not displayed
+	result, err := s.executor.Execute(ctx, command, &outputBuf, os.Stderr)
+	if err != nil {
+		return "", err
+	}
+
+	if result.ExitCode != 0 {
+		return outputBuf.String(), fmt.Errorf("command exited with code %d", result.ExitCode)
+	}
+
+	return outputBuf.String(), nil
+}
+
+// handleAgentRequestUnified handles all ?? modes with streaming UX.
+func (s *Shell) handleAgentRequestUnified(ctx context.Context, parsed parser.ParseResult) {
 	modelName := s.config.Agent.Model
 	if modelName == "" {
 		modelName = s.config.Agent.Command
 	}
-	s.responseUI.ShowThinking(modelName)
 
-	resp, err := s.agentHandler.HandleRequest(ctx, parsed)
-	s.responseUI.ClearThinking()
+	// For pipe mode, capture command output first
+	var pipeOutput string
+	if parsed.Type == parser.CommandTypeAgentPipe {
+		var err error
+		pipeOutput, err = s.executePipeCommand(ctx, parsed.Command)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "hash: pipe command failed: %v\n", err)
+			s.lastExitCode = 1
+			s.updatePrompt()
+			return
+		}
+		// Update context with pipe output
+		if s.clipboard != nil {
+			s.clipboard.SetOutput(pipeOutput)
+		}
+	}
 
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "hash: agent error: %v\n", err)
-		s.lastExitCode = 1
+	// Start progress bar
+	s.responseUI.StartProgress()
+	defer s.responseUI.StopProgress()
+
+	// For full ?? and pipe modes, show thinking on new line
+	// For inline mode, use editor with ghost text
+	if s.useEditor && parsed.Type == parser.CommandTypeAgentInline {
+		s.handleAgentInlineStreaming(ctx, parsed, modelName)
+		return
+	}
+
+	// Full ?? and pipe modes: streaming with confirmation UI
+	s.handleAgentFullStreaming(ctx, parsed, modelName)
+}
+
+// handleAgentFullStreaming handles full ?? and pipe modes with streaming.
+func (s *Shell) handleAgentFullStreaming(ctx context.Context, parsed parser.ParseResult, modelName string) {
+	// Show thinking indicator
+	s.responseUI.ShowThinkingInline(modelName)
+
+	// Start streaming request
+	textCh, errCh := s.agentHandler.StreamRequest(ctx, parsed)
+
+	// Collect streamed response
+	var response strings.Builder
+	var streamErr error
+
+collectLoop:
+	for {
+		select {
+		case <-ctx.Done():
+			s.responseUI.ClearLine()
+			fmt.Fprintln(os.Stderr, "hash: request cancelled")
+			s.lastExitCode = 1
+			s.updatePrompt()
+			return
+		case err := <-errCh:
+			if err != nil {
+				streamErr = err
+			}
+		case text, ok := <-textCh:
+			if !ok {
+				break collectLoop
+			}
+			if response.Len() == 0 {
+				// First chunk - clear thinking indicator
+				s.responseUI.ClearLine()
+			}
+			response.WriteString(text)
+			// Stream output character by character (dim)
+			fmt.Fprintf(os.Stdout, "\033[90m%s\033[0m", text)
+		}
+	}
+
+	fmt.Println() // New line after response
+
+	if streamErr != nil {
+		s.responseUI.ShowError(streamErr.Error())
+		s.responseUI.ShowConfirmation(ConfirmTypeError)
+		action := s.responseUI.WaitForConfirmationByType(ConfirmTypeError)
+		fmt.Println()
+		if action == ConfirmRun { // Retry
+			s.handleAgentFullStreaming(ctx, parsed, modelName)
+			return
+		}
 		s.updatePrompt()
 		return
 	}
 
-	// For inline completion, reconstruct the full command
-	if parsed.Type == parser.CommandTypeAgentInline && resp.Type == agent.ResponseTypeCommand {
-		resp.Command = parsed.Command + resp.Command
+	// Determine response type
+	responseText := strings.TrimSpace(response.String())
+	collector := agent.NewStreamCollector()
+	collector.Append(responseText)
+	resp := collector.Response()
+
+	// Show confirmation based on response type
+	var confirmType ConfirmationType
+	if resp.Type == agent.ResponseTypeCommand {
+		confirmType = ConfirmTypeCommand
+	} else {
+		confirmType = ConfirmTypeExplanation
 	}
 
-	s.responseUI.ShowResponse(resp)
+	s.responseUI.ShowConfirmation(confirmType)
+	action := s.responseUI.WaitForConfirmationByType(confirmType)
+	fmt.Println()
 
-	// If it's a command suggestion, wait for confirmation
-	if resp.Type == agent.ResponseTypeCommand {
-		action := s.responseUI.WaitForConfirmation()
-		fmt.Println() // Move to next line after key press
+	// Stop progress bar before any action
+	s.responseUI.StopProgress()
 
-		switch action {
-		case ConfirmRun:
-			// Execute the suggested command
+	switch action {
+	case ConfirmRun:
+		if confirmType == ConfirmTypeCommand {
+			// Execute the command
 			result, err := s.executor.Execute(ctx, resp.Command, os.Stdout, os.Stderr)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "hash: %v\n", err)
@@ -729,23 +841,68 @@ func (s *Shell) handleAgentRequestBlocking(ctx context.Context, parsed parser.Pa
 				s.lastDuration = result.Duration
 			}
 			s.recordCommand(resp.Command, s.lastExitCode, s.lastDuration)
-			s.updatePrompt()
-			return
-
-		case ConfirmEdit:
-			// For readline mode, set the line buffer
-			s.readline.SetBuffer(resp.Command)
-			s.updatePrompt()
-			return
-
-		case ConfirmCancel:
-			// User cancelled - do nothing
-			s.updatePrompt()
-			return
 		}
+		// For explanations, ConfirmRun just dismisses
+	case ConfirmEdit:
+		if confirmType == ConfirmTypeCommand {
+			// Put command in readline buffer for editing
+			if s.useEditor {
+				// For editor mode, we need to re-enter with the command
+				s.handleEditCommand(ctx, resp.Command)
+				return
+			} else {
+				s.readline.SetBuffer(resp.Command)
+			}
+		} else {
+			// Copy explanation to clipboard
+			if s.clipboard != nil {
+				s.clipboard.AddCommand(responseText) // Reuse for now
+			}
+		}
+	case ConfirmCancel:
+		// Do nothing
 	}
 
-	s.lastExitCode = 0
+	s.updatePrompt()
+}
+
+// handleEditCommand opens editor with command for editing.
+func (s *Shell) handleEditCommand(ctx context.Context, command string) {
+	s.historyIndex = -1
+	s.historySavedLine = ""
+
+	cfg := s.editorCfg
+	cfg.Prompt = s.currentPromptLine()
+
+	ed := editor.New(cfg, os.Stdin, os.Stdout)
+	ed.SetInitialText(command)
+
+	result, err := ed.Run(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "hash: editor error: %v\n", err)
+		s.lastExitCode = 1
+		s.updatePrompt()
+		return
+	}
+
+	if result.Cancelled || result.EOF {
+		s.updatePrompt()
+		return
+	}
+
+	// Execute edited command
+	editedCmd := strings.TrimSpace(result.Text)
+	if editedCmd != "" {
+		execResult, err := s.executor.Execute(ctx, editedCmd, os.Stdout, os.Stderr)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "hash: %v\n", err)
+			s.lastExitCode = 1
+		} else {
+			s.lastExitCode = execResult.ExitCode
+			s.lastDuration = execResult.Duration
+		}
+		s.recordCommand(editedCmd, s.lastExitCode, s.lastDuration)
+	}
 	s.updatePrompt()
 }
 
@@ -905,4 +1062,11 @@ func (s *Shell) History() *history.Store {
 // Learning returns the learning store for use by builtins.
 func (s *Shell) Learning() *learning.FixStore {
 	return s.learning
+}
+
+func errStr(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }

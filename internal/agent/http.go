@@ -207,8 +207,8 @@ func (t *HTTPTransport) parseResponse(text string) Response {
 
 // looksLikeCommand checks if the text appears to be a shell command.
 func looksLikeCommand(text string) bool {
-	// Single line, no markdown, looks like a command
-	if strings.Contains(text, "\n") && len(text) > 100 {
+	// Multi-line text is likely an explanation
+	if strings.Contains(text, "\n") {
 		return false
 	}
 
@@ -228,8 +228,20 @@ func looksLikeCommand(text string) bool {
 		}
 	}
 
-	// Short responses without spaces are likely commands
-	if len(text) < 80 && !strings.Contains(text, ". ") {
+	// Explanatory text patterns - if it has these, it's not a command
+	if strings.Contains(text, ". ") || // Multiple sentences
+		strings.HasPrefix(text, "The ") ||
+		strings.HasPrefix(text, "This ") ||
+		strings.HasPrefix(text, "To ") ||
+		strings.HasPrefix(text, "You ") ||
+		strings.HasPrefix(text, "I ") ||
+		strings.Contains(text, " is ") ||
+		strings.Contains(text, " are ") {
+		return false
+	}
+
+	// Short single-line text without explanatory patterns might be a command
+	if len(text) < 80 {
 		return true
 	}
 

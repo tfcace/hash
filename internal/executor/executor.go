@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/creack/pty"
+	"golang.org/x/sys/unix"
 	"github.com/tfcace/hash/internal/progress"
 	"golang.org/x/term"
 	"mvdan.cc/sh/v3/expand"
@@ -414,16 +415,16 @@ func copyWithRetry(dst io.Writer, src io.Reader, onRead func(int), onWrite func(
 }
 
 func hasDataAvailable(fd int, timeout time.Duration) bool {
-	var readSet syscall.FdSet
-	readSet.Bits[fd/64] |= 1 << (uint(fd) % 64)
+	var readSet unix.FdSet
+	readSet.Set(fd)
 
-	tv := syscall.NsecToTimeval(timeout.Nanoseconds())
+	tv := unix.NsecToTimeval(timeout.Nanoseconds())
 
-	if _, err := syscall.Select(fd+1, &readSet, nil, nil, &tv); err != nil {
+	if _, err := unix.Select(fd+1, &readSet, nil, nil, &tv); err != nil {
 		return false
 	}
 
-	return (readSet.Bits[fd/64] & (1 << (uint(fd) % 64))) != 0
+	return readSet.IsSet(fd)
 }
 
 func signalProcessGroup(cmd *exec.Cmd, sig syscall.Signal) {
