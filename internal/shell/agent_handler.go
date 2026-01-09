@@ -89,6 +89,66 @@ Respond with ONLY the value to append.
 	return h.client.Ask(ctx, req)
 }
 
+// StreamRequest processes a parsed agent request and returns streaming channels.
+// Text chunks arrive on the text channel, errors on the error channel.
+func (h *AgentHandler) StreamRequest(ctx context.Context, parsed parser.ParseResult) (<-chan string, <-chan error) {
+	if h.client == nil {
+		errCh := make(chan error, 1)
+		errCh <- fmt.Errorf("no agent configured")
+		close(errCh)
+		return nil, errCh
+	}
+
+	// Build context - use selected context if available, otherwise auto-detect
+	var agentCtx agent.Context
+	if h.selectedContext != nil && len(h.selectedContext.SelectedItems()) > 0 {
+		agentCtx = h.buildContextFromSelection()
+	} else {
+		ctxBuilder := agent.NewContextBuilder().
+			DetectGitBranch().
+			DetectKubeContext()
+
+		if h.clipboardBuf != nil {
+			if lastOutput := h.clipboardBuf.LastOutput(); lastOutput != "" {
+				ctxBuilder.WithLastOutput(lastOutput)
+			}
+		}
+		agentCtx = ctxBuilder.Build()
+	}
+
+	// Build the prompt based on parse type
+	var prompt string
+	switch parsed.Type {
+	case parser.CommandTypeAgent:
+		prompt = parsed.AgentPrompt
+	case parser.CommandTypeAgentPipe:
+		prompt = fmt.Sprintf("Given the output of '%s', %s", parsed.Command, parsed.AgentPrompt)
+	case parser.CommandTypeAgentInline:
+		prompt = fmt.Sprintf(`Complete this shell command argument.
+
+Partial command: %s
+What the user wants: %s
+
+Respond with ONLY the value to append.
+- No explanations
+- Quote values with spaces (e.g., '%%h %%s' not %%h %%s)
+- Shell-safe output only`, parsed.Command, parsed.AgentPrompt)
+	default:
+		errCh := make(chan error, 1)
+		errCh <- fmt.Errorf("not an agent request")
+		close(errCh)
+		return nil, errCh
+	}
+
+	req := agent.Request{
+		Prompt:      prompt,
+		CommandLine: parsed.Command,
+		Context:     agentCtx,
+	}
+
+	return h.client.StreamRequest(ctx, req)
+}
+
 // buildContextFromSelection converts user-selected context to agent.Context.
 func (h *AgentHandler) buildContextFromSelection() agent.Context {
 	cwd, _ := os.Getwd()

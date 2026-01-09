@@ -419,7 +419,7 @@ func hasDataAvailable(fd int, timeout time.Duration) bool {
 
 	tv := syscall.NsecToTimeval(timeout.Nanoseconds())
 
-	if err := syscall.Select(fd+1, &readSet, nil, nil, &tv); err != nil {
+	if _, err := syscall.Select(fd+1, &readSet, nil, nil, &tv); err != nil {
 		return false
 	}
 

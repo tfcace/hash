@@ -469,5 +469,128 @@ func (t *ACPTransport) Close() error {
 	return nil
 }
 
-// Compile-time check
+// SendStreaming implements StreamingTransport for real-time text streaming.
+func (t *ACPTransport) SendStreaming(ctx context.Context, req Request) (<-chan string, <-chan error) {
+	textCh := make(chan string, 64)
+	errCh := make(chan error, 1)
+
+	go func() {
+		defer close(textCh)
+		defer close(errCh)
+
+		t.mu.Lock()
+
+		// Lazy connect
+		if t.stdin == nil {
+			if err := t.connectLocked(ctx); err != nil {
+				t.mu.Unlock()
+				errCh <- err
+				return
+			}
+		}
+
+		// Create session if needed
+		if t.sessionID == "" {
+			cwd := req.Context.Cwd
+			if cwd == "" {
+				cwd = "."
+			}
+			sessionID, err := t.newSession(ctx, cwd)
+			if err != nil {
+				t.mu.Unlock()
+				errCh <- err
+				return
+			}
+			t.sessionID = sessionID
+		}
+
+		sessionID := t.sessionID
+		t.mu.Unlock()
+
+		// Build prompt with context
+		promptText := buildPromptWithContext(req)
+
+		// Send prompt request
+		id := t.requestID.Add(1)
+		rpcReq := jsonRPCRequest{
+			JSONRPC: "2.0",
+			ID:      id,
+			Method:  "session/prompt",
+			Params: promptParams{
+				SessionID: sessionID,
+				Prompt: []promptPart{
+					{Type: "text", Text: promptText},
+				},
+			},
+		}
+
+		data, err := json.Marshal(rpcReq)
+		if err != nil {
+			errCh <- err
+			return
+		}
+
+		t.mu.Lock()
+		_, err = t.stdin.Write(append(data, '\n'))
+		t.mu.Unlock()
+		if err != nil {
+			errCh <- err
+			return
+		}
+
+		// Stream response text as it arrives
+		for {
+			select {
+			case <-ctx.Done():
+				errCh <- ctx.Err()
+				return
+
+			case line, ok := <-t.messages:
+				if !ok {
+					return
+				}
+
+				var msg struct {
+					JSONRPC string          `json:"jsonrpc"`
+					ID      *int64          `json:"id"`
+					Method  string          `json:"method"`
+					Params  json.RawMessage `json:"params"`
+					Result  json.RawMessage `json:"result"`
+					Error   *jsonRPCError   `json:"error"`
+				}
+				if err := json.Unmarshal(line, &msg); err != nil {
+					continue
+				}
+
+				// Check if it's our response (end of prompt)
+				if msg.ID != nil && *msg.ID == id {
+					if msg.Error != nil {
+						errCh <- fmt.Errorf("rpc error %d: %s", msg.Error.Code, msg.Error.Message)
+					}
+					return
+				}
+
+				// Handle session/update notification - stream text chunks
+				if msg.Method == "session/update" {
+					var updateParams sessionUpdateParams
+					if err := json.Unmarshal(msg.Params, &updateParams); err != nil {
+						continue
+					}
+
+					if updateParams.Update.SessionUpdate == "agent_message_chunk" &&
+						updateParams.Update.Content != nil &&
+						updateParams.Update.Content.Type == "text" {
+						// Send text chunk immediately
+						textCh <- updateParams.Update.Content.Text
+					}
+				}
+			}
+		}
+	}()
+
+	return textCh, errCh
+}
+
+// Compile-time checks
 var _ Transport = (*ACPTransport)(nil)
+var _ StreamingTransport = (*ACPTransport)(nil)

@@ -217,6 +217,121 @@ func (d *Display) Render(buf *Buffer, cur *Cursor, hasSelection bool) {
 	d.out.Write([]byte(sb.String()))
 }
 
+// RenderWithGhost draws the buffer with inline ghost text suggestion.
+// Ghost text appears after the cursor in dim gray, showing the suggested completion.
+func (d *Display) RenderWithGhost(buf *Buffer, cur *Cursor, hasSelection bool, ghostText string, streaming bool) {
+	var sb strings.Builder
+
+	// Hide cursor during render for flicker-free updates
+	sb.WriteString(ansiHideCursor)
+
+	// Move up from where cursor was left to first line of our content
+	if d.lastCursorRow > 0 {
+		fmt.Fprintf(&sb, ansiCursorUp, d.lastCursorRow)
+	}
+	sb.WriteString("\r")
+
+	// Mode indicator: letter + vertical bar with color
+	modeBar := ""
+	if d.gutter {
+		switch d.mode {
+		case "normal":
+			modeBar = "\x1b[33;1mn│\x1b[0m" // Bold yellow "n│"
+		default: // "insert" or empty
+			modeBar = "\x1b[2mi│\x1b[0m" // Dim "i│"
+		}
+	}
+
+	cursorRow := cur.Pos.Row
+	cursorCol := cur.Pos.Col
+
+	for i := 0; i < buf.LineCount(); i++ {
+		if i > 0 {
+			sb.WriteString("\r\n")
+		}
+		sb.WriteString(ansiClearLine)
+
+		line := buf.Line(i)
+
+		// Show mode bar on all lines, then prompt on first line
+		if d.gutter {
+			sb.WriteString(modeBar)
+		}
+		if i == 0 {
+			if d.prompt != "" {
+				sb.WriteString(d.prompt)
+			} else {
+				sb.WriteString(" ")
+			}
+		} else {
+			sb.WriteString(" ")
+		}
+
+		// Render line content
+		if hasSelection && cur.HasSelection() {
+			d.renderLineWithSelection(&sb, line, i, cur)
+		} else {
+			sb.WriteString(line)
+		}
+
+		// Render ghost text on the cursor's line, after the cursor position
+		if ghostText != "" && i == cursorRow {
+			// Get the first line of ghost text (for single-line display)
+			ghostFirstLine := ghostText
+			newlineIdx := strings.Index(ghostText, "\n")
+			if newlineIdx >= 0 {
+				ghostFirstLine = ghostText[:newlineIdx]
+			}
+
+			// Render ghost text in dim gray with italic
+			sb.WriteString("\x1b[90;3m") // Dim + italic
+			sb.WriteString(ghostFirstLine)
+			sb.WriteString(ansiReset)
+
+			// Show streaming indicator if still receiving
+			if streaming {
+				sb.WriteString("\x1b[90m▌\x1b[0m") // Blinking cursor-like indicator
+			}
+		}
+	}
+
+	// Clear everything below the buffer
+	sb.WriteString(ansiClearToEnd)
+
+	d.lastLines = buf.LineCount()
+
+	// Move to cursor position
+	if cursorRow < buf.LineCount()-1 {
+		fmt.Fprintf(&sb, ansiCursorUp, buf.LineCount()-1-cursorRow)
+	}
+
+	// Calculate prefix width for cursor positioning
+	prefixWidth := 0
+	if d.gutter {
+		prefixWidth = 2
+	}
+	if cursorRow == 0 && d.promptWidth > 0 {
+		prefixWidth += d.promptWidth
+	} else if cursorRow == 0 {
+		prefixWidth += 1
+	} else {
+		prefixWidth += 1
+	}
+
+	sb.WriteString("\r")
+	if cursorCol+prefixWidth > 0 {
+		fmt.Fprintf(&sb, ansiCursorForward, cursorCol+prefixWidth)
+	}
+
+	// Show cursor
+	sb.WriteString(ansiShowCursor)
+
+	// Remember where we left the cursor for next render
+	d.lastCursorRow = cursorRow
+
+	d.out.Write([]byte(sb.String()))
+}
+
 func (d *Display) renderLineWithSelection(sb *strings.Builder, line string, row int, cur *Cursor) {
 	start, end := cur.SelectionRange()
 
