@@ -907,6 +907,13 @@ func (s *Shell) handleEditCommand(ctx context.Context, command string) {
 }
 
 func (s *Shell) updatePrompt() {
+	s.printPromptPrefix()
+}
+
+// printPromptPrefix prints just the Starship prefix (info bar) and updates the
+// readline prompt. This is called when returning from the Ctrl+R history picker
+// or when updating the prompt after command execution.
+func (s *Shell) printPromptPrefix() {
 	cwd, _ := os.Getwd()
 	ctx := prompt.PromptContext{
 		Cwd:        cwd,
@@ -917,24 +924,6 @@ func (s *Shell) updatePrompt() {
 	// Use GenerateMultiLine to properly handle Starship's multi-line prompts.
 	// chzyer/readline doesn't support multi-line prompts, so we print the
 	// prefix (info bar) ourselves and only give readline the prompt character.
-	prefix, promptLine := s.prompt.GenerateMultiLine(ctx)
-	if prefix != "" {
-		fmt.Print(prefix)
-	}
-	s.readline.SetPrompt(promptLine)
-	// Note: For editor mode, the editor renders the prompt itself
-}
-
-// printPromptPrefix prints just the Starship prefix (info bar) and updates the
-// readline prompt. This is called when returning from the Ctrl+R history picker.
-func (s *Shell) printPromptPrefix() {
-	cwd, _ := os.Getwd()
-	ctx := prompt.PromptContext{
-		Cwd:        cwd,
-		ExitCode:   s.lastExitCode,
-		DurationMs: s.lastDuration.Milliseconds(),
-	}
-
 	prefix, promptLine := s.prompt.GenerateMultiLine(ctx)
 	if prefix != "" {
 		fmt.Print(prefix)

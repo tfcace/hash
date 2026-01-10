@@ -80,13 +80,8 @@ type Editor struct {
 func New(cfg Config, in io.Reader, out io.Writer) *Editor {
 	state := NewEditorState()
 
-	// Determine initial mode
-	var mode Mode
-	if cfg.Keybindings == "helix" || cfg.Keybindings == "vim" {
-		mode = NewInsertMode() // Start in insert mode
-	} else {
-		mode = NewInsertMode() // Emacs is always insert mode
-	}
+	// All modes start in insert mode
+	mode := NewInsertMode()
 
 	// Default terminal size
 	width, height := 80, 24
