@@ -406,46 +406,41 @@ func buildPromptWithContext(req Request) string {
 	var b strings.Builder
 
 	ctx := req.Context
-	hasContext := false
 
-	// Add context section if there's anything to include
-	if ctx.Cwd != "" || ctx.GitBranch != "" || ctx.KubeContext != "" ||
-		len(ctx.History) > 0 || len(ctx.EnvVars) > 0 ||
-		ctx.LastOutput != "" || ctx.LastError != "" {
-
-		b.WriteString("Context:\n")
-		hasContext = true
-
-		if ctx.Cwd != "" {
-			fmt.Fprintf(&b, "- Working directory: %s\n", ctx.Cwd)
-		}
-		if ctx.GitBranch != "" {
-			fmt.Fprintf(&b, "- Git branch: %s\n", ctx.GitBranch)
-		}
-		if ctx.KubeContext != "" {
-			fmt.Fprintf(&b, "- Kubernetes context: %s\n", ctx.KubeContext)
-		}
-		if len(ctx.History) > 0 {
-			b.WriteString("- Recent commands:\n")
-			for _, cmd := range ctx.History {
-				fmt.Fprintf(&b, "  - %s\n", cmd)
-			}
-		}
-		if len(ctx.EnvVars) > 0 {
-			b.WriteString("- Environment:\n")
-			for k, v := range ctx.EnvVars {
-				fmt.Fprintf(&b, "  - %s=%s\n", k, v)
-			}
-		}
-		if ctx.LastOutput != "" {
-			fmt.Fprintf(&b, "- Last command output:\n%s\n", ctx.LastOutput)
-		}
-		if ctx.LastError != "" {
-			fmt.Fprintf(&b, "- Last error:\n%s\n", ctx.LastError)
+	// Build context section
+	var contextLines strings.Builder
+	if ctx.Cwd != "" {
+		fmt.Fprintf(&contextLines, "- Working directory: %s\n", ctx.Cwd)
+	}
+	if ctx.GitBranch != "" {
+		fmt.Fprintf(&contextLines, "- Git branch: %s\n", ctx.GitBranch)
+	}
+	if ctx.KubeContext != "" {
+		fmt.Fprintf(&contextLines, "- Kubernetes context: %s\n", ctx.KubeContext)
+	}
+	if len(ctx.History) > 0 {
+		contextLines.WriteString("- Recent commands:\n")
+		for _, cmd := range ctx.History {
+			fmt.Fprintf(&contextLines, "  - %s\n", cmd)
 		}
 	}
+	if len(ctx.EnvVars) > 0 {
+		contextLines.WriteString("- Environment:\n")
+		for k, v := range ctx.EnvVars {
+			fmt.Fprintf(&contextLines, "  - %s=%s\n", k, v)
+		}
+	}
+	if ctx.LastOutput != "" {
+		fmt.Fprintf(&contextLines, "- Last command output:\n%s\n", ctx.LastOutput)
+	}
+	if ctx.LastError != "" {
+		fmt.Fprintf(&contextLines, "- Last error:\n%s\n", ctx.LastError)
+	}
 
-	if hasContext {
+	// Only add context header if there's content
+	if contextLines.Len() > 0 {
+		b.WriteString("Context:\n")
+		b.WriteString(contextLines.String())
 		b.WriteString("\nUser request: ")
 	}
 	b.WriteString(req.Prompt)

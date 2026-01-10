@@ -99,6 +99,21 @@ func (d *Display) SetScrollbarColor(hexColor string) {
 	d.scrollbarCode = fmt.Sprintf("\x1b[38;2;%d;%d;%dm", r, g, b)
 }
 
+// calcPrefixWidth calculates the prefix width for cursor positioning on a given row.
+// Structure: [mode bar "i│" or "n│" if gutter] + [prompt on line 0, space on others]
+func (d *Display) calcPrefixWidth(row int) int {
+	prefixWidth := 0
+	if d.gutter {
+		prefixWidth = 2 // Mode bar "i│" or "n│"
+	}
+	if row == 0 && d.promptWidth > 0 {
+		prefixWidth += d.promptWidth
+	} else {
+		prefixWidth += 1 // Space after bar (for no prompt on row 0 or continuation lines)
+	}
+	return prefixWidth
+}
+
 // visibleWidth returns the visible width of a string, excluding ANSI codes.
 func visibleWidth(s string) int {
 	width := 0
@@ -190,18 +205,7 @@ func (d *Display) Render(buf *Buffer, cur *Cursor, hasSelection bool) {
 	}
 
 	// Calculate prefix width for cursor positioning
-	// Structure: [mode bar "i│" or "n│" if gutter] + [prompt on line 0, space on others]
-	prefixWidth := 0
-	if d.gutter {
-		prefixWidth = 2 // Mode bar "i│" or "n│"
-	}
-	if cursorRow == 0 && d.promptWidth > 0 {
-		prefixWidth += d.promptWidth
-	} else if cursorRow == 0 {
-		prefixWidth += 1 // Space after bar when no prompt
-	} else {
-		prefixWidth += 1 // Space for continuation lines
-	}
+	prefixWidth := d.calcPrefixWidth(cursorRow)
 
 	sb.WriteString("\r")
 	if cursorCol+prefixWidth > 0 {
@@ -317,17 +321,7 @@ func (d *Display) RenderWithGhost(buf *Buffer, cur *Cursor, hasSelection bool, g
 	}
 
 	// Calculate prefix width for cursor positioning
-	prefixWidth := 0
-	if d.gutter {
-		prefixWidth = 2
-	}
-	if cursorRow == 0 && d.promptWidth > 0 {
-		prefixWidth += d.promptWidth
-	} else if cursorRow == 0 {
-		prefixWidth += 1
-	} else {
-		prefixWidth += 1
-	}
+	prefixWidth := d.calcPrefixWidth(cursorRow)
 
 	sb.WriteString("\r")
 	if cursorCol+prefixWidth > 0 {

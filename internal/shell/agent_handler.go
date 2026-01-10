@@ -40,52 +40,9 @@ func (h *AgentHandler) HandleRequest(ctx context.Context, parsed parser.ParseRes
 		return agent.Response{}, fmt.Errorf("no agent configured")
 	}
 
-	// Build context - use selected context if available, otherwise auto-detect
-	var agentCtx agent.Context
-	if h.selectedContext != nil && len(h.selectedContext.SelectedItems()) > 0 {
-		// Use user-selected context from picker
-		agentCtx = h.buildContextFromSelection()
-	} else {
-		// Default auto-detect behavior
-		ctxBuilder := agent.NewContextBuilder().
-			DetectGitBranch().
-			DetectKubeContext()
-
-		// Add last output/error from clipboard buffer if available
-		if h.clipboardBuf != nil {
-			if lastOutput := h.clipboardBuf.LastOutput(); lastOutput != "" {
-				ctxBuilder.WithLastOutput(lastOutput)
-			}
-		}
-		agentCtx = ctxBuilder.Build()
-	}
-
-	// Build the prompt based on parse type
-	var prompt string
-	switch parsed.Type {
-	case parser.CommandTypeAgent:
-		prompt = parsed.AgentPrompt
-	case parser.CommandTypeAgentPipe:
-		prompt = fmt.Sprintf("Given the output of '%s', %s", parsed.Command, parsed.AgentPrompt)
-	case parser.CommandTypeAgentInline:
-		prompt = fmt.Sprintf(`Complete this shell command argument.
-
-Partial command: %s
-What the user wants: %s
-
-Respond with ONLY the completion to append (single line).
-- No explanations or multiple lines
-- Quote values with spaces (e.g., '%%h %%s' not %%h %%s)
-- Shell-safe output only
-- Single line response required`, parsed.Command, parsed.AgentPrompt)
-	default:
-		return agent.Response{}, fmt.Errorf("not an agent request")
-	}
-
-	req := agent.Request{
-		Prompt:      prompt,
-		CommandLine: parsed.Command,
-		Context:     agentCtx,
+	req, err := h.buildRequest(parsed)
+	if err != nil {
+		return agent.Response{}, err
 	}
 
 	return h.client.Ask(ctx, req)
@@ -111,52 +68,12 @@ func (h *AgentHandler) StreamRequest(ctx context.Context, parsed parser.ParseRes
 		return nil, errCh
 	}
 
-	// Build context - use selected context if available, otherwise auto-detect
-	var agentCtx agent.Context
-	if h.selectedContext != nil && len(h.selectedContext.SelectedItems()) > 0 {
-		agentCtx = h.buildContextFromSelection()
-	} else {
-		ctxBuilder := agent.NewContextBuilder().
-			DetectGitBranch().
-			DetectKubeContext()
-
-		if h.clipboardBuf != nil {
-			if lastOutput := h.clipboardBuf.LastOutput(); lastOutput != "" {
-				ctxBuilder.WithLastOutput(lastOutput)
-			}
-		}
-		agentCtx = ctxBuilder.Build()
-	}
-
-	// Build the prompt based on parse type
-	var prompt string
-	switch parsed.Type {
-	case parser.CommandTypeAgent:
-		prompt = parsed.AgentPrompt
-	case parser.CommandTypeAgentPipe:
-		prompt = fmt.Sprintf("Given the output of '%s', %s", parsed.Command, parsed.AgentPrompt)
-	case parser.CommandTypeAgentInline:
-		prompt = fmt.Sprintf(`Complete this shell command argument.
-
-Partial command: %s
-What the user wants: %s
-
-Respond with ONLY the completion to append (single line).
-- No explanations or multiple lines
-- Quote values with spaces (e.g., '%%h %%s' not %%h %%s)
-- Shell-safe output only
-- Single line response required`, parsed.Command, parsed.AgentPrompt)
-	default:
+	req, err := h.buildRequest(parsed)
+	if err != nil {
 		errCh := make(chan error, 1)
-		errCh <- fmt.Errorf("not an agent request")
+		errCh <- err
 		close(errCh)
 		return nil, errCh
-	}
-
-	req := agent.Request{
-		Prompt:      prompt,
-		CommandLine: parsed.Command,
-		Context:     agentCtx,
 	}
 
 	textCh, errCh := h.client.StreamRequest(ctx, req)
@@ -198,6 +115,54 @@ Respond with ONLY the completion to append (single line).
 	}()
 
 	return tracedTextCh, tracedErrCh
+}
+
+// buildRequest constructs an agent.Request from a parsed result.
+func (h *AgentHandler) buildRequest(parsed parser.ParseResult) (agent.Request, error) {
+	// Build context - use selected context if available, otherwise auto-detect
+	var agentCtx agent.Context
+	if h.selectedContext != nil && len(h.selectedContext.SelectedItems()) > 0 {
+		agentCtx = h.buildContextFromSelection()
+	} else {
+		ctxBuilder := agent.NewContextBuilder().
+			DetectGitBranch().
+			DetectKubeContext()
+
+		if h.clipboardBuf != nil {
+			if lastOutput := h.clipboardBuf.LastOutput(); lastOutput != "" {
+				ctxBuilder.WithLastOutput(lastOutput)
+			}
+		}
+		agentCtx = ctxBuilder.Build()
+	}
+
+	// Build the prompt based on parse type
+	var prompt string
+	switch parsed.Type {
+	case parser.CommandTypeAgent:
+		prompt = parsed.AgentPrompt
+	case parser.CommandTypeAgentPipe:
+		prompt = fmt.Sprintf("Given the output of '%s', %s", parsed.Command, parsed.AgentPrompt)
+	case parser.CommandTypeAgentInline:
+		prompt = fmt.Sprintf(`Complete this shell command argument.
+
+Partial command: %s
+What the user wants: %s
+
+Respond with ONLY the completion to append (single line).
+- No explanations or multiple lines
+- Quote values with spaces (e.g., '%%h %%s' not %%h %%s)
+- Shell-safe output only
+- Single line response required`, parsed.Command, parsed.AgentPrompt)
+	default:
+		return agent.Request{}, fmt.Errorf("not an agent request")
+	}
+
+	return agent.Request{
+		Prompt:      prompt,
+		CommandLine: parsed.Command,
+		Context:     agentCtx,
+	}, nil
 }
 
 // buildContextFromSelection converts user-selected context to agent.Context.

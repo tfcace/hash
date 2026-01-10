@@ -239,37 +239,41 @@ func keyString(k Key) string {
 		parts = append(parts, "Shift")
 	}
 
+	keyName := ""
 	switch k.Special {
 	case KeyEnter:
-		parts = append(parts, "Enter")
+		keyName = "Enter"
 	case KeyTab:
-		parts = append(parts, "Tab")
+		keyName = "Tab"
 	case KeyBackspace:
-		parts = append(parts, "Backspace")
+		keyName = "Backspace"
 	case KeyDelete:
-		parts = append(parts, "Delete")
+		keyName = "Delete"
 	case KeyEscape:
-		parts = append(parts, "Escape")
+		keyName = "Escape"
 	case KeyUp:
-		parts = append(parts, "Up")
+		keyName = "Up"
 	case KeyDown:
-		parts = append(parts, "Down")
+		keyName = "Down"
 	case KeyLeft:
-		parts = append(parts, "Left")
+		keyName = "Left"
 	case KeyRight:
-		parts = append(parts, "Right")
+		keyName = "Right"
 	case KeyHome:
-		parts = append(parts, "Home")
+		keyName = "Home"
 	case KeyEnd:
-		parts = append(parts, "End")
+		keyName = "End"
 	case KeyNone:
 		if k.Rune != 0 {
-			parts = append(parts, string(k.Rune))
+			keyName = string(k.Rune)
 		}
 	default:
-		parts = append(parts, "Unknown")
+		keyName = "Unknown"
 	}
 
+	if keyName != "" {
+		parts = append(parts, keyName)
+	}
 	if len(parts) == 0 {
 		return "None"
 	}

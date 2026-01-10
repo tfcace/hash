@@ -22,7 +22,7 @@ func main() {
 
 	// Parse flags manually (order-independent)
 	var command string
-	var commandIdx int = -1
+	var commandIdx = -1
 
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
@@ -30,14 +30,13 @@ func main() {
 			mode.Login = true
 		case "-c":
 			mode.Command = true
-			if i+1 < len(args) {
-				command = args[i+1]
-				commandIdx = i
-				i++ // Skip the command argument
-			} else {
+			if i+1 >= len(args) {
 				fmt.Fprintf(os.Stderr, "hash: -c: option requires an argument\n")
 				os.Exit(2)
 			}
+			command = args[i+1]
+			commandIdx = i
+			i++
 		case "-v", "--version":
 			fmt.Printf("hash version %s\n", version)
 			os.Exit(0)
