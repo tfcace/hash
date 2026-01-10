@@ -317,6 +317,7 @@ func (e *Editor) Run(ctx context.Context) (Result, error) {
 				e.ghost.Clear()
 				e.ghostTextChan = nil
 				e.ghostErrChan = nil
+				e.render() // Update display so user sees normal prompt
 			}
 			continue
 		case key := <-keyCh:
@@ -357,8 +358,8 @@ func (e *Editor) Run(ctx context.Context) (Result, error) {
 				continue
 			}
 
-			// If ghost text is active, intercept keys
-			if e.ghost.Active && !e.ghost.IsEmpty() {
+			// If ghost text is active (streaming or has content), intercept keys
+			if e.ghost.Active && (!e.ghost.IsEmpty() || e.ghost.Streaming) {
 				if e.handleGhostTextKey(key) {
 					e.render()
 					continue

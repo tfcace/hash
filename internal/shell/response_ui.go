@@ -138,12 +138,8 @@ func (u *ResponseUI) WaitForConfirmation() ConfirmAction {
 		case '\t': // Tab
 			return ConfirmEdit
 		case 0x1b: // Escape - might be standalone or start of sequence
-			// Try to read more to see if it's an escape sequence
-			u.in.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
-			n, _ = u.in.Read(buf[1:])
-			u.in.SetReadDeadline(time.Time{})
-			if n == 0 {
-				// Standalone Esc
+			// Use channel-based timeout since SetReadDeadline doesn't work on terminals
+			if u.isStandaloneEscape(buf[1:]) {
 				return ConfirmCancel
 			}
 			// Escape sequence (arrow keys, etc.) - ignore and continue
@@ -168,6 +164,14 @@ func (u *ResponseUI) ShowThinkingInline(model string) {
 // ClearLine clears the current line (for replacing thinking with response).
 func (u *ResponseUI) ClearLine() {
 	fmt.Fprintf(u.out, "\r\033[K")
+}
+
+// ClearLines moves cursor up n lines and clears each one.
+// Used to remove streamed response when user cancels.
+func (u *ResponseUI) ClearLines(n int) {
+	for i := 0; i < n; i++ {
+		fmt.Fprintf(u.out, "\033[A\033[K") // Move up, clear line
+	}
 }
 
 // ShowStreamedResponse displays a streamed response with dim styling.
@@ -225,16 +229,43 @@ func (u *ResponseUI) WaitForConfirmationByType(ct ConfirmationType) ConfirmActio
 				continue // No Tab action for errors
 			}
 			return ConfirmEdit // ConfirmEdit means "secondary action" (edit/copy)
-		case 0x1b: // Escape
-			u.in.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
-			n, _ = u.in.Read(buf[1:])
-			u.in.SetReadDeadline(time.Time{})
-			if n == 0 {
+		case 0x1b: // Escape - might be standalone or start of sequence
+			// Use channel-based timeout since SetReadDeadline doesn't work on terminals
+			if u.isStandaloneEscape(buf[1:]) {
 				return ConfirmCancel
 			}
+			// Escape sequence (arrow keys, etc.) - ignore and continue
 			continue
 		case 0x03: // Ctrl+C
 			return ConfirmCancel
 		}
+	}
+}
+
+// isStandaloneEscape reads additional bytes with a timeout to determine if
+// ESC was pressed alone or as part of an escape sequence (like arrow keys).
+// SetReadDeadline doesn't work on terminal file descriptors, so we use
+// a channel-based approach with a goroutine.
+func (u *ResponseUI) isStandaloneEscape(buf []byte) bool {
+	type readResult struct {
+		n   int
+		err error
+	}
+
+	resultCh := make(chan readResult, 1)
+	go func() {
+		n, err := u.in.Read(buf)
+		resultCh <- readResult{n, err}
+	}()
+
+	select {
+	case result := <-resultCh:
+		// Got more bytes - this is an escape sequence, not standalone ESC
+		return result.n == 0
+	case <-time.After(50 * time.Millisecond):
+		// Timeout - this is a standalone ESC press
+		// Note: the goroutine will still be blocked on Read, but it will
+		// eventually complete when more input arrives or the fd is closed
+		return true
 	}
 }

@@ -78,39 +78,60 @@ func (h *AgentHandler) StreamRequest(ctx context.Context, parsed parser.ParseRes
 
 	textCh, errCh := h.client.StreamRequest(ctx, req)
 
-	// Wrap channels to add tracing
+	// Wrap channels to add tracing - single goroutine to avoid race between
+	// "complete" and "error" state transitions
 	tracedTextCh := make(chan string, 1)
 	tracedErrCh := make(chan error, 1)
 
 	go func() {
 		defer close(tracedTextCh)
+		defer close(tracedErrCh)
+
 		totalLen := 0
-		for text := range textCh {
-			totalLen += len(text)
-			trace.Agent("ghost_chunk", map[string]any{
-				"text":      text,
+		var streamErr error
+		textDone := false
+		errDone := false
+
+		for !textDone || !errDone {
+			select {
+			case text, ok := <-textCh:
+				if !ok {
+					textDone = true
+					textCh = nil // Stop selecting on this channel
+					continue
+				}
+				totalLen += len(text)
+				trace.Agent("ghost_chunk", map[string]any{
+					"text":      text,
+					"total_len": totalLen,
+				})
+				tracedTextCh <- text
+
+			case err, ok := <-errCh:
+				if !ok {
+					errDone = true
+					errCh = nil // Stop selecting on this channel
+					continue
+				}
+				if err != nil {
+					streamErr = err
+					trace.AgentHigh("ghost_state", map[string]any{
+						"from":   "streaming",
+						"to":     "error",
+						"reason": err.Error(),
+					})
+				}
+				tracedErrCh <- err
+			}
+		}
+
+		// Only log complete if there was no error
+		if streamErr == nil {
+			trace.AgentDetailed("ghost_state", map[string]any{
+				"from":      "streaming",
+				"to":        "complete",
 				"total_len": totalLen,
 			})
-			tracedTextCh <- text
-		}
-		trace.AgentDetailed("ghost_state", map[string]any{
-			"from":      "streaming",
-			"to":        "complete",
-			"total_len": totalLen,
-		})
-	}()
-
-	go func() {
-		defer close(tracedErrCh)
-		for err := range errCh {
-			if err != nil {
-				trace.AgentHigh("ghost_state", map[string]any{
-					"from":   "streaming",
-					"to":     "error",
-					"reason": err.Error(),
-				})
-			}
-			tracedErrCh <- err
 		}
 	}()
 

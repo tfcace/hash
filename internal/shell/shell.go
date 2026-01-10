@@ -764,6 +764,7 @@ func (s *Shell) handleAgentFullStreaming(ctx context.Context, parsed parser.Pars
 	// Collect streamed response
 	var response strings.Builder
 	var streamErr error
+	lineCount := 0 // Track lines for clearing on cancel
 
 collectLoop:
 	for {
@@ -774,7 +775,11 @@ collectLoop:
 			s.lastExitCode = 1
 			s.updatePrompt()
 			return
-		case err := <-errCh:
+		case err, ok := <-errCh:
+			if !ok {
+				errCh = nil // Stop selecting on closed channel
+				continue
+			}
 			if err != nil {
 				streamErr = err
 			}
@@ -787,12 +792,15 @@ collectLoop:
 				s.responseUI.ClearLine()
 			}
 			response.WriteString(text)
+			// Count newlines for clearing on cancel
+			lineCount += strings.Count(text, "\n")
 			// Stream output character by character (dim)
 			fmt.Fprintf(os.Stdout, "\033[90m%s\033[0m", text)
 		}
 	}
 
 	fmt.Println() // New line after response
+	lineCount++   // Count the final newline
 
 	if streamErr != nil {
 		s.responseUI.ShowError(streamErr.Error())
@@ -803,6 +811,9 @@ collectLoop:
 			s.handleAgentFullStreaming(ctx, parsed, modelName)
 			return
 		}
+		// Cancel: clear error + any partial response
+		// lineCount + error line + confirmation line + blank line
+		s.responseUI.ClearLines(lineCount + 3)
 		s.updatePrompt()
 		return
 	}
@@ -860,7 +871,9 @@ collectLoop:
 			}
 		}
 	case ConfirmCancel:
-		// Do nothing
+		// Clear the streamed response from screen
+		// +1 for confirmation hint line, +1 for the blank line after fmt.Println()
+		s.responseUI.ClearLines(lineCount + 2)
 	}
 
 	s.updatePrompt()
