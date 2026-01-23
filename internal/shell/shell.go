@@ -328,6 +328,23 @@ func (s *Shell) Run(ctx context.Context) error {
 		}
 
 		line = trimSpace(line)
+
+		// Handle !! shortcut for quick issue submission
+		if line == "!!" {
+			if s.lastExitCode == 0 {
+				fmt.Print("Last command succeeded. Open issue anyway? [y/N] ")
+				var response string
+				fmt.Scanln(&response)
+				if strings.ToLower(response) != "y" {
+					s.updatePrompt()
+					continue
+				}
+			}
+			s.builtinIssue([]string{"--last"})
+			s.updatePrompt()
+			continue
+		}
+
 		if line == "" {
 			s.updatePrompt()
 			continue
