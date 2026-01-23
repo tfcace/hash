@@ -29,7 +29,7 @@ func isBuiltinEnabled(cfg *config.Config, name string) bool {
 // isBuiltin returns true if the command is a shell builtin.
 func isBuiltin(cmd string) bool {
 	switch cmd {
-	case "cd", "exit", "quit", "history", "copy":
+	case "cd", "exit", "quit", "history", "copy", "issue":
 		return true
 	default:
 		return false
@@ -74,6 +74,8 @@ func (s *Shell) executeBuiltin(line string) (bool, error) {
 		return true, s.builtinHistory(args)
 	case "copy":
 		return true, s.builtinCopy(args)
+	case "issue":
+		return true, s.builtinIssue(args)
 	default:
 		return false, nil
 	}
