@@ -89,6 +89,8 @@ jj new                 # Create new commit on top
 jj diff                # Show changes
 ```
 
+**Important**: When committing, always commit to both jj and git.
+
 ## Configuration
 
 User config: `~/.config/hash/config.toml` (TOML format)
