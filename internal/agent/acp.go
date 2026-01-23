@@ -168,6 +168,38 @@ func (t *ACPTransport) readLoop() {
 	}
 }
 
+// sendCancel sends a session/cancel notification to stop ongoing operations.
+// This is a notification (no response expected) per ACP spec.
+func (t *ACPTransport) sendCancel() {
+	if t.sessionID == "" {
+		return
+	}
+
+	// Notifications don't have an ID field
+	notification := struct {
+		JSONRPC string      `json:"jsonrpc"`
+		Method  string      `json:"method"`
+		Params  interface{} `json:"params"`
+	}{
+		JSONRPC: "2.0",
+		Method:  "session/cancel",
+		Params: struct {
+			SessionID string `json:"sessionId"`
+		}{
+			SessionID: t.sessionID,
+		},
+	}
+
+	data, err := json.Marshal(notification)
+	if err != nil {
+		return // Best effort
+	}
+
+	t.mu.Lock()
+	_, _ = t.stdin.Write(append(data, '\n'))
+	t.mu.Unlock()
+}
+
 func (t *ACPTransport) sendRequest(ctx context.Context, method string, params interface{}) (json.RawMessage, error) {
 	id := t.requestID.Add(1)
 
@@ -191,6 +223,7 @@ func (t *ACPTransport) sendRequest(ctx context.Context, method string, params in
 	for {
 		select {
 		case <-ctx.Done():
+			t.sendCancel()
 			return nil, ctx.Err()
 		case line, ok := <-t.messages:
 			if !ok {
@@ -323,6 +356,7 @@ func (t *ACPTransport) Send(ctx context.Context, req Request) (<-chan Response, 
 		for {
 			select {
 			case <-ctx.Done():
+				t.sendCancel()
 				respCh <- Response{Type: ResponseTypeError, Error: ctx.Err().Error()}
 				return
 
@@ -537,6 +571,7 @@ func (t *ACPTransport) SendStreaming(ctx context.Context, req Request) (<-chan s
 		for {
 			select {
 			case <-ctx.Done():
+				t.sendCancel()
 				errCh <- ctx.Err()
 				return
 
