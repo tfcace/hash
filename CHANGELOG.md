@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.2](https://github.com/tfcace/hash/compare/v0.1.1...v0.1.2) (2026-01-23)
+
+
+### Bug Fixes
+
+* **ci:** install X11 dev libraries for clipboard build ([e665a8e](https://github.com/tfcace/hash/commit/e665a8e55ab68f081b944f85f5cb999e87cd6b52))
+
 ## [0.1.1](https://github.com/tfcace/hash/compare/v0.1.0...v0.1.1) (2026-01-23)
 
 
