@@ -161,12 +161,54 @@ disable_builtins = ["cd"]  # Let zoxide handle cd
 
 ## Installation
 
-```bash
-# Build from source
-go build -o hash ./cmd/hash
+### Homebrew (recommended)
 
-# Run
-./hash
+```bash
+brew tap tfcace/hash
+brew install hash
+```
+
+### From Source
+
+Requires Go 1.21+.
+
+```bash
+git clone https://github.com/tfcace/hash.git
+cd hash
+go build -o /usr/local/bin/hash ./cmd/hash
+```
+
+For development builds with version info:
+
+```bash
+./scripts/build.sh            # Builds to ./hash
+./scripts/build.sh --install  # Builds to /usr/local/bin/hash
+```
+
+### Development Setup
+
+If you're developing Hash, set `HASH_SRC` to enable rebuild commands:
+
+```bash
+export HASH_SRC="$HOME/path/to/hash"  # Add to your shell profile
+```
+
+Then use these functions (add to `~/.hashrc`):
+
+```bash
+# Quick rebuild from working tree
+hash-rebuild() {
+    [[ -z "$HASH_SRC" ]] && echo "Set HASH_SRC to your hash source directory" && return 1
+    (cd "$HASH_SRC" && ./scripts/build.sh)
+    "$HASH_SRC/hash" --version
+}
+
+# Pull latest, build, install to stable location
+hash-upgrade() {
+    [[ -z "$HASH_SRC" ]] && echo "Set HASH_SRC to your hash source directory" && return 1
+    (cd "$HASH_SRC" && git pull && ./scripts/build.sh --install)
+    hash --version
+}
 ```
 
 ## Configuration
@@ -199,22 +241,15 @@ See [docs/config-reference.md](docs/config-reference.md) for the complete refere
 
 ## Using as Login Shell
 
-### Installation
+After installing Hash (see Installation above), set it as your login shell:
 
-1. Build and install:
-   ```bash
-   go build -o /usr/local/bin/hash ./cmd/hash
-   ```
+```bash
+# Add to /etc/shells
+sudo sh -c 'echo $(which hash) >> /etc/shells'
 
-2. Add to `/etc/shells`:
-   ```bash
-   sudo sh -c 'echo /usr/local/bin/hash >> /etc/shells'
-   ```
-
-3. Change your login shell:
-   ```bash
-   chsh -s /usr/local/bin/hash
-   ```
+# Change your login shell
+chsh -s $(which hash)
+```
 
 ### Startup Files
 
