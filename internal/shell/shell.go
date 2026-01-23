@@ -288,6 +288,10 @@ func (s *Shell) Run(ctx context.Context) error {
 		}
 		return err
 	}
+
+	// Re-extract color palette now that PATH is set up (starship may now be findable)
+	s.refreshColorPalette()
+
 	s.updatePrompt()
 	trace.ShellHigh("prompt_start", map[string]any{
 		"mode": "editor",
@@ -971,6 +975,27 @@ func (s *Shell) printPromptPrefix() {
 	}
 	s.readline.SetPrompt(promptLine)
 	// Note: For editor mode, the editor renders the prompt itself
+}
+
+// refreshColorPalette re-extracts colors from starship after PATH is set up.
+// This is called after startup files are sourced, when starship may now be findable.
+func (s *Shell) refreshColorPalette() {
+	// Trigger lazy starship lookup by generating a prompt
+	// This sets p.starshipPath if starship is now in PATH
+	cwd, _ := os.Getwd()
+	s.prompt.Generate(prompt.PromptContext{Cwd: cwd})
+
+	// Now try to extract palette with the (hopefully found) starship path
+	newPalette := prompt.ExtractPalette(s.prompt.StarshipPath())
+
+	// Only update if we got actual starship colors (not defaults)
+	// Check if Primary color differs from default - indicates successful extraction
+	if newPalette.Primary != prompt.DefaultPalette().Primary {
+		s.colorPalette = newPalette
+		// Update editor config with new colors
+		s.editorCfg.InputBgColor = newPalette.InputBg
+		s.editorCfg.ScrollbarColor = newPalette.Primary
+	}
 }
 
 // stripAnsi removes ANSI escape sequences for length calculation.

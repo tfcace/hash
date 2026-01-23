@@ -187,29 +187,28 @@ For development builds with version info:
 
 ### Development Setup
 
-If you're developing Hash, set `HASH_SRC` to enable rebuild commands:
+If you're developing Hash from source, you can optionally add these helper functions to `~/.hashrc`:
 
 ```bash
-export HASH_SRC="$HOME/path/to/hash"  # Add to your shell profile
-```
+# Point to your hash source directory
+export HASH_SRC="$HOME/path/to/hash"
 
-Then use these functions (add to `~/.hashrc`):
-
-```bash
-# Quick rebuild from working tree
+# Quick rebuild for testing (runs from working tree)
 hash-rebuild() {
     [[ -z "$HASH_SRC" ]] && echo "Set HASH_SRC to your hash source directory" && return 1
     (cd "$HASH_SRC" && ./scripts/build.sh)
     "$HASH_SRC/hash" --version
 }
 
-# Pull latest, build, install to stable location
+# Build and install to /usr/local/bin (stable location)
 hash-upgrade() {
     [[ -z "$HASH_SRC" ]] && echo "Set HASH_SRC to your hash source directory" && return 1
-    (cd "$HASH_SRC" && git pull && ./scripts/build.sh --install)
+    (cd "$HASH_SRC" && ./scripts/build.sh --install)
     hash --version
 }
 ```
+
+This lets you run `hash-rebuild` to quickly test changes, or `hash-upgrade` to install a new version system-wide.
 
 ## Configuration
 
@@ -334,9 +333,25 @@ These environment variables are for debugging and advanced use cases:
 
 | Variable | Description | Default |
 |----------|-------------|---------|
+| `HASH_TRACE` | Enable shell tracing. Comma-separated subsystems: `editor`, `shell`, `agent`, `parser`, or `all`. | Disabled |
+| `HASH_TRACE_PATH` | Path for trace log file (JSONL format). | `./hash-trace.jsonl` |
+| `HASH_TRACE_LEVEL` | Trace verbosity: `verbose`, `detailed`, or `high`. | `verbose` |
 | `HASH_CLIPBOARD_MAX_OUTPUT_SIZE` | Maximum output capture per command. Accepts sizes like `1MB`, `512KB`, `unlimited`, or `0` to disable capture. | `1MB` |
 | `HASH_PTY_TRACE` | Enable PTY I/O tracing for debugging hangs. Set to `1` or `true` to enable. | Disabled |
 | `HASH_PTY_TRACE_PATH` | Path for PTY trace log file when tracing is enabled. | `./hash-pty-trace.log` |
+
+**Example: Shell tracing**
+
+```bash
+# Trace all subsystems
+HASH_TRACE=all HASH_TRACE_PATH=/tmp/hash-trace.jsonl ./hash
+
+# Trace only editor and shell with high-level events
+HASH_TRACE=editor,shell HASH_TRACE_LEVEL=high ./hash
+
+# View trace in real-time
+tail -f /tmp/hash-trace.jsonl | jq .
+```
 
 **Example: Debugging PTY issues**
 

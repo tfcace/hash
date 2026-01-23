@@ -45,9 +45,12 @@ type Prompt struct {
 func New(cfg Config) *Prompt {
 	p := &Prompt{config: cfg}
 
-	if cfg.Mode == "starship" {
+	// If explicit path is provided, use it immediately
+	if cfg.Mode == "starship" && cfg.StarshipPath != "" {
 		p.starshipPath = p.findStarship(cfg.StarshipPath)
 	}
+	// Otherwise, defer starship lookup until first prompt generation
+	// This allows PATH to be set up by startup files first
 
 	return p
 }
@@ -61,6 +64,10 @@ func (p *Prompt) StarshipPath() string {
 func (p *Prompt) Generate(ctx PromptContext) string {
 	switch p.config.Mode {
 	case "starship":
+		// Lazy lookup: retry finding starship until found (allows PATH to be set up by startup files)
+		if p.starshipPath == "" {
+			p.starshipPath = p.findStarship(p.config.StarshipPath)
+		}
 		if p.starshipPath != "" {
 			return p.starshipPrompt(ctx)
 		}

@@ -427,6 +427,60 @@ func hasDataAvailable(fd int, timeout time.Duration) bool {
 	return readSet.IsSet(fd)
 }
 
+// drainTerminalResponses discards any pending terminal responses from stdin.
+// This should be called before starting PTY I/O to prevent escape sequences
+// (like DECRQSS responses from colorprofile/lipgloss queries) from being read
+// by the child process and appearing as garbage input.
+//
+// The issue: Libraries like charmbracelet/colorprofile query terminal capabilities
+// (e.g., current SGR state via DECRQSS). The terminal responds asynchronously with
+// escape sequences. If a PTY command starts before these responses are consumed,
+// they get read by the child process instead.
+func drainTerminalResponses(fd int, trace *ptyTrace) {
+	// Wait briefly for any terminal responses that may still be in flight.
+	// Terminal responses typically arrive within 10-50ms of the query.
+	if !hasDataAvailable(fd, 50*time.Millisecond) {
+		// No pending data
+		return
+	}
+
+	buf := make([]byte, 512)
+	drained := 0
+	for {
+		if !hasDataAvailable(fd, 5*time.Millisecond) {
+			break
+		}
+
+		n, err := syscall.Read(fd, buf)
+		if err != nil || n <= 0 {
+			break
+		}
+
+		drained += n
+
+		// Only drain data that looks like terminal responses (escape sequences).
+		// Terminal responses start with ESC (0x1b), DCS (0x90), or CSI (0x9b).
+		// If we see regular printable input, stop - don't discard user keystrokes.
+		if buf[0] != 0x1b && buf[0] != 0x90 && buf[0] != 0x9b {
+			if trace != nil {
+				trace.logf("drain: stopped at non-escape byte 0x%02x after %d bytes", buf[0], drained)
+			}
+			// This might be user input - but we already read it, so it's lost.
+			// This is acceptable since escape sequences are more likely than
+			// the user typing a command and immediately pressing enter.
+			break
+		}
+
+		if trace != nil {
+			trace.logf("drain: read %d bytes: %q", n, buf[:n])
+		}
+	}
+
+	if trace != nil && drained > 0 {
+		trace.logf("drain: discarded %d total bytes of terminal responses", drained)
+	}
+}
+
 func signalProcessGroup(cmd *exec.Cmd, sig syscall.Signal) {
 	if cmd == nil || cmd.Process == nil {
 		return
@@ -458,12 +512,23 @@ type Executor struct {
 	positionalArgs    []string    // $0, $1, $2, etc. for -c execution
 	ptyActive         atomic.Bool // set when PTY is in use, disables progress
 	captureLimit      int64
+
+	// Persistent interpreter state - keeps function definitions across executions
+	runner       *interp.Runner
+	switchStdout *switchableWriter
+	switchStderr *switchableWriter
+	runnerMu     sync.Mutex // Protects runner access during execution
 }
 
 // New creates a new Executor.
 func New() *Executor {
 	execPath, _ := os.Executable()
 	env := newEnvStoreFromOS()
+
+	// Create switchable writers for persistent runner
+	switchStdout := newSwitchableWriter(os.Stdout)
+	switchStderr := newSwitchableWriter(os.Stderr)
+
 	exec := &Executor{
 		shellName:         "hash",
 		shellPath:         execPath,
@@ -471,10 +536,39 @@ func New() *Executor {
 		progressThreshold: 2 * time.Second,
 		env:               env,
 		captureLimit:      defaultCaptureSize,
+		switchStdout:      switchStdout,
+		switchStderr:      switchStderr,
+		// runner is created lazily on first Execute()
 	}
 	exec.ensureShellEnv()
 	exec.syncProcessEnv()
 	return exec
+}
+
+// initRunner creates the persistent interpreter runner.
+// Called lazily on first Execute() to allow configuration before first use.
+func (e *Executor) initRunner() error {
+	opts := []interp.RunnerOption{
+		interp.StdIO(os.Stdin, e.switchStdout, e.switchStderr),
+		interp.Env(e.env),
+		interp.ExecHandlers(e.execHandler),
+	}
+
+	runner, err := interp.New(opts...)
+	if err != nil {
+		return fmt.Errorf("failed to create interpreter: %w", err)
+	}
+
+	e.runner = runner
+	return nil
+}
+
+// Reset clears the interpreter state, including all function definitions.
+// The runner will be recreated on the next Execute() call.
+func (e *Executor) Reset() {
+	e.runnerMu.Lock()
+	defer e.runnerMu.Unlock()
+	e.runner = nil
 }
 
 // SetProgressThreshold sets how long to wait before showing progress.
@@ -510,6 +604,9 @@ func (e *Executor) ShellPath() string {
 
 // Execute runs a command using the mvdan/sh interpreter.
 func (e *Executor) Execute(ctx context.Context, command string, stdout, stderr io.Writer) (*Result, error) {
+	e.runnerMu.Lock()
+	defer e.runnerMu.Unlock()
+
 	start := time.Now()
 	e.ensureShellEnv()
 	e.ptyActive.Store(false)
@@ -560,42 +657,28 @@ func (e *Executor) Execute(ctx context.Context, command string, stdout, stderr i
 		captureWriter = &captureBuf
 	}
 
-	// Set up output writers with capture
-	var actualStdout io.Writer = io.Discard
+	// Switch writers for this execution
 	if stdout != nil {
-		actualStdout = io.MultiWriter(stdout, captureWriter)
+		e.switchStdout.Set(io.MultiWriter(stdout, captureWriter))
 	} else {
-		actualStdout = captureWriter
+		e.switchStdout.Set(captureWriter)
+	}
+	if stderr != nil {
+		e.switchStderr.Set(stderr)
+	} else {
+		e.switchStderr.Set(io.Discard)
 	}
 
-	actualStderr := stderr
-	if actualStderr == nil {
-		actualStderr = io.Discard
+	// Create persistent runner on first use (lazy init)
+	if e.runner == nil {
+		if err := e.initRunner(); err != nil {
+			return nil, err
+		}
 	}
 
-	// Create interpreter with options
-	opts := []interp.RunnerOption{
-		interp.StdIO(os.Stdin, actualStdout, actualStderr),
-		interp.Env(e.env),
-		interp.ExecHandlers(e.execHandler),
-	}
-
-	// Add positional parameters if set
-	// For -c behavior: first arg becomes $0, rest become $1, $2, ...
-	if len(e.positionalArgs) > 1 {
-		// Remaining args ($1, $2, ...) go via interp.Params
-		paramsArgs := append([]string{"--"}, e.positionalArgs[1:]...)
-		opts = append(opts, interp.Params(paramsArgs...))
-	}
-
-	runner, err := interp.New(opts...)
-	if err != nil {
-		return nil, err
-	}
-
-	// Run the command
-	err = runner.Run(ctx, prog)
-	e.updateEnvFromRunner(runner)
+	// Run with persistent runner - functions persist across executions
+	err = e.runner.Run(ctx, prog)
+	e.updateEnvFromRunner(e.runner)
 	e.ensureShellEnv()
 	e.syncProcessEnv()
 	e.syncWorkingDir()
@@ -695,6 +778,12 @@ func (e *Executor) runWithPTY(ctx context.Context, cmd *exec.Cmd, hc interp.Hand
 			}
 		}
 	}()
+
+	// Drain any pending terminal responses before starting stdin copy.
+	// Libraries like bubbletea/colorprofile query terminal capabilities (DECRQSS, etc.)
+	// and responses may still be in the input buffer. Without draining, these responses
+	// would be read by the PTY child process and appear as garbage input.
+	drainTerminalResponses(stdinFd, trace)
 
 	// Stop stdin->PTY copy on command exit so it doesn't consume the next prompt.
 	done := make(chan struct{})
@@ -919,6 +1008,40 @@ func (e *Executor) syncWorkingDir() {
 			_ = os.Chdir(pwd.Str)
 		}
 	}
+}
+
+// SyncRunnerDir syncs the persistent runner's working directory with the process.
+// Call this after changing directory via os.Chdir() (e.g., after builtin cd).
+func (e *Executor) SyncRunnerDir() {
+	e.runnerMu.Lock()
+	defer e.runnerMu.Unlock()
+
+	if e.runner == nil {
+		return // Runner will pick up current dir when created
+	}
+
+	// Run a cd command through the interpreter to sync its internal directory state
+	cwd, err := os.Getwd()
+	if err != nil {
+		return
+	}
+
+	// Parse and run cd to update runner's internal Dir
+	prog, err := syntax.NewParser().Parse(strings.NewReader("cd "+shellQuote(cwd)), "")
+	if err != nil {
+		return
+	}
+
+	// Temporarily discard output for this sync command
+	e.switchStdout.Set(io.Discard)
+	e.switchStderr.Set(io.Discard)
+	_ = e.runner.Run(context.Background(), prog)
+}
+
+// shellQuote quotes a string for safe use in shell commands.
+func shellQuote(s string) string {
+	// Use single quotes and escape any single quotes within
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
 
 // exitCodeFromError extracts exit code from interpreter error.

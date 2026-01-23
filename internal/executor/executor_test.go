@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -309,4 +310,112 @@ func TestExecutor_CdPersistsAcrossCommands(t *testing.T) {
 
 func writeExecutableScript(path, content string) error {
 	return os.WriteFile(path, []byte(content), 0755)
+}
+
+func TestExecutor_SyncRunnerDir(t *testing.T) {
+	exec := New()
+	var stdout, stderr bytes.Buffer
+
+	// Initialize the runner by running a command
+	_, err := exec.Execute(context.Background(), "pwd", &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("initial pwd failed: %v", err)
+	}
+	initialDir := strings.TrimSpace(stdout.String())
+
+	// Change directory via os.Chdir (simulating builtin cd)
+	tmpDir := t.TempDir()
+	// Resolve symlinks for comparison (macOS has /var -> /private/var)
+	tmpDirResolved, _ := filepath.EvalSymlinks(tmpDir)
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatalf("os.Chdir failed: %v", err)
+	}
+	defer os.Chdir(initialDir) // Restore
+
+	// Without SyncRunnerDir, the runner would still be in initialDir
+	// Call SyncRunnerDir to sync the runner's directory
+	exec.SyncRunnerDir()
+
+	// Now pwd should show the new directory
+	stdout.Reset()
+	_, err = exec.Execute(context.Background(), "pwd", &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("second pwd failed: %v", err)
+	}
+
+	newDir := strings.TrimSpace(stdout.String())
+	newDirResolved, _ := filepath.EvalSymlinks(newDir)
+	if newDirResolved != tmpDirResolved {
+		t.Errorf("SyncRunnerDir did not update runner dir: got %q, want %q", newDir, tmpDir)
+	}
+}
+
+func TestExecutor_FunctionPersistsAcrossCommands(t *testing.T) {
+	exec := New()
+	ctx := context.Background()
+	var stdout bytes.Buffer
+
+	// First execution: define a function
+	_, err := exec.Execute(ctx, `myfunc() { echo "function works!"; }`, &stdout, nil)
+	if err != nil {
+		t.Fatalf("Error defining function: %v", err)
+	}
+	stdout.Reset()
+
+	// Second execution: call the function (should persist from first execution)
+	_, err = exec.Execute(ctx, `myfunc`, &stdout, nil)
+	if err != nil {
+		t.Fatalf("Error calling function: %v", err)
+	}
+
+	result := strings.TrimSpace(stdout.String())
+	if result != "function works!" {
+		t.Errorf("Expected 'function works!', got: %q", result)
+	}
+}
+
+func TestExecutor_FunctionWithArgs(t *testing.T) {
+	exec := New()
+	ctx := context.Background()
+	var stdout bytes.Buffer
+
+	// Define function with arguments
+	_, err := exec.Execute(ctx, `greet() { echo "Hello, $1!"; }`, &stdout, nil)
+	if err != nil {
+		t.Fatalf("Error defining function: %v", err)
+	}
+	stdout.Reset()
+
+	// Call with argument
+	_, err = exec.Execute(ctx, `greet "World"`, &stdout, nil)
+	if err != nil {
+		t.Fatalf("Error calling function: %v", err)
+	}
+
+	result := strings.TrimSpace(stdout.String())
+	if result != "Hello, World!" {
+		t.Errorf("Expected 'Hello, World!', got: %q", result)
+	}
+}
+
+func TestExecutor_Reset(t *testing.T) {
+	exec := New()
+	ctx := context.Background()
+	var stdout bytes.Buffer
+
+	// Define a function
+	_, err := exec.Execute(ctx, `testfunc() { echo "exists"; }`, &stdout, nil)
+	if err != nil {
+		t.Fatalf("Error defining function: %v", err)
+	}
+	stdout.Reset()
+
+	// Reset the executor
+	exec.Reset()
+
+	// Try to call the function - should fail now
+	result, _ := exec.Execute(ctx, `testfunc`, &stdout, nil)
+	if result.ExitCode == 0 {
+		t.Error("Expected function to not exist after Reset()")
+	}
 }

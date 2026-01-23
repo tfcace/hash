@@ -6,7 +6,12 @@ set -euo pipefail
 #   ./scripts/build.sh            # Build to ./hash
 #   ./scripts/build.sh --install  # Build to /usr/local/bin/hash
 
-VERSION="${VERSION:-0.1.0}"
+# Read version from release-please manifest, fallback to 0.1.0
+if [[ -f ".release-please-manifest.json" ]]; then
+    VERSION="${VERSION:-$(jq -r '."."' .release-please-manifest.json 2>/dev/null || echo "0.1.0")}"
+else
+    VERSION="${VERSION:-0.1.0}"
+fi
 GIT_COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 JJ_CHANGE=$(jj log -r @ --no-graph -T 'change_id.shortest()' 2>/dev/null || echo "unknown")
 BUILD_DATE=$(date -u +%Y-%m-%d)
@@ -16,13 +21,24 @@ LDFLAGS="${LDFLAGS} -X github.com/tfcace/hash/internal/version.GitCommit=${GIT_C
 LDFLAGS="${LDFLAGS} -X github.com/tfcace/hash/internal/version.JjChange=${JJ_CHANGE}"
 LDFLAGS="${LDFLAGS} -X github.com/tfcace/hash/internal/version.BuildDate=${BUILD_DATE}"
 
-OUTPUT="./hash"
+INSTALL=false
 if [[ "${1:-}" == "--install" ]]; then
-    OUTPUT="/usr/local/bin/hash"
+    INSTALL=true
 fi
 
 echo "Building hash ${VERSION} (jj:${JJ_CHANGE} git:${GIT_COMMIT} ${BUILD_DATE})"
-go build -ldflags "${LDFLAGS}" -o "${OUTPUT}" ./cmd/hash
+go build -ldflags "${LDFLAGS}" -o "./hash" ./cmd/hash
 
-echo "Built: ${OUTPUT}"
-"${OUTPUT}" --version
+if [[ "$INSTALL" == "true" ]]; then
+    echo "Installing to /usr/local/bin/hash (requires sudo)"
+    sudo cp ./hash /usr/local/bin/hash
+    # Re-sign after copy to fix code signature invalidation on macOS
+    if [[ "$(uname)" == "Darwin" ]]; then
+        sudo codesign --force --sign - /usr/local/bin/hash
+    fi
+    echo "Installed: /usr/local/bin/hash"
+    /usr/local/bin/hash --version
+else
+    echo "Built: ./hash"
+    ./hash --version
+fi

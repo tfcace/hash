@@ -66,6 +66,8 @@ func (s *Shell) executeBuiltin(line string) (bool, error) {
 			if cwd, cwdErr := os.Getwd(); cwdErr == nil {
 				s.executor.SetExportedEnv("PWD", cwd)
 			}
+			// Sync the persistent runner's directory with the process
+			s.executor.SyncRunnerDir()
 		}
 		return true, err
 	case "exit", "quit":
