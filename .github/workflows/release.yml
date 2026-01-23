@@ -19,8 +19,9 @@ jobs:
       - uses: googleapis/release-please-action@v4
         id: release
         with:
-          release-type: go
           token: ${{ secrets.GITHUB_TOKEN }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
 
   build-and-release:
     needs: release-please
