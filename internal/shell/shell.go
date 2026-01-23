@@ -50,6 +50,9 @@ type Shell struct {
 
 	lastExitCode int
 	lastDuration time.Duration
+	lastCommand  string // Last executed command
+	lastStderr   string // Stderr from last command (truncated)
+	lastCwd      string // Working directory of last command
 
 	// History navigation state for editor mode
 	historyIndex     int    // -1 means current line (not in history)
@@ -371,8 +374,11 @@ func (s *Shell) Run(ctx context.Context) error {
 				s.clipboard.AddCommand(line)
 			}
 
+			// Capture stderr for issue reporting
+			stderrCap := newStderrCapture(os.Stderr)
+
 			// Execute external command
-			result, err := s.executor.Execute(ctx, line, os.Stdout, os.Stderr)
+			result, err := s.executor.Execute(ctx, line, os.Stdout, stderrCap)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "hash: %v\n", err)
 				s.lastExitCode = 1
@@ -384,6 +390,11 @@ func (s *Shell) Run(ctx context.Context) error {
 					s.clipboard.SetOutput(result.CapturedOutput)
 				}
 			}
+
+			// Store for issue reporting
+			s.lastCommand = line
+			s.lastStderr = stderrCap.String()
+			s.lastCwd, _ = os.Getwd()
 
 			// Record command in history
 			s.recordCommand(line, s.lastExitCode, s.lastDuration)
