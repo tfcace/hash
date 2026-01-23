@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 
 	"github.com/tfcace/hash/internal/config"
@@ -14,7 +15,12 @@ import (
 	"github.com/tfcace/hash/internal/trace"
 )
 
-const version = "0.1.0"
+var (
+	version   = "dev"
+	gitCommit = "unknown"
+	jjChange  = "unknown"
+	buildDate = "unknown"
+)
 
 func main() {
 	mode := DetectMode(os.Args)
@@ -38,7 +44,7 @@ func main() {
 			commandIdx = i
 			i++
 		case "-v", "--version":
-			fmt.Printf("hash version %s\n", version)
+			printVersion()
 			os.Exit(0)
 		case "-h", "--help":
 			printHelp()
@@ -95,6 +101,36 @@ Startup files:
   Login shell:       /etc/profile, ~/.profile, ~/.hash_profile
   Interactive shell: ~/.hashrc
   Login+Interactive: All of the above`)
+}
+
+func printVersion() {
+	// Build version string
+	v := fmt.Sprintf("hash %s", version)
+
+	// Add VCS info if available
+	var vcsInfo []string
+	if jjChange != "unknown" && jjChange != "" {
+		vcsInfo = append(vcsInfo, fmt.Sprintf("jj:%s", jjChange))
+	}
+	if gitCommit != "unknown" && gitCommit != "" {
+		vcsInfo = append(vcsInfo, fmt.Sprintf("git:%s", gitCommit))
+	}
+
+	if len(vcsInfo) > 0 || buildDate != "unknown" {
+		v += " ("
+		if len(vcsInfo) > 0 {
+			v += strings.Join(vcsInfo, " ")
+		}
+		if buildDate != "unknown" && buildDate != "" {
+			if len(vcsInfo) > 0 {
+				v += " "
+			}
+			v += buildDate
+		}
+		v += ")"
+	}
+
+	fmt.Println(v)
 }
 
 // runCommand executes a single command and returns its exit code.
