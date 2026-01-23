@@ -1007,6 +1007,70 @@ style = "helix"
 
 ---
 
+## Built-in Commands
+
+Hash includes several built-in commands that run directly in the shell process.
+
+### cd
+
+Change directory. Can be disabled via `shell.disable_builtins` to use zoxide or similar.
+
+```bash
+cd ~/projects
+cd -              # Previous directory
+```
+
+### history
+
+View and search command history.
+
+```bash
+history           # Show recent 20 commands
+history search <query>   # Search history
+history failed    # Show failed commands
+history sudo      # Show sudo commands
+history asked     # Show agent interactions
+```
+
+### copy
+
+Copy commands and output to system clipboard.
+
+```bash
+copy cmd          # Copy last command
+copy out          # Copy last output
+copy all          # Copy command + output
+copy cmd 2        # Copy 2nd-to-last command
+```
+
+### issue
+
+Submit issues to the Hash GitHub repository. Opens your editor with a pre-filled template including system context.
+
+```bash
+issue [TITLE]          # Open editor with template
+issue --last           # Pre-fill with last command context
+issue -l               # Same as --last
+issue "bug title"      # Start with title
+```
+
+Requires `gh` CLI to be installed and authenticated.
+
+### !!
+
+Quick shortcut for `issue --last`. Type `!!` after a failed command to quickly submit an issue with context pre-filled.
+
+```bash
+$ some-command-that-fails
+hash: command not found
+$ !!
+# Opens issue editor with error context
+```
+
+If the last command succeeded, you'll be prompted for confirmation before opening the issue editor.
+
+---
+
 ## Aliases File
 
 **File:** `~/.config/hash/aliases.toml`
@@ -1052,7 +1116,16 @@ These environment variables override config file settings.
 | `HASH_KEYBINDINGS` | `shell.keybindings` | `vim` |
 | `HASH_HISTORY` | `history.path` | `/tmp/hash_history.db` |
 | `HASH_CLIPBOARD_MAX_OUTPUT_SIZE` | `clipboard.max_output_size` | `unlimited` |
+| `HASH_SRC` | Development source directory | `$HOME/projects/hash` |
 | `EDITOR` | `shell.editor` | `nvim` |
+
+### HASH_SRC
+
+Path to Hash source directory. Used by `hash-rebuild` and `hash-upgrade` functions for development workflows. See the README for setup instructions.
+
+```bash
+export HASH_SRC="$HOME/projects/hash"
+```
 
 ---
 
