@@ -8,6 +8,8 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
+
+	"github.com/tfcace/hash/internal/version"
 )
 
 const issueTemplate = `%s
@@ -185,9 +187,7 @@ func (s *Shell) findEditor() string {
 }
 
 func (s *Shell) getVersionString() string {
-	// This would ideally use the same version info as --version
-	// For now, return a placeholder that will be replaced when we wire up version
-	return "dev"
+	return version.String()
 }
 
 func (s *Shell) getTerminal() string {

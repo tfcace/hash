@@ -40,10 +40,10 @@ jobs:
           GIT_COMMIT=$(git rev-parse --short HEAD)
           BUILD_DATE=$(date -u +%Y-%m-%d)
 
-          LDFLAGS="-X main.version=${VERSION}"
-          LDFLAGS="${LDFLAGS} -X main.gitCommit=${GIT_COMMIT}"
-          LDFLAGS="${LDFLAGS} -X main.jjChange=unknown"
-          LDFLAGS="${LDFLAGS} -X main.buildDate=${BUILD_DATE}"
+          LDFLAGS="-X github.com/tfcace/hash/internal/version.Version=${VERSION}"
+          LDFLAGS="${LDFLAGS} -X github.com/tfcace/hash/internal/version.GitCommit=${GIT_COMMIT}"
+          LDFLAGS="${LDFLAGS} -X github.com/tfcace/hash/internal/version.JjChange=unknown"
+          LDFLAGS="${LDFLAGS} -X github.com/tfcace/hash/internal/version.BuildDate=${BUILD_DATE}"
 
           go build -ldflags "${LDFLAGS}" -o hash ./cmd/hash
           ./hash --version
@@ -85,10 +85,10 @@ jobs:
             def install
               commit = \`git rev-parse --short HEAD\`.strip
               ldflags = %W[
-                -X main.version=#{version}
-                -X main.gitCommit=#{commit}
-                -X main.jjChange=unknown
-                -X main.buildDate=#{Time.now.utc.strftime("%Y-%m-%d")}
+                -X github.com/tfcace/hash/internal/version.Version=#{version}
+                -X github.com/tfcace/hash/internal/version.GitCommit=#{commit}
+                -X github.com/tfcace/hash/internal/version.JjChange=unknown
+                -X github.com/tfcace/hash/internal/version.BuildDate=#{Time.now.utc.strftime("%Y-%m-%d")}
               ]
               system "go", "build", *std_go_args(ldflags:), "./cmd/hash"
             end

@@ -6,20 +6,13 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strings"
 	"syscall"
 
 	"github.com/tfcace/hash/internal/config"
 	"github.com/tfcace/hash/internal/executor"
 	"github.com/tfcace/hash/internal/shell"
 	"github.com/tfcace/hash/internal/trace"
-)
-
-var (
-	version   = "dev"
-	gitCommit = "unknown"
-	jjChange  = "unknown"
-	buildDate = "unknown"
+	"github.com/tfcace/hash/internal/version"
 )
 
 func main() {
@@ -104,33 +97,7 @@ Startup files:
 }
 
 func printVersion() {
-	// Build version string
-	v := fmt.Sprintf("hash %s", version)
-
-	// Add VCS info if available
-	var vcsInfo []string
-	if jjChange != "unknown" && jjChange != "" {
-		vcsInfo = append(vcsInfo, fmt.Sprintf("jj:%s", jjChange))
-	}
-	if gitCommit != "unknown" && gitCommit != "" {
-		vcsInfo = append(vcsInfo, fmt.Sprintf("git:%s", gitCommit))
-	}
-
-	if len(vcsInfo) > 0 || buildDate != "unknown" {
-		v += " ("
-		if len(vcsInfo) > 0 {
-			v += strings.Join(vcsInfo, " ")
-		}
-		if buildDate != "unknown" && buildDate != "" {
-			if len(vcsInfo) > 0 {
-				v += " "
-			}
-			v += buildDate
-		}
-		v += ")"
-	}
-
-	fmt.Println(v)
+	fmt.Printf("hash %s\n", version.String())
 }
 
 // runCommand executes a single command and returns its exit code.

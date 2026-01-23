@@ -11,10 +11,10 @@ GIT_COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 JJ_CHANGE=$(jj log -r @ --no-graph -T 'change_id.shortest()' 2>/dev/null || echo "unknown")
 BUILD_DATE=$(date -u +%Y-%m-%d)
 
-LDFLAGS="-X main.version=${VERSION}"
-LDFLAGS="${LDFLAGS} -X main.gitCommit=${GIT_COMMIT}"
-LDFLAGS="${LDFLAGS} -X main.jjChange=${JJ_CHANGE}"
-LDFLAGS="${LDFLAGS} -X main.buildDate=${BUILD_DATE}"
+LDFLAGS="-X github.com/tfcace/hash/internal/version.Version=${VERSION}"
+LDFLAGS="${LDFLAGS} -X github.com/tfcace/hash/internal/version.GitCommit=${GIT_COMMIT}"
+LDFLAGS="${LDFLAGS} -X github.com/tfcace/hash/internal/version.JjChange=${JJ_CHANGE}"
+LDFLAGS="${LDFLAGS} -X github.com/tfcace/hash/internal/version.BuildDate=${BUILD_DATE}"
 
 OUTPUT="./hash"
 if [[ "${1:-}" == "--install" ]]; then
