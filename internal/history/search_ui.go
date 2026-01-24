@@ -106,6 +106,9 @@ func (ui *SearchUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (ui *SearchUI) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Clear status message on any keypress
+	ui.statusMessage = ""
+
 	switch msg.String() {
 	case "ctrl+c", "esc":
 		ui.selected = -1
@@ -409,7 +412,7 @@ func (ui *SearchUI) copyToClipboard(text string) error {
 func (ui *SearchUI) copyCommand() tea.Cmd {
 	if ui.selected < 0 || ui.selected >= len(ui.results) {
 		ui.statusMessage = "No selection"
-		return ui.clearStatusAfter()
+		return nil
 	}
 
 	cmd := ui.results[ui.selected].Command
@@ -418,13 +421,13 @@ func (ui *SearchUI) copyCommand() tea.Cmd {
 	} else {
 		ui.statusMessage = "Copied!"
 	}
-	return ui.clearStatusAfter()
+	return nil
 }
 
 func (ui *SearchUI) copyOutput() tea.Cmd {
 	if ui.selected < 0 || ui.selected >= len(ui.results) {
 		ui.statusMessage = "No selection"
-		return ui.clearStatusAfter()
+		return nil
 	}
 
 	cmd := ui.results[ui.selected].Command
@@ -436,7 +439,7 @@ func (ui *SearchUI) copyOutput() tea.Cmd {
 	} else {
 		ui.statusMessage = "Copied output!"
 	}
-	return ui.clearStatusAfter()
+	return nil
 }
 
 func (ui *SearchUI) findOutputForCommand(cmd string) string {

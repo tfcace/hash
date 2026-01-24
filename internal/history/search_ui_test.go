@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/tfcace/hash/internal/prompt"
 )
 
@@ -406,6 +407,33 @@ func TestSearchUI_TimestampFormatting(t *testing.T) {
 		if !strings.Contains(result, tc.contains) {
 			t.Errorf("formatTimestamp(%v) = %q, want to contain %q", tc.duration, result, tc.contains)
 		}
+	}
+}
+
+func TestSearchUI_PersistentCopyConfirmation(t *testing.T) {
+	// The status message should not auto-clear
+	// It should only clear on next user action
+
+	store, _ := NewStore(":memory:")
+	defer store.Close()
+	store.Add(Command{Command: "test", Timestamp: time.Now()})
+
+	ui := NewSearchUI(store, prompt.DefaultPalette())
+	ui.searchNow()
+	ui.statusMessage = "Copied!"
+
+	// Status should persist in view
+	view := ui.View()
+	if !strings.Contains(view, "Copied!") {
+		t.Error("Status message should be visible")
+	}
+
+	// Simulate a keypress (any navigation)
+	ui.handleKey(tea.KeyMsg{Type: tea.KeyDown})
+
+	// Status should be cleared after keypress
+	if ui.statusMessage != "" {
+		t.Error("Status should clear after keypress")
 	}
 }
 
