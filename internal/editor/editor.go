@@ -124,6 +124,7 @@ func (e *Editor) SetGhostTextStreaming(textCh <-chan string, errCh <-chan error)
 	e.ghostErrChan = errCh
 	e.ghost.Clear()
 	e.ghost.SetStreaming(true)
+	e.ghost.FromAgent = true // Agent suggestions show hints
 	// Dismiss any active completion menu - ghost text takes precedence
 	e.dismissCompletion()
 }
@@ -458,10 +459,11 @@ func (e *Editor) render() {
 	// Pass ghost text to display for inline rendering
 	ghostText := ""
 	ghostStreaming := e.ghost.Streaming
+	ghostFromAgent := e.ghost.FromAgent
 	if e.ghost.Active && !e.ghost.IsEmpty() {
 		ghostText = e.ghost.Remaining()
 	}
-	e.display.RenderWithGhost(e.state.Buffer, e.state.Cursor, hasSelection, ghostText, ghostStreaming, e.streamingModel)
+	e.display.RenderWithGhost(e.state.Buffer, e.state.Cursor, hasSelection, ghostText, ghostStreaming, ghostFromAgent, e.streamingModel)
 
 	// Render completion menu if active
 	if e.completionActive && len(e.completionItems) > 0 {

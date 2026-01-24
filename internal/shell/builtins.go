@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/charmbracelet/lipgloss"
 	"github.com/tfcace/hash/internal/clipboard"
 	"github.com/tfcace/hash/internal/config"
 	"github.com/tfcace/hash/internal/history"
@@ -336,25 +337,41 @@ func (s *Shell) builtinTips(args []string) error {
 		return nil
 	}
 
-	tips := `Hash Tips:
+	// Use colors from starship palette
+	primary := s.colorPalette.Primary
+	dim := s.colorPalette.Dim
 
-Navigation:
-  Ctrl+R      Search command history
-  Ctrl+P      Context picker for AI requests
-  Up/Down     Browse history
+	headerStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color(primary)).
+		Bold(true)
 
-AI features:
-  ??          Full command generation
-  cmd | ??    Pipe to AI for transformation
-  cmd ??      Inline completion
+	keyStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color(primary))
 
-Clipboard:
-  Ctrl+Y      Copy last command
-  Ctrl+O      Copy last output
+	dimStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color(dim))
 
-Run 'tips off' to disable startup hints.
-`
-	fmt.Print(tips)
+	fmt.Println(headerStyle.Render("Hash Tips:"))
+	fmt.Println()
+
+	fmt.Println(headerStyle.Render("Navigation:"))
+	fmt.Printf("  %s  %s\n", keyStyle.Render("Ctrl+R"), dimStyle.Render("Search command history"))
+	fmt.Printf("  %s  %s\n", keyStyle.Render("Ctrl+P"), dimStyle.Render("Context picker for AI requests"))
+	fmt.Printf("  %s %s\n", keyStyle.Render("Up/Down"), dimStyle.Render("Browse history"))
+	fmt.Println()
+
+	fmt.Println(headerStyle.Render("AI features:"))
+	fmt.Printf("  %s      %s\n", keyStyle.Render("??"), dimStyle.Render("Full command generation"))
+	fmt.Printf("  %s  %s\n", keyStyle.Render("cmd | ??"), dimStyle.Render("Pipe to AI for transformation"))
+	fmt.Printf("  %s    %s\n", keyStyle.Render("cmd ??"), dimStyle.Render("Inline completion"))
+	fmt.Println()
+
+	fmt.Println(headerStyle.Render("Clipboard:"))
+	fmt.Printf("  %s  %s\n", keyStyle.Render("Ctrl+Y"), dimStyle.Render("Copy last command"))
+	fmt.Printf("  %s  %s\n", keyStyle.Render("Ctrl+O"), dimStyle.Render("Copy last output"))
+	fmt.Println()
+
+	fmt.Println(dimStyle.Render("Run 'tips off' to disable startup hints."))
 	return nil
 }
 

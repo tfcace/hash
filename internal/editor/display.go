@@ -223,7 +223,8 @@ func (d *Display) Render(buf *Buffer, cur *Cursor, hasSelection bool) {
 
 // RenderWithGhost draws the buffer with inline ghost text suggestion.
 // Ghost text appears after the cursor in dim gray, showing the suggested completion.
-func (d *Display) RenderWithGhost(buf *Buffer, cur *Cursor, hasSelection bool, ghostText string, streaming bool, modelName string) {
+// fromAgent indicates whether this is an agent suggestion (show hints) or prediction (fish-style).
+func (d *Display) RenderWithGhost(buf *Buffer, cur *Cursor, hasSelection bool, ghostText string, streaming bool, fromAgent bool, modelName string) {
 	var sb strings.Builder
 
 	// Hide cursor during render for flicker-free updates
@@ -281,7 +282,7 @@ func (d *Display) RenderWithGhost(buf *Buffer, cur *Cursor, hasSelection bool, g
 		// Render ghost text on the cursor's line, after the cursor position
 		if i == cursorRow && (ghostText != "" || streaming) {
 			if ghostText == "" && streaming {
-				// Show "Thinking..." while waiting for first chunk
+				// Show "Thinking..." while waiting for first chunk (agent only)
 				if modelName != "" {
 					fmt.Fprintf(&sb, "\x1b[90;3m Thinking (%s)...\x1b[0m", modelName)
 				} else {
@@ -295,16 +296,23 @@ func (d *Display) RenderWithGhost(buf *Buffer, cur *Cursor, hasSelection bool, g
 					ghostFirstLine = ghostText[:newlineIdx]
 				}
 
-				// Render ghost text in dim gray with italic
-				sb.WriteString("\x1b[90;3m") // Dim + italic
-				sb.WriteString(ghostFirstLine)
-				sb.WriteString(ansiReset)
+				if fromAgent {
+					// Agent suggestions: dim + italic with hints
+					sb.WriteString("\x1b[90;3m") // Dim + italic
+					sb.WriteString(ghostFirstLine)
+					sb.WriteString(ansiReset)
 
-				// Show streaming indicator if still receiving, otherwise show accept hint
-				if streaming {
-					sb.WriteString("\x1b[90m▌\x1b[0m")
+					// Show streaming indicator if still receiving, otherwise show accept hint
+					if streaming {
+						sb.WriteString("\x1b[90m▌\x1b[0m")
+					} else {
+						sb.WriteString("\x1b[90m   [enter]run  [tab]edit  [esc]\x1b[0m")
+					}
 				} else {
-					sb.WriteString("\x1b[90m   [enter]run  [tab]edit  [esc]\x1b[0m")
+					// Predictions: fish-shell style - just dim gray, no hints
+					sb.WriteString("\x1b[38;5;242m") // Gray (brighter than 90)
+					sb.WriteString(ghostFirstLine)
+					sb.WriteString(ansiReset)
 				}
 			}
 		}

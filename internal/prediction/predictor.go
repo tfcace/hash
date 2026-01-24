@@ -113,10 +113,11 @@ func (p *Predictor) Record(prevCmd, cmd, cwd string, paths []string) {
 	}
 
 	// Record command sequence
+	// Normalize prevCmd for matching, but store full cmd for suggestion
 	if prevCmd != "" {
 		p.store.RecordSequence(
 			normalizeCommand(prevCmd),
-			normalizeCommand(cmd),
+			cmd, // Store full command so we can suggest "echo world" not just "echo"
 			cwd,
 		)
 	}

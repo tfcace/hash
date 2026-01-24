@@ -48,6 +48,7 @@ type Shell struct {
 	learning     *learning.FixStore
 	clipboard    *clipboard.Buffer
 	predictor    *prediction.Predictor
+	suggestor    *CommandSuggestor
 	colorPalette prompt.Palette
 
 	lastExitCode int
@@ -196,6 +197,9 @@ func New(cfg *config.Config) (*Shell, error) {
 		}
 	}
 
+	// Initialize command suggestor (PATH caching happens in background)
+	suggestor := NewCommandSuggestor(historyStore)
+
 	// Initialize clipboard buffer (configurable size and output limit)
 	clipboardBuf := clipboard.NewBuffer(cfg.Clipboard.BufferSize)
 	maxOutputSizeStr := cfg.Clipboard.MaxOutputSize
@@ -267,6 +271,7 @@ func New(cfg *config.Config) (*Shell, error) {
 		learning:     learningStore,
 		clipboard:    clipboardBuf,
 		predictor:    predictor,
+		suggestor:    suggestor,
 		colorPalette: colorPalette,
 		historyIndex: -1, // Start before history (current line)
 	}
@@ -423,8 +428,18 @@ func (s *Shell) Run(ctx context.Context) error {
 			// Execute external command
 			result, err := s.executor.Execute(ctx, line, os.Stdout, stderrCap)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "hash: %v\n", err)
-				s.lastExitCode = 1
+				// Check for command-not-found specifically
+				var cnf *executor.CommandNotFoundError
+				if errors.As(err, &cnf) {
+					suggestions := s.suggestor.Suggest(cnf.Command)
+					installHint := s.suggestor.InstallHint(cnf.Command)
+					handler := NewErrorHandler(s.learning)
+					handler.HandleCommandNotFound(cnf.Command, suggestions, installHint)
+					s.lastExitCode = 127 // Standard "command not found" exit code
+				} else {
+					fmt.Fprintf(os.Stderr, "hash: %v\n", err)
+					s.lastExitCode = 1
+				}
 			} else {
 				s.lastExitCode = result.ExitCode
 				s.lastDuration = result.Duration

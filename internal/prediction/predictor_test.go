@@ -23,8 +23,8 @@ func TestPredictor_PredictCommand(t *testing.T) {
 	if prediction == "" {
 		t.Fatal("Should return a prediction")
 	}
-	if prediction != "npm" {
-		t.Errorf("Prediction = %q, want %q", prediction, "npm")
+	if prediction != "npm test" {
+		t.Errorf("Prediction = %q, want %q", prediction, "npm test")
 	}
 }
 

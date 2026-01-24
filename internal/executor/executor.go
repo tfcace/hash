@@ -741,6 +741,17 @@ func (e *Executor) Execute(ctx context.Context, command string, stdout, stderr i
 			formatBytes(lw.LimitSize()))
 	}
 
+	// Return CommandNotFoundError to caller for special handling
+	var cnf *CommandNotFoundError
+	if errors.As(err, &cnf) {
+		return &Result{
+			ExitCode:       127,
+			Duration:       time.Since(start),
+			Command:        command,
+			CapturedOutput: captureBuf.String(),
+		}, cnf
+	}
+
 	return &Result{
 		ExitCode:       exitCodeFromError(err),
 		Duration:       time.Since(start),
@@ -756,7 +767,7 @@ func (e *Executor) execHandler(next interp.ExecHandlerFunc) interp.ExecHandlerFu
 
 		path, err := interp.LookPathDir(hc.Dir, hc.Env, args[0])
 		if err != nil {
-			return err
+			return &CommandNotFoundError{Command: args[0]}
 		}
 
 		cmd := exec.CommandContext(ctx, path, args[1:]...)
