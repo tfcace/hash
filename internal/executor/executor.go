@@ -580,6 +580,14 @@ func (e *Executor) initRunner() error {
 		interp.ExecHandlers(e.execHandler),
 	}
 
+	// Set positional parameters ($1, $2, etc.) if provided
+	// Skip $0 since that's handled separately via syntax.Parse filename
+	if len(e.positionalArgs) > 1 {
+		// interp.Params expects "--" followed by the parameters
+		params := append([]string{"--"}, e.positionalArgs[1:]...)
+		opts = append(opts, interp.Params(params...))
+	}
+
 	runner, err := interp.New(opts...)
 	if err != nil {
 		return fmt.Errorf("failed to create interpreter: %w", err)

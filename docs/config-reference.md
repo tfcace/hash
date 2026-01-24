@@ -874,6 +874,67 @@ copy_both = "alt+shift+c"
 
 ---
 
+## [prediction]
+
+Command and path prediction based on usage patterns.
+
+### prediction.enabled
+
+**Type:** `boolean`
+**Default:** `true`
+
+Enable command prediction. When enabled, Hash learns command sequences and suggests the next likely command as ghost text after each successful command.
+
+```toml
+enabled = true
+```
+
+### prediction.accept_keys
+
+**Type:** `array of strings`
+**Default:** `["right", "tab"]`
+
+Keys that accept the predicted ghost text.
+
+```toml
+accept_keys = ["right", "tab"]
+```
+
+### prediction.confidence_threshold
+
+**Type:** `float (0.0 - 1.0)`
+**Default:** `0.6`
+
+Minimum confidence score required to show a prediction. Higher values show fewer but more reliable predictions.
+
+```toml
+confidence_threshold = 0.6
+```
+
+### prediction.path_min_count
+
+**Type:** `integer`
+**Default:** `2`
+
+Minimum times a path must be used with a command before it's suggested in completions.
+
+```toml
+path_min_count = 2
+```
+
+### prediction.path_recency_boost_hours
+
+**Type:** `integer`
+**Default:** `24`
+
+Time window (in hours) for recency boost in prediction scoring. More recently used patterns score higher.
+
+```toml
+path_recency_boost_hours = 24
+```
+
+---
+
 ## [ui]
 
 User interface settings.
@@ -1056,6 +1117,33 @@ issue "bug title"      # Start with title
 
 Requires `gh` CLI to be installed and authenticated.
 
+### status
+
+Show the current status of all shell subsystems.
+
+```bash
+status
+```
+
+Output includes:
+- Hash version
+- Prompt mode and availability
+- History database path and entry count
+- Learning system status and pattern count
+- Agent connection status
+- PTY availability
+- Clipboard availability
+
+### tips
+
+Show helpful tips about Hash features.
+
+```bash
+tips           # Show all tips
+tips off       # Disable startup hints
+tips on        # Re-enable hints
+```
+
 ### !!
 
 Quick shortcut for `issue --last`. Type `!!` after a failed command to quickly submit an issue with context pre-filled.
@@ -1209,6 +1297,13 @@ preserve_colors = false
 copy_command = "alt+c"
 copy_output = "alt+o"
 copy_both = "alt+shift+c"
+
+[prediction]
+enabled = true
+accept_keys = ["right", "tab"]
+confidence_threshold = 0.6
+path_min_count = 2
+path_recency_boost_hours = 24
 
 [ui]
 context_picker_key = "ctrl+p"
