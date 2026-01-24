@@ -2,8 +2,11 @@ package shell
 
 import (
 	"bytes"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/tfcace/hash/internal/learning"
 )
 
 func TestErrorHandler_FormatPrompt(t *testing.T) {
@@ -42,5 +45,43 @@ func TestErrorHandler_ShowsStderrInline(t *testing.T) {
 	}
 	if !strings.Contains(output, "go mod tidy") {
 		t.Error("Should show stderr hint")
+	}
+}
+
+func TestErrorHandler_ShowsLowConfidenceFixes(t *testing.T) {
+	// Create a mock store with a low-confidence fix
+	tmpDir := t.TempDir()
+	store, err := learning.NewFixStore(filepath.Join(tmpDir, "learning.db"))
+	if err != nil {
+		t.Fatalf("NewFixStore error: %v", err)
+	}
+	defer store.Close()
+
+	// Record a fix with low confidence (2 tries, 1 success = 0.5)
+	pattern := learning.Pattern{
+		CommandPattern: "{script}",
+		ErrorPattern:   "permission denied",
+		ExitCode:       126,
+	}
+	store.RecordFix(pattern, "chmod +x {script}", true)
+	store.RecordFix(pattern, "chmod +x {script}", false)
+
+	var buf bytes.Buffer
+	h := NewErrorHandler(store)
+	h.out = &buf
+
+	h.HandleError("./script.sh", "permission denied", 126)
+
+	output := buf.String()
+
+	// Should show with "?" prefix for low confidence
+	if !strings.Contains(output, "?") {
+		t.Error("Should show ? prefix for low confidence fix")
+	}
+	if !strings.Contains(output, "chmod") {
+		t.Error("Should show the fix command")
+	}
+	if !strings.Contains(output, "tried") {
+		t.Error("Should show attempt count for low confidence")
 	}
 }
