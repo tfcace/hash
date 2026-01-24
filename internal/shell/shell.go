@@ -634,11 +634,24 @@ func (s *Shell) navigateHistory(dir int, currentLine string) string {
 }
 
 func (s *Shell) handleAgentRequest(ctx context.Context, parsed parser.ParseResult) {
+	// Show which mode was detected
+	var modeLabel string
+	switch parsed.Type {
+	case parser.CommandTypeAgent:
+		modeLabel = "command"
+	case parser.CommandTypeAgentPipe:
+		modeLabel = "pipe"
+	case parser.CommandTypeAgentInline:
+		modeLabel = "inline"
+	}
+	fmt.Fprintf(os.Stdout, "\033[90m[agent: %s]\033[0m ", modeLabel)
+
 	if s.agentHandler == nil {
-		fmt.Fprintf(os.Stderr, "hash: no agent configured\n")
+		fmt.Fprintf(os.Stderr, "\n\033[31m✗ Agent not configured.\033[0m\n")
 		fmt.Fprintf(os.Stderr, "  Configure an agent in ~/.config/hash/config.toml:\n")
 		fmt.Fprintf(os.Stderr, "  [agent]\n")
 		fmt.Fprintf(os.Stderr, "  command = \"claude\"\n")
+		fmt.Fprintf(os.Stderr, "  See docs/config-reference.md for options.\n")
 		s.lastExitCode = 1
 		s.updatePrompt()
 		return
