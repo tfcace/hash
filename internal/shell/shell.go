@@ -432,7 +432,16 @@ func (s *Shell) Run(ctx context.Context) error {
 				var cnf *executor.CommandNotFoundError
 				if errors.As(err, &cnf) {
 					suggestions := s.suggestor.Suggest(cnf.Command)
+					// Check typed command first, then suggestions for install hints
 					installHint := s.suggestor.InstallHint(cnf.Command)
+					if installHint == "" {
+						for _, sug := range suggestions {
+							if hint := s.suggestor.InstallHint(sug); hint != "" {
+								installHint = hint
+								break
+							}
+						}
+					}
 					handler := NewErrorHandler(s.learning)
 					handler.HandleCommandNotFound(cnf.Command, suggestions, installHint)
 					s.lastExitCode = 127 // Standard "command not found" exit code
