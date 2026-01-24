@@ -30,7 +30,7 @@ func isBuiltinEnabled(cfg *config.Config, name string) bool {
 // isBuiltin returns true if the command is a shell builtin.
 func isBuiltin(cmd string) bool {
 	switch cmd {
-	case "cd", "exit", "quit", "history", "copy", "issue", "status":
+	case "cd", "exit", "quit", "history", "copy", "issue", "status", "tips":
 		return true
 	default:
 		return false
@@ -81,6 +81,8 @@ func (s *Shell) executeBuiltin(line string) (bool, error) {
 		return true, s.builtinIssue(args)
 	case "status":
 		return true, s.builtinStatus()
+	case "tips":
+		return true, s.builtinTips(args)
 	default:
 		return false, nil
 	}
@@ -318,6 +320,41 @@ type ClipboardBuffer = clipboard.Buffer
 func (s *Shell) builtinStatus() error {
 	status := s.collectStatus()
 	fmt.Print(status.Format())
+	return nil
+}
+
+// builtinTips shows helpful tips about Hash features.
+func (s *Shell) builtinTips(args []string) error {
+	// Handle "tips off" to disable hints (stored in config)
+	if len(args) > 0 && args[0] == "off" {
+		fmt.Println("Hints disabled. Run 'tips on' to re-enable.")
+		// TODO: persist to config
+		return nil
+	}
+	if len(args) > 0 && args[0] == "on" {
+		fmt.Println("Hints enabled.")
+		return nil
+	}
+
+	tips := `Hash Tips:
+
+Navigation:
+  Ctrl+R      Search command history
+  Ctrl+P      Context picker for AI requests
+  Up/Down     Browse history
+
+AI features:
+  ??          Full command generation
+  cmd | ??    Pipe to AI for transformation
+  cmd ??      Inline completion
+
+Clipboard:
+  Ctrl+Y      Copy last command
+  Ctrl+O      Copy last output
+
+Run 'tips off' to disable startup hints.
+`
+	fmt.Print(tips)
 	return nil
 }
 
