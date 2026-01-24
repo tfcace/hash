@@ -20,16 +20,25 @@ type CommandSuggestor struct {
 	pathCacheMu    sync.RWMutex
 	historyStore   *history.Store
 	packageManager string
+	pmOnce         sync.Once
 }
 
 // NewCommandSuggestor creates a new suggestor and starts PATH caching in background.
 func NewCommandSuggestor(historyStore *history.Store) *CommandSuggestor {
 	s := &CommandSuggestor{
-		historyStore:   historyStore,
-		packageManager: detectPackageManager(),
+		historyStore: historyStore,
+		// packageManager detected lazily to allow PATH to be set up first
 	}
 	go s.buildPathCache()
 	return s
+}
+
+// getPackageManager returns the detected package manager, detecting lazily on first call.
+func (s *CommandSuggestor) getPackageManager() string {
+	s.pmOnce.Do(func() {
+		s.packageManager = detectPackageManager()
+	})
+	return s.packageManager
 }
 
 // Suggest returns up to 3 similar command names.
@@ -63,7 +72,7 @@ func (s *CommandSuggestor) InstallHint(cmd string) string {
 		return ""
 	}
 
-	switch s.packageManager {
+	switch s.getPackageManager() {
 	case "brew":
 		return hint.brew
 	case "apt":
