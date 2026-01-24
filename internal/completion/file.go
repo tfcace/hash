@@ -149,7 +149,15 @@ func getCompletionPrefix(original, matched string) string {
 	// Return the directory part of original
 	dir := filepath.Dir(original)
 	if dir == "." {
+		// Preserve "./" if user explicitly typed it
+		if strings.HasPrefix(original, "./") {
+			return "./"
+		}
 		return ""
+	}
+	// filepath.Dir strips "./" prefix, so restore it if original had it
+	if strings.HasPrefix(original, "./") && !strings.HasPrefix(dir, "./") {
+		dir = "./" + dir
 	}
 	// Don't add trailing slash if dir already ends with one (root directory case)
 	if strings.HasSuffix(dir, "/") {

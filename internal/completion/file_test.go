@@ -362,3 +362,36 @@ func TestFileCompleter_RootFilesystem(t *testing.T) {
 		}
 	}
 }
+
+func TestFileCompleter_DotSlashPrefix(t *testing.T) {
+	tmpDir := t.TempDir()
+	os.Mkdir(filepath.Join(tmpDir, "scripts"), 0755)
+	os.WriteFile(filepath.Join(tmpDir, "scripts", "build.sh"), []byte{}, 0755)
+	os.WriteFile(filepath.Join(tmpDir, "scripts", "test.sh"), []byte{}, 0755)
+
+	oldDir, _ := os.Getwd()
+	os.Chdir(tmpDir)
+	defer os.Chdir(oldDir)
+
+	completer := NewFileCompleter()
+	ctx := context.Background()
+
+	// Complete "./scripts/buil" should preserve "./" prefix
+	result, err := completer.Complete(ctx, "./scripts/buil", 14)
+	if err != nil {
+		t.Fatalf("Complete() error = %v", err)
+	}
+
+	// Prefix should be "./scripts/" not "scripts/"
+	if result.Prefix != "./scripts/" {
+		t.Errorf("Prefix = %q, want %q", result.Prefix, "./scripts/")
+	}
+
+	// Verify the full path includes "./"
+	for _, item := range result.Items {
+		fullPath := result.Prefix + item.Value
+		if !strings.HasPrefix(fullPath, "./") {
+			t.Errorf("Full path should start with './', got %q", fullPath)
+		}
+	}
+}
