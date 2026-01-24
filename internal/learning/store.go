@@ -167,6 +167,13 @@ func calculateScore(successCount, failureCount int, lastUsed time.Time) float64 
 	return (successRate * 0.5) + (recencyBoost * 0.3) + (frequencyBoost * 0.2)
 }
 
+// PatternCount returns the number of unique patterns stored.
+func (s *FixStore) PatternCount() (int64, error) {
+	var count int64
+	err := s.db.QueryRow("SELECT COUNT(DISTINCT pattern_hash) FROM fixes").Scan(&count)
+	return count, err
+}
+
 // Close closes the database.
 func (s *FixStore) Close() error {
 	return s.db.Close()
