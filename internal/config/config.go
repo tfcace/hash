@@ -16,6 +16,7 @@ type Config struct {
 	History     HistoryConfig     `toml:"history"`
 	Completions CompletionsConfig `toml:"completions"`
 	Clipboard   ClipboardConfig   `toml:"clipboard"`
+	Prediction  PredictionConfig  `toml:"prediction"`
 }
 
 type ShellConfig struct {
@@ -78,6 +79,15 @@ type ClipboardConfig struct {
 	PreserveColors bool   `toml:"preserve_colors"`
 }
 
+// PredictionConfig configures command and path prediction.
+type PredictionConfig struct {
+	Enabled             bool     `toml:"enabled"`
+	AcceptKeys          []string `toml:"accept_keys"`
+	ConfidenceThreshold float64  `toml:"confidence_threshold"`
+	PathMinCount        int      `toml:"path_min_count"`
+	PathRecencyHours    int      `toml:"path_recency_boost_hours"`
+}
+
 // ParseMaxOutputSize parses the MaxOutputSize string and returns bytes.
 func (c *ClipboardConfig) ParseMaxOutputSize() (int64, error) {
 	return ParseSize(c.MaxOutputSize)
@@ -127,6 +137,13 @@ func Default() *Config {
 			MaxOutputSize:  "1MB",
 			BufferSize:     100,
 			PreserveColors: false,
+		},
+		Prediction: PredictionConfig{
+			Enabled:             true,
+			AcceptKeys:          []string{"right", "tab"},
+			ConfidenceThreshold: 0.6,
+			PathMinCount:        2,
+			PathRecencyHours:    24,
 		},
 	}
 }

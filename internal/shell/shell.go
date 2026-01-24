@@ -20,6 +20,7 @@ import (
 	"github.com/tfcace/hash/internal/history"
 	"github.com/tfcace/hash/internal/learning"
 	"github.com/tfcace/hash/internal/parser"
+	"github.com/tfcace/hash/internal/prediction"
 	"github.com/tfcace/hash/internal/prompt"
 	"github.com/tfcace/hash/internal/readline"
 	"github.com/tfcace/hash/internal/trace"
@@ -46,6 +47,7 @@ type Shell struct {
 	history      *history.Store
 	learning     *learning.FixStore
 	clipboard    *clipboard.Buffer
+	predictor    *prediction.Predictor
 	colorPalette prompt.Palette
 
 	lastExitCode int
@@ -175,6 +177,25 @@ func New(cfg *config.Config) (*Shell, error) {
 		fmt.Fprintf(os.Stderr, "hash: warning: learning unavailable: %v\n", err)
 	}
 
+	// Initialize prediction store and predictor
+	var predictor *prediction.Predictor
+	if cfg.Prediction.Enabled {
+		predictionPath := filepath.Join(getDataDir(), "prediction.db")
+		predictionStore, err := prediction.NewStore(predictionPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "hash: warning: prediction unavailable: %v\n", err)
+		} else {
+			predCfg := prediction.Config{
+				Enabled:             cfg.Prediction.Enabled,
+				AcceptKeys:          cfg.Prediction.AcceptKeys,
+				ConfidenceThreshold: cfg.Prediction.ConfidenceThreshold,
+				PathMinCount:        cfg.Prediction.PathMinCount,
+				PathRecencyHours:    cfg.Prediction.PathRecencyHours,
+			}
+			predictor = prediction.NewPredictor(predictionStore, predCfg)
+		}
+	}
+
 	// Initialize clipboard buffer (configurable size and output limit)
 	clipboardBuf := clipboard.NewBuffer(cfg.Clipboard.BufferSize)
 	maxOutputSizeStr := cfg.Clipboard.MaxOutputSize
@@ -245,6 +266,7 @@ func New(cfg *config.Config) (*Shell, error) {
 		history:      historyStore,
 		learning:     learningStore,
 		clipboard:    clipboardBuf,
+		predictor:    predictor,
 		colorPalette: colorPalette,
 		historyIndex: -1, // Start before history (current line)
 	}
@@ -412,6 +434,9 @@ func (s *Shell) Run(ctx context.Context) error {
 				}
 			}
 
+			// Store the previous command for prediction before updating
+			prevCommand := s.lastCommand
+
 			// Store for issue reporting
 			s.lastCommand = line
 			s.lastStderr = stderrCap.String()
@@ -419,6 +444,12 @@ func (s *Shell) Run(ctx context.Context) error {
 
 			// Record command in history
 			s.recordCommand(line, s.lastExitCode, s.lastDuration)
+
+			// Record command sequence for prediction (only successful commands)
+			if s.predictor != nil && s.lastExitCode == 0 && prevCommand != "" {
+				cwd, _ := os.Getwd()
+				s.predictor.Record(prevCommand, line, cwd, nil)
+			}
 		}
 
 		s.updatePrompt()
@@ -492,6 +523,15 @@ func (s *Shell) readLineWithEditor(ctx context.Context) (string, error) {
 			ed.SetInitialText(initialText)
 			initialText = ""
 		}
+
+		// Set ghost text prediction based on last command
+		if s.predictor != nil && s.lastCommand != "" {
+			cwd, _ := os.Getwd()
+			if prediction := s.predictor.PredictCommand(s.lastCommand, cwd); prediction != "" {
+				ed.SetGhostText(prediction)
+			}
+		}
+
 		result, err := ed.Run(ctx)
 		if err != nil {
 			return "", err
