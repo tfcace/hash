@@ -28,6 +28,21 @@ import (
 // defaultCaptureSize limits how much output we capture by default (1MB).
 const defaultCaptureSize = 1024 * 1024
 
+// CommandNotFoundError is returned when a command doesn't exist in PATH.
+type CommandNotFoundError struct {
+	Command string
+}
+
+func (e *CommandNotFoundError) Error() string {
+	return fmt.Sprintf("%s: command not found", e.Command)
+}
+
+// IsCommandNotFound checks if an error is a CommandNotFoundError.
+func IsCommandNotFound(err error) bool {
+	var cnf *CommandNotFoundError
+	return errors.As(err, &cnf)
+}
+
 // limitedWriter wraps a writer and stops writing after n bytes.
 type limitedWriter struct {
 	w         io.Writer
