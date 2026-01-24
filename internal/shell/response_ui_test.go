@@ -58,3 +58,32 @@ func TestResponseUI_FormatError(t *testing.T) {
 		t.Errorf("Output missing error, got: %s", output)
 	}
 }
+
+func TestResponseUI_LoadingStates(t *testing.T) {
+	var buf bytes.Buffer
+	ui := NewResponseUI(&buf)
+
+	// Test different states
+	ui.ShowState(AgentStateConnecting)
+	if !bytes.Contains(buf.Bytes(), []byte("Connecting")) {
+		t.Error("Should show Connecting state")
+	}
+
+	buf.Reset()
+	ui.ShowState(AgentStateSending)
+	if !bytes.Contains(buf.Bytes(), []byte("Sending")) {
+		t.Error("Should show Sending state")
+	}
+
+	buf.Reset()
+	ui.ShowState(AgentStateThinking)
+	if !bytes.Contains(buf.Bytes(), []byte("thinking")) {
+		t.Error("Should show Thinking state")
+	}
+
+	buf.Reset()
+	ui.ShowState(AgentStateReceiving)
+	if !bytes.Contains(buf.Bytes(), []byte("Receiving")) {
+		t.Error("Should show Receiving state")
+	}
+}

@@ -31,6 +31,31 @@ const (
 	ConfirmTypeError                               // ↵ retry · esc
 )
 
+// AgentState represents the current state of an agent request.
+type AgentState int
+
+const (
+	AgentStateConnecting AgentState = iota
+	AgentStateSending
+	AgentStateThinking
+	AgentStateReceiving
+)
+
+func (s AgentState) String() string {
+	switch s {
+	case AgentStateConnecting:
+		return "Connecting to agent..."
+	case AgentStateSending:
+		return "Sending context..."
+	case AgentStateThinking:
+		return "Agent thinking..."
+	case AgentStateReceiving:
+		return "Receiving response..."
+	default:
+		return "Processing..."
+	}
+}
+
 // ResponseUI handles displaying agent responses.
 type ResponseUI struct {
 	out      io.Writer
@@ -80,6 +105,27 @@ func (u *ResponseUI) showExplanation(text string) {
 func (u *ResponseUI) showError(err string) {
 	// Red text for errors
 	fmt.Fprintf(u.out, "\033[31mAgent error: %s\033[0m\n", err)
+}
+
+// ShowState displays the current agent state with spinner.
+func (u *ResponseUI) ShowState(state AgentState) {
+	fmt.Fprintf(u.out, "\r\033[K\033[90m⠋ %s\033[0m", state.String())
+	if state == AgentStateConnecting {
+		u.progress.Start()
+	}
+}
+
+// ShowStateWithSize displays state with context size info.
+func (u *ResponseUI) ShowStateWithSize(state AgentState, sizeBytes int) {
+	sizeStr := formatSize(sizeBytes)
+	fmt.Fprintf(u.out, "\r\033[K\033[90m⠋ %s (%s)\033[0m", state.String(), sizeStr)
+}
+
+func formatSize(bytes int) string {
+	if bytes < 1024 {
+		return fmt.Sprintf("%d B", bytes)
+	}
+	return fmt.Sprintf("%.1f KB", float64(bytes)/1024)
 }
 
 // ShowThinking displays a thinking indicator with optional model name.
