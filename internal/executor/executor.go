@@ -30,17 +30,28 @@ const defaultCaptureSize = 1024 * 1024
 
 // limitedWriter wraps a writer and stops writing after n bytes.
 type limitedWriter struct {
-	w io.Writer
-	n int64
+	w         io.Writer
+	n         int64
+	limit     int64 // Original limit
+	truncated bool  // Whether truncation occurred
+	original  int64 // Total bytes attempted (before truncation)
+}
+
+func newLimitedWriter(w io.Writer, limit int64) *limitedWriter {
+	return &limitedWriter{w: w, n: limit, limit: limit}
 }
 
 func (l *limitedWriter) Write(p []byte) (int, error) {
+	l.original += int64(len(p))
+
 	if l.n <= 0 {
+		l.truncated = true
 		return len(p), nil
 	}
 	origLen := len(p)
 	if int64(origLen) > l.n {
 		p = p[:l.n]
+		l.truncated = true
 	}
 	n, err := l.w.Write(p)
 	if n > 0 {
@@ -53,6 +64,21 @@ func (l *limitedWriter) Write(p []byte) (int, error) {
 		return origLen, nil
 	}
 	return n, nil
+}
+
+// WasTruncated returns true if output was truncated.
+func (l *limitedWriter) WasTruncated() bool {
+	return l.truncated
+}
+
+// OriginalSize returns the total bytes attempted before truncation.
+func (l *limitedWriter) OriginalSize() int64 {
+	return l.original
+}
+
+// LimitSize returns the configured limit.
+func (l *limitedWriter) LimitSize() int64 {
+	return l.limit
 }
 
 type deadlineReader interface {
@@ -648,11 +674,13 @@ func (e *Executor) Execute(ctx context.Context, command string, stdout, stderr i
 	// Set up capture buffer
 	var captureBuf bytes.Buffer
 	var captureWriter io.Writer = &captureBuf
+	var lw *limitedWriter
 	switch {
 	case e.captureLimit == 0:
 		captureWriter = io.Discard
 	case e.captureLimit > 0:
-		captureWriter = &limitedWriter{w: &captureBuf, n: e.captureLimit}
+		lw = newLimitedWriter(&captureBuf, e.captureLimit)
+		captureWriter = lw
 	default:
 		captureWriter = &captureBuf
 	}
@@ -682,6 +710,13 @@ func (e *Executor) Execute(ctx context.Context, command string, stdout, stderr i
 	e.ensureShellEnv()
 	e.syncProcessEnv()
 	e.syncWorkingDir()
+
+	// Show truncation warning if output was truncated
+	if lw != nil && lw.WasTruncated() {
+		fmt.Fprintf(os.Stderr, "\033[90m(output truncated: %s → %s for clipboard/agent)\033[0m\n",
+			formatBytes(lw.OriginalSize()),
+			formatBytes(lw.LimitSize()))
+	}
 
 	return &Result{
 		ExitCode:       exitCodeFromError(err),
@@ -1053,4 +1088,18 @@ func exitCodeFromError(err error) int {
 		return int(status)
 	}
 	return 1
+}
+
+// formatBytes formats a byte count in a human-readable format.
+func formatBytes(b int64) string {
+	const unit = 1024
+	if b < unit {
+		return fmt.Sprintf("%d B", b)
+	}
+	div, exp := int64(unit), 0
+	for n := b / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(b)/float64(div), "KMGTPE"[exp])
 }
