@@ -226,6 +226,32 @@ func (ui *SearchUI) View() string {
 		}
 	}
 
+	// Preview pane for selected command
+	if ui.selected >= 0 && ui.selected < len(ui.results) {
+		cmd := ui.results[ui.selected]
+
+		b.WriteString("\n")
+		b.WriteString(dimStyle.Render("─── Preview ───"))
+		b.WriteString("\n")
+
+		// Full command (not truncated)
+		b.WriteString(normalStyle.Render(cmd.Command))
+		b.WriteString("\n")
+
+		// Metadata line
+		meta := fmt.Sprintf("%s │ %s", cmd.Timestamp.Format("2006-01-02 15:04"), cmd.Cwd)
+		if cmd.GitBranch != "" {
+			meta += fmt.Sprintf(" │ %s", cmd.GitBranch)
+		}
+		if cmd.ExitCode != 0 {
+			meta += fmt.Sprintf(" │ ✗%d", cmd.ExitCode)
+		} else {
+			meta += " │ ✓"
+		}
+		b.WriteString(dimStyle.Render(meta))
+		b.WriteString("\n")
+	}
+
 	// Result count (bottom right)
 	if len(ui.results) > 0 {
 		countStr := fmt.Sprintf("[%d/%d]", ui.selected+1, ui.totalResults)

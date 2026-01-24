@@ -408,3 +408,32 @@ func TestSearchUI_TimestampFormatting(t *testing.T) {
 		}
 	}
 }
+
+func TestSearchUI_PreviewPane(t *testing.T) {
+	// Create store with test data
+	store, _ := NewStore(":memory:")
+	defer store.Close()
+
+	store.Add(Command{
+		Command:   "kubectl get pods -n staging --sort-by='.status.startTime'",
+		Cwd:       "/home/user/projects",
+		GitBranch: "main",
+		ExitCode:  0,
+		Timestamp: time.Now(),
+	})
+
+	ui := NewSearchUI(store, prompt.DefaultPalette())
+	ui.searchNow()
+
+	view := ui.View()
+
+	// Should contain preview section
+	if !strings.Contains(view, "Preview") {
+		t.Error("View should contain Preview section")
+	}
+
+	// Should show full command in preview (not truncated)
+	if !strings.Contains(view, "kubectl get pods -n staging --sort-by='.status.startTime'") {
+		t.Error("Preview should show full command")
+	}
+}
