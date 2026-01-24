@@ -254,7 +254,7 @@ func (ui *SearchUI) View() string {
 
 	// Result count (bottom right)
 	if len(ui.results) > 0 {
-		countStr := fmt.Sprintf("[%d/%d]", ui.selected+1, ui.totalResults)
+		countStr := fmt.Sprintf("result %d of %d", ui.selected+1, ui.totalResults)
 		padding := ui.width - len(countStr) - 2
 		if padding > 0 {
 			b.WriteString(strings.Repeat(" ", padding))

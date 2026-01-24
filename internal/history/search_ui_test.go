@@ -409,6 +409,28 @@ func TestSearchUI_TimestampFormatting(t *testing.T) {
 	}
 }
 
+func TestSearchUI_ResultCountFormat(t *testing.T) {
+	store, _ := NewStore(":memory:")
+	defer store.Close()
+
+	for i := 0; i < 5; i++ {
+		store.Add(Command{Command: fmt.Sprintf("cmd%d", i), Timestamp: time.Now()})
+	}
+
+	ui := NewSearchUI(store, prompt.DefaultPalette())
+	ui.searchNow()
+
+	view := ui.View()
+
+	// Should use "result X of Y" format, not "[X/Y]"
+	if strings.Contains(view, "[1/5]") {
+		t.Error("Should not use [X/Y] format")
+	}
+	if !strings.Contains(view, "result 1 of 5") {
+		t.Error("Should use 'result X of Y' format")
+	}
+}
+
 func TestSearchUI_PreviewPane(t *testing.T) {
 	// Create store with test data
 	store, _ := NewStore(":memory:")
