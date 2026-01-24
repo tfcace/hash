@@ -78,6 +78,11 @@ type ClipboardConfig struct {
 	PreserveColors bool   `toml:"preserve_colors"`
 }
 
+// ParseMaxOutputSize parses the MaxOutputSize string and returns bytes.
+func (c *ClipboardConfig) ParseMaxOutputSize() (int64, error) {
+	return ParseSize(c.MaxOutputSize)
+}
+
 // Default returns a Config with default values.
 func Default() *Config {
 	return &Config{
