@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.3](https://github.com/tfcace/hash/compare/v0.1.2...v0.1.3) (2026-01-24)
+
+
+### Features
+
+* **shell:** persistent interpreter with lazy starship and cd sync ([2eb1431](https://github.com/tfcace/hash/commit/2eb1431014746d520688aa47b6c8141d57542c87))
+
 ## [0.1.2](https://github.com/tfcace/hash/compare/v0.1.1...v0.1.2) (2026-01-23)
 
 
