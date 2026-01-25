@@ -26,6 +26,7 @@ import (
 	"github.com/tfcace/hash/internal/prediction"
 	"github.com/tfcace/hash/internal/prompt"
 	"github.com/tfcace/hash/internal/readline"
+	"github.com/tfcace/hash/internal/shell/integration"
 	"github.com/tfcace/hash/internal/trace"
 )
 
@@ -59,6 +60,8 @@ type Shell struct {
 	lastCommand  string // Last executed command
 	lastStderr   string // Stderr from last command (truncated)
 	lastCwd      string // Working directory of last command
+
+	osc *integration.Emitter // OSC shell integration emitter
 
 	// History navigation state for editor mode
 	historyIndex     int    // -1 means current line (not in history)
@@ -203,6 +206,9 @@ func New(cfg *config.Config) (*Shell, error) {
 	// Initialize command suggestor (PATH caching happens in background)
 	suggestor := NewCommandSuggestor(historyStore)
 
+	// Initialize OSC shell integration emitter
+	osc := integration.New()
+
 	// Initialize clipboard buffer (configurable size and output limit)
 	clipboardBuf := clipboard.NewBuffer(cfg.Clipboard.BufferSize)
 	maxOutputSizeStr := cfg.Clipboard.MaxOutputSize
@@ -278,12 +284,21 @@ func New(cfg *config.Config) (*Shell, error) {
 		suggestor:    suggestor,
 		colorPalette: colorPalette,
 		historyIndex: -1, // Start before history (current line)
+		osc:          osc,
 	}
 
 	// Set up history function for editor mode
 	// This closure captures shell for proper state management
 	if useEditor && historyStore != nil {
 		shell.editorCfg.HistoryFunc = shell.navigateHistory
+	}
+
+	// Set up shell integration callback for editor mode
+	// This emits OSC 133;B (CommandStart) when the editor is ready for input
+	shell.editorCfg.OnInputReady = func() {
+		if shell.osc != nil {
+			shell.osc.CommandStart()
+		}
 	}
 
 	// Set prompt refresh callback for Ctrl+R history picker
@@ -328,11 +343,27 @@ func (s *Shell) Run(ctx context.Context) error {
 		"mode": "editor",
 	})
 
+	// Track whether we need to emit CommandFinished at start of loop
+	firstPrompt := true
+
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
+		}
+
+		// Shell integration: emit sequences before prompt
+		if s.osc != nil {
+			// Emit CommandFinished for previous command (skip on very first prompt)
+			if !firstPrompt {
+				s.osc.CommandFinished(s.lastExitCode)
+			}
+			firstPrompt = false
+			s.osc.PromptStart()
+			if cwd, err := os.Getwd(); err == nil {
+				s.osc.ReportDirectory(cwd)
+			}
 		}
 
 		var line string
@@ -341,6 +372,10 @@ func (s *Shell) Run(ctx context.Context) error {
 		if s.useEditor {
 			line, err = s.readLineWithEditor(ctx)
 		} else {
+			// Shell integration: mark start of user input (readline mode)
+			if s.osc != nil {
+				s.osc.CommandStart()
+			}
 			line, err = s.inputHandler.ReadLine()
 		}
 
@@ -424,6 +459,11 @@ func (s *Shell) Run(ctx context.Context) error {
 			// Record command to clipboard buffer before execution
 			if s.clipboard != nil {
 				s.clipboard.AddCommand(line)
+			}
+
+			// Shell integration: mark start of command output
+			if s.osc != nil {
+				s.osc.CommandExecuted()
 			}
 
 			// Capture stderr for issue reporting

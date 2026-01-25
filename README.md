@@ -150,6 +150,17 @@ Copy commands and output without reaching for the mouse:
 
 Hash shows progress indication (OSC 9;4) in supporting terminals when commands run longer than 2 seconds. Works with Windows Terminal, ConEmu, and iTerm2.
 
+### Shell Integration
+
+Hash emits standard shell integration escape sequences (OSC 133) supported by modern terminals. This enables:
+
+- **Prompt navigation** — Jump between commands with Cmd+Up/Down (iTerm2) or Ctrl+Shift+Z/X (Kitty/Ghostty)
+- **Output selection** — Triple-click or Cmd+click to select entire command output
+- **Directory inheritance** — New tabs/panes open in the current working directory
+- **Smart resizing** — Prompts redraw cleanly when terminal is resized
+
+Shell integration works automatically with no configuration required. Supported terminals include iTerm2, Ghostty, Kitty, WezTerm, and Windows Terminal.
+
 ### Configurable Builtins
 
 Disable built-in commands to use external alternatives like [zoxide](https://github.com/ajeetdsouza/zoxide) or [eza](https://github.com/eza-community/eza):

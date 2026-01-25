@@ -935,6 +935,20 @@ path_recency_boost_hours = 24
 
 ---
 
+## Shell Integration
+
+Hash automatically emits terminal integration escape sequences:
+
+- **OSC 133** — Semantic prompt markers for navigation and output selection
+- **OSC 7** — Working directory reporting for new tab/pane inheritance
+- **OSC 9;4** — Progress indication for agent requests
+
+These sequences are safely ignored by terminals that don't support them. No configuration is required.
+
+**Supported terminals:** iTerm2, Ghostty, Kitty, WezTerm, Windows Terminal, VS Code
+
+---
+
 ## [ui]
 
 User interface settings.

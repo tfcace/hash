@@ -28,6 +28,7 @@ type Config struct {
 	HistoryFunc    func(dir int, currentLine string) string            // -1=prev, +1=next; currentLine is for saving
 	CompleteFunc   func(line string, pos int) []Completion             // Tab completion
 	PrefetchFunc   func(line string, pos int)                          // Background completion prefetch (on space)
+	OnInputReady   func()                                              // Called after editor chrome is rendered, before input loop
 	Gutter         bool                                                // Show gutter indicator
 	Prompt         string                                              // Prompt string to display before input
 	InputBgColor   string                                              // Background color for submitted input (hex)
@@ -249,6 +250,11 @@ func (e *Editor) Run(ctx context.Context) (Result, error) {
 
 	// Initial render
 	e.render()
+
+	// Notify shell that input area is ready (for OSC 133;B)
+	if e.config.OnInputReady != nil {
+		e.config.OnInputReady()
+	}
 
 	// Channel for keyboard input (enables non-blocking ghost text handling)
 	// done channel signals the reader goroutine to exit when editor returns.
