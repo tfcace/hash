@@ -27,6 +27,7 @@ type Config struct {
 	Keybindings    string                                              // "helix", "emacs", "vim"
 	HistoryFunc    func(dir int, currentLine string) string            // -1=prev, +1=next; currentLine is for saving
 	CompleteFunc   func(line string, pos int) []Completion             // Tab completion
+	PrefetchFunc   func(line string, pos int)                          // Background completion prefetch (on space)
 	Gutter         bool                                                // Show gutter indicator
 	Prompt         string                                              // Prompt string to display before input
 	InputBgColor   string                                              // Background color for submitted input (hex)
@@ -430,6 +431,11 @@ func (e *Editor) Run(ctx context.Context) (Result, error) {
 				e.triggerCompletion()
 			}
 
+			// Handle background prefetch (for Cobra completions on space)
+			if result.Prefetch {
+				e.triggerPrefetch()
+			}
+
 			// Handle clipboard operations
 			if result.Yank {
 				e.yank()
@@ -717,6 +723,22 @@ func (e *Editor) triggerCompletion() {
 	e.completionItems = items
 	e.completionIndex = 0
 	e.completionActive = true
+}
+
+// triggerPrefetch calls the prefetch function to populate completion cache.
+// Called when space is typed after a command.
+func (e *Editor) triggerPrefetch() {
+	if e.config.PrefetchFunc == nil {
+		return
+	}
+
+	line := e.state.Buffer.Content()
+	pos := e.cursorOffset()
+
+	// Only prefetch if line ends with space (just typed a space)
+	if pos > 0 && pos <= len(line) && line[pos-1] == ' ' {
+		e.config.PrefetchFunc(line, pos)
+	}
 }
 
 // cursorOffset returns the byte offset of cursor in the buffer content.

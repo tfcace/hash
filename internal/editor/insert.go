@@ -87,6 +87,10 @@ func (m *InsertMode) HandleKey(key Key, state *EditorState) ModeResult {
 	// Printable character
 	if key.Rune != 0 && unicode.IsPrint(key.Rune) {
 		m.insertChar(state, key.Rune)
+		// Trigger prefetch when space is typed (for Cobra completions)
+		if key.Rune == ' ' {
+			return ModeResult{Action: ActionInsert, Prefetch: true}
+		}
 		return ModeResult{Action: ActionInsert}
 	}
 

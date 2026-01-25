@@ -101,3 +101,18 @@ func (r *Router) Completers() []Completer {
 	}
 	return result
 }
+
+// Prefetcher is an optional interface for completers that support background prefetching.
+type Prefetcher interface {
+	Prefetch(line string, pos int)
+}
+
+// Prefetch triggers background prefetching for all completers that support it.
+// Call this when the user types a space after a command.
+func (r *Router) Prefetch(line string, pos int) {
+	for _, rc := range r.completers {
+		if p, ok := rc.completer.(Prefetcher); ok {
+			p.Prefetch(line, pos)
+		}
+	}
+}

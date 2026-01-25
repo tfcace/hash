@@ -258,6 +258,7 @@ func New(cfg *config.Config) (*Shell, error) {
 		InputBgColor:   colorPalette.InputBg,
 		ScrollbarColor: colorPalette.Primary,
 		CompleteFunc:   makeEditorCompleteFunc(router),
+		PrefetchFunc:   makeEditorPrefetchFunc(router),
 	}
 
 	shell := &Shell{
@@ -1156,6 +1157,12 @@ func makeEditorCompleteFunc(router *completion.Router) func(string, int) []edito
 			}
 		}
 		return items
+	}
+}
+
+func makeEditorPrefetchFunc(router *completion.Router) func(string, int) {
+	return func(line string, pos int) {
+		router.Prefetch(line, pos)
 	}
 }
 
