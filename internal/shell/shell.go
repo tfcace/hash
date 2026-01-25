@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/tfcace/hash/internal/agent"
@@ -721,6 +723,25 @@ func (s *Shell) handleAgentRequest(ctx context.Context, parsed parser.ParseResul
 		return
 	}
 
+	// Create a new context for the agent request that we can cancel independently.
+	// This allows Ctrl+C to cancel the agent operation without exiting the shell.
+	agentCtx, agentCancel := context.WithCancel(context.Background())
+	defer agentCancel()
+
+	// Set up SIGINT handler for this agent request
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT)
+	defer signal.Stop(sigCh)
+
+	// Handle SIGINT by cancelling only the agent context
+	go func() {
+		select {
+		case <-sigCh:
+			agentCancel()
+		case <-agentCtx.Done():
+		}
+	}()
+
 	// Apply agent timeout
 	timeout := 30 * time.Second
 	if s.config.Agent.Timeout != "" {
@@ -728,14 +749,14 @@ func (s *Shell) handleAgentRequest(ctx context.Context, parsed parser.ParseResul
 			timeout = parsedDur
 		}
 	}
-	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
+	agentCtx, timeoutCancel := context.WithTimeout(agentCtx, timeout)
+	defer timeoutCancel()
 
 	// Pass selected context to agent handler
 	s.agentHandler.SetSelectedContext(s.selectedContext)
 
 	// Use unified streaming handler for all modes
-	s.handleAgentRequestUnified(ctx, parsed)
+	s.handleAgentRequestUnified(agentCtx, parsed)
 }
 
 // handleAgentInlineStreaming uses ghost text for inline completions.

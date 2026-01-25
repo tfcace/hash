@@ -140,12 +140,14 @@ func run(mode ShellMode) error {
 		return err
 	}
 
-	// Set up context with signal handling
+	// Set up context with signal handling.
+	// Only SIGTERM cancels the shell context (for graceful shutdown).
+	// SIGINT (Ctrl+C) is handled locally by the shell components that need it.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	signal.Notify(sigCh, syscall.SIGTERM)
 	go func() {
 		<-sigCh
 		cancel()
