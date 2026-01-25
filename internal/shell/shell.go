@@ -21,6 +21,7 @@ import (
 	"github.com/tfcace/hash/internal/executor"
 	"github.com/tfcace/hash/internal/history"
 	"github.com/tfcace/hash/internal/learning"
+	"github.com/tfcace/hash/internal/markdown"
 	"github.com/tfcace/hash/internal/parser"
 	"github.com/tfcace/hash/internal/prediction"
 	"github.com/tfcace/hash/internal/prompt"
@@ -891,10 +892,11 @@ func (s *Shell) handleAgentFullStreaming(ctx context.Context, parsed parser.Pars
 	// Start streaming request
 	textCh, errCh := s.agentHandler.StreamRequest(ctx, parsed)
 
-	// Collect streamed response
+	// Collect streamed response with markdown rendering
 	var response strings.Builder
 	var streamErr error
 	lineCount := 0 // Track lines for clearing on cancel
+	renderer := markdown.NewStreamingRenderer()
 
 collectLoop:
 	for {
@@ -924,9 +926,15 @@ collectLoop:
 			response.WriteString(text)
 			// Count newlines for clearing on cancel
 			lineCount += strings.Count(text, "\n")
-			// Stream output character by character (dim)
-			fmt.Fprintf(os.Stdout, "\033[90m%s\033[0m", text)
+			// Stream output with markdown rendering
+			rendered := renderer.Write(text)
+			fmt.Fprint(os.Stdout, rendered)
 		}
+	}
+
+	// Flush any remaining buffered content from the renderer
+	if remaining := renderer.Flush(); remaining != "" {
+		fmt.Fprint(os.Stdout, remaining)
 	}
 
 	fmt.Println() // New line after response
