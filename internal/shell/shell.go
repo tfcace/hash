@@ -886,8 +886,8 @@ func (s *Shell) handleAgentRequestUnified(ctx context.Context, parsed parser.Par
 
 // handleAgentFullStreaming handles full ?? and pipe modes with streaming.
 func (s *Shell) handleAgentFullStreaming(ctx context.Context, parsed parser.ParseResult, modelName string) {
-	// Show thinking indicator
-	s.responseUI.ShowThinkingInline(modelName)
+	// Show thinking indicator (multi-stage: thinking -> receiving)
+	s.responseUI.ShowState(AgentStateThinking)
 
 	// Start streaming request
 	textCh, errCh := s.agentHandler.StreamRequest(ctx, parsed)
@@ -920,7 +920,8 @@ collectLoop:
 				break collectLoop
 			}
 			if response.Len() == 0 {
-				// First chunk - clear thinking indicator
+				// First chunk - transition to receiving state, then clear for output
+				s.responseUI.ShowState(AgentStateReceiving)
 				s.responseUI.ClearLine()
 			}
 			response.WriteString(text)

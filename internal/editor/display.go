@@ -282,12 +282,9 @@ func (d *Display) RenderWithGhost(buf *Buffer, cur *Cursor, hasSelection bool, g
 		// Render ghost text on the cursor's line, after the cursor position
 		if i == cursorRow && (ghostText != "" || streaming) {
 			if ghostText == "" && streaming {
-				// Show "Thinking..." while waiting for first chunk (agent only)
-				if modelName != "" {
-					fmt.Fprintf(&sb, "\x1b[90;3m Thinking (%s)...\x1b[0m", modelName)
-				} else {
-					sb.WriteString("\x1b[90;3m Thinking...\x1b[0m")
-				}
+				// Show thinking indicator while waiting for first chunk (agent only)
+				// Use consistent text with response_ui states
+				sb.WriteString("\x1b[90;3m Agent thinking...\x1b[0m")
 			} else if ghostText != "" {
 				// Get the first line of ghost text (for single-line display)
 				ghostFirstLine := ghostText
