@@ -8,6 +8,7 @@ type GhostText struct {
 	AcceptedAt int    // Number of characters already accepted (for partial acceptance)
 	Active     bool   // Whether ghost text is currently displayed
 	Streaming  bool   // Whether more text is still arriving
+	FromAgent  bool   // True for agent suggestions (show hints), false for predictions (fish-style)
 }
 
 // NewGhostText creates a new ghost text state.
@@ -34,6 +35,7 @@ func (g *GhostText) Clear() {
 	g.AcceptedAt = 0
 	g.Active = false
 	g.Streaming = false
+	g.FromAgent = false
 }
 
 // Remaining returns the unaccepted portion of ghost text.

@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -217,6 +218,20 @@ func TestFileCompleter_HiddenFiles(t *testing.T) {
 	if !found {
 		t.Error("Hidden files should be shown when enabled")
 	}
+
+	// Test: hidden files should be shown when prefix starts with "."
+	completer.SetShowHidden(false) // Reset to default
+	result3, _ := completer.Complete(ctx, "cat .", 5)
+	foundWithDotPrefix := false
+	for _, item := range result3.Items {
+		if item.Value == ".hidden" {
+			foundWithDotPrefix = true
+			break
+		}
+	}
+	if !foundWithDotPrefix {
+		t.Error("Hidden files should be shown when prefix starts with '.'")
+	}
 }
 
 func TestFileCompleter_AbsolutePath(t *testing.T) {
@@ -321,5 +336,62 @@ func TestFileCompleter_CaseInsensitivePrefix(t *testing.T) {
 	result, _ := completer.Complete(ctx, "cat read", 8)
 	if len(result.Items) != 2 {
 		t.Errorf("Case-insensitive prefix should match 2 files, got %d", len(result.Items))
+	}
+}
+
+func TestFileCompleter_RootFilesystem(t *testing.T) {
+	completer := NewFileCompleter()
+	ctx := context.Background()
+
+	// Complete "cd /t" should return prefix "/" not "//"
+	result, err := completer.Complete(ctx, "cd /t", 5)
+	if err != nil {
+		t.Fatalf("Complete() error = %v", err)
+	}
+
+	// The prefix should be "/" not "//"
+	if result.Prefix != "/" {
+		t.Errorf("Prefix = %q, want %q", result.Prefix, "/")
+	}
+
+	// Verify items don't have double slashes when combined with prefix
+	for _, item := range result.Items {
+		fullPath := result.Prefix + item.Value
+		if strings.Contains(fullPath, "//") {
+			t.Errorf("Full path contains double slash: %q", fullPath)
+		}
+	}
+}
+
+func TestFileCompleter_DotSlashPrefix(t *testing.T) {
+	tmpDir := t.TempDir()
+	os.Mkdir(filepath.Join(tmpDir, "scripts"), 0755)
+	os.WriteFile(filepath.Join(tmpDir, "scripts", "build.sh"), []byte{}, 0755)
+	os.WriteFile(filepath.Join(tmpDir, "scripts", "test.sh"), []byte{}, 0755)
+
+	oldDir, _ := os.Getwd()
+	os.Chdir(tmpDir)
+	defer os.Chdir(oldDir)
+
+	completer := NewFileCompleter()
+	ctx := context.Background()
+
+	// Complete "./scripts/buil" should preserve "./" prefix
+	result, err := completer.Complete(ctx, "./scripts/buil", 14)
+	if err != nil {
+		t.Fatalf("Complete() error = %v", err)
+	}
+
+	// Prefix should be "./scripts/" not "scripts/"
+	if result.Prefix != "./scripts/" {
+		t.Errorf("Prefix = %q, want %q", result.Prefix, "./scripts/")
+	}
+
+	// Verify the full path includes "./"
+	for _, item := range result.Items {
+		fullPath := result.Prefix + item.Value
+		if !strings.HasPrefix(fullPath, "./") {
+			t.Errorf("Full path should start with './', got %q", fullPath)
+		}
 	}
 }

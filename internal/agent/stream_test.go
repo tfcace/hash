@@ -92,6 +92,16 @@ func TestLooksLikeCommand(t *testing.T) {
 		{"The largest files are config.db and logs.tar", false},
 		{"ls -la | sort -k5 -h | head", true},
 		{"This is a multi-line\nexplanation of how to do something.", false},
+		// Contractions and conversational patterns
+		{"I'll convert the CSV data to JSON format for you.", false},
+		{"I'm going to list the files", false},
+		{"I've found 5 matching files", false},
+		{"Here's the command you need", false},
+		{"Here is what you should run", false},
+		{"Let me show you how to do this", false},
+		{"Looking at the output", false},
+		{"You can use grep to filter", false},
+		{"This will list all files", false},
 	}
 	for _, tt := range tests {
 		name := tt.text

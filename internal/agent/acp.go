@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // ACPConfig configures the ACP transport.
@@ -170,10 +171,18 @@ func (t *ACPTransport) readLoop() {
 
 // sendCancel sends a session/cancel notification to stop ongoing operations.
 // This is a notification (no response expected) per ACP spec.
+// After cancel, the session is invalidated to force a fresh session on next request.
 func (t *ACPTransport) sendCancel() {
-	if t.sessionID == "" {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	sessionID := t.sessionID
+	if sessionID == "" {
 		return
 	}
+
+	// Invalidate the session - next request will create a fresh one
+	t.sessionID = ""
 
 	// Notifications don't have an ID field
 	notification := struct {
@@ -186,7 +195,7 @@ func (t *ACPTransport) sendCancel() {
 		Params: struct {
 			SessionID string `json:"sessionId"`
 		}{
-			SessionID: t.sessionID,
+			SessionID: sessionID,
 		},
 	}
 
@@ -195,9 +204,7 @@ func (t *ACPTransport) sendCancel() {
 		return // Best effort
 	}
 
-	t.mu.Lock()
 	_, _ = t.stdin.Write(append(data, '\n'))
-	t.mu.Unlock()
 }
 
 func (t *ACPTransport) sendRequest(ctx context.Context, method string, params interface{}) (json.RawMessage, error) {
@@ -297,20 +304,26 @@ func (t *ACPTransport) Send(ctx context.Context, req Request) (<-chan Response, 
 		}
 	}
 
-	// Create session if needed
-	if t.sessionID == "" {
+	// Check if we need a new session
+	needSession := t.sessionID == ""
+	t.mu.Unlock()
+
+	// Create session if needed (outside lock to avoid deadlock on timeout)
+	if needSession {
 		cwd := req.Context.Cwd
 		if cwd == "" {
 			cwd = "."
 		}
 		sessionID, err := t.newSession(ctx, cwd)
 		if err != nil {
-			t.mu.Unlock()
 			return nil, fmt.Errorf("new session: %w", err)
 		}
+		t.mu.Lock()
 		t.sessionID = sessionID
+		t.mu.Unlock()
 	}
 
+	t.mu.Lock()
 	sessionID := t.sessionID
 	t.mu.Unlock()
 
@@ -353,11 +366,27 @@ func (t *ACPTransport) Send(ctx context.Context, req Request) (<-chan Response, 
 		// Collect response text from streaming notifications
 		var textBuilder strings.Builder
 
+		// Create idle timer
+		idleTimer := time.NewTimer(IdleTimeout)
+		defer idleTimer.Stop()
+
 		for {
 			select {
 			case <-ctx.Done():
 				t.sendCancel()
 				respCh <- Response{Type: ResponseTypeError, Error: ctx.Err().Error()}
+				return
+
+			case <-idleTimer.C:
+				// No message received for IdleTimeout - agent may be stuck
+				t.sendCancel()
+				text := textBuilder.String()
+				if text != "" {
+					// Return partial response with warning
+					respCh <- parseAgentResponse(text)
+				} else {
+					respCh <- Response{Type: ResponseTypeError, Error: fmt.Sprintf("agent idle timeout (%v without response)", IdleTimeout)}
+				}
 				return
 
 			case line, ok := <-t.messages:
@@ -370,6 +399,15 @@ func (t *ACPTransport) Send(ctx context.Context, req Request) (<-chan Response, 
 					}
 					return
 				}
+
+				// Reset idle timer on any message
+				if !idleTimer.Stop() {
+					select {
+					case <-idleTimer.C:
+					default:
+					}
+				}
+				idleTimer.Reset(IdleTimeout)
 
 				var msg struct {
 					JSONRPC string          `json:"jsonrpc"`
@@ -498,6 +536,10 @@ func (t *ACPTransport) Close() error {
 	return nil
 }
 
+// IdleTimeout is the maximum time to wait without receiving any message from the agent.
+// If exceeded, the request is considered stuck and cancelled.
+const IdleTimeout = 30 * time.Second
+
 // SendStreaming implements StreamingTransport for real-time text streaming.
 func (t *ACPTransport) SendStreaming(ctx context.Context, req Request) (<-chan string, <-chan error) {
 	textCh := make(chan string, 64)
@@ -518,21 +560,27 @@ func (t *ACPTransport) SendStreaming(ctx context.Context, req Request) (<-chan s
 			}
 		}
 
-		// Create session if needed
-		if t.sessionID == "" {
+		// Check if we need a new session
+		needSession := t.sessionID == ""
+		t.mu.Unlock()
+
+		// Create session if needed (outside lock to avoid deadlock on timeout)
+		if needSession {
 			cwd := req.Context.Cwd
 			if cwd == "" {
 				cwd = "."
 			}
 			sessionID, err := t.newSession(ctx, cwd)
 			if err != nil {
-				t.mu.Unlock()
 				errCh <- err
 				return
 			}
+			t.mu.Lock()
 			t.sessionID = sessionID
+			t.mu.Unlock()
 		}
 
+		t.mu.Lock()
 		sessionID := t.sessionID
 		t.mu.Unlock()
 
@@ -567,6 +615,10 @@ func (t *ACPTransport) SendStreaming(ctx context.Context, req Request) (<-chan s
 			return
 		}
 
+		// Create idle timer
+		idleTimer := time.NewTimer(IdleTimeout)
+		defer idleTimer.Stop()
+
 		// Stream response text as it arrives
 		for {
 			select {
@@ -575,10 +627,25 @@ func (t *ACPTransport) SendStreaming(ctx context.Context, req Request) (<-chan s
 				errCh <- ctx.Err()
 				return
 
+			case <-idleTimer.C:
+				// No message received for IdleTimeout - agent may be stuck
+				t.sendCancel()
+				errCh <- fmt.Errorf("agent idle timeout (%v without response)", IdleTimeout)
+				return
+
 			case line, ok := <-t.messages:
 				if !ok {
 					return
 				}
+
+				// Reset idle timer on any message
+				if !idleTimer.Stop() {
+					select {
+					case <-idleTimer.C:
+					default:
+					}
+				}
+				idleTimer.Reset(IdleTimeout)
 
 				var msg struct {
 					JSONRPC string          `json:"jsonrpc"`

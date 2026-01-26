@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/tfcace/hash/internal/agent"
@@ -12,6 +13,9 @@ import (
 	"github.com/tfcace/hash/internal/progress"
 	"golang.org/x/term"
 )
+
+// Braille spinner frames for animation
+var spinnerFrames = []rune{'⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'}
 
 // ConfirmAction represents the user's response to a command suggestion.
 type ConfirmAction int
@@ -31,11 +35,42 @@ const (
 	ConfirmTypeError                               // ↵ retry · esc
 )
 
+// AgentState represents the current state of an agent request.
+type AgentState int
+
+const (
+	AgentStateConnecting AgentState = iota
+	AgentStateSending
+	AgentStateThinking
+	AgentStateReceiving
+)
+
+func (s AgentState) String() string {
+	switch s {
+	case AgentStateConnecting:
+		return "Connecting to agent..."
+	case AgentStateSending:
+		return "Sending context..."
+	case AgentStateThinking:
+		return "Agent thinking..."
+	case AgentStateReceiving:
+		return "Receiving response..."
+	default:
+		return "Processing..."
+	}
+}
+
 // ResponseUI handles displaying agent responses.
 type ResponseUI struct {
 	out      io.Writer
 	in       *os.File
 	progress *progress.OSC
+
+	// Spinner state
+	spinnerMu      sync.Mutex
+	spinnerRunning bool
+	spinnerStop    chan struct{}
+	spinnerText    string
 }
 
 // NewResponseUI creates a new response UI.
@@ -82,22 +117,105 @@ func (u *ResponseUI) showError(err string) {
 	fmt.Fprintf(u.out, "\033[31mAgent error: %s\033[0m\n", err)
 }
 
-// ShowThinking displays a thinking indicator with optional model name.
-func (u *ResponseUI) ShowThinking(model string) {
-	if model != "" {
-		fmt.Fprintf(u.out, "\033[90m⟳ Thinking (%s)...\033[0m", model)
-	} else {
-		fmt.Fprintf(u.out, "\033[90m⟳ Thinking...\033[0m")
+// ShowState displays the current agent state with animated spinner.
+// If a spinner is already running, it updates the text.
+// If no spinner is running, it starts one.
+func (u *ResponseUI) ShowState(state AgentState) {
+	u.spinnerMu.Lock()
+	defer u.spinnerMu.Unlock()
+
+	text := state.String()
+
+	if u.spinnerRunning {
+		// Update the spinner text
+		u.spinnerText = text
+		return
 	}
-	// Show OSC 9;4 progress bar in terminal tab/title bar
+
+	// Start new spinner
+	u.spinnerText = text
+	u.spinnerStop = make(chan struct{})
+	u.spinnerRunning = true
+
+	// Start OSC progress bar
 	u.progress.Start()
+
+	go u.runSpinner()
+}
+
+// runSpinner animates the spinner until stopped.
+func (u *ResponseUI) runSpinner() {
+	ticker := time.NewTicker(80 * time.Millisecond)
+	defer ticker.Stop()
+
+	frame := 0
+	for {
+		select {
+		case <-u.spinnerStop:
+			return
+		case <-ticker.C:
+			u.spinnerMu.Lock()
+			text := u.spinnerText
+			u.spinnerMu.Unlock()
+
+			char := spinnerFrames[frame%len(spinnerFrames)]
+			fmt.Fprintf(u.out, "\r\033[K\033[90m%c %s\033[0m", char, text)
+			frame++
+		}
+	}
+}
+
+// StopSpinner stops the animated spinner if running.
+func (u *ResponseUI) StopSpinner() {
+	u.spinnerMu.Lock()
+	defer u.spinnerMu.Unlock()
+
+	if u.spinnerRunning {
+		close(u.spinnerStop)
+		u.spinnerRunning = false
+		u.progress.Done()
+	}
+}
+
+// ShowStateWithSize displays state with context size info.
+func (u *ResponseUI) ShowStateWithSize(state AgentState, sizeBytes int) {
+	u.spinnerMu.Lock()
+	defer u.spinnerMu.Unlock()
+
+	sizeStr := formatSize(sizeBytes)
+	text := fmt.Sprintf("%s (%s)", state.String(), sizeStr)
+
+	if u.spinnerRunning {
+		u.spinnerText = text
+		return
+	}
+
+	// Start new spinner with size info
+	u.spinnerText = text
+	u.spinnerStop = make(chan struct{})
+	u.spinnerRunning = true
+	u.progress.Start()
+
+	go u.runSpinner()
+}
+
+func formatSize(bytes int) string {
+	if bytes < 1024 {
+		return fmt.Sprintf("%d B", bytes)
+	}
+	return fmt.Sprintf("%.1f KB", float64(bytes)/1024)
+}
+
+// ShowThinking displays a thinking indicator with optional model name.
+// Deprecated: Use ShowState(AgentStateThinking) instead for consistent styling.
+func (u *ResponseUI) ShowThinking(model string) {
+	u.ShowState(AgentStateThinking)
 }
 
 // ClearThinking clears the thinking indicator.
 func (u *ResponseUI) ClearThinking() {
+	u.StopSpinner()
 	fmt.Fprintf(u.out, "\r\033[K")
-	// Clear OSC 9;4 progress bar
-	u.progress.Done()
 }
 
 // StartProgress starts the OSC 9;4 progress bar without showing text.
@@ -152,17 +270,14 @@ func (u *ResponseUI) WaitForConfirmation() ConfirmAction {
 }
 
 // ShowThinkingInline displays thinking indicator (for streaming modes).
-// Unlike ShowThinking, this doesn't start progress bar (caller manages that).
+// Deprecated: Use ShowState(AgentStateThinking) instead for consistent styling.
 func (u *ResponseUI) ShowThinkingInline(model string) {
-	if model != "" {
-		fmt.Fprintf(u.out, "\033[90m⟳ thinking (%s)...\033[0m", model)
-	} else {
-		fmt.Fprintf(u.out, "\033[90m⟳ thinking...\033[0m")
-	}
+	u.ShowState(AgentStateThinking)
 }
 
 // ClearLine clears the current line (for replacing thinking with response).
 func (u *ResponseUI) ClearLine() {
+	u.StopSpinner()
 	fmt.Fprintf(u.out, "\r\033[K")
 }
 

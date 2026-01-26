@@ -254,6 +254,13 @@ func (s *Store) GetAgentInteractions(prompt string, limit int) ([]AgentInteracti
 	return interactions, rows.Err()
 }
 
+// Count returns the total number of commands in history.
+func (s *Store) Count() (int64, error) {
+	var count int64
+	err := s.db.QueryRow("SELECT COUNT(*) FROM history").Scan(&count)
+	return count, err
+}
+
 // Close closes the database connection.
 func (s *Store) Close() error {
 	return s.db.Close()

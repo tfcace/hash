@@ -106,6 +106,9 @@ func (ui *SearchUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (ui *SearchUI) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Clear status message on any keypress
+	ui.statusMessage = ""
+
 	switch msg.String() {
 	case "ctrl+c", "esc":
 		ui.selected = -1
@@ -226,9 +229,35 @@ func (ui *SearchUI) View() string {
 		}
 	}
 
+	// Preview pane for selected command
+	if ui.selected >= 0 && ui.selected < len(ui.results) {
+		cmd := ui.results[ui.selected]
+
+		b.WriteString("\n")
+		b.WriteString(dimStyle.Render("─── Preview ───"))
+		b.WriteString("\n")
+
+		// Full command (not truncated)
+		b.WriteString(normalStyle.Render(cmd.Command))
+		b.WriteString("\n")
+
+		// Metadata line
+		meta := fmt.Sprintf("%s │ %s", cmd.Timestamp.Format("2006-01-02 15:04"), cmd.Cwd)
+		if cmd.GitBranch != "" {
+			meta += fmt.Sprintf(" │ %s", cmd.GitBranch)
+		}
+		if cmd.ExitCode != 0 {
+			meta += fmt.Sprintf(" │ ✗%d", cmd.ExitCode)
+		} else {
+			meta += " │ ✓"
+		}
+		b.WriteString(dimStyle.Render(meta))
+		b.WriteString("\n")
+	}
+
 	// Result count (bottom right)
 	if len(ui.results) > 0 {
-		countStr := fmt.Sprintf("[%d/%d]", ui.selected+1, ui.totalResults)
+		countStr := fmt.Sprintf("result %d of %d", ui.selected+1, ui.totalResults)
 		padding := ui.width - len(countStr) - 2
 		if padding > 0 {
 			b.WriteString(strings.Repeat(" ", padding))
@@ -383,7 +412,7 @@ func (ui *SearchUI) copyToClipboard(text string) error {
 func (ui *SearchUI) copyCommand() tea.Cmd {
 	if ui.selected < 0 || ui.selected >= len(ui.results) {
 		ui.statusMessage = "No selection"
-		return ui.clearStatusAfter()
+		return nil
 	}
 
 	cmd := ui.results[ui.selected].Command
@@ -392,13 +421,13 @@ func (ui *SearchUI) copyCommand() tea.Cmd {
 	} else {
 		ui.statusMessage = "Copied!"
 	}
-	return ui.clearStatusAfter()
+	return nil
 }
 
 func (ui *SearchUI) copyOutput() tea.Cmd {
 	if ui.selected < 0 || ui.selected >= len(ui.results) {
 		ui.statusMessage = "No selection"
-		return ui.clearStatusAfter()
+		return nil
 	}
 
 	cmd := ui.results[ui.selected].Command
@@ -410,7 +439,7 @@ func (ui *SearchUI) copyOutput() tea.Cmd {
 	} else {
 		ui.statusMessage = "Copied output!"
 	}
-	return ui.clearStatusAfter()
+	return nil
 }
 
 func (ui *SearchUI) findOutputForCommand(cmd string) string {

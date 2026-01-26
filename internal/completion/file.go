@@ -40,6 +40,7 @@ func (c *FileCompleter) SetShowHidden(show bool) {
 func (c *FileCompleter) Complete(ctx context.Context, line string, pos int) (Result, error) {
 	// Extract the word being completed
 	word := extractWord(line, pos)
+	originalWord := word // Save for hidden file detection
 	if word == "" {
 		word = "."
 	}
@@ -69,12 +70,17 @@ func (c *FileCompleter) Complete(ctx context.Context, line string, pos int) (Res
 		return Result{}, nil // Return empty on error, not an error
 	}
 
+	// Show hidden files if user is explicitly typing a dot prefix
+	// Use originalWord to avoid false positive when word defaults to "."
+	wantsDotFiles := originalWord != "" && strings.HasPrefix(filepath.Base(originalWord), ".")
+	showHidden := c.showHidden || wantsDotFiles
+
 	var items []Item
 	for _, entry := range entries {
 		name := entry.Name()
 
-		// Skip hidden files unless enabled
-		if !c.showHidden && strings.HasPrefix(name, ".") {
+		// Skip hidden files unless enabled or prefix starts with "."
+		if !showHidden && strings.HasPrefix(name, ".") {
 			continue
 		}
 
@@ -143,7 +149,19 @@ func getCompletionPrefix(original, matched string) string {
 	// Return the directory part of original
 	dir := filepath.Dir(original)
 	if dir == "." {
+		// Preserve "./" if user explicitly typed it
+		if strings.HasPrefix(original, "./") {
+			return "./"
+		}
 		return ""
+	}
+	// filepath.Dir strips "./" prefix, so restore it if original had it
+	if strings.HasPrefix(original, "./") && !strings.HasPrefix(dir, "./") {
+		dir = "./" + dir
+	}
+	// Don't add trailing slash if dir already ends with one (root directory case)
+	if strings.HasSuffix(dir, "/") {
+		return dir
 	}
 	return dir + "/"
 }

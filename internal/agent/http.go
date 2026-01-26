@@ -235,8 +235,14 @@ func looksLikeCommand(text string) bool {
 		strings.HasPrefix(text, "To ") ||
 		strings.HasPrefix(text, "You ") ||
 		strings.HasPrefix(text, "I ") ||
+		strings.HasPrefix(text, "I'") || // Contractions like "I'll", "I'm", "I've"
+		strings.HasPrefix(text, "Here") ||
+		strings.HasPrefix(text, "Let") ||
+		strings.HasPrefix(text, "Looking") ||
 		strings.Contains(text, " is ") ||
-		strings.Contains(text, " are ") {
+		strings.Contains(text, " are ") ||
+		strings.Contains(text, " will ") ||
+		strings.Contains(text, " can ") {
 		return false
 	}
 

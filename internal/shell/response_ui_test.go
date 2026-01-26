@@ -3,6 +3,7 @@ package shell
 import (
 	"bytes"
 	"testing"
+	"time"
 
 	"github.com/tfcace/hash/internal/agent"
 )
@@ -56,5 +57,44 @@ func TestResponseUI_FormatError(t *testing.T) {
 
 	if !bytes.Contains(buf.Bytes(), []byte("Connection failed")) {
 		t.Errorf("Output missing error, got: %s", output)
+	}
+}
+
+func TestResponseUI_LoadingStates(t *testing.T) {
+	var buf bytes.Buffer
+	ui := NewResponseUI(&buf)
+
+	// Helper to wait for spinner output and stop it
+	waitForSpinner := func() {
+		time.Sleep(100 * time.Millisecond) // Wait for at least one spinner frame
+		ui.StopSpinner()
+	}
+
+	// Test different states
+	ui.ShowState(AgentStateConnecting)
+	waitForSpinner()
+	if !bytes.Contains(buf.Bytes(), []byte("Connecting")) {
+		t.Errorf("Should show Connecting state, got: %s", buf.String())
+	}
+
+	buf.Reset()
+	ui.ShowState(AgentStateSending)
+	waitForSpinner()
+	if !bytes.Contains(buf.Bytes(), []byte("Sending")) {
+		t.Errorf("Should show Sending state, got: %s", buf.String())
+	}
+
+	buf.Reset()
+	ui.ShowState(AgentStateThinking)
+	waitForSpinner()
+	if !bytes.Contains(buf.Bytes(), []byte("thinking")) {
+		t.Errorf("Should show Thinking state, got: %s", buf.String())
+	}
+
+	buf.Reset()
+	ui.ShowState(AgentStateReceiving)
+	waitForSpinner()
+	if !bytes.Contains(buf.Bytes(), []byte("Receiving")) {
+		t.Errorf("Should show Receiving state, got: %s", buf.String())
 	}
 }

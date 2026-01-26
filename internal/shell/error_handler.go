@@ -2,6 +2,7 @@ package shell
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"strings"
 
@@ -11,6 +12,7 @@ import (
 // ErrorHandler manages error detection and fix suggestions.
 type ErrorHandler struct {
 	fixStore *learning.FixStore
+	out      io.Writer
 }
 
 // NewErrorHandler creates a new error handler.
@@ -30,9 +32,14 @@ func (h *ErrorHandler) HandleError(command string, stderr string, exitCode int) 
 	// Check for learned fix
 	if h.fixStore != nil {
 		fix, found := h.fixStore.GetFix(pattern)
-		if found && fix.Score >= 0.7 {
-			h.showLearnedFix(fix)
-			return
+		if found {
+			if fix.Score >= 0.7 {
+				h.showLearnedFix(fix, true) // high confidence
+				return
+			} else if fix.Score >= 0.5 {
+				h.showLearnedFix(fix, false) // low confidence
+				return
+			}
 		}
 	}
 
@@ -40,20 +47,75 @@ func (h *ErrorHandler) HandleError(command string, stderr string, exitCode int) 
 	h.showErrorPrompt(exitCode, stderr)
 }
 
-func (h *ErrorHandler) showLearnedFix(fix learning.Fix) {
-	fmt.Fprintf(os.Stderr, "\n\033[33mx Learned fix available\033[0m\n")
-	fmt.Fprintf(os.Stderr, "\n\033[32m->\033[0m %s    \033[90m(worked %d times)\033[0m\n", fix.Fix, fix.SuccessCount)
-	fmt.Fprintf(os.Stderr, "  \033[90m[Enter: run] [Tab: edit] [?: ask agent] [Esc: dismiss]\033[0m\n")
+// HandleCommandNotFound displays a command-not-found error with suggestions.
+func (h *ErrorHandler) HandleCommandNotFound(cmd string, suggestions []string, installHint string) {
+	out := h.out
+	if out == nil {
+		out = os.Stderr
+	}
+
+	// Header
+	fmt.Fprintf(out, "\n\033[31m✗ %s: command not found\033[0m\n", cmd)
+
+	// Suggestions
+	if len(suggestions) > 0 {
+		fmt.Fprintf(out, "  \033[90m│\033[0m did you mean: %s?\n", strings.Join(suggestions, ", "))
+	}
+
+	// Install hint
+	if installHint != "" {
+		fmt.Fprintf(out, "  \033[90m│\033[0m install: \033[33m%s\033[0m\n", installHint)
+	}
+
+	// Footer
+	fmt.Fprintf(out, "  \033[90m└─ ?? to explain\033[0m\n")
+}
+
+func (h *ErrorHandler) showLearnedFix(fix learning.Fix, highConfidence bool) {
+	out := h.out
+	if out == nil {
+		out = os.Stderr
+	}
+
+	if highConfidence {
+		// High confidence: → prefix
+		fmt.Fprintf(out, "\n\033[33m✗ Learned fix available\033[0m\n")
+		fmt.Fprintf(out, "\n\033[32m→\033[0m %s    \033[90m(worked %d×)\033[0m\n",
+			fix.Fix, fix.SuccessCount)
+	} else {
+		// Low confidence: ? prefix
+		fmt.Fprintf(out, "\n\033[33m✗ Possible fix\033[0m\n")
+		fmt.Fprintf(out, "\n\033[33m?\033[0m %s    \033[90m(tried %d×, worked %d×)\033[0m\n",
+			fix.Fix, fix.SuccessCount+fix.FailureCount, fix.SuccessCount)
+	}
+	fmt.Fprintf(out, "  \033[90m[Enter: run] [Tab: edit] [?: ask agent] [Esc: dismiss]\033[0m\n")
 }
 
 func (h *ErrorHandler) showErrorPrompt(exitCode int, stderr string) {
-	// Truncate stderr if too long
-	stderrLines := strings.Split(stderr, "\n")
-	if len(stderrLines) > 3 {
-		stderrLines = stderrLines[:3]
+	out := h.out
+	if out == nil {
+		out = os.Stderr
 	}
 
-	fmt.Fprintf(os.Stderr, "\n\033[31mx Exit %d\033[0m | \033[90m?? to explain\033[0m\n", exitCode)
+	// Header
+	fmt.Fprintf(out, "\n\033[31m✗ Exit %d\033[0m\n", exitCode)
+
+	// Show last 2-3 lines of stderr
+	if stderr != "" {
+		lines := strings.Split(strings.TrimSpace(stderr), "\n")
+		start := 0
+		if len(lines) > 3 {
+			start = len(lines) - 3
+		}
+		for _, line := range lines[start:] {
+			if line != "" {
+				fmt.Fprintf(out, "  \033[90m│\033[0m %s\n", line)
+			}
+		}
+	}
+
+	// Footer
+	fmt.Fprintf(out, "  \033[90m└─ ?? to explain\033[0m\n")
 }
 
 // FormatErrorPrompt formats an error prompt string.

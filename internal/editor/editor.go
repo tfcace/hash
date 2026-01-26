@@ -27,6 +27,8 @@ type Config struct {
 	Keybindings    string                                              // "helix", "emacs", "vim"
 	HistoryFunc    func(dir int, currentLine string) string            // -1=prev, +1=next; currentLine is for saving
 	CompleteFunc   func(line string, pos int) []Completion             // Tab completion
+	PrefetchFunc   func(line string, pos int)                          // Background completion prefetch (on space)
+	OnInputReady   func()                                              // Called after editor chrome is rendered, before input loop
 	Gutter         bool                                                // Show gutter indicator
 	Prompt         string                                              // Prompt string to display before input
 	InputBgColor   string                                              // Background color for submitted input (hex)
@@ -124,6 +126,7 @@ func (e *Editor) SetGhostTextStreaming(textCh <-chan string, errCh <-chan error)
 	e.ghostErrChan = errCh
 	e.ghost.Clear()
 	e.ghost.SetStreaming(true)
+	e.ghost.FromAgent = true // Agent suggestions show hints
 	// Dismiss any active completion menu - ghost text takes precedence
 	e.dismissCompletion()
 }
@@ -226,7 +229,13 @@ func (e *Editor) Run(ctx context.Context) (Result, error) {
 		// modifier information with special keys like Enter.
 		e.out.Write([]byte("\x1b[>4;1u"))
 
+		// Enable bracketed paste mode so we can detect pasted content
+		// Terminal sends \x1b[200~ before paste and \x1b[201~ after
+		e.out.Write([]byte("\x1b[?2004h"))
+
 		defer func() {
+			// Disable bracketed paste mode
+			e.out.Write([]byte("\x1b[?2004l"))
 			// Disable enhanced keyboard protocol
 			e.out.Write([]byte("\x1b[<u"))
 			term.Restore(int(f.Fd()), oldState)
@@ -247,6 +256,11 @@ func (e *Editor) Run(ctx context.Context) (Result, error) {
 
 	// Initial render
 	e.render()
+
+	// Notify shell that input area is ready (for OSC 133;B)
+	if e.config.OnInputReady != nil {
+		e.config.OnInputReady()
+	}
 
 	// Channel for keyboard input (enables non-blocking ghost text handling)
 	// done channel signals the reader goroutine to exit when editor returns.
@@ -429,6 +443,11 @@ func (e *Editor) Run(ctx context.Context) (Result, error) {
 				e.triggerCompletion()
 			}
 
+			// Handle background prefetch (for Cobra completions on space)
+			if result.Prefetch {
+				e.triggerPrefetch()
+			}
+
 			// Handle clipboard operations
 			if result.Yank {
 				e.yank()
@@ -458,10 +477,11 @@ func (e *Editor) render() {
 	// Pass ghost text to display for inline rendering
 	ghostText := ""
 	ghostStreaming := e.ghost.Streaming
+	ghostFromAgent := e.ghost.FromAgent
 	if e.ghost.Active && !e.ghost.IsEmpty() {
 		ghostText = e.ghost.Remaining()
 	}
-	e.display.RenderWithGhost(e.state.Buffer, e.state.Cursor, hasSelection, ghostText, ghostStreaming, e.streamingModel)
+	e.display.RenderWithGhost(e.state.Buffer, e.state.Cursor, hasSelection, ghostText, ghostStreaming, ghostFromAgent, e.streamingModel)
 
 	// Render completion menu if active
 	if e.completionActive && len(e.completionItems) > 0 {
@@ -715,6 +735,22 @@ func (e *Editor) triggerCompletion() {
 	e.completionItems = items
 	e.completionIndex = 0
 	e.completionActive = true
+}
+
+// triggerPrefetch calls the prefetch function to populate completion cache.
+// Called when space is typed after a command.
+func (e *Editor) triggerPrefetch() {
+	if e.config.PrefetchFunc == nil {
+		return
+	}
+
+	line := e.state.Buffer.Content()
+	pos := e.cursorOffset()
+
+	// Only prefetch if line ends with space (just typed a space)
+	if pos > 0 && pos <= len(line) && line[pos-1] == ' ' {
+		e.config.PrefetchFunc(line, pos)
+	}
 }
 
 // cursorOffset returns the byte offset of cursor in the buffer content.
