@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0](https://github.com/tfcace/hash/compare/v0.2.0...v0.3.0) (2026-01-26)
+
+
+### Features
+
+* delightful ux ([c36611e](https://github.com/tfcace/hash/commit/c36611ebd25c75dc0cb52dba221eb9d5a2c3723d))
+
 ## [0.1.2](https://github.com/tfcace/hash/compare/v0.1.1...v0.1.2) (2026-01-23)
 
 
