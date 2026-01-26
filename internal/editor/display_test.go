@@ -119,3 +119,35 @@ func TestDisplay_RenderCompletionMenu(t *testing.T) {
 		t.Error("Menu should contain 'bar'")
 	}
 }
+
+func TestDisplay_RenderCompletionMenu_WithGutter(t *testing.T) {
+	var buf bytes.Buffer
+	d := NewDisplay(&buf, 80, 24)
+	d.SetGutter(true)
+	d.SetPrompt("$ ")
+
+	items := []CompletionItem{
+		{Text: "file.txt", Description: "A file"},
+	}
+
+	// startCol=3 (e.g., after "ls " in buffer)
+	// With gutter (2) + prompt "$ " (2) = prefix of 4
+	// Menu should be positioned at column 3 + 4 = 7
+	d.RenderCompletionMenu(items, 0, 3)
+
+	output := buf.String()
+
+	// The output should contain cursor forward command with the correct offset
+	// \x1b[7C means move cursor forward 7 columns (3 for startCol + 4 for prefix)
+	if !strings.Contains(output, "\x1b[7C") {
+		t.Errorf("Menu should be positioned at column 7 (startCol 3 + prefix 4), got %q", output)
+	}
+
+	// Should use save/restore cursor to preserve cursor position
+	if !strings.Contains(output, "\x1b[s") {
+		t.Error("Menu should save cursor position at start")
+	}
+	if !strings.Contains(output, "\x1b[u") {
+		t.Error("Menu should restore cursor position at end")
+	}
+}

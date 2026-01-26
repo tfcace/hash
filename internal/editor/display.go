@@ -530,6 +530,14 @@ func (d *Display) RenderCompletionMenu(items []CompletionItem, selected, startCo
 
 	var sb strings.Builder
 
+	// Save cursor position before rendering menu - will restore at end
+	sb.WriteString("\x1b[s")
+
+	// Add prefix width (gutter + prompt on row 0) to startCol for proper positioning
+	// The menu appears below line 0, so use row 0's prefix width
+	prefixWidth := d.calcPrefixWidth(0)
+	menuCol := startCol + prefixWidth
+
 	// Calculate max width for alignment
 	maxTextWidth := 0
 	for _, item := range items {
@@ -573,11 +581,11 @@ func (d *Display) RenderCompletionMenu(items []CompletionItem, selected, startCo
 		item := items[i]
 		rowIndex := i - scrollOffset // 0-based index within visible area
 
-		// Move to next line, then clear it and position at startCol
+		// Move to next line, then clear it and position at menuCol
 		sb.WriteString("\r\n")
 		sb.WriteString(ansiClearLine)
-		if startCol > 0 {
-			fmt.Fprintf(&sb, ansiCursorForward, startCol)
+		if menuCol > 0 {
+			fmt.Fprintf(&sb, ansiCursorForward, menuCol)
 		}
 
 		// Draw scrollbar as first column of menu (before content)
@@ -633,10 +641,8 @@ func (d *Display) RenderCompletionMenu(items []CompletionItem, selected, startCo
 		}
 	}
 
-	// Move cursor back up to where we started (before the menu)
-	// We moved down maxVisible lines total
-	fmt.Fprintf(&sb, ansiCursorUp, maxVisible)
-	sb.WriteString("\r")
+	// Restore cursor position (saved at start of function)
+	sb.WriteString("\x1b[u")
 
 	d.out.Write([]byte(sb.String()))
 
@@ -652,6 +658,9 @@ func (d *Display) ClearCompletionMenu(numItems int) {
 
 	var sb strings.Builder
 
+	// Save cursor position
+	sb.WriteString("\x1b[s")
+
 	// Move down and clear each menu line
 	maxVisible := 6
 	if numItems < maxVisible {
@@ -663,9 +672,8 @@ func (d *Display) ClearCompletionMenu(numItems int) {
 		sb.WriteString(ansiClearLine)
 	}
 
-	// Move cursor back up
-	fmt.Fprintf(&sb, ansiCursorUp, maxVisible)
-	sb.WriteString("\r")
+	// Restore cursor position
+	sb.WriteString("\x1b[u")
 
 	d.out.Write([]byte(sb.String()))
 
