@@ -43,8 +43,11 @@ func (c *CobraCompleter) Name() string {
 // Complete returns completions from cache only.
 // Use Prefetch to populate the cache in the background.
 func (c *CobraCompleter) Complete(ctx context.Context, line string, pos int) (Result, error) {
-	// Extract command and args
-	parts := strings.Fields(line[:pos])
+	// Extract pipe context - get command segment after last pipe
+	pipeLine, pipePos := ExtractPipeContext(line, pos)
+
+	// Extract command and args from the pipe context
+	parts := strings.Fields(pipeLine[:pipePos])
 	if len(parts) == 0 {
 		return Result{}, nil
 	}
@@ -78,8 +81,11 @@ func (c *CobraCompleter) Complete(ctx context.Context, line string, pos int) (Re
 // Prefetch triggers background fetching of Cobra completions.
 // Call this when the user types a space after a command.
 func (c *CobraCompleter) Prefetch(line string, pos int) {
-	// Extract command and args
-	parts := strings.Fields(line[:pos])
+	// Extract pipe context - get command segment after last pipe
+	pipeLine, pipePos := ExtractPipeContext(line, pos)
+
+	// Extract command and args from the pipe context
+	parts := strings.Fields(pipeLine[:pipePos])
 	if len(parts) == 0 {
 		return
 	}

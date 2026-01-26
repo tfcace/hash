@@ -93,6 +93,41 @@ func extractCompletionQuery(line string, pos int) string {
 	return line[start:pos]
 }
 
+// ExtractPipeContext extracts the command context after the last pipe.
+// For "cat file | pb", returns ("pb", 3) where 3 is the new position.
+// For "ls -la", returns ("ls -la", 5) unchanged.
+// This allows completers to work correctly with piped commands.
+func ExtractPipeContext(line string, pos int) (string, int) {
+	if pos > len(line) {
+		pos = len(line)
+	}
+
+	// Find the last pipe character before pos
+	lastPipe := -1
+	for i := pos - 1; i >= 0; i-- {
+		if line[i] == '|' {
+			lastPipe = i
+			break
+		}
+	}
+
+	if lastPipe < 0 {
+		// No pipe, return original
+		return line, pos
+	}
+
+	// Skip the pipe and any leading whitespace
+	start := lastPipe + 1
+	for start < pos && (line[start] == ' ' || line[start] == '\t') {
+		start++
+	}
+
+	// Return the segment after the pipe with adjusted position
+	newLine := line[start:pos]
+	newPos := pos - start
+	return newLine, newPos
+}
+
 // Completers returns the registered completers for inspection.
 func (r *Router) Completers() []Completer {
 	result := make([]Completer, len(r.completers))

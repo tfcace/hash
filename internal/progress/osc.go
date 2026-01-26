@@ -119,7 +119,7 @@ func (t *Tracker) Tick() {
 	if t.shown {
 		return
 	}
-	if time.Since(t.started) > t.threshold {
+	if time.Since(t.started) >= t.threshold {
 		t.osc.Start()
 		t.shown = true
 	}

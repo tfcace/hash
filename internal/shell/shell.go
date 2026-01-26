@@ -101,6 +101,9 @@ func New(cfg *config.Config) (*Shell, error) {
 	fileCompleter.SetFuzzyMode(cfg.Completions.Fuzzy)
 	router.Register(fileCompleter, completion.PriorityFilesystem)
 
+	// Executable completer for command names from PATH
+	router.Register(completion.NewExecutableCompleter(), completion.PriorityExecutable)
+
 	if cfg.Completions.CobraEnabled {
 		router.Register(completion.NewCobraCompleter(), completion.PriorityToolNative)
 	}

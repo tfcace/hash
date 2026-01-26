@@ -775,12 +775,24 @@ func (e *Executor) execHandler(next interp.ExecHandlerFunc) interp.ExecHandlerFu
 		cmd.Env = environToSlice(hc.Env)
 		cmd.Env = append(cmd.Env, "HASH_SHELL=1", "SHELL="+e.shellPath)
 
-		// Use PTY only if stdin/stdout are terminals (interactive)
-		// We check the actual terminal fds, not hc.Stdin/hc.Stdout which may be wrapped
+		// Use PTY only if BOTH the real terminal AND the handler context are terminals.
+		// For pipes (e.g., "cat file | pbcopy"), hc.Stdin/hc.Stdout are pipes, not terminals.
+		// We need to check hc.Stdin/hc.Stdout to avoid using PTY for piped commands.
 		stdinFd := int(os.Stdin.Fd())
 		stdoutFd := int(os.Stdout.Fd())
+		realTerminal := term.IsTerminal(stdinFd) && term.IsTerminal(stdoutFd)
 
-		if term.IsTerminal(stdinFd) && term.IsTerminal(stdoutFd) {
+		// Check if handler context stdin/stdout are terminals (not pipes)
+		hcStdinTerminal := false
+		hcStdoutTerminal := false
+		if f, ok := hc.Stdin.(*os.File); ok {
+			hcStdinTerminal = term.IsTerminal(int(f.Fd()))
+		}
+		if f, ok := hc.Stdout.(*os.File); ok {
+			hcStdoutTerminal = term.IsTerminal(int(f.Fd()))
+		}
+
+		if realTerminal && hcStdinTerminal && hcStdoutTerminal {
 			return e.runWithPTY(ctx, cmd, hc)
 		}
 
