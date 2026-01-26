@@ -86,7 +86,11 @@ func TestFindSimilar(t *testing.T) {
 }
 
 func TestInstallHint(t *testing.T) {
-	s := &CommandSuggestor{packageManager: "brew"}
+	// Create suggestor and trigger the sync.Once with brew as package manager
+	s := &CommandSuggestor{}
+	s.pmOnce.Do(func() {
+		s.packageManager = "brew"
+	})
 
 	tests := []struct {
 		cmd      string

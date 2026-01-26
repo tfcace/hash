@@ -277,11 +277,18 @@ func TestExecutor_PATHUpdateAffectsLookup(t *testing.T) {
 }
 
 func TestExecutor_CdPersistsAcrossCommands(t *testing.T) {
+	// Save and restore process CWD since executor syncs shell PWD to process
+	origDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("failed to get original dir: %v", err)
+	}
+	defer os.Chdir(origDir)
+
 	exec := New()
 	var stdout, stderr bytes.Buffer
 
 	// Get initial directory
-	_, err := exec.Execute(context.Background(), "pwd", &stdout, &stderr)
+	_, err = exec.Execute(context.Background(), "pwd", &stdout, &stderr)
 	if err != nil {
 		t.Fatalf("initial pwd failed: %v", err)
 	}
