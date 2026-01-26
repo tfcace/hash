@@ -229,7 +229,13 @@ func (e *Editor) Run(ctx context.Context) (Result, error) {
 		// modifier information with special keys like Enter.
 		e.out.Write([]byte("\x1b[>4;1u"))
 
+		// Enable bracketed paste mode so we can detect pasted content
+		// Terminal sends \x1b[200~ before paste and \x1b[201~ after
+		e.out.Write([]byte("\x1b[?2004h"))
+
 		defer func() {
+			// Disable bracketed paste mode
+			e.out.Write([]byte("\x1b[?2004l"))
 			// Disable enhanced keyboard protocol
 			e.out.Write([]byte("\x1b[<u"))
 			term.Restore(int(f.Fd()), oldState)

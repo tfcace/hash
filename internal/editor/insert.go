@@ -18,10 +18,16 @@ func (m *InsertMode) Name() string {
 
 // HandleKey processes a key in insert mode.
 func (m *InsertMode) HandleKey(key Key, state *EditorState) ModeResult {
-	// Alt+Enter or Shift+Enter: insert newline (must check before general Alt handling)
+	// Handle bracketed paste - insert content with backslash continuations
+	if key.Special == KeyPaste {
+		m.insertPasteContent(state, key.PasteText)
+		return ModeResult{Action: ActionPaste}
+	}
+
+	// Alt+Enter or Shift+Enter: insert newline with backslash continuation
 	// Some terminals send ESC+Enter for Shift+Enter
 	if key.Special == KeyEnter && (key.Shift || key.Alt) {
-		m.insertChar(state, '\n')
+		m.insertNewlineWithContinuation(state)
 		return ModeResult{Action: ActionInsert}
 	}
 
@@ -265,4 +271,112 @@ func (m *InsertMode) deleteToLineEnd(state *EditorState) {
 	col := state.Cursor.Pos.Col
 	lineLen := len(state.Buffer.Line(row))
 	state.Buffer.Delete(Position{row, col}, Position{row, lineLen})
+}
+
+// insertNewlineWithContinuation inserts a newline with shell line continuation.
+// Adds " \" before the newline if the line doesn't already end with "\".
+func (m *InsertMode) insertNewlineWithContinuation(state *EditorState) {
+	row, col := state.Cursor.Pos.Row, state.Cursor.Pos.Col
+	line := state.Buffer.Line(row)
+
+	// Check if we need to add continuation
+	// Get the text before cursor on this line
+	textBeforeCursor := line[:col]
+	needsContinuation := !endsWithBackslash(textBeforeCursor)
+
+	if needsContinuation {
+		// Insert " \" before the newline
+		state.Buffer.Insert(row, col, " \\\n")
+		state.Cursor.Pos.Row++
+		state.Cursor.Pos.Col = 0
+	} else {
+		// Already has backslash, just insert newline
+		state.Buffer.Insert(row, col, "\n")
+		state.Cursor.Pos.Row++
+		state.Cursor.Pos.Col = 0
+	}
+}
+
+// insertPasteContent inserts pasted text with shell line continuations.
+// Adds " \" before each newline if the line doesn't already end with "\".
+func (m *InsertMode) insertPasteContent(state *EditorState, text string) {
+	if text == "" {
+		return
+	}
+
+	// Process the pasted text to add continuations where needed
+	processed := addLineContinuations(text)
+
+	// Insert the processed text
+	row, col := state.Cursor.Pos.Row, state.Cursor.Pos.Col
+	state.Buffer.Insert(row, col, processed)
+
+	// Move cursor to end of inserted text
+	for _, r := range processed {
+		if r == '\n' {
+			row++
+			col = 0
+		} else {
+			col++
+		}
+	}
+	state.Cursor.Pos.Row = row
+	state.Cursor.Pos.Col = col
+}
+
+// endsWithBackslash checks if a string ends with a backslash (ignoring trailing whitespace).
+func endsWithBackslash(s string) bool {
+	// Trim trailing whitespace
+	trimmed := s
+	for len(trimmed) > 0 && (trimmed[len(trimmed)-1] == ' ' || trimmed[len(trimmed)-1] == '\t') {
+		trimmed = trimmed[:len(trimmed)-1]
+	}
+	return len(trimmed) > 0 && trimmed[len(trimmed)-1] == '\\'
+}
+
+// addLineContinuations processes pasted text to add " \" before newlines
+// where the line doesn't already end with a backslash.
+func addLineContinuations(text string) string {
+	lines := splitLines(text)
+	if len(lines) <= 1 {
+		return text
+	}
+
+	var result []byte
+	for i, line := range lines {
+		if i > 0 {
+			result = append(result, '\n')
+		}
+		result = append(result, line...)
+
+		// Add continuation if this is not the last line and doesn't already have one
+		if i < len(lines)-1 && !endsWithBackslash(line) {
+			result = append(result, ' ', '\\')
+		}
+	}
+	return string(result)
+}
+
+// splitLines splits text into lines, preserving empty lines.
+func splitLines(text string) []string {
+	var lines []string
+	var current []byte
+	for i := 0; i < len(text); i++ {
+		if text[i] == '\n' {
+			lines = append(lines, string(current))
+			current = current[:0]
+		} else if text[i] == '\r' {
+			// Handle \r\n (skip \r, \n will be handled next)
+			if i+1 < len(text) && text[i+1] == '\n' {
+				continue
+			}
+			// Standalone \r treated as newline
+			lines = append(lines, string(current))
+			current = current[:0]
+		} else {
+			current = append(current, text[i])
+		}
+	}
+	lines = append(lines, string(current))
+	return lines
 }
