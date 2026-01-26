@@ -18,6 +18,7 @@ type ModeResult struct {
 	Action        Action
 	Submit        bool // True = user wants to execute
 	Complete      bool // True = trigger completion
+	Prefetch      bool // True = trigger completion prefetch (background)
 	HistoryPrev   bool // True = navigate to previous history
 	HistoryNext   bool // True = navigate to next history
 	HistorySearch bool // True = launch history search (Ctrl+R)

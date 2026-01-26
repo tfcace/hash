@@ -28,19 +28,45 @@ import (
 // defaultCaptureSize limits how much output we capture by default (1MB).
 const defaultCaptureSize = 1024 * 1024
 
+// CommandNotFoundError is returned when a command doesn't exist in PATH.
+type CommandNotFoundError struct {
+	Command string
+}
+
+func (e *CommandNotFoundError) Error() string {
+	return fmt.Sprintf("%s: command not found", e.Command)
+}
+
+// IsCommandNotFound checks if an error is a CommandNotFoundError.
+func IsCommandNotFound(err error) bool {
+	var cnf *CommandNotFoundError
+	return errors.As(err, &cnf)
+}
+
 // limitedWriter wraps a writer and stops writing after n bytes.
 type limitedWriter struct {
-	w io.Writer
-	n int64
+	w         io.Writer
+	n         int64
+	limit     int64 // Original limit
+	truncated bool  // Whether truncation occurred
+	original  int64 // Total bytes attempted (before truncation)
+}
+
+func newLimitedWriter(w io.Writer, limit int64) *limitedWriter {
+	return &limitedWriter{w: w, n: limit, limit: limit}
 }
 
 func (l *limitedWriter) Write(p []byte) (int, error) {
+	l.original += int64(len(p))
+
 	if l.n <= 0 {
+		l.truncated = true
 		return len(p), nil
 	}
 	origLen := len(p)
 	if int64(origLen) > l.n {
 		p = p[:l.n]
+		l.truncated = true
 	}
 	n, err := l.w.Write(p)
 	if n > 0 {
@@ -53,6 +79,21 @@ func (l *limitedWriter) Write(p []byte) (int, error) {
 		return origLen, nil
 	}
 	return n, nil
+}
+
+// WasTruncated returns true if output was truncated.
+func (l *limitedWriter) WasTruncated() bool {
+	return l.truncated
+}
+
+// OriginalSize returns the total bytes attempted before truncation.
+func (l *limitedWriter) OriginalSize() int64 {
+	return l.original
+}
+
+// LimitSize returns the configured limit.
+func (l *limitedWriter) LimitSize() int64 {
+	return l.limit
 }
 
 type deadlineReader interface {
@@ -500,6 +541,7 @@ type Result struct {
 	Duration       time.Duration
 	Command        string
 	CapturedOutput string
+	UsedPTY        bool // True if command ran with PTY (TUI apps, interactive programs)
 }
 
 // Executor runs shell commands using mvdan/sh interpreter.
@@ -552,6 +594,14 @@ func (e *Executor) initRunner() error {
 		interp.StdIO(os.Stdin, e.switchStdout, e.switchStderr),
 		interp.Env(e.env),
 		interp.ExecHandlers(e.execHandler),
+	}
+
+	// Set positional parameters ($1, $2, etc.) if provided
+	// Skip $0 since that's handled separately via syntax.Parse filename
+	if len(e.positionalArgs) > 1 {
+		// interp.Params expects "--" followed by the parameters
+		params := append([]string{"--"}, e.positionalArgs[1:]...)
+		opts = append(opts, interp.Params(params...))
 	}
 
 	runner, err := interp.New(opts...)
@@ -648,11 +698,13 @@ func (e *Executor) Execute(ctx context.Context, command string, stdout, stderr i
 	// Set up capture buffer
 	var captureBuf bytes.Buffer
 	var captureWriter io.Writer = &captureBuf
+	var lw *limitedWriter
 	switch {
 	case e.captureLimit == 0:
 		captureWriter = io.Discard
 	case e.captureLimit > 0:
-		captureWriter = &limitedWriter{w: &captureBuf, n: e.captureLimit}
+		lw = newLimitedWriter(&captureBuf, e.captureLimit)
+		captureWriter = lw
 	default:
 		captureWriter = &captureBuf
 	}
@@ -683,11 +735,34 @@ func (e *Executor) Execute(ctx context.Context, command string, stdout, stderr i
 	e.syncProcessEnv()
 	e.syncWorkingDir()
 
+	// Show truncation warning if output was truncated
+	if lw != nil && lw.WasTruncated() {
+		fmt.Fprintf(os.Stderr, "\033[90m(output truncated: %s → %s for clipboard/agent)\033[0m\n",
+			formatBytes(lw.OriginalSize()),
+			formatBytes(lw.LimitSize()))
+	}
+
+	// Capture PTY usage before returning
+	usedPTY := e.ptyActive.Load()
+
+	// Return CommandNotFoundError to caller for special handling
+	var cnf *CommandNotFoundError
+	if errors.As(err, &cnf) {
+		return &Result{
+			ExitCode:       127,
+			Duration:       time.Since(start),
+			Command:        command,
+			CapturedOutput: captureBuf.String(),
+			UsedPTY:        usedPTY,
+		}, cnf
+	}
+
 	return &Result{
 		ExitCode:       exitCodeFromError(err),
 		Duration:       time.Since(start),
 		Command:        command,
 		CapturedOutput: captureBuf.String(),
+		UsedPTY:        usedPTY,
 	}, nil
 }
 
@@ -698,7 +773,7 @@ func (e *Executor) execHandler(next interp.ExecHandlerFunc) interp.ExecHandlerFu
 
 		path, err := interp.LookPathDir(hc.Dir, hc.Env, args[0])
 		if err != nil {
-			return err
+			return &CommandNotFoundError{Command: args[0]}
 		}
 
 		cmd := exec.CommandContext(ctx, path, args[1:]...)
@@ -706,13 +781,35 @@ func (e *Executor) execHandler(next interp.ExecHandlerFunc) interp.ExecHandlerFu
 		cmd.Env = environToSlice(hc.Env)
 		cmd.Env = append(cmd.Env, "HASH_SHELL=1", "SHELL="+e.shellPath)
 
-		// Use PTY only if stdin/stdout are terminals (interactive)
-		// We check the actual terminal fds, not hc.Stdin/hc.Stdout which may be wrapped
+		// Use PTY if running interactively in a terminal and not in a pipeline.
+		// Check real terminal (os.Stdin/os.Stdout) and hc.Stdin to detect pipeline.
+		// Note: hc.Stdout is always switchableWriter (not *os.File), so we can't
+		// check it directly. Instead, we check hc.Stdin to detect if we're
+		// downstream in a pipeline (e.g., `cat | this_cmd`).
+		// Use PTY if stdin is a terminal and not in a pipeline.
+		// Note: We only check stdin because stdout may be captured/redirected
+		// by the parent process (e.g., Claude Code) while still being interactive.
 		stdinFd := int(os.Stdin.Fd())
-		stdoutFd := int(os.Stdout.Fd())
+		stdinIsTerm := term.IsTerminal(stdinFd)
 
-		if term.IsTerminal(stdinFd) && term.IsTerminal(stdoutFd) {
+		// Check if hc.Stdin is a terminal (detects downstream pipe position)
+		hcStdinTerminal := false
+		if f, ok := hc.Stdin.(*os.File); ok {
+			hcStdinTerminal = term.IsTerminal(int(f.Fd()))
+		}
+
+		if stdinIsTerm && hcStdinTerminal {
+			// PTY mode: skip OSC 133;C to avoid interference with TUI apps
+			// that send their own terminal queries on startup
 			return e.runWithPTY(ctx, cmd, hc)
+		}
+
+		// Non-PTY: emit OSC 133;C only if running interactively.
+		// This marks the boundary between user input and command output.
+		// Skip when running in non-interactive contexts where the sequence
+		// could interfere with programs that check terminal state.
+		if stdinIsTerm {
+			os.Stdout.WriteString("\x1b]133;C\x07")
 		}
 
 		// Non-PTY: connect to handler's stdio
@@ -1053,4 +1150,18 @@ func exitCodeFromError(err error) int {
 		return int(status)
 	}
 	return 1
+}
+
+// formatBytes formats a byte count in a human-readable format.
+func formatBytes(b int64) string {
+	const unit = 1024
+	if b < unit {
+		return fmt.Sprintf("%d B", b)
+	}
+	div, exp := int64(unit), 0
+	for n := b / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(b)/float64(div), "KMGTPE"[exp])
 }

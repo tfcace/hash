@@ -31,6 +31,7 @@ type Priority int
 
 const (
 	PriorityToolNative Priority = 100 // Try first for subcommand completion
+	PriorityExecutable Priority = 150 // Executable names from PATH (command position only)
 	PriorityFilesystem Priority = 200 // Fallback for file arguments
 	PriorityAgent      Priority = 300 // AI-powered fallback
 )

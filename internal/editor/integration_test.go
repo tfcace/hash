@@ -55,8 +55,8 @@ func TestIntegration_EnterSubmitsInInsertMode(t *testing.T) {
 	}
 }
 
-func TestIntegration_ShiftEnterInsertsNewline(t *testing.T) {
-	// Test that Shift+Enter inserts newline using the Key struct directly
+func TestIntegration_ShiftEnterInsertsNewlineWithContinuation(t *testing.T) {
+	// Test that Shift+Enter inserts newline with shell continuation
 	// (CSI u sequence parsing is tested in key_test.go)
 	state := NewEditorState()
 	mode := NewInsertMode()
@@ -66,7 +66,7 @@ func TestIntegration_ShiftEnterInsertsNewline(t *testing.T) {
 		mode.HandleKey(Key{Rune: r}, state)
 	}
 
-	// Shift+Enter - should insert newline
+	// Shift+Enter - should insert " \" then newline for shell continuation
 	mode.HandleKey(Key{Special: KeyEnter, Shift: true}, state)
 
 	// Type "world"
@@ -74,8 +74,35 @@ func TestIntegration_ShiftEnterInsertsNewline(t *testing.T) {
 		mode.HandleKey(Key{Rune: r}, state)
 	}
 
-	if state.Buffer.Content() != "hello\nworld" {
-		t.Errorf("Content = %q, want %q", state.Buffer.Content(), "hello\nworld")
+	// Expect shell continuation: "hello \\\nworld"
+	expected := "hello \\\nworld"
+	if state.Buffer.Content() != expected {
+		t.Errorf("Content = %q, want %q", state.Buffer.Content(), expected)
+	}
+}
+
+func TestIntegration_ShiftEnterNoDoubleContinuation(t *testing.T) {
+	// Test that Shift+Enter doesn't add extra continuation if line already ends with \
+	state := NewEditorState()
+	mode := NewInsertMode()
+
+	// Type "hello \"
+	for _, r := range "hello \\" {
+		mode.HandleKey(Key{Rune: r}, state)
+	}
+
+	// Shift+Enter - should NOT add another continuation since line ends with \
+	mode.HandleKey(Key{Special: KeyEnter, Shift: true}, state)
+
+	// Type "world"
+	for _, r := range "world" {
+		mode.HandleKey(Key{Rune: r}, state)
+	}
+
+	// Line already had \, so just newline added
+	expected := "hello \\\nworld"
+	if state.Buffer.Content() != expected {
+		t.Errorf("Content = %q, want %q", state.Buffer.Content(), expected)
 	}
 }
 
@@ -296,6 +323,65 @@ func TestIntegration_CtrlU_DeleteToStart(t *testing.T) {
 
 	if result.Text != "world" {
 		t.Errorf("Text = %q, want %q", result.Text, "world")
+	}
+}
+
+func TestIntegration_BracketedPaste_SingleLine(t *testing.T) {
+	// Test that single-line paste works without adding continuation
+	state := NewEditorState()
+	mode := NewInsertMode()
+
+	// Simulate pasting "hello world"
+	mode.HandleKey(Key{Special: KeyPaste, PasteText: "hello world"}, state)
+
+	expected := "hello world"
+	if state.Buffer.Content() != expected {
+		t.Errorf("Content = %q, want %q", state.Buffer.Content(), expected)
+	}
+}
+
+func TestIntegration_BracketedPaste_Multiline(t *testing.T) {
+	// Test that multiline paste adds continuations
+	state := NewEditorState()
+	mode := NewInsertMode()
+
+	// Simulate pasting multiline text
+	mode.HandleKey(Key{Special: KeyPaste, PasteText: "echo hello\necho world"}, state)
+
+	// Should add continuation before newline
+	expected := "echo hello \\\necho world"
+	if state.Buffer.Content() != expected {
+		t.Errorf("Content = %q, want %q", state.Buffer.Content(), expected)
+	}
+}
+
+func TestIntegration_BracketedPaste_PreserveExistingContinuation(t *testing.T) {
+	// Test that paste preserves existing backslash continuations
+	state := NewEditorState()
+	mode := NewInsertMode()
+
+	// Simulate pasting text that already has continuation
+	mode.HandleKey(Key{Special: KeyPaste, PasteText: "echo hello \\\necho world"}, state)
+
+	// Should not add extra continuation
+	expected := "echo hello \\\necho world"
+	if state.Buffer.Content() != expected {
+		t.Errorf("Content = %q, want %q", state.Buffer.Content(), expected)
+	}
+}
+
+func TestIntegration_BracketedPaste_MultipleLines(t *testing.T) {
+	// Test paste with multiple lines
+	state := NewEditorState()
+	mode := NewInsertMode()
+
+	// Simulate pasting 3 lines
+	mode.HandleKey(Key{Special: KeyPaste, PasteText: "line1\nline2\nline3"}, state)
+
+	// Should add continuation before each internal newline
+	expected := "line1 \\\nline2 \\\nline3"
+	if state.Buffer.Content() != expected {
+		t.Errorf("Content = %q, want %q", state.Buffer.Content(), expected)
 	}
 }
 

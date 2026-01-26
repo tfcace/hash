@@ -1,0 +1,13 @@
+diff --git a/internal/auth/login.go b/internal/auth/login.go
+index abc1234..def5678 100644
+--- a/internal/auth/login.go
++++ b/internal/auth/login.go
+@@ -15,6 +15,10 @@ func Login(username, password string) (*User, error) {
++	// Validate input length
++	if len(username) > 100 || len(password) > 100 {
++		return nil, ErrInputTooLong
++	}
++
+ 	user, err := db.FindUser(username)
+ 	if err != nil {
+ 		return nil, err

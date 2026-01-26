@@ -7,9 +7,11 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/charmbracelet/lipgloss"
 	"github.com/tfcace/hash/internal/clipboard"
 	"github.com/tfcace/hash/internal/config"
 	"github.com/tfcace/hash/internal/history"
+	"github.com/tfcace/hash/internal/version"
 	sysClipboard "golang.design/x/clipboard"
 )
 
@@ -29,7 +31,7 @@ func isBuiltinEnabled(cfg *config.Config, name string) bool {
 // isBuiltin returns true if the command is a shell builtin.
 func isBuiltin(cmd string) bool {
 	switch cmd {
-	case "cd", "exit", "quit", "history", "copy", "issue":
+	case "cd", "exit", "quit", "history", "copy", "issue", "status", "tips":
 		return true
 	default:
 		return false
@@ -78,6 +80,10 @@ func (s *Shell) executeBuiltin(line string) (bool, error) {
 		return true, s.builtinCopy(args)
 	case "issue":
 		return true, s.builtinIssue(args)
+	case "status":
+		return true, s.builtinStatus()
+	case "tips":
+		return true, s.builtinTips(args)
 	default:
 		return false, nil
 	}
@@ -310,3 +316,120 @@ func copyToSystemClipboard(text string) error {
 
 // ClipboardBuffer is a type alias for easier external access.
 type ClipboardBuffer = clipboard.Buffer
+
+// builtinStatus shows the current system status.
+func (s *Shell) builtinStatus() error {
+	status := s.collectStatus()
+	fmt.Print(status.Format())
+	return nil
+}
+
+// builtinTips shows helpful tips about Hash features.
+func (s *Shell) builtinTips(args []string) error {
+	// Handle "tips off" to disable hints (stored in config)
+	if len(args) > 0 && args[0] == "off" {
+		fmt.Println("Hints disabled. Run 'tips on' to re-enable.")
+		// TODO: persist to config
+		return nil
+	}
+	if len(args) > 0 && args[0] == "on" {
+		fmt.Println("Hints enabled.")
+		return nil
+	}
+
+	// Use colors from starship palette
+	primary := s.colorPalette.Primary
+	dim := s.colorPalette.Dim
+
+	headerStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color(primary)).
+		Bold(true)
+
+	keyStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color(primary))
+
+	dimStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color(dim))
+
+	fmt.Println(headerStyle.Render("Hash Tips:"))
+	fmt.Println()
+
+	fmt.Println(headerStyle.Render("Navigation:"))
+	fmt.Printf("  %s  %s\n", keyStyle.Render("Ctrl+R"), dimStyle.Render("Search command history"))
+	fmt.Printf("  %s  %s\n", keyStyle.Render("Ctrl+P"), dimStyle.Render("Context picker for AI requests"))
+	fmt.Printf("  %s %s\n", keyStyle.Render("Up/Down"), dimStyle.Render("Browse history"))
+	fmt.Println()
+
+	fmt.Println(headerStyle.Render("AI features:"))
+	fmt.Printf("  %s      %s\n", keyStyle.Render("??"), dimStyle.Render("Full command generation"))
+	fmt.Printf("  %s  %s\n", keyStyle.Render("cmd | ??"), dimStyle.Render("Pipe to AI for transformation"))
+	fmt.Printf("  %s    %s\n", keyStyle.Render("cmd ??"), dimStyle.Render("Inline completion"))
+	fmt.Println()
+
+	fmt.Println(headerStyle.Render("Clipboard:"))
+	fmt.Printf("  %s  %s\n", keyStyle.Render("Ctrl+Y"), dimStyle.Render("Copy last command"))
+	fmt.Printf("  %s  %s\n", keyStyle.Render("Ctrl+O"), dimStyle.Render("Copy last output"))
+	fmt.Println()
+
+	fmt.Println(dimStyle.Render("Run 'tips off' to disable startup hints."))
+	return nil
+}
+
+// collectStatus gathers the current status of all subsystems.
+func (s *Shell) collectStatus() *SystemStatus {
+	status := &SystemStatus{
+		Version: version.Version,
+	}
+
+	// Prompt status
+	status.PromptMode = s.config.Prompt.Mode
+	status.PromptOK = s.prompt != nil
+	if !status.PromptOK {
+		status.PromptErr = "not available"
+	}
+
+	// History status
+	if s.history != nil {
+		status.HistoryOK = true
+		status.HistoryPath = "~/.local/share/hash/history.db"
+		if count, err := s.history.Count(); err == nil {
+			status.HistoryCount = count
+		}
+	} else {
+		status.HistoryErr = "not initialized"
+	}
+
+	// Learning status
+	if s.learning != nil {
+		status.LearningOK = true
+		if count, err := s.learning.PatternCount(); err == nil {
+			status.PatternCount = count
+		}
+	} else {
+		status.LearningErr = "not initialized"
+	}
+
+	// Agent status
+	status.AgentName = s.config.Agent.Default
+	if status.AgentName == "" {
+		status.AgentName = s.config.Agent.Command
+	}
+	status.AgentOK = s.agentHandler != nil
+
+	// PTY status - check if executor supports PTY
+	status.PTYOK = true // PTY is always available on unix systems
+	if s.executor == nil {
+		status.PTYOK = false
+		status.PTYErr = "executor not initialized"
+	}
+
+	// Clipboard status
+	if err := sysClipboard.Init(); err != nil {
+		status.ClipboardOK = false
+		status.ClipboardErr = err.Error()
+	} else {
+		status.ClipboardOK = true
+	}
+
+	return status
+}

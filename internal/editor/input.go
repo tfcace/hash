@@ -20,6 +20,8 @@ type InputReader struct {
 	pending      byte   // Byte to return on next read (0 = none)
 	hasPending   bool
 	pendingKeys  []Key  // Keys to return before reading new input
+	inPaste      bool   // Currently reading bracketed paste content
+	pasteBuffer  []byte // Buffer for paste content
 }
 
 // NewInputReader creates a new input reader.
@@ -263,6 +265,8 @@ func keyString(k Key) string {
 		keyName = "Home"
 	case KeyEnd:
 		keyName = "End"
+	case KeyPaste:
+		keyName = "Paste"
 	case KeyNone:
 		if k.Rune != 0 {
 			keyName = string(k.Rune)
@@ -335,7 +339,39 @@ func (r *InputReader) readEscapeSequence() (Key, error) {
 		}
 	}
 
+	// Check if this is a bracketed paste start sequence
+	if isPasteStart(r.buf[:total]) {
+		return r.readPasteContent()
+	}
+
 	return ParseKey(r.buf[:total]), nil
+}
+
+// readPasteContent reads all content until the paste end marker.
+func (r *InputReader) readPasteContent() (Key, error) {
+	r.pasteBuffer = r.pasteBuffer[:0] // Reset buffer
+
+	// Read until we see the paste end sequence \x1b[201~
+	var singleByte [1]byte
+	for {
+		n, err := r.in.Read(singleByte[:])
+		if err != nil {
+			// Return whatever we have on error
+			return Key{Special: KeyPaste, PasteText: string(r.pasteBuffer)}, err
+		}
+		if n == 0 {
+			continue
+		}
+
+		r.pasteBuffer = append(r.pasteBuffer, singleByte[0])
+
+		// Check if we've reached the end marker
+		if isPasteEnd(r.pasteBuffer) {
+			// Remove the end marker from the content
+			content := r.pasteBuffer[:len(r.pasteBuffer)-6]
+			return Key{Special: KeyPaste, PasteText: string(content)}, nil
+		}
+	}
 }
 
 // isCompleteSequence checks if we have a complete escape sequence.
@@ -350,4 +386,20 @@ func isCompleteSequence(b []byte) bool {
 	// CSI sequence ends with a letter
 	last := b[len(b)-1]
 	return (last >= 'A' && last <= 'Z') || (last >= 'a' && last <= 'z') || last == '~'
+}
+
+// isPasteStart checks if the sequence is the bracketed paste start marker.
+func isPasteStart(b []byte) bool {
+	// \x1b[200~
+	return len(b) == 6 && b[0] == 0x1b && b[1] == '[' && b[2] == '2' && b[3] == '0' && b[4] == '0' && b[5] == '~'
+}
+
+// isPasteEnd checks if the buffer ends with the bracketed paste end marker.
+func isPasteEnd(b []byte) bool {
+	// \x1b[201~
+	if len(b) < 6 {
+		return false
+	}
+	end := b[len(b)-6:]
+	return end[0] == 0x1b && end[1] == '[' && end[2] == '2' && end[3] == '0' && end[4] == '1' && end[5] == '~'
 }

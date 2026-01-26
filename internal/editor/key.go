@@ -19,15 +19,17 @@ const (
 	KeyEnd
 	KeyPageUp
 	KeyPageDown
+	KeyPaste // Bracketed paste content
 )
 
 // Key represents a parsed keypress.
 type Key struct {
-	Rune    rune
-	Special KeyCode
-	Ctrl    bool
-	Alt     bool
-	Shift   bool
+	Rune      rune
+	Special   KeyCode
+	Ctrl      bool
+	Alt       bool
+	Shift     bool
+	PasteText string // Content for KeyPaste (bracketed paste)
 }
 
 // ParseKey parses a byte sequence into a Key.

@@ -116,3 +116,40 @@ func TestConfig_StartupFilesDefaults(t *testing.T) {
 		t.Error("expected default interactive startup files")
 	}
 }
+
+func TestConfig_ClipboardMaxOutputSize(t *testing.T) {
+	cfg := Default()
+
+	// Default should be 1MB
+	size, err := cfg.Clipboard.ParseMaxOutputSize()
+	if err != nil {
+		t.Fatalf("ParseMaxOutputSize error: %v", err)
+	}
+	if size != 1024*1024 {
+		t.Errorf("Default size = %d, want %d", size, 1024*1024)
+	}
+}
+
+func TestConfig_ClipboardMaxOutputSizeParsing(t *testing.T) {
+	tests := []struct {
+		input string
+		want  int64
+	}{
+		{"1MB", 1024 * 1024},
+		{"5MB", 5 * 1024 * 1024},
+		{"500KB", 500 * 1024},
+		{"1024", 1024},
+	}
+
+	for _, tt := range tests {
+		cfg := &ClipboardConfig{MaxOutputSize: tt.input}
+		got, err := cfg.ParseMaxOutputSize()
+		if err != nil {
+			t.Errorf("ParseMaxOutputSize(%q) error: %v", tt.input, err)
+			continue
+		}
+		if got != tt.want {
+			t.Errorf("ParseMaxOutputSize(%q) = %d, want %d", tt.input, got, tt.want)
+		}
+	}
+}

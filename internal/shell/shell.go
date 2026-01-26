@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/tfcace/hash/internal/agent"
@@ -19,9 +21,12 @@ import (
 	"github.com/tfcace/hash/internal/executor"
 	"github.com/tfcace/hash/internal/history"
 	"github.com/tfcace/hash/internal/learning"
+	"github.com/tfcace/hash/internal/markdown"
 	"github.com/tfcace/hash/internal/parser"
+	"github.com/tfcace/hash/internal/prediction"
 	"github.com/tfcace/hash/internal/prompt"
 	"github.com/tfcace/hash/internal/readline"
+	"github.com/tfcace/hash/internal/shell/integration"
 	"github.com/tfcace/hash/internal/trace"
 )
 
@@ -46,6 +51,8 @@ type Shell struct {
 	history      *history.Store
 	learning     *learning.FixStore
 	clipboard    *clipboard.Buffer
+	predictor    *prediction.Predictor
+	suggestor    *CommandSuggestor
 	colorPalette prompt.Palette
 
 	lastExitCode int
@@ -53,6 +60,8 @@ type Shell struct {
 	lastCommand  string // Last executed command
 	lastStderr   string // Stderr from last command (truncated)
 	lastCwd      string // Working directory of last command
+
+	osc *integration.Emitter // OSC shell integration emitter
 
 	// History navigation state for editor mode
 	historyIndex     int    // -1 means current line (not in history)
@@ -91,6 +100,9 @@ func New(cfg *config.Config) (*Shell, error) {
 	fileCompleter := completion.NewFileCompleter()
 	fileCompleter.SetFuzzyMode(cfg.Completions.Fuzzy)
 	router.Register(fileCompleter, completion.PriorityFilesystem)
+
+	// Executable completer for command names from PATH
+	router.Register(completion.NewExecutableCompleter(), completion.PriorityExecutable)
 
 	if cfg.Completions.CobraEnabled {
 		router.Register(completion.NewCobraCompleter(), completion.PriorityToolNative)
@@ -175,6 +187,31 @@ func New(cfg *config.Config) (*Shell, error) {
 		fmt.Fprintf(os.Stderr, "hash: warning: learning unavailable: %v\n", err)
 	}
 
+	// Initialize prediction store and predictor
+	var predictor *prediction.Predictor
+	if cfg.Prediction.Enabled {
+		predictionPath := filepath.Join(getDataDir(), "prediction.db")
+		predictionStore, err := prediction.NewStore(predictionPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "hash: warning: prediction unavailable: %v\n", err)
+		} else {
+			predCfg := prediction.Config{
+				Enabled:             cfg.Prediction.Enabled,
+				AcceptKeys:          cfg.Prediction.AcceptKeys,
+				ConfidenceThreshold: cfg.Prediction.ConfidenceThreshold,
+				PathMinCount:        cfg.Prediction.PathMinCount,
+				PathRecencyHours:    cfg.Prediction.PathRecencyHours,
+			}
+			predictor = prediction.NewPredictor(predictionStore, predCfg)
+		}
+	}
+
+	// Initialize command suggestor (PATH caching happens in background)
+	suggestor := NewCommandSuggestor(historyStore)
+
+	// Initialize OSC shell integration emitter
+	osc := integration.New()
+
 	// Initialize clipboard buffer (configurable size and output limit)
 	clipboardBuf := clipboard.NewBuffer(cfg.Clipboard.BufferSize)
 	maxOutputSizeStr := cfg.Clipboard.MaxOutputSize
@@ -230,6 +267,7 @@ func New(cfg *config.Config) (*Shell, error) {
 		InputBgColor:   colorPalette.InputBg,
 		ScrollbarColor: colorPalette.Primary,
 		CompleteFunc:   makeEditorCompleteFunc(router),
+		PrefetchFunc:   makeEditorPrefetchFunc(router),
 	}
 
 	shell := &Shell{
@@ -245,14 +283,25 @@ func New(cfg *config.Config) (*Shell, error) {
 		history:      historyStore,
 		learning:     learningStore,
 		clipboard:    clipboardBuf,
+		predictor:    predictor,
+		suggestor:    suggestor,
 		colorPalette: colorPalette,
 		historyIndex: -1, // Start before history (current line)
+		osc:          osc,
 	}
 
 	// Set up history function for editor mode
 	// This closure captures shell for proper state management
 	if useEditor && historyStore != nil {
 		shell.editorCfg.HistoryFunc = shell.navigateHistory
+	}
+
+	// Set up shell integration callback for editor mode
+	// This emits OSC 133;B (CommandStart) when the editor is ready for input
+	shell.editorCfg.OnInputReady = func() {
+		if shell.osc != nil {
+			shell.osc.CommandStart()
+		}
 	}
 
 	// Set prompt refresh callback for Ctrl+R history picker
@@ -297,11 +346,27 @@ func (s *Shell) Run(ctx context.Context) error {
 		"mode": "editor",
 	})
 
+	// Track whether we need to emit CommandFinished at start of loop
+	firstPrompt := true
+
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
+		}
+
+		// Shell integration: emit sequences before prompt
+		if s.osc != nil {
+			// Emit CommandFinished for previous command (skip on very first prompt)
+			if !firstPrompt {
+				s.osc.CommandFinished(s.lastExitCode)
+			}
+			firstPrompt = false
+			s.osc.PromptStart()
+			if cwd, err := os.Getwd(); err == nil {
+				s.osc.ReportDirectory(cwd)
+			}
 		}
 
 		var line string
@@ -310,6 +375,10 @@ func (s *Shell) Run(ctx context.Context) error {
 		if s.useEditor {
 			line, err = s.readLineWithEditor(ctx)
 		} else {
+			// Shell integration: mark start of user input (readline mode)
+			if s.osc != nil {
+				s.osc.CommandStart()
+			}
 			line, err = s.inputHandler.ReadLine()
 		}
 
@@ -395,14 +464,37 @@ func (s *Shell) Run(ctx context.Context) error {
 				s.clipboard.AddCommand(line)
 			}
 
+			// Note: OSC 133;C (CommandExecuted) is now emitted by the executor
+			// only for non-PTY commands. This avoids interference with TUI apps
+			// (vim, helix, etc.) that send their own terminal queries on startup.
+
 			// Capture stderr for issue reporting
 			stderrCap := newStderrCapture(os.Stderr)
 
 			// Execute external command
 			result, err := s.executor.Execute(ctx, line, os.Stdout, stderrCap)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "hash: %v\n", err)
-				s.lastExitCode = 1
+				// Check for command-not-found specifically
+				var cnf *executor.CommandNotFoundError
+				if errors.As(err, &cnf) {
+					suggestions := s.suggestor.Suggest(cnf.Command)
+					// Check typed command first, then suggestions for install hints
+					installHint := s.suggestor.InstallHint(cnf.Command)
+					if installHint == "" {
+						for _, sug := range suggestions {
+							if hint := s.suggestor.InstallHint(sug); hint != "" {
+								installHint = hint
+								break
+							}
+						}
+					}
+					handler := NewErrorHandler(s.learning)
+					handler.HandleCommandNotFound(cnf.Command, suggestions, installHint)
+					s.lastExitCode = 127 // Standard "command not found" exit code
+				} else {
+					fmt.Fprintf(os.Stderr, "hash: %v\n", err)
+					s.lastExitCode = 1
+				}
 			} else {
 				s.lastExitCode = result.ExitCode
 				s.lastDuration = result.Duration
@@ -412,6 +504,9 @@ func (s *Shell) Run(ctx context.Context) error {
 				}
 			}
 
+			// Store the previous command for prediction before updating
+			prevCommand := s.lastCommand
+
 			// Store for issue reporting
 			s.lastCommand = line
 			s.lastStderr = stderrCap.String()
@@ -419,6 +514,12 @@ func (s *Shell) Run(ctx context.Context) error {
 
 			// Record command in history
 			s.recordCommand(line, s.lastExitCode, s.lastDuration)
+
+			// Record command sequence for prediction (only successful commands)
+			if s.predictor != nil && s.lastExitCode == 0 && prevCommand != "" {
+				cwd, _ := os.Getwd()
+				s.predictor.Record(prevCommand, line, cwd, nil)
+			}
 		}
 
 		s.updatePrompt()
@@ -492,6 +593,15 @@ func (s *Shell) readLineWithEditor(ctx context.Context) (string, error) {
 			ed.SetInitialText(initialText)
 			initialText = ""
 		}
+
+		// Set ghost text prediction based on last command
+		if s.predictor != nil && s.lastCommand != "" {
+			cwd, _ := os.Getwd()
+			if prediction := s.predictor.PredictCommand(s.lastCommand, cwd); prediction != "" {
+				ed.SetGhostText(prediction)
+			}
+		}
+
 		result, err := ed.Run(ctx)
 		if err != nil {
 			return "", err
@@ -634,15 +744,47 @@ func (s *Shell) navigateHistory(dir int, currentLine string) string {
 }
 
 func (s *Shell) handleAgentRequest(ctx context.Context, parsed parser.ParseResult) {
+	// Show which mode was detected
+	var modeLabel string
+	switch parsed.Type {
+	case parser.CommandTypeAgent:
+		modeLabel = "command"
+	case parser.CommandTypeAgentPipe:
+		modeLabel = "pipe"
+	case parser.CommandTypeAgentInline:
+		modeLabel = "inline"
+	}
+	fmt.Fprintf(os.Stdout, "\033[90m[agent: %s]\033[0m ", modeLabel)
+
 	if s.agentHandler == nil {
-		fmt.Fprintf(os.Stderr, "hash: no agent configured\n")
+		fmt.Fprintf(os.Stderr, "\n\033[31m✗ Agent not configured.\033[0m\n")
 		fmt.Fprintf(os.Stderr, "  Configure an agent in ~/.config/hash/config.toml:\n")
 		fmt.Fprintf(os.Stderr, "  [agent]\n")
 		fmt.Fprintf(os.Stderr, "  command = \"claude\"\n")
+		fmt.Fprintf(os.Stderr, "  See docs/config-reference.md for options.\n")
 		s.lastExitCode = 1
 		s.updatePrompt()
 		return
 	}
+
+	// Create a new context for the agent request that we can cancel independently.
+	// This allows Ctrl+C to cancel the agent operation without exiting the shell.
+	agentCtx, agentCancel := context.WithCancel(context.Background())
+	defer agentCancel()
+
+	// Set up SIGINT handler for this agent request
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT)
+	defer signal.Stop(sigCh)
+
+	// Handle SIGINT by cancelling only the agent context
+	go func() {
+		select {
+		case <-sigCh:
+			agentCancel()
+		case <-agentCtx.Done():
+		}
+	}()
 
 	// Apply agent timeout
 	timeout := 30 * time.Second
@@ -651,14 +793,14 @@ func (s *Shell) handleAgentRequest(ctx context.Context, parsed parser.ParseResul
 			timeout = parsedDur
 		}
 	}
-	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
+	agentCtx, timeoutCancel := context.WithTimeout(agentCtx, timeout)
+	defer timeoutCancel()
 
 	// Pass selected context to agent handler
 	s.agentHandler.SetSelectedContext(s.selectedContext)
 
 	// Use unified streaming handler for all modes
-	s.handleAgentRequestUnified(ctx, parsed)
+	s.handleAgentRequestUnified(agentCtx, parsed)
 }
 
 // handleAgentInlineStreaming uses ghost text for inline completions.
@@ -787,16 +929,17 @@ func (s *Shell) handleAgentRequestUnified(ctx context.Context, parsed parser.Par
 
 // handleAgentFullStreaming handles full ?? and pipe modes with streaming.
 func (s *Shell) handleAgentFullStreaming(ctx context.Context, parsed parser.ParseResult, modelName string) {
-	// Show thinking indicator
-	s.responseUI.ShowThinkingInline(modelName)
+	// Show thinking indicator (multi-stage: thinking -> receiving)
+	s.responseUI.ShowState(AgentStateThinking)
 
 	// Start streaming request
 	textCh, errCh := s.agentHandler.StreamRequest(ctx, parsed)
 
-	// Collect streamed response
+	// Collect streamed response with markdown rendering
 	var response strings.Builder
 	var streamErr error
 	lineCount := 0 // Track lines for clearing on cancel
+	renderer := markdown.NewStreamingRenderer()
 
 collectLoop:
 	for {
@@ -820,15 +963,22 @@ collectLoop:
 				break collectLoop
 			}
 			if response.Len() == 0 {
-				// First chunk - clear thinking indicator
+				// First chunk - transition to receiving state, then clear for output
+				s.responseUI.ShowState(AgentStateReceiving)
 				s.responseUI.ClearLine()
 			}
 			response.WriteString(text)
 			// Count newlines for clearing on cancel
 			lineCount += strings.Count(text, "\n")
-			// Stream output character by character (dim)
-			fmt.Fprintf(os.Stdout, "\033[90m%s\033[0m", text)
+			// Stream output with markdown rendering
+			rendered := renderer.Write(text)
+			fmt.Fprint(os.Stdout, rendered)
 		}
+	}
+
+	// Flush any remaining buffered content from the renderer
+	if remaining := renderer.Flush(); remaining != "" {
+		fmt.Fprint(os.Stdout, remaining)
 	}
 
 	fmt.Println() // New line after response
@@ -1049,6 +1199,12 @@ func makeEditorCompleteFunc(router *completion.Router) func(string, int) []edito
 			}
 		}
 		return items
+	}
+}
+
+func makeEditorPrefetchFunc(router *completion.Router) func(string, int) {
+	return func(line string, pos int) {
+		router.Prefetch(line, pos)
 	}
 }
 
