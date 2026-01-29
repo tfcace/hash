@@ -19,6 +19,7 @@ import (
 	"github.com/creack/pty"
 	"golang.org/x/sys/unix"
 	"github.com/tfcace/hash/internal/progress"
+	"github.com/tfcace/hash/internal/trace"
 	"golang.org/x/term"
 	"mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/interp"
@@ -634,6 +635,9 @@ func (e *Executor) bashBuiltinHandler(ctx context.Context, args []string) ([]str
 			fmt.Fprintln(hc.Stderr, "source: need filename")
 			return []string{"false"}, nil // Return false to indicate error
 		}
+		trace.Emit("compat", "source_intercept", trace.LevelVerbose, map[string]any{
+			"path": args[1],
+		})
 		err := e.handleBashSource(ctx, args[1])
 		if err != nil {
 			return []string{"false"}, nil
@@ -645,6 +649,10 @@ func (e *Executor) bashBuiltinHandler(ctx context.Context, args []string) ([]str
 		if len(args) < 2 {
 			return []string{":"}, nil // eval with no args is a no-op
 		}
+		src := strings.Join(args[1:], " ")
+		trace.Emit("compat", "eval_intercept", trace.LevelVerbose, map[string]any{
+			"src_preview": truncateForTrace(src, 200),
+		})
 		err := e.handleBashEval(ctx, args[1:])
 		if err != nil {
 			return []string{"false"}, nil
@@ -685,9 +693,16 @@ func (e *Executor) handleBashSource(ctx context.Context, path string) error {
 	prog, err := parser.Parse(strings.NewReader(string(content)), path)
 	if err != nil {
 		// Graceful degradation: skip unparseable files silently
+		trace.Emit("compat", "source_parse_skip", trace.LevelVerbose, map[string]any{
+			"path":  path,
+			"error": err.Error(),
+		})
 		return nil
 	}
 
+	trace.Emit("compat", "source_execute", trace.LevelVerbose, map[string]any{
+		"path": path,
+	})
 	// Run through the existing runner (preserves state)
 	return e.runner.Run(ctx, prog)
 }
@@ -701,11 +716,26 @@ func (e *Executor) handleBashEval(ctx context.Context, args []string) error {
 	prog, err := parser.Parse(strings.NewReader(src), "eval")
 	if err != nil {
 		// Graceful degradation: skip unparseable eval content silently
+		trace.Emit("compat", "eval_parse_skip", trace.LevelVerbose, map[string]any{
+			"src_preview": truncateForTrace(src, 200),
+			"error":       err.Error(),
+		})
 		return nil
 	}
 
+	trace.Emit("compat", "eval_execute", trace.LevelVerbose, map[string]any{
+		"src_preview": truncateForTrace(src, 100),
+	})
 	// Run through the existing runner (preserves state)
 	return e.runner.Run(ctx, prog)
+}
+
+// truncateForTrace truncates a string for trace output.
+func truncateForTrace(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
 }
 
 // Reset clears the interpreter state, including all function definitions.
