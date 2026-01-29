@@ -601,3 +601,191 @@ eval '[[ "$TEST_VAR" == "bar" ]] && echo "eval in script works"'
 		t.Errorf("expected 'eval in script works', got: %q", output)
 	}
 }
+
+// Tests for graceful degradation - zsh-specific syntax should be silently skipped
+
+func TestExecutor_SourceZshSpecificFile_GracefulSkip(t *testing.T) {
+	exec := New()
+	ctx := context.Background()
+	var stdout, stderr bytes.Buffer
+
+	tmpDir := t.TempDir()
+
+	// Create a file with zsh-specific parameter expansion syntax
+	// This mimics what's in zsh-autosuggestions and bun completions
+	zshFile := filepath.Join(tmpDir, "zsh-specific.zsh")
+	zshContent := `# Zsh-specific syntax that should fail to parse
+typeset -g var
+(( ${+commands[foo]} )) && echo "has foo"
+${(%):-%n}
+`
+	if err := os.WriteFile(zshFile, []byte(zshContent), 0644); err != nil {
+		t.Fatalf("failed to create zsh file: %v", err)
+	}
+
+	// Source should silently skip unparseable content (no error)
+	_, err := exec.Execute(ctx, "source "+zshFile, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("source should not error on unparseable zsh file: %v", err)
+	}
+
+	// Stderr should be empty (graceful skip, no error messages)
+	if stderr.String() != "" {
+		t.Errorf("expected no stderr output, got: %q", stderr.String())
+	}
+}
+
+func TestExecutor_EvalZshHook_GracefulSkip(t *testing.T) {
+	exec := New()
+	ctx := context.Background()
+	var stdout, stderr bytes.Buffer
+
+	// Simulate direnv hook zsh output (contains zsh-specific syntax)
+	// The actual output contains things like: (( ${+commands[direnv]} ))
+	zshHookContent := `_direnv_hook() {
+  (( ${+commands[direnv]} )) || return
+  eval "$(direnv export zsh)"
+}
+typeset -ag precmd_functions
+precmd_functions=(_direnv_hook $precmd_functions)
+`
+
+	// Eval should silently skip unparseable content
+	_, err := exec.Execute(ctx, `eval '`+zshHookContent+`'`, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("eval should not error on unparseable zsh content: %v", err)
+	}
+
+	// Stderr should be empty
+	if stderr.String() != "" {
+		t.Errorf("expected no stderr output, got: %q", stderr.String())
+	}
+}
+
+func TestExecutor_EvalZoxideHook_GracefulSkip(t *testing.T) {
+	exec := New()
+	ctx := context.Background()
+	var stdout, stderr bytes.Buffer
+
+	// Simulate zoxide init zsh output
+	zoxideContent := `__zoxide_hook() {
+  (( ${+__zoxide_hooked} )) && return
+  __zoxide_hooked=1
+}
+`
+
+	_, err := exec.Execute(ctx, `eval '`+zoxideContent+`'`, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("eval should not error on zoxide zsh hook: %v", err)
+	}
+
+	if stderr.String() != "" {
+		t.Errorf("expected no stderr output, got: %q", stderr.String())
+	}
+}
+
+func TestExecutor_SourceMixedContent_PartialExecution(t *testing.T) {
+	exec := New()
+	ctx := context.Background()
+	var stdout, stderr bytes.Buffer
+
+	tmpDir := t.TempDir()
+
+	// Create a file that sources both valid bash and invalid zsh files
+	validFile := filepath.Join(tmpDir, "valid.sh")
+	validContent := `export VALID_VAR="from-valid"
+echo "valid file loaded"
+`
+	if err := os.WriteFile(validFile, []byte(validContent), 0644); err != nil {
+		t.Fatalf("failed to create valid file: %v", err)
+	}
+
+	invalidFile := filepath.Join(tmpDir, "invalid.zsh")
+	invalidContent := `# This will fail to parse
+(( ${+foo} )) && bar
+`
+	if err := os.WriteFile(invalidFile, []byte(invalidContent), 0644); err != nil {
+		t.Fatalf("failed to create invalid file: %v", err)
+	}
+
+	// Source the valid file - should work
+	_, err := exec.Execute(ctx, "source "+validFile, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("source valid file failed: %v", err)
+	}
+
+	if !strings.Contains(stdout.String(), "valid file loaded") {
+		t.Errorf("expected 'valid file loaded' in output")
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+
+	// Source the invalid file - should silently skip
+	_, err = exec.Execute(ctx, "source "+invalidFile, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("source invalid file should not error: %v", err)
+	}
+
+	// The valid var should still be set from before
+	stdout.Reset()
+	_, err = exec.Execute(ctx, `echo "$VALID_VAR"`, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("echo failed: %v", err)
+	}
+
+	if strings.TrimSpace(stdout.String()) != "from-valid" {
+		t.Errorf("expected VALID_VAR to be 'from-valid', got: %q", stdout.String())
+	}
+}
+
+func TestExecutor_EvalValidBashStillWorks(t *testing.T) {
+	exec := New()
+	ctx := context.Background()
+	var stdout, stderr bytes.Buffer
+
+	// Make sure valid bash eval still works after our changes
+	_, err := exec.Execute(ctx, `eval 'echo "eval works"'`, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("eval failed: %v", err)
+	}
+
+	if strings.TrimSpace(stdout.String()) != "eval works" {
+		t.Errorf("expected 'eval works', got: %q", stdout.String())
+	}
+}
+
+func TestExecutor_SourceValidBashStillWorks(t *testing.T) {
+	exec := New()
+	ctx := context.Background()
+	var stdout, stderr bytes.Buffer
+
+	tmpDir := t.TempDir()
+	scriptPath := filepath.Join(tmpDir, "valid.sh")
+	scriptContent := `export TEST_FROM_SOURCE="hello"
+echo "sourced successfully"
+`
+	if err := os.WriteFile(scriptPath, []byte(scriptContent), 0644); err != nil {
+		t.Fatalf("failed to create script: %v", err)
+	}
+
+	_, err := exec.Execute(ctx, "source "+scriptPath, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("source failed: %v", err)
+	}
+
+	if !strings.Contains(stdout.String(), "sourced successfully") {
+		t.Errorf("expected 'sourced successfully' in output")
+	}
+
+	// Verify the export persisted
+	stdout.Reset()
+	_, err = exec.Execute(ctx, `echo "$TEST_FROM_SOURCE"`, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("echo failed: %v", err)
+	}
+
+	if strings.TrimSpace(stdout.String()) != "hello" {
+		t.Errorf("expected 'hello', got: %q", stdout.String())
+	}
+}

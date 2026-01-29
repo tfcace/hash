@@ -658,7 +658,6 @@ func (e *Executor) bashBuiltinHandler(ctx context.Context, args []string) ([]str
 }
 
 // handleBashSource reads a file and executes it with LangBash parsing.
-// It also applies compatibility filtering to skip zsh-specific commands.
 func (e *Executor) handleBashSource(ctx context.Context, path string) error {
 	hc := interp.HandlerCtx(ctx)
 
@@ -681,76 +680,28 @@ func (e *Executor) handleBashSource(ctx context.Context, path string) error {
 		return err
 	}
 
-	// Apply compatibility filtering - skip zsh-specific commands
-	filtered := filterSourceContent(string(content))
-
-	// Parse with LangBash
+	// Parse with LangBash - silently skip if it fails (likely zsh-specific syntax)
 	parser := syntax.NewParser(syntax.Variant(syntax.LangBash))
-	prog, err := parser.Parse(strings.NewReader(filtered), path)
+	prog, err := parser.Parse(strings.NewReader(string(content)), path)
 	if err != nil {
-		fmt.Fprintf(hc.Stderr, "source: %v\n", err)
-		return err
+		// Graceful degradation: skip unparseable files silently
+		return nil
 	}
 
 	// Run through the existing runner (preserves state)
 	return e.runner.Run(ctx, prog)
 }
 
-// filterSourceContent applies compatibility filtering to shell script content.
-// It comments out zsh-specific commands that would fail or cause issues.
-func filterSourceContent(content string) string {
-	lines := strings.Split(content, "\n")
-	var filtered []string
-
-	// Zsh-specific builtins to skip
-	zshBuiltins := map[string]bool{
-		"bindkey": true, "setopt": true, "unsetopt": true,
-		"autoload": true, "compdef": true, "zstyle": true,
-		"zmodload": true, "zle": true, "compinit": true,
-		"promptinit": true,
-	}
-
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-
-		// Skip empty lines and comments - keep as-is
-		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
-			filtered = append(filtered, line)
-			continue
-		}
-
-		// Skip shell-specific tool initializations
-		if strings.Contains(trimmed, "starship init") ||
-			strings.Contains(trimmed, "zoxide init zsh") ||
-			strings.Contains(trimmed, "fzf --zsh") {
-			filtered = append(filtered, "# [hash-compat] "+line)
-			continue
-		}
-
-		// Skip zsh-specific builtins
-		fields := strings.Fields(trimmed)
-		if len(fields) > 0 && zshBuiltins[fields[0]] {
-			filtered = append(filtered, "# [hash-compat] "+line)
-			continue
-		}
-
-		filtered = append(filtered, line)
-	}
-
-	return strings.Join(filtered, "\n")
-}
-
 // handleBashEval parses and executes args as bash code.
 func (e *Executor) handleBashEval(ctx context.Context, args []string) error {
-	hc := interp.HandlerCtx(ctx)
 	src := strings.Join(args, " ")
 
-	// Parse with LangBash
+	// Parse with LangBash - silently skip if it fails (likely zsh-specific syntax)
 	parser := syntax.NewParser(syntax.Variant(syntax.LangBash))
 	prog, err := parser.Parse(strings.NewReader(src), "eval")
 	if err != nil {
-		fmt.Fprintf(hc.Stderr, "eval: %v\n", err)
-		return err
+		// Graceful degradation: skip unparseable eval content silently
+		return nil
 	}
 
 	// Run through the existing runner (preserves state)

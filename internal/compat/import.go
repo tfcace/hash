@@ -225,6 +225,25 @@ func shouldSkipLine(line string) string {
 	if strings.Contains(line, "fzf --zsh") {
 		return "fzf zsh integration (use 'eval \"$(fzf --bash)\"' instead)"
 	}
+	if strings.Contains(line, "direnv hook zsh") {
+		return "direnv hook zsh (use 'eval \"$(direnv hook bash)\"' instead)"
+	}
+
+	// Zsh-specific plugins
+	if strings.Contains(line, "zsh-autosuggestions") {
+		return "zsh-autosuggestions (zsh-specific plugin)"
+	}
+	if strings.Contains(line, "zsh-syntax-highlighting") {
+		return "zsh-syntax-highlighting (zsh-specific plugin)"
+	}
+	if strings.Contains(line, "zsh-completions") {
+		return "zsh-completions (zsh-specific plugin)"
+	}
+
+	// Bun completions use zsh-specific syntax
+	if strings.Contains(line, ".bun/_bun") || strings.Contains(line, "bun completions") {
+		return "bun zsh completions (zsh-specific)"
+	}
 
 	return ""
 }
