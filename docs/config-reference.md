@@ -530,6 +530,21 @@ Ctrl+H during completion regardless of this setting.
 show_hidden = false
 ```
 
+### completions.mask_sensitive_env
+
+**Type:** `boolean`
+**Default:** `true`
+
+Mask values of sensitive environment variables in completion previews.
+Variables with names containing `KEY`, `SECRET`, `TOKEN`, `PASSWORD`,
+`AUTH`, `CREDENTIAL`, or `PRIVATE` show only the first 4 characters
+followed by bullets (e.g., `sk-pr••••••••`).
+
+```toml
+mask_sensitive_env = true   # Default: mask sensitive values
+mask_sensitive_env = false  # Show full values for all env vars
+```
+
 ---
 
 ## [completions.<tool>]
@@ -1243,6 +1258,7 @@ history_count = 5
 fuzzy = true
 file_icons = true
 show_hidden = false
+mask_sensitive_env = true
 
 [completions.kubectl]
 cache_ttl = "5m"

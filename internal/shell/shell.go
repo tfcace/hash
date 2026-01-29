@@ -102,7 +102,9 @@ func New(cfg *config.Config) (*Shell, error) {
 	router.Register(completion.NewAliasCompleter(exec), completion.PriorityAlias)
 
 	// Environment variable completer ($VAR, ${VAR})
-	router.Register(completion.NewEnvCompleter(exec), completion.PriorityEnv)
+	envCompleter := completion.NewEnvCompleter(exec)
+	envCompleter.SetMaskSensitive(cfg.Completions.MaskSensitiveEnv)
+	router.Register(envCompleter, completion.PriorityEnv)
 
 	// Executable completer for command names from PATH
 	router.Register(completion.NewExecutableCompleter(), completion.PriorityExecutable)

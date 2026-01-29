@@ -13,16 +13,23 @@ type EnvProvider interface {
 
 // EnvCompleter completes environment variable names.
 type EnvCompleter struct {
-	provider EnvProvider
-	envFunc  func() []string // For testing; overrides provider if set
+	provider      EnvProvider
+	envFunc       func() []string // For testing; overrides provider if set
+	maskSensitive bool            // Mask values of sensitive env vars
 }
 
 // NewEnvCompleter creates a new environment variable completer.
 // If provider is nil, falls back to os.Environ().
 func NewEnvCompleter(provider EnvProvider) *EnvCompleter {
 	return &EnvCompleter{
-		provider: provider,
+		provider:      provider,
+		maskSensitive: true, // Enabled by default
 	}
+}
+
+// SetMaskSensitive enables or disables masking of sensitive env var values.
+func (c *EnvCompleter) SetMaskSensitive(enabled bool) {
+	c.maskSensitive = enabled
 }
 
 // Name returns the completer name.
@@ -62,16 +69,64 @@ func (c *EnvCompleter) Complete(ctx context.Context, line string, pos int) (Resu
 		name, value := parts[0], parts[1]
 
 		if strings.HasPrefix(name, prefix) {
+			displayValue := value
+			if c.maskSensitive && isSensitiveEnvName(name) {
+				displayValue = maskValue(value)
+			}
 			items = append(items, Item{
 				Value:       "$" + name, // Include $ so replacement works correctly
 				Display:     name,
-				Description: truncateValue(value, 40),
+				Description: truncateValue(displayValue, 40),
 				Icon:        "$",
 			})
 		}
 	}
 
 	return Result{Items: items}, nil
+}
+
+// sensitivePatterns contains substrings that indicate a sensitive env var.
+var sensitivePatterns = []string{
+	"KEY",
+	"SECRET",
+	"TOKEN",
+	"PASSWORD",
+	"PASSWD",
+	"CREDENTIAL",
+	"PRIVATE",
+	"API_KEY",
+	"APIKEY",
+	"AUTH",
+}
+
+// isSensitiveEnvName returns true if the env var name suggests it contains sensitive data.
+func isSensitiveEnvName(name string) bool {
+	upper := strings.ToUpper(name)
+	for _, pattern := range sensitivePatterns {
+		if strings.Contains(upper, pattern) {
+			return true
+		}
+	}
+	return false
+}
+
+// maskValue masks a sensitive value, showing only the first 4 characters.
+// Returns the original value if it's too short to mask meaningfully.
+func maskValue(value string) string {
+	const visibleChars = 4
+	const maskChar = "•"
+
+	if len(value) <= visibleChars {
+		// Too short to mask meaningfully
+		return strings.Repeat(maskChar, len(value))
+	}
+
+	// Show first 4 chars, mask the rest (up to 8 bullets to avoid long strings)
+	maskedLen := len(value) - visibleChars
+	if maskedLen > 8 {
+		maskedLen = 8
+	}
+	return value[:visibleChars] + strings.Repeat(maskChar, maskedLen)
 }
 
 // extractEnvPrefix extracts the environment variable prefix being typed.

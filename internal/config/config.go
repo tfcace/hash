@@ -65,9 +65,10 @@ type HistoryConfig struct {
 }
 
 type CompletionsConfig struct {
-	Fuzzy        bool `toml:"fuzzy"`
-	FileIcons    bool `toml:"file_icons"`
-	CobraEnabled bool `toml:"cobra_enabled"`
+	Fuzzy            bool `toml:"fuzzy"`
+	FileIcons        bool `toml:"file_icons"`
+	CobraEnabled     bool `toml:"cobra_enabled"`
+	MaskSensitiveEnv bool `toml:"mask_sensitive_env"` // Mask values of sensitive env vars (KEY, SECRET, TOKEN, etc.)
 }
 
 type ClipboardConfig struct {
@@ -125,9 +126,10 @@ func Default() *Config {
 			MaxAge:     "forever",
 		},
 		Completions: CompletionsConfig{
-			Fuzzy:        true,
-			FileIcons:    true,
-			CobraEnabled: true,
+			Fuzzy:            true,
+			FileIcons:        true,
+			CobraEnabled:     true,
+			MaskSensitiveEnv: true,
 		},
 		Clipboard: ClipboardConfig{
 			MaxOutputSize:  "1MB",
