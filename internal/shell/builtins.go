@@ -1,6 +1,7 @@
 package shell
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -33,6 +34,12 @@ func isBuiltin(cmd string) bool {
 	switch cmd {
 	case "cd", "exit", "quit", "history", "copy", "issue", "status", "tips":
 		return true
+	// Source builtin with LangBash support
+	case "source", ".":
+		return true
+	// No-op builtins for zsh compatibility
+	case "bindkey", "setopt", "unsetopt", "autoload", "compdef", "zstyle", "zmodload", "zle", "compinit", "promptinit":
+		return true
 	default:
 		return false
 	}
@@ -47,7 +54,7 @@ func isBuiltinWithConfig(cfg *config.Config, cmd string) bool {
 }
 
 // executeBuiltin runs a builtin command. Returns (handled, error).
-func (s *Shell) executeBuiltin(line string) (bool, error) {
+func (s *Shell) executeBuiltin(ctx context.Context, line string) (bool, error) {
 	parts := strings.Fields(line)
 	if len(parts) == 0 {
 		return false, nil
@@ -84,6 +91,11 @@ func (s *Shell) executeBuiltin(line string) (bool, error) {
 		return true, s.builtinStatus()
 	case "tips":
 		return true, s.builtinTips(args)
+	case "source", ".":
+		return true, s.builtinSource(ctx, args)
+	case "bindkey", "setopt", "unsetopt", "autoload", "compdef", "zstyle", "zmodload", "zle", "compinit", "promptinit":
+		// No-op for zsh compatibility - silently succeed
+		return true, nil
 	default:
 		return false, nil
 	}
@@ -432,4 +444,45 @@ func (s *Shell) collectStatus() *SystemStatus {
 	}
 
 	return status
+}
+
+// builtinSource sources a shell script file using LangBash parsing.
+// This ensures bash syntax like [[ ]] and == works correctly.
+func (s *Shell) builtinSource(ctx context.Context, args []string) error {
+	if len(args) < 1 {
+		return fmt.Errorf("source: need filename")
+	}
+
+	path := args[0]
+
+	// Expand tilde
+	if strings.HasPrefix(path, "~") {
+		home := os.Getenv("HOME")
+		if home != "" {
+			path = filepath.Join(home, path[1:])
+		}
+	}
+
+	// Check if file exists
+	info, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("source: %w", err)
+	}
+	if info.IsDir() {
+		return fmt.Errorf("source: %s: is a directory", path)
+	}
+
+	// Read file content
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("source: %w", err)
+	}
+
+	// Execute through the executor (which parses with LangBash)
+	if s.executor != nil {
+		_, err = s.executor.Execute(ctx, string(content), os.Stdout, os.Stderr)
+		return err
+	}
+
+	return fmt.Errorf("source: executor not available")
 }

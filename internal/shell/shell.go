@@ -443,7 +443,7 @@ func (s *Shell) Run(ctx context.Context) error {
 
 		case parser.CommandTypeRegular:
 			// Check for builtins first
-			handled, err := s.executeBuiltin(line)
+			handled, err := s.executeBuiltin(ctx, line)
 			if err == errExit {
 				return nil
 			}
@@ -547,7 +547,7 @@ func (s *Shell) runInitCommands(ctx context.Context) error {
 			continue
 
 		case parser.CommandTypeRegular:
-			handled, err := s.executeBuiltin(line)
+			handled, err := s.executeBuiltin(ctx, line)
 			if err == errExit {
 				return errExit
 			}

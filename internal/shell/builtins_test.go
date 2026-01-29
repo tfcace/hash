@@ -179,3 +179,17 @@ func TestBuiltinCopy_All(t *testing.T) {
 		t.Errorf("GetBoth(0) = (%q, %q), want (%q, %q)", cmd, out, "ls -la", "file1\nfile2")
 	}
 }
+
+func TestNoopBuiltin_Bindkey(t *testing.T) {
+	// bindkey should be recognized as a builtin
+	if !isBuiltin("bindkey") {
+		t.Error("bindkey should be a builtin")
+	}
+}
+
+func TestNoopBuiltin_Setopt(t *testing.T) {
+	// setopt should be recognized as a builtin
+	if !isBuiltin("setopt") {
+		t.Error("setopt should be a builtin")
+	}
+}

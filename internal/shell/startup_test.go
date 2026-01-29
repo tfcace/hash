@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/tfcace/hash/internal/compat"
 	"github.com/tfcace/hash/internal/config"
 )
 
@@ -131,4 +132,23 @@ func TestStartup_NonInteractive_SkipsRC(t *testing.T) {
 	if os.Getenv("RC_RAN") == "1" {
 		t.Error("rc should not run for non-interactive shell")
 	}
+}
+
+func TestStartup_FirstRunMigration(t *testing.T) {
+	// This test verifies the integration point exists
+	// Full first-run testing requires interactive input
+
+	tmpDir := t.TempDir()
+
+	// Create a .zshrc in tmp
+	os.WriteFile(filepath.Join(tmpDir, ".zshrc"), []byte("alias ll='ls -la'\n"), 0644)
+
+	// Mock the check - just verify the function exists and is callable
+	shouldShow, shell, rcFile := compat.ShouldShowMigrationPrompt()
+
+	// In test environment, this depends on actual home dir state
+	// Just verify it doesn't panic
+	_ = shouldShow
+	_ = shell
+	_ = rcFile
 }

@@ -593,6 +593,7 @@ func (e *Executor) initRunner() error {
 	opts := []interp.RunnerOption{
 		interp.StdIO(os.Stdin, e.switchStdout, e.switchStderr),
 		interp.Env(e.env),
+		interp.CallHandler(e.bashBuiltinHandler),
 		interp.ExecHandlers(e.execHandler),
 	}
 
@@ -611,6 +612,149 @@ func (e *Executor) initRunner() error {
 
 	e.runner = runner
 	return nil
+}
+
+// bashBuiltinHandler intercepts source/. and eval commands to parse with LangBash.
+// This uses CallHandler which runs for ALL commands including builtins, unlike
+// ExecHandler which only runs for external commands.
+// We handle the command ourselves, then return ":" (no-op) so the Runner
+// doesn't also try to run the builtin.
+func (e *Executor) bashBuiltinHandler(ctx context.Context, args []string) ([]string, error) {
+	if len(args) == 0 {
+		return args, nil
+	}
+
+	cmd := args[0]
+
+	switch cmd {
+	case "source", ".":
+		// Handle source with LangBash parsing
+		if len(args) < 2 {
+			hc := interp.HandlerCtx(ctx)
+			fmt.Fprintln(hc.Stderr, "source: need filename")
+			return []string{"false"}, nil // Return false to indicate error
+		}
+		err := e.handleBashSource(ctx, args[1])
+		if err != nil {
+			return []string{"false"}, nil
+		}
+		return []string{":"}, nil // Return no-op, we handled it
+
+	case "eval":
+		// Handle eval with LangBash parsing
+		if len(args) < 2 {
+			return []string{":"}, nil // eval with no args is a no-op
+		}
+		err := e.handleBashEval(ctx, args[1:])
+		if err != nil {
+			return []string{"false"}, nil
+		}
+		return []string{":"}, nil // Return no-op, we handled it
+
+	default:
+		// Not source/eval, let Runner handle it normally
+		return args, nil
+	}
+}
+
+// handleBashSource reads a file and executes it with LangBash parsing.
+// It also applies compatibility filtering to skip zsh-specific commands.
+func (e *Executor) handleBashSource(ctx context.Context, path string) error {
+	hc := interp.HandlerCtx(ctx)
+
+	// Expand tilde
+	if strings.HasPrefix(path, "~") {
+		home, _ := os.UserHomeDir()
+		if home != "" {
+			path = filepath.Join(home, path[1:])
+		}
+	}
+
+	// Resolve relative paths against current directory
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(hc.Dir, path)
+	}
+
+	content, err := os.ReadFile(path)
+	if err != nil {
+		fmt.Fprintf(hc.Stderr, "source: %v\n", err)
+		return err
+	}
+
+	// Apply compatibility filtering - skip zsh-specific commands
+	filtered := filterSourceContent(string(content))
+
+	// Parse with LangBash
+	parser := syntax.NewParser(syntax.Variant(syntax.LangBash))
+	prog, err := parser.Parse(strings.NewReader(filtered), path)
+	if err != nil {
+		fmt.Fprintf(hc.Stderr, "source: %v\n", err)
+		return err
+	}
+
+	// Run through the existing runner (preserves state)
+	return e.runner.Run(ctx, prog)
+}
+
+// filterSourceContent applies compatibility filtering to shell script content.
+// It comments out zsh-specific commands that would fail or cause issues.
+func filterSourceContent(content string) string {
+	lines := strings.Split(content, "\n")
+	var filtered []string
+
+	// Zsh-specific builtins to skip
+	zshBuiltins := map[string]bool{
+		"bindkey": true, "setopt": true, "unsetopt": true,
+		"autoload": true, "compdef": true, "zstyle": true,
+		"zmodload": true, "zle": true, "compinit": true,
+		"promptinit": true,
+	}
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+
+		// Skip empty lines and comments - keep as-is
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			filtered = append(filtered, line)
+			continue
+		}
+
+		// Skip shell-specific tool initializations
+		if strings.Contains(trimmed, "starship init") ||
+			strings.Contains(trimmed, "zoxide init zsh") ||
+			strings.Contains(trimmed, "fzf --zsh") {
+			filtered = append(filtered, "# [hash-compat] "+line)
+			continue
+		}
+
+		// Skip zsh-specific builtins
+		fields := strings.Fields(trimmed)
+		if len(fields) > 0 && zshBuiltins[fields[0]] {
+			filtered = append(filtered, "# [hash-compat] "+line)
+			continue
+		}
+
+		filtered = append(filtered, line)
+	}
+
+	return strings.Join(filtered, "\n")
+}
+
+// handleBashEval parses and executes args as bash code.
+func (e *Executor) handleBashEval(ctx context.Context, args []string) error {
+	hc := interp.HandlerCtx(ctx)
+	src := strings.Join(args, " ")
+
+	// Parse with LangBash
+	parser := syntax.NewParser(syntax.Variant(syntax.LangBash))
+	prog, err := parser.Parse(strings.NewReader(src), "eval")
+	if err != nil {
+		fmt.Fprintf(hc.Stderr, "eval: %v\n", err)
+		return err
+	}
+
+	// Run through the existing runner (preserves state)
+	return e.runner.Run(ctx, prog)
 }
 
 // Reset clears the interpreter state, including all function definitions.
@@ -689,8 +833,8 @@ func (e *Executor) Execute(ctx context.Context, command string, stdout, stderr i
 		shellName = e.positionalArgs[0]
 	}
 
-	// Parse the command with $0 name
-	prog, err := syntax.NewParser().Parse(strings.NewReader(command), shellName)
+	// Parse the command with $0 name and bash syntax support
+	prog, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(command), shellName)
 	if err != nil {
 		return nil, err
 	}
@@ -1124,7 +1268,7 @@ func (e *Executor) SyncRunnerDir() {
 	}
 
 	// Parse and run cd to update runner's internal Dir
-	prog, err := syntax.NewParser().Parse(strings.NewReader("cd "+shellQuote(cwd)), "")
+	prog, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader("cd "+shellQuote(cwd)), "")
 	if err != nil {
 		return
 	}

@@ -19,6 +19,13 @@ func main() {
 	mode := DetectMode(os.Args)
 	args := os.Args[1:]
 
+	// Handle subcommands before flag parsing
+	for i, arg := range args {
+		if arg == "migrate" {
+			os.Exit(runMigrate(args[i+1:]))
+		}
+	}
+
 	// Parse flags manually (order-independent)
 	var command string
 	var commandIdx = -1

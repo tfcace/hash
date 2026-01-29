@@ -426,3 +426,178 @@ func TestExecutor_Reset(t *testing.T) {
 		t.Error("Expected function to not exist after Reset()")
 	}
 }
+
+func TestExecutor_SourceWithBashSyntax(t *testing.T) {
+	exec := New()
+	ctx := context.Background()
+	var stdout, stderr bytes.Buffer
+
+	// Create a script file with bash syntax (== in [[ ]])
+	tmpDir := t.TempDir()
+	scriptPath := filepath.Join(tmpDir, "test.sh")
+	scriptContent := `# Test script with bash syntax
+export TEST_VAR="hello"
+[[ "$TEST_VAR" == "hello" ]] && echo "comparison works"
+if [[ -n "$TEST_VAR" ]]; then
+  echo "test var is set"
+fi
+`
+	if err := os.WriteFile(scriptPath, []byte(scriptContent), 0644); err != nil {
+		t.Fatalf("failed to create test script: %v", err)
+	}
+
+	// Source the file - should work with LangBash parsing
+	_, err := exec.Execute(ctx, "source "+scriptPath, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("source failed: %v, stderr: %s", err, stderr.String())
+	}
+
+	output := stdout.String()
+	if !strings.Contains(output, "comparison works") {
+		t.Errorf("expected 'comparison works' in output, got: %q", output)
+	}
+	if !strings.Contains(output, "test var is set") {
+		t.Errorf("expected 'test var is set' in output, got: %q", output)
+	}
+}
+
+func TestExecutor_EvalWithBashSyntax(t *testing.T) {
+	exec := New()
+	ctx := context.Background()
+	var stdout, stderr bytes.Buffer
+
+	// Set up a variable
+	_, err := exec.Execute(ctx, `export FOO="bar"`, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("export failed: %v", err)
+	}
+	stdout.Reset()
+
+	// Use eval with bash syntax (== comparison)
+	_, err = exec.Execute(ctx, `eval '[[ "$FOO" == "bar" ]] && echo "eval works"'`, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("eval failed: %v, stderr: %s", err, stderr.String())
+	}
+
+	output := strings.TrimSpace(stdout.String())
+	if output != "eval works" {
+		t.Errorf("expected 'eval works', got: %q", output)
+	}
+}
+
+func TestExecutor_SourcePersistsState(t *testing.T) {
+	exec := New()
+	ctx := context.Background()
+	var stdout, stderr bytes.Buffer
+
+	// Create a script that exports a variable and defines a function
+	tmpDir := t.TempDir()
+	scriptPath := filepath.Join(tmpDir, "setup.sh")
+	scriptContent := `export SOURCED_VAR="from-script"
+myalias() { echo "alias output"; }
+`
+	if err := os.WriteFile(scriptPath, []byte(scriptContent), 0644); err != nil {
+		t.Fatalf("failed to create test script: %v", err)
+	}
+
+	// Source the file
+	_, err := exec.Execute(ctx, "source "+scriptPath, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("source failed: %v", err)
+	}
+
+	// Check that the variable persists
+	stdout.Reset()
+	_, err = exec.Execute(ctx, `echo "$SOURCED_VAR"`, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("echo failed: %v", err)
+	}
+
+	output := strings.TrimSpace(stdout.String())
+	if output != "from-script" {
+		t.Errorf("expected 'from-script', got: %q", output)
+	}
+
+	// Check that the function persists
+	stdout.Reset()
+	_, err = exec.Execute(ctx, "myalias", &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("function call failed: %v", err)
+	}
+
+	output = strings.TrimSpace(stdout.String())
+	if output != "alias output" {
+		t.Errorf("expected 'alias output', got: %q", output)
+	}
+}
+
+func TestExecutor_NestedSourceWithBashSyntax(t *testing.T) {
+	exec := New()
+	ctx := context.Background()
+	var stdout, stderr bytes.Buffer
+
+	// Create two script files - outer sources inner
+	tmpDir := t.TempDir()
+	innerPath := filepath.Join(tmpDir, "inner.sh")
+	outerPath := filepath.Join(tmpDir, "outer.sh")
+
+	// Inner script has bash syntax that would fail with POSIX parser
+	innerContent := `# Inner script with bash syntax
+export INNER_VAR="hello"
+[[ "$INNER_VAR" == "hello" ]] && echo "inner comparison works"
+`
+	if err := os.WriteFile(innerPath, []byte(innerContent), 0644); err != nil {
+		t.Fatalf("failed to create inner script: %v", err)
+	}
+
+	// Outer script sources inner - this tests nested source handling
+	outerContent := `# Outer script
+source ` + innerPath + `
+[[ -n "$INNER_VAR" ]] && echo "outer sees inner var"
+`
+	if err := os.WriteFile(outerPath, []byte(outerContent), 0644); err != nil {
+		t.Fatalf("failed to create outer script: %v", err)
+	}
+
+	// Source the outer file - should work with nested source
+	_, err := exec.Execute(ctx, "source "+outerPath, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("source failed: %v, stderr: %s", err, stderr.String())
+	}
+
+	output := stdout.String()
+	if !strings.Contains(output, "inner comparison works") {
+		t.Errorf("expected 'inner comparison works' in output, got: %q", output)
+	}
+	if !strings.Contains(output, "outer sees inner var") {
+		t.Errorf("expected 'outer sees inner var' in output, got: %q", output)
+	}
+}
+
+func TestExecutor_EvalInsideScript(t *testing.T) {
+	exec := New()
+	ctx := context.Background()
+	var stdout, stderr bytes.Buffer
+
+	// Create a script that uses eval with bash syntax
+	tmpDir := t.TempDir()
+	scriptPath := filepath.Join(tmpDir, "test.sh")
+	scriptContent := `# Script that uses eval with bash syntax
+export TEST_VAR="bar"
+eval '[[ "$TEST_VAR" == "bar" ]] && echo "eval in script works"'
+`
+	if err := os.WriteFile(scriptPath, []byte(scriptContent), 0644); err != nil {
+		t.Fatalf("failed to create test script: %v", err)
+	}
+
+	// Source the file - eval inside should work
+	_, err := exec.Execute(ctx, "source "+scriptPath, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("source failed: %v, stderr: %s", err, stderr.String())
+	}
+
+	output := strings.TrimSpace(stdout.String())
+	if output != "eval in script works" {
+		t.Errorf("expected 'eval in script works', got: %q", output)
+	}
+}
