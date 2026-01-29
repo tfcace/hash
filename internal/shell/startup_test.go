@@ -11,7 +11,19 @@ import (
 )
 
 func TestStartup_LoginShell_SourcesProfileThenRC(t *testing.T) {
+	// Clean environment to avoid interference from previous tests or migration
+	os.Unsetenv("PROFILE_SOURCED")
+	os.Unsetenv("RC_AFTER_PROFILE")
+
+	// Isolate from system state by setting HOME and XDG_DATA_HOME to temp dir
 	tmpDir := t.TempDir()
+	oldHome := os.Getenv("HOME")
+	os.Setenv("HOME", tmpDir)
+	os.Setenv("XDG_DATA_HOME", tmpDir)
+	defer func() {
+		os.Setenv("HOME", oldHome)
+		os.Unsetenv("XDG_DATA_HOME")
+	}()
 
 	// Create test profile that sets a marker
 	profilePath := filepath.Join(tmpDir, "profile")
@@ -56,7 +68,19 @@ fi
 }
 
 func TestStartup_NonLoginInteractive_SkipsProfile(t *testing.T) {
+	// Isolate from system state by setting HOME and XDG_DATA_HOME to temp dir
 	tmpDir := t.TempDir()
+	oldHome := os.Getenv("HOME")
+	os.Setenv("HOME", tmpDir)
+	os.Setenv("XDG_DATA_HOME", tmpDir)
+	defer func() {
+		os.Setenv("HOME", oldHome)
+		os.Unsetenv("XDG_DATA_HOME")
+	}()
+
+	// Clean environment
+	os.Unsetenv("PROFILE_RAN")
+	os.Unsetenv("RC_RAN")
 
 	// Create profile that would fail if sourced
 	profilePath := filepath.Join(tmpDir, "profile")
@@ -69,9 +93,6 @@ func TestStartup_NonLoginInteractive_SkipsProfile(t *testing.T) {
 	if err := os.WriteFile(rcPath, []byte("export RC_RAN=1\n"), 0644); err != nil {
 		t.Fatalf("failed to write rc: %v", err)
 	}
-
-	os.Unsetenv("PROFILE_RAN")
-	os.Unsetenv("RC_RAN")
 
 	cfg := config.Default()
 	cfg.Shell.StartupFiles.Login = []string{profilePath}
@@ -102,14 +123,23 @@ func TestStartup_NonLoginInteractive_SkipsProfile(t *testing.T) {
 }
 
 func TestStartup_NonInteractive_SkipsRC(t *testing.T) {
+	// Isolate from system state by setting HOME and XDG_DATA_HOME to temp dir
 	tmpDir := t.TempDir()
+	oldHome := os.Getenv("HOME")
+	os.Setenv("HOME", tmpDir)
+	os.Setenv("XDG_DATA_HOME", tmpDir)
+	defer func() {
+		os.Setenv("HOME", oldHome)
+		os.Unsetenv("XDG_DATA_HOME")
+	}()
+
+	// Clean environment
+	os.Unsetenv("RC_RAN")
 
 	rcPath := filepath.Join(tmpDir, "rc")
 	if err := os.WriteFile(rcPath, []byte("export RC_RAN=1\n"), 0644); err != nil {
 		t.Fatalf("failed to write rc: %v", err)
 	}
-
-	os.Unsetenv("RC_RAN")
 
 	cfg := config.Default()
 	cfg.Shell.StartupFiles.Login = nil
