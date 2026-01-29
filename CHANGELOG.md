@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.4.0](https://github.com/tfcace/hash/compare/v0.3.0...v0.4.0) (2026-01-29)
+
+
+### Features
+
+* add bash/zsh migration system with compatibility layer ([8474089](https://github.com/tfcace/hash/commit/847408985fca0c84e307c501a6d9a99b55542d79))
+* alias/function tab-completion ([ec68874](https://github.com/tfcace/hash/commit/ec68874b6df35df861a1db8cbf690d88b8e3f226))
+* **completion:** mask sensitive env var values in completion preview ([09d2d88](https://github.com/tfcace/hash/commit/09d2d882798be34f7fe4d0c10650176a41199f09))
+
+
+### Bug Fixes
+
+* add environment variable tab-completion with value preview ([f07c236](https://github.com/tfcace/hash/commit/f07c23672333a42b664731362ba1f8e81b56cf36))
+* copy agent response to system clipboard with feedback ([9110225](https://github.com/tfcace/hash/commit/91102252b9bbeff318649563fd5fa792328df3cd))
+* disable ONLCR on PTY when stdout is a pipe ([8b7fc9c](https://github.com/tfcace/hash/commit/8b7fc9c69057a5aa7f5f2c09dd1aded6e9595d0f))
+* handle agent startup failures gracefully ([67959bd](https://github.com/tfcace/hash/commit/67959bd113593dbb9c388140cffc1cc00b7592bf))
+* improved handling of complex aliases when migrating from zsh ([#12](https://github.com/tfcace/hash/issues/12)) ([43ec193](https://github.com/tfcace/hash/commit/43ec1930122474292864c9e330e75a6f7469f29d))
+* preserve cursor position when rendering completion menu ([fa7f0f3](https://github.com/tfcace/hash/commit/fa7f0f3199b86cc6539c67b999a603b1959b68e1))
+* use graceful degradation for source/eval compatibility ([7101c49](https://github.com/tfcace/hash/commit/7101c4989ccfa669689fd4b06f20783f00166c69))
+
 ## [0.3.0](https://github.com/tfcace/hash/compare/v0.2.0...v0.3.0) (2026-01-26)
 
 
