@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.1](https://github.com/tfcace/hash/compare/v0.4.0...v0.4.1) (2026-01-29)
+
+
+### Bug Fixes
+
+* resolve release CI failures ([#13](https://github.com/tfcace/hash/issues/13)) ([0c5f775](https://github.com/tfcace/hash/commit/0c5f7750f915e28e0cca48ae966de0c3243a1c5e))
+
 ## [0.4.0](https://github.com/tfcace/hash/compare/v0.3.0...v0.4.0) (2026-01-29)
 
 
