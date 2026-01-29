@@ -20,14 +20,19 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libx11-dev
+          sudo apt-get install -y libx11-dev xvfb
 
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
           go-version: '1.25'
 
-      - name: Run tests
+      - name: Run tests (Linux)
+        if: runner.os == 'Linux'
+        run: xvfb-run -a go test ./...
+
+      - name: Run tests (macOS)
+        if: runner.os == 'macOS'
         run: go test ./...
 
       - name: Run vet
