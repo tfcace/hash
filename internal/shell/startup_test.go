@@ -15,10 +15,15 @@ func TestStartup_LoginShell_SourcesProfileThenRC(t *testing.T) {
 	os.Unsetenv("PROFILE_SOURCED")
 	os.Unsetenv("RC_AFTER_PROFILE")
 
-	// Set XDG_DATA_HOME to temp dir to isolate from system migration state
+	// Isolate from system state by setting HOME and XDG_DATA_HOME to temp dir
 	tmpDir := t.TempDir()
+	oldHome := os.Getenv("HOME")
+	os.Setenv("HOME", tmpDir)
 	os.Setenv("XDG_DATA_HOME", tmpDir)
-	defer os.Unsetenv("XDG_DATA_HOME")
+	defer func() {
+		os.Setenv("HOME", oldHome)
+		os.Unsetenv("XDG_DATA_HOME")
+	}()
 
 	// Create test profile that sets a marker
 	profilePath := filepath.Join(tmpDir, "profile")
@@ -63,10 +68,15 @@ fi
 }
 
 func TestStartup_NonLoginInteractive_SkipsProfile(t *testing.T) {
-	// Set XDG_DATA_HOME to temp dir to isolate from system migration state
+	// Isolate from system state by setting HOME and XDG_DATA_HOME to temp dir
 	tmpDir := t.TempDir()
+	oldHome := os.Getenv("HOME")
+	os.Setenv("HOME", tmpDir)
 	os.Setenv("XDG_DATA_HOME", tmpDir)
-	defer os.Unsetenv("XDG_DATA_HOME")
+	defer func() {
+		os.Setenv("HOME", oldHome)
+		os.Unsetenv("XDG_DATA_HOME")
+	}()
 
 	// Clean environment
 	os.Unsetenv("PROFILE_RAN")
@@ -113,10 +123,15 @@ func TestStartup_NonLoginInteractive_SkipsProfile(t *testing.T) {
 }
 
 func TestStartup_NonInteractive_SkipsRC(t *testing.T) {
-	// Set XDG_DATA_HOME to temp dir to isolate from system migration state
+	// Isolate from system state by setting HOME and XDG_DATA_HOME to temp dir
 	tmpDir := t.TempDir()
+	oldHome := os.Getenv("HOME")
+	os.Setenv("HOME", tmpDir)
 	os.Setenv("XDG_DATA_HOME", tmpDir)
-	defer os.Unsetenv("XDG_DATA_HOME")
+	defer func() {
+		os.Setenv("HOME", oldHome)
+		os.Unsetenv("XDG_DATA_HOME")
+	}()
 
 	// Clean environment
 	os.Unsetenv("RC_RAN")
