@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/tfcace/hash/internal/compat"
+	"github.com/tfcace/hash/internal/trace"
 )
 
 // runStartup executes all startup files and commands based on shell mode.
@@ -77,6 +78,10 @@ func (s *Shell) sourceFile(ctx context.Context, path string) error {
 		path = filepath.Join(home, path[1:])
 	}
 
+	trace.Emit("compat", "source_file_start", trace.LevelVerbose, map[string]any{
+		"path": path,
+	})
+
 	// Check if file exists
 	info, err := os.Stat(path)
 	if err != nil {
@@ -94,6 +99,10 @@ func (s *Shell) sourceFile(ctx context.Context, path string) error {
 
 	// Execute as shell commands
 	_, err = s.executor.Execute(ctx, string(content), os.Stdout, os.Stderr)
+	trace.Emit("compat", "source_file_done", trace.LevelVerbose, map[string]any{
+		"path":  path,
+		"error": fmt.Sprintf("%v", err),
+	})
 	return err
 }
 
@@ -231,6 +240,11 @@ func (s *Shell) sourceMigrationFiles(ctx context.Context) {
 		return
 	}
 
+	trace.Emit("compat", "migration_source_start", trace.LevelVerbose, map[string]any{
+		"files": state.SourceFiles,
+		"shell": state.SourceShell,
+	})
+
 	// Source each migration file with compatibility layer
 	for _, file := range state.SourceFiles {
 		if _, err := os.Stat(file); os.IsNotExist(err) {
@@ -244,12 +258,23 @@ func (s *Shell) sourceMigrationFiles(ctx context.Context) {
 			continue
 		}
 
+		trace.Emit("compat", "migration_execute", trace.LevelVerbose, map[string]any{
+			"file":            file,
+			"filtered_length": len(filtered),
+		})
+
 		// Execute through our executor (parses with LangBash, persists to shell)
 		if s.executor != nil {
 			_, err = s.executor.Execute(ctx, filtered, os.Stdout, os.Stderr)
 			if err != nil {
+				trace.Emit("compat", "migration_execute_error", trace.LevelVerbose, map[string]any{
+					"file":  file,
+					"error": err.Error(),
+				})
 				fmt.Fprintf(os.Stderr, "hash: %s: %v\n", file, err)
 			}
 		}
 	}
+
+	trace.Emit("compat", "migration_source_done", trace.LevelVerbose, nil)
 }

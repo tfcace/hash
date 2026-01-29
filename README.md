@@ -300,6 +300,14 @@ if [ "$HASH_SHELL" = "1" ]; then
 fi
 ```
 
+### Migration from Bash/Zsh
+
+When you first launch Hash, it detects your previous shell and offers to load compatible settings. Hash fully supports bash syntax including `[[`, `==`, `&&`, `||`, and process substitution.
+
+**Aliases are converted to functions:** Hash converts `alias foo='cmd1 && cmd2'` to `foo() { cmd1 && cmd2; }` internally. This is transparent — you use the alias name normally, and it works as expected.
+
+Run `hash migrate` to re-run migration or `hash migrate status` to see what was imported/skipped.
+
 ## Architecture
 
 ```

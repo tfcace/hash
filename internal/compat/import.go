@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/tfcace/hash/internal/trace"
 	"mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/interp"
 	"mvdan.cc/sh/v3/syntax"
@@ -18,6 +19,11 @@ import (
 // and a report of what was processed. The caller should execute the content
 // through their own executor/interpreter.
 func FilterWithCompat(path, shell string) (string, *Report, error) {
+	trace.Emit("compat", "filter_start", trace.LevelVerbose, map[string]any{
+		"path":  path,
+		"shell": shell,
+	})
+
 	info, err := os.Stat(path)
 	if err != nil {
 		return "", nil, err
@@ -87,6 +93,11 @@ func FilterWithCompat(path, shell string) (string, *Report, error) {
 
 		filteredLines = append(filteredLines, line)
 	}
+
+	trace.Emit("compat", "filter_done", trace.LevelVerbose, map[string]any{
+		"path":    path,
+		"skipped": report.Summary.Skipped,
+	})
 
 	return strings.Join(filteredLines, "\n"), report, nil
 }
