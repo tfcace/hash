@@ -30,9 +30,9 @@ const (
 type ConfirmationType int
 
 const (
-	ConfirmTypeCommand     ConfirmationType = iota // ↵ run · ⇥ edit · esc
-	ConfirmTypeExplanation                         // ↵ ok · ⇥ copy · esc
-	ConfirmTypeError                               // ↵ retry · esc
+	ConfirmTypeCommand     ConfirmationType = iota // [Enter: run] [Tab: edit] [Esc: cancel]
+	ConfirmTypeExplanation                         // [Enter: ok] [Tab: copy] [Esc: cancel]
+	ConfirmTypeError                               // [Enter: retry] [Esc: cancel]
 )
 
 // AgentState represents the current state of an agent request.
@@ -324,11 +324,11 @@ func (u *ResponseUI) ShowConfirmation(ct ConfirmationType) {
 	var hint string
 	switch ct {
 	case ConfirmTypeCommand:
-		hint = "↵ run · ⇥ edit · esc"
+		hint = "[Enter: run] [Tab: edit] [Esc: cancel]"
 	case ConfirmTypeExplanation:
-		hint = "↵ ok · ⇥ copy · esc"
+		hint = "[Enter: ok] [Tab: copy] [Esc: cancel]"
 	case ConfirmTypeError:
-		hint = "↵ retry · esc"
+		hint = "[Enter: retry] [Esc: cancel]"
 	}
 	fmt.Fprintf(u.out, "  \033[90m%s\033[0m\n", hint)
 }

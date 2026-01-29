@@ -1066,9 +1066,11 @@ collectLoop:
 				s.readline.SetBuffer(resp.Command)
 			}
 		} else {
-			// Copy explanation to clipboard
-			if s.clipboard != nil {
-				s.clipboard.AddCommand(responseText) // Reuse for now
+			// Copy explanation to system clipboard
+			if err := copyToSystemClipboard(responseText); err != nil {
+				fmt.Fprintf(os.Stderr, "\033[90mCould not copy: %v\033[0m\n", err)
+			} else {
+				fmt.Fprintf(os.Stdout, "\033[90mCopied to clipboard\033[0m\n")
 			}
 		}
 	case ConfirmCancel:
