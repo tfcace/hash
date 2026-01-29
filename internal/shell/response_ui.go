@@ -301,6 +301,24 @@ func (u *ResponseUI) ShowError(errMsg string) {
 	fmt.Fprintf(u.out, "\033[31m✗ %s\033[0m\n", errMsg)
 }
 
+// ShowAgentHint displays troubleshooting hints for agent connection failures.
+func (u *ResponseUI) ShowAgentHint(transport, command, url string) {
+	fmt.Fprintln(u.out)
+	fmt.Fprintf(u.out, "\033[90m  Troubleshooting:\033[0m\n")
+
+	if transport == "http" {
+		fmt.Fprintf(u.out, "\033[90m  • Is the service running?\033[0m\n")
+		fmt.Fprintf(u.out, "\033[90m  • Is it listening on the configured URL? (%s)\033[0m\n", url)
+		fmt.Fprintf(u.out, "\033[90m  • Check firewall or network settings\033[0m\n")
+	} else {
+		// stdio transport (default)
+		fmt.Fprintf(u.out, "\033[90m  • Is '%s' installed?\033[0m\n", command)
+		fmt.Fprintf(u.out, "\033[90m  • Is it in your PATH? (try: which %s)\033[0m\n", command)
+		fmt.Fprintf(u.out, "\033[90m  • Is it executable? (try: ls -la $(which %s))\033[0m\n", command)
+	}
+	fmt.Fprintln(u.out)
+}
+
 // ShowConfirmation displays the compact confirmation UI below the response.
 func (u *ResponseUI) ShowConfirmation(ct ConfirmationType) {
 	var hint string

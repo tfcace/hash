@@ -981,11 +981,25 @@ collectLoop:
 		fmt.Fprint(os.Stdout, remaining)
 	}
 
-	fmt.Println() // New line after response
-	lineCount++   // Count the final newline
-
+	// Handle error case first - clear spinner before any output
 	if streamErr != nil {
+		s.responseUI.ClearLine() // Stop spinner and clear the line
 		s.responseUI.ShowError(streamErr.Error())
+
+		// If no response was received, this is a startup/connection failure
+		// (e.g., agent not in PATH). Just return to prompt - retry won't help.
+		if response.Len() == 0 {
+			s.responseUI.ShowAgentHint(
+				s.config.Agent.Transport,
+				s.config.Agent.Command,
+				s.config.Agent.URL,
+			)
+			s.lastExitCode = 1
+			s.updatePrompt()
+			return
+		}
+
+		// Mid-stream error with partial response - offer retry
 		s.responseUI.ShowConfirmation(ConfirmTypeError)
 		action := s.responseUI.WaitForConfirmationByType(ConfirmTypeError)
 		fmt.Println()
@@ -999,6 +1013,11 @@ collectLoop:
 		s.updatePrompt()
 		return
 	}
+
+	// Success path - add newline after response and clear spinner
+	fmt.Println()
+	lineCount++
+	s.responseUI.ClearLine() // Stop spinner
 
 	// Determine response type
 	responseText := strings.TrimSpace(response.String())
