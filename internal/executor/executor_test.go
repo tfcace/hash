@@ -183,6 +183,34 @@ func TestExecute_PipeChain(t *testing.T) {
 	}
 }
 
+func TestExecute_PipeDataIntegrity(t *testing.T) {
+	// Test that piped data preserves exact bytes - no LF→CRLF translation.
+	// This is critical for `curl ... | bash` style pipelines.
+	exec := New()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Use printf to emit exact bytes including newlines, then verify with od
+	// that no CRLF translation occurred. If ONLCR was active, \n would become \r\n.
+	var stdout bytes.Buffer
+	result, err := exec.Execute(ctx, `printf 'line1\nline2\n' | od -c | head -1`, &stdout, nil)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if result.ExitCode != 0 {
+		t.Errorf("ExitCode = %d, want 0", result.ExitCode)
+	}
+
+	// od output should show \n (newline) NOT \r \n (carriage return + newline)
+	got := stdout.String()
+	if strings.Contains(got, `\r`) {
+		t.Errorf("Pipe data contains CRLF - LF was translated to CRLF: %q", got)
+	}
+	if !strings.Contains(got, `\n`) {
+		t.Errorf("Pipe data should contain newlines: %q", got)
+	}
+}
+
 func TestExecute_Conditionals(t *testing.T) {
 	exec := New()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

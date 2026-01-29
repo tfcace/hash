@@ -1013,10 +1013,21 @@ func (e *Executor) execHandler(next interp.ExecHandlerFunc) interp.ExecHandlerFu
 			hcStdinTerminal = term.IsTerminal(int(f.Fd()))
 		}
 
+		// Check if hc.Stdout is a pipe (detects upstream pipe position)
+		// When in a pipeline like `cmd1 | cmd2`, mvdan/sh sets hc.Stdout
+		// to a pipe *os.File for cmd1. We need to know this to disable
+		// ONLCR on the PTY to prevent LF→CRLF translation.
+		hcStdoutIsPipe := false
+		if f, ok := hc.Stdout.(*os.File); ok {
+			if fi, err := f.Stat(); err == nil {
+				hcStdoutIsPipe = fi.Mode()&os.ModeNamedPipe != 0
+			}
+		}
+
 		if stdinIsTerm && hcStdinTerminal {
 			// PTY mode: skip OSC 133;C to avoid interference with TUI apps
 			// that send their own terminal queries on startup
-			return e.runWithPTY(ctx, cmd, hc)
+			return e.runWithPTY(ctx, cmd, hc, hcStdoutIsPipe)
 		}
 
 		// Non-PTY: emit OSC 133;C only if running interactively.
@@ -1037,7 +1048,15 @@ func (e *Executor) execHandler(next interp.ExecHandlerFunc) interp.ExecHandlerFu
 }
 
 // runWithPTY runs a command with a pseudo-terminal.
-func (e *Executor) runWithPTY(ctx context.Context, cmd *exec.Cmd, hc interp.HandlerContext) error {
+// If stdoutIsPipe is true, ONLCR is disabled on the PTY to prevent LF→CRLF
+// translation which would corrupt piped data (e.g., `curl ... | bash`).
+func (e *Executor) runWithPTY(ctx context.Context, cmd *exec.Cmd, hc interp.HandlerContext, stdoutIsPipe bool) error {
+	// When stdout is a pipe, we need to disable ONLCR on the PTY slave.
+	// Use pty.Open() to get access to both master and slave for configuration.
+	if stdoutIsPipe {
+		return e.runWithPTYRaw(ctx, cmd, hc)
+	}
+
 	ptmx, err := pty.Start(cmd)
 	if err != nil {
 		cmd.Stdin = hc.Stdin
@@ -1238,6 +1257,171 @@ func (e *Executor) runWithPTY(ctx context.Context, cmd *exec.Cmd, hc interp.Hand
 		return stdoutErr
 	}
 	return cmdErr
+}
+
+// runWithPTYRaw runs a command with a PTY that has ONLCR disabled.
+// This is used when stdout is a pipe to prevent LF→CRLF translation.
+func (e *Executor) runWithPTYRaw(ctx context.Context, cmd *exec.Cmd, hc interp.HandlerContext) error {
+	// Use pty.Open() to get access to both master and slave
+	ptmx, pts, err := pty.Open()
+	if err != nil {
+		// Fall back to non-PTY execution
+		cmd.Stdin = hc.Stdin
+		cmd.Stdout = hc.Stdout
+		cmd.Stderr = hc.Stderr
+		return cmd.Run()
+	}
+	defer ptmx.Close()
+
+	// Disable ONLCR on the PTY slave to prevent LF→CRLF translation
+	if err := disablePTYOutputProcessing(pts); err != nil {
+		pts.Close()
+		cmd.Stdin = hc.Stdin
+		cmd.Stdout = hc.Stdout
+		cmd.Stderr = hc.Stderr
+		return cmd.Run()
+	}
+
+	// Connect command to PTY slave and start it
+	cmd.Stdin = pts
+	cmd.Stdout = pts
+	cmd.Stderr = pts
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
+	}
+	cmd.SysProcAttr.Setsid = true
+	cmd.SysProcAttr.Setctty = true
+
+	if err := cmd.Start(); err != nil {
+		pts.Close()
+		cmd.Stdin = hc.Stdin
+		cmd.Stdout = hc.Stdout
+		cmd.Stderr = hc.Stderr
+		return cmd.Run()
+	}
+	pts.Close() // Close slave in parent after child has it
+
+	// Signal PTY is active to disable progress indicator
+	e.ptyActive.Store(true)
+
+	// Put the real terminal in raw mode
+	stdinFd := int(os.Stdin.Fd())
+	if term.IsTerminal(stdinFd) {
+		oldState, err := term.MakeRaw(stdinFd)
+		if err == nil {
+			defer term.Restore(stdinFd, oldState)
+		}
+	}
+
+	// Handle terminal resize
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGWINCH)
+	defer signal.Stop(sigCh)
+
+	if w, h, err := term.GetSize(stdinFd); err == nil {
+		pty.Setsize(ptmx, &pty.Winsize{Rows: uint16(h), Cols: uint16(w)})
+	}
+
+	go func() {
+		for range sigCh {
+			if w, h, err := term.GetSize(stdinFd); err == nil {
+				pty.Setsize(ptmx, &pty.Winsize{Rows: uint16(h), Cols: uint16(w)})
+			}
+		}
+	}()
+
+	drainTerminalResponses(stdinFd, nil)
+
+	// Copy stdin to PTY
+	done := make(chan struct{})
+	stdinDone := make(chan struct{})
+	var lastCtrlC time.Time
+	onInput := func(buf []byte) {
+		for _, b := range buf {
+			if b != ctrlCByte {
+				continue
+			}
+			now := time.Now()
+			if !lastCtrlC.IsZero() && now.Sub(lastCtrlC) <= doubleCtrlCWait {
+				signalProcessGroup(cmd, syscall.SIGINT)
+			}
+			lastCtrlC = now
+		}
+	}
+
+	if f, ok := hc.Stdin.(*os.File); ok {
+		go func() {
+			copyWithPoll(ptmx, f, done, onInput, nil)
+			close(stdinDone)
+		}()
+	} else {
+		go func() {
+			copyWithOnInput(ptmx, hc.Stdin, onInput, nil)
+			close(stdinDone)
+		}()
+	}
+
+	// Copy PTY to stdout
+	stdoutDone := make(chan error, 1)
+	go func() {
+		err := copyWithRetry(hc.Stdout, ptmx, nil, nil)
+		stdoutDone <- err
+	}()
+
+	// Wait for command
+	cmdDone := make(chan error, 1)
+	go func() {
+		cmdDone <- cmd.Wait()
+	}()
+
+	var cmdErr error
+	var stdoutErr error
+	stdoutFinished := false
+
+	select {
+	case cmdErr = <-cmdDone:
+	case stdoutErr = <-stdoutDone:
+		stdoutFinished = true
+		select {
+		case cmdErr = <-cmdDone:
+		case <-time.After(ptyStopGrace):
+			signalProcessGroup(cmd, syscall.SIGTERM)
+			cmdErr = <-cmdDone
+			if cmdErr == nil && stdoutErr != nil {
+				cmdErr = stdoutErr
+			}
+		}
+	}
+
+	close(done)
+	<-stdinDone
+
+	if !stdoutFinished {
+		select {
+		case stdoutErr = <-stdoutDone:
+		case <-time.After(ptyStopGrace):
+			_ = ptmx.Close()
+			<-stdoutDone
+		}
+	}
+
+	if cmdErr == nil && stdoutErr != nil {
+		return stdoutErr
+	}
+	return cmdErr
+}
+
+// disablePTYOutputProcessing disables ONLCR and other output processing on a PTY.
+// This prevents LF→CRLF translation which would corrupt piped binary data.
+func disablePTYOutputProcessing(f *os.File) error {
+	fd := int(f.Fd())
+	termios, err := unix.IoctlGetTermios(fd, unix.TIOCGETA)
+	if err != nil {
+		return err
+	}
+	// Disable ONLCR (map NL to CR-NL on output) and other output processing
+	termios.Oflag &^= unix.ONLCR | unix.OCRNL | unix.OPOST
+	return unix.IoctlSetTermios(fd, unix.TIOCSETA, termios)
 }
 
 // environToSlice converts expand.Environ to []string.
