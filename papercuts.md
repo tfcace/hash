@@ -50,12 +50,12 @@ No way to preview command before selecting
 Copy confirmation disappears after 1.5s (:383-414)
 Fix: Add command preview on hover/selection, clear count format (result 1 of 10), persistent copy confirmation.
 
-7. No Mode Indicator (Editor vs Readline)
-Location: internal/shell/shell.go:226-233
+7. No Keybinding Indicator
+Location: internal/shell/shell.go
 
-Config defaults to "editor" mode, but users with Emacs/Vim muscle memory don't know why their bindings don't work. No visual indication of current input mode.
+Users with Emacs/Vim muscle memory don't know which keybinding mode is active. No visual indication of current keybinding style.
 
-Fix: Show mode in prompt or status area: [editor], [emacs], [vim]
+Fix: Show keybinding mode in prompt or status area: [helix], [emacs], [vim]
 
 8. Unreliable Escape Key Detection
 Location: internal/shell/response_ui.go:249-271

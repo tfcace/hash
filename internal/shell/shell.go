@@ -45,7 +45,6 @@ type Shell struct {
 	readline     *readline.Readline
 	inputHandler *readline.InputHandler // For Ctrl+R search
 	editorCfg    editor.Config          // Editor configuration
-	useEditor    bool                   // Use editor instead of readline
 	agentHandler *AgentHandler
 	responseUI   *ResponseUI
 	history      *history.Store
@@ -257,8 +256,7 @@ func New(cfg *config.Config) (*Shell, error) {
 		agentHandler.SetClipboard(clipboardBuf)
 	}
 
-	// Configure editor mode based on config
-	useEditor := cfg.Input.Mode == "editor"
+	// Configure editor mode
 	editorCfg := editor.Config{
 		Keybindings:    cfg.Input.Keybindings,
 		Gutter:         cfg.Input.Gutter,
@@ -275,7 +273,6 @@ func New(cfg *config.Config) (*Shell, error) {
 		readline:     rl,
 		inputHandler: inputHandler,
 		editorCfg:    editorCfg,
-		useEditor:    useEditor,
 		agentHandler: agentHandler,
 		responseUI:   NewResponseUI(os.Stdout),
 		history:      historyStore,
@@ -290,7 +287,7 @@ func New(cfg *config.Config) (*Shell, error) {
 
 	// Set up history function for editor mode
 	// This closure captures shell for proper state management
-	if useEditor && historyStore != nil {
+	if historyStore != nil {
 		shell.editorCfg.HistoryFunc = shell.navigateHistory
 	}
 
@@ -367,23 +364,11 @@ func (s *Shell) Run(ctx context.Context) error {
 			}
 		}
 
-		var line string
-		var err error
-
-		if s.useEditor {
-			line, err = s.readLineWithEditor(ctx)
-		} else {
-			// Shell integration: mark start of user input (readline mode)
-			if s.osc != nil {
-				s.osc.CommandStart()
-			}
-			line, err = s.inputHandler.ReadLine()
-		}
+		line, err := s.readLineWithEditor(ctx)
 
 		trace.ShellDetailed("input_ready", map[string]any{
-			"line":   line,
-			"error":  errStr(err),
-			"editor": s.useEditor,
+			"line":  line,
+			"error": errStr(err),
 		})
 
 		if err != nil {
@@ -914,9 +899,8 @@ func (s *Shell) handleAgentRequestUnified(ctx context.Context, parsed parser.Par
 	s.responseUI.StartProgress()
 	defer s.responseUI.StopProgress()
 
-	// For full ?? and pipe modes, show thinking on new line
 	// For inline mode, use editor with ghost text
-	if s.useEditor && parsed.Type == parser.CommandTypeAgentInline {
+	if parsed.Type == parser.CommandTypeAgentInline {
 		s.handleAgentInlineStreaming(ctx, parsed, modelName)
 		return
 	}
@@ -1055,14 +1039,9 @@ collectLoop:
 		// For explanations, ConfirmRun just dismisses
 	case ConfirmEdit:
 		if confirmType == ConfirmTypeCommand {
-			// Put command in readline buffer for editing
-			if s.useEditor {
-				// For editor mode, we need to re-enter with the command
-				s.handleEditCommand(ctx, resp.Command)
-				return
-			} else {
-				s.readline.SetBuffer(resp.Command)
-			}
+			// Re-enter with the command for editing
+			s.handleEditCommand(ctx, resp.Command)
+			return
 		} else {
 			// Copy explanation to system clipboard
 			if err := copyToSystemClipboard(responseText); err != nil {

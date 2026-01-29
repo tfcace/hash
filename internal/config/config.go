@@ -37,7 +37,6 @@ type StartupFilesConfig struct {
 
 // InputConfig configures the input/editing mode.
 type InputConfig struct {
-	Mode        string `toml:"mode"`        // "editor" or "readline"
 	Keybindings string `toml:"keybindings"` // "helix", "emacs", "vim"
 	Gutter      bool   `toml:"gutter"`      // Show visual indicator for multiline
 }
@@ -109,7 +108,6 @@ func Default() *Config {
 			},
 		},
 		Input: InputConfig{
-			Mode:        "editor",
 			Keybindings: "helix",
 			Gutter:      true,
 		},
@@ -167,9 +165,6 @@ func Load(configDir string) (*Config, error) {
 	// Apply defaults for empty values
 	if cfg.Shell.Keybindings == "" {
 		cfg.Shell.Keybindings = "emacs"
-	}
-	if cfg.Input.Mode == "" {
-		cfg.Input.Mode = "editor"
 	}
 	if cfg.Input.Keybindings == "" {
 		cfg.Input.Keybindings = "helix"
