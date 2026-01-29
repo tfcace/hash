@@ -659,8 +659,14 @@ func (e *Executor) bashBuiltinHandler(ctx context.Context, args []string) ([]str
 		}
 		return []string{":"}, nil // Return no-op, we handled it
 
+	case "alias":
+		// Handle alias definitions that contain bash-specific syntax
+		// mvdan/sh's alias builtin parses values with POSIX mode, which fails
+		// on bash syntax like && or ||. We convert these to functions instead.
+		return e.handleBashAlias(ctx, args[1:])
+
 	default:
-		// Not source/eval, let Runner handle it normally
+		// Not source/eval/alias, let Runner handle it normally
 		return args, nil
 	}
 }
@@ -730,6 +736,85 @@ func (e *Executor) handleBashEval(ctx context.Context, args []string) error {
 	return e.runner.Run(ctx, prog)
 }
 
+// handleBashAlias handles alias definitions by converting them to functions.
+// mvdan/sh stores aliases but doesn't expand them on subsequent Parse() calls
+// (each parse is independent). Converting to functions makes them actually work.
+// Also handles bash-specific syntax like && that would fail POSIX parsing.
+// Returns the args to pass to the default handler, or a no-op if we handled it.
+func (e *Executor) handleBashAlias(ctx context.Context, args []string) ([]string, error) {
+	trace.Emit("compat", "alias_intercept", trace.LevelVerbose, map[string]any{
+		"args": args,
+	})
+
+	if len(args) == 0 {
+		// No args = show all aliases, let default handler do it
+		// (Note: this won't show our function-based aliases)
+		return append([]string{"alias"}, args...), nil
+	}
+
+	// Check if any arg is a definition (contains =)
+	hasDefinition := false
+	for _, arg := range args {
+		if strings.Contains(arg, "=") {
+			hasDefinition = true
+			break
+		}
+	}
+
+	if !hasDefinition {
+		// Just displaying aliases, let default handler do it
+		return append([]string{"alias"}, args...), nil
+	}
+
+	// Process each definition - convert ALL to functions so they actually work
+	for _, arg := range args {
+		name, value, isDefinition := strings.Cut(arg, "=")
+		if !isDefinition {
+			// Not a definition, skip
+			continue
+		}
+
+		// Strip matching outer quotes from value if present
+		// Only strip if both start and end match (single or double quotes)
+		if len(value) >= 2 {
+			if (value[0] == '\'' && value[len(value)-1] == '\'') ||
+				(value[0] == '"' && value[len(value)-1] == '"') {
+				value = value[1 : len(value)-1]
+			}
+		}
+
+		// Convert alias to function: alias foo='cmd' becomes foo() { cmd; }
+		trace.Emit("compat", "alias_to_function", trace.LevelVerbose, map[string]any{
+			"name":  name,
+			"value": truncateForTrace(value, 100),
+		})
+
+		funcDef := fmt.Sprintf("%s() { %s; }", name, value)
+		funcParser := syntax.NewParser(syntax.Variant(syntax.LangBash))
+		prog, err := funcParser.Parse(strings.NewReader(funcDef), "alias-func")
+		if err != nil {
+			// Function conversion failed, skip silently (graceful degradation)
+			trace.Emit("compat", "alias_func_fail", trace.LevelVerbose, map[string]any{
+				"name":  name,
+				"value": truncateForTrace(value, 100),
+				"error": err.Error(),
+			})
+			continue
+		}
+
+		// Execute function definition
+		if err := e.runner.Run(ctx, prog); err != nil {
+			trace.Emit("compat", "alias_func_exec_fail", trace.LevelVerbose, map[string]any{
+				"name":  name,
+				"error": err.Error(),
+			})
+		}
+	}
+
+	// We handled all definitions ourselves
+	return []string{":"}, nil
+}
+
 // truncateForTrace truncates a string for trace output.
 func truncateForTrace(s string, maxLen int) string {
 	if len(s) <= maxLen {
@@ -775,6 +860,11 @@ func (e *Executor) ShellName() string {
 // ShellPath returns the path to the shell executable.
 func (e *Executor) ShellPath() string {
 	return e.shellPath
+}
+
+// GetRunner returns the underlying interpreter runner (for testing).
+func (e *Executor) GetRunner() *interp.Runner {
+	return e.runner
 }
 
 // Execute runs a command using the mvdan/sh interpreter.

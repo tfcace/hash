@@ -789,3 +789,83 @@ echo "sourced successfully"
 		t.Errorf("expected 'hello', got: %q", stdout.String())
 	}
 }
+
+func TestExecutor_AliasBashSyntaxConvertsToFunction(t *testing.T) {
+	exec := New()
+	ctx := context.Background()
+	var stdout, stderr bytes.Buffer
+
+	// Define an alias with bash-specific syntax (&&)
+	// This would fail with POSIX parsing, so it gets converted to a function
+	_, err := exec.Execute(ctx, `alias mytest='echo "first" && echo "second"'`, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("alias definition failed: %v, stderr: %s", err, stderr.String())
+	}
+
+	// Check stderr - should NOT have the "could not parse" error
+	if strings.Contains(stderr.String(), "could not parse") {
+		t.Errorf("unexpected parse error in stderr: %s", stderr.String())
+	}
+
+	// Now call it - should work as a function
+	stdout.Reset()
+	stderr.Reset()
+	_, err = exec.Execute(ctx, "mytest", &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("mytest execution failed: %v, stderr: %s", err, stderr.String())
+	}
+
+	output := stdout.String()
+	if !strings.Contains(output, "first") || !strings.Contains(output, "second") {
+		t.Errorf("expected 'first' and 'second' in output, got: %q", output)
+	}
+}
+
+func TestExecutor_AliasSimpleSyntaxStillWorks(t *testing.T) {
+	exec := New()
+	ctx := context.Background()
+	var stdout, stderr bytes.Buffer
+
+	// Simple alias should work through default handler
+	_, err := exec.Execute(ctx, `alias greeting='echo hello'`, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("alias definition failed: %v", err)
+	}
+
+	stdout.Reset()
+	_, err = exec.Execute(ctx, "greeting", &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("greeting execution failed: %v", err)
+	}
+
+	if strings.TrimSpace(stdout.String()) != "hello" {
+		t.Errorf("expected 'hello', got: %q", stdout.String())
+	}
+}
+
+func TestExecutor_AliasWithPipeConvertsToFunction(t *testing.T) {
+	exec := New()
+	ctx := context.Background()
+	var stdout, stderr bytes.Buffer
+
+	// Alias with || (logical OR) - bash syntax
+	_, err := exec.Execute(ctx, `alias tryit='false || echo "fallback"'`, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("alias definition failed: %v, stderr: %s", err, stderr.String())
+	}
+
+	if strings.Contains(stderr.String(), "could not parse") {
+		t.Errorf("unexpected parse error in stderr: %s", stderr.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	_, err = exec.Execute(ctx, "tryit", &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("tryit execution failed: %v", err)
+	}
+
+	if strings.TrimSpace(stdout.String()) != "fallback" {
+		t.Errorf("expected 'fallback', got: %q", stdout.String())
+	}
+}
