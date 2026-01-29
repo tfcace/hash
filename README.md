@@ -114,9 +114,10 @@ Smart completions with intelligent fallback:
 
 1. **Tool-native** (10-200ms) — Cobra `__complete` for kubectl, docker, helm, etc.
 2. **Aliases & functions** (<5ms) — Your defined aliases and shell functions (ƒ icon)
-3. **Executables** — Commands from your PATH
-4. **Filesystem** (<10ms) — Paths, globs, hidden file toggle
-5. **Agent-assisted** (200-800ms) — When you need AI help mid-command
+3. **Environment variables** — `$VAR` and `${VAR}` expansion with value preview
+4. **Executables** — Commands from your PATH
+5. **Filesystem** (<10ms) — Paths, globs, hidden file toggle
+6. **Agent-assisted** (200-800ms) — When you need AI help mid-command
 
 ### Rich History with Full-Text Search
 

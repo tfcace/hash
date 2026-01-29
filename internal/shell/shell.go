@@ -101,6 +101,9 @@ func New(cfg *config.Config) (*Shell, error) {
 	// Alias/function completer for user-defined functions
 	router.Register(completion.NewAliasCompleter(exec), completion.PriorityAlias)
 
+	// Environment variable completer ($VAR, ${VAR})
+	router.Register(completion.NewEnvCompleter(exec), completion.PriorityEnv)
+
 	// Executable completer for command names from PATH
 	router.Register(completion.NewExecutableCompleter(), completion.PriorityExecutable)
 

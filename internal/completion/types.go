@@ -32,6 +32,7 @@ type Priority int
 const (
 	PriorityToolNative Priority = 100 // Try first for subcommand completion
 	PriorityAlias      Priority = 125 // User-defined functions/aliases (before executables)
+	PriorityEnv        Priority = 130 // Environment variables ($VAR)
 	PriorityExecutable Priority = 150 // Executable names from PATH (command position only)
 	PriorityFilesystem Priority = 200 // Fallback for file arguments
 	PriorityAgent      Priority = 300 // AI-powered fallback
@@ -45,4 +46,5 @@ const (
 	KindDirectory  Kind = "directory"
 	KindExecutable Kind = "executable"
 	KindAlias      Kind = "alias" // User-defined functions and aliases (ƒ icon)
+	KindEnv        Kind = "env"   // Environment variables ($ icon)
 )

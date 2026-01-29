@@ -910,6 +910,23 @@ func (e *Executor) Functions() []string {
 	return names
 }
 
+// Environ returns all environment variables in "NAME=value" format.
+// This is used for tab-completion of environment variables.
+func (e *Executor) Environ() []string {
+	if e == nil || e.env == nil {
+		return os.Environ()
+	}
+
+	var result []string
+	e.env.Each(func(name string, vr expand.Variable) bool {
+		if vr.Set && vr.Kind == expand.String {
+			result = append(result, name+"="+vr.Str)
+		}
+		return true
+	})
+	return result
+}
+
 // trackFunctionsFromAST scans a parsed program for function definitions
 // and adds them to the tracking map.
 func (e *Executor) trackFunctionsFromAST(prog *syntax.File) {

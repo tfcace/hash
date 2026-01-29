@@ -284,3 +284,42 @@ func TestRouter_FuzzyGetter(t *testing.T) {
 		t.Error("Fuzzy should be false after SetFuzzy(false)")
 	}
 }
+
+// mockEnvProvider implements EnvProvider for testing
+type mockEnvProvider struct {
+	environ []string
+}
+
+func (m *mockEnvProvider) Environ() []string {
+	return m.environ
+}
+
+func TestRouter_EnvVarCompletion(t *testing.T) {
+	router := NewRouter()
+
+	// Register env completer with mock provider
+	envProvider := &mockEnvProvider{
+		environ: []string{"HASH_SRC=/home/user/hash", "HOME=/home/user", "PATH=/usr/bin"},
+	}
+	envCompleter := NewEnvCompleter(envProvider)
+	router.Register(envCompleter, PriorityEnv)
+
+	// Also register file completer to verify env completer wins for $
+	fileCompleter := NewFileCompleter()
+	router.Register(fileCompleter, PriorityFilesystem)
+
+	// Complete "echo $HA"
+	result, err := router.Complete(context.Background(), "echo $HA", 8)
+	if err != nil {
+		t.Fatalf("Complete() error = %v", err)
+	}
+
+	// Should get $HASH_SRC from env completer
+	if len(result.Items) != 1 {
+		t.Errorf("Expected 1 item ($HASH_SRC), got %d: %v", len(result.Items), result.Items)
+		return
+	}
+	if result.Items[0].Value != "$HASH_SRC" {
+		t.Errorf("Expected $HASH_SRC, got %s", result.Items[0].Value)
+	}
+}
