@@ -2,8 +2,6 @@ name: Release
 
 on:
   push:
-    branches:
-      - master
 
 permissions:
   contents: write
@@ -37,6 +35,7 @@ jobs:
 
   release-please:
     needs: test
+    if: github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     outputs:
       release_created: ${{ steps.release.outputs.release_created }}
