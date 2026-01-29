@@ -32,7 +32,7 @@ hash/
 │   ├── learning/      # Error pattern learning, fix suggestions
 │   ├── parser/        # ?? detection and command parsing
 │   ├── progress/      # OSC 9;4 progress bar support
-│   ├── prompt/        # Starship + built-in with dev mode chip
+│   ├── prompt/        # Starship + built-in prompt engines
 │   ├── readline/      # Input, Emacs/Vim/Helix keybindings
 │   └── shell/         # REPL, builtins, agent integration
 └── go.mod

@@ -192,33 +192,6 @@ in a non-standard location.
 starship_path = "/opt/homebrew/bin/starship"
 ```
 
-### prompt.dev_mode
-
-**Type:** `boolean`
-**Default:** `false`
-
-Show a development/non-production indicator chip in the prompt. The chip
-appears on the opposite side of the prompt alignment:
-- Left-aligned prompt → chip on right
-- Right-aligned prompt → chip on left
-
-```toml
-dev_mode = true
-```
-
-### prompt.dev_mode_label
-
-**Type:** `string`
-**Default:** `"dev"`
-
-Text shown in the dev mode chip.
-
-```toml
-dev_mode_label = "dev"
-dev_mode_label = "DEV"
-dev_mode_label = "⚠ dev"
-```
-
 ---
 
 ## [prompt.theme]
@@ -1244,8 +1217,6 @@ disable_builtins = []
 
 [prompt]
 mode = "starship"
-dev_mode = false
-dev_mode_label = "dev"
 
 [agent]
 default = "claude"

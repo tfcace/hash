@@ -16,15 +16,6 @@ type Config struct {
 	Mode         string // "starship", "built-in", "none"
 	StarshipPath string // Optional explicit path
 	Alignment    string // "left" or "right"
-	DevMode      bool   // Show dev mode indicator
-	DevModeLabel string // Custom label (default: "DEV")
-}
-
-// PromptResult holds both left and right prompt parts.
-type PromptResult struct {
-	Prompt      string // Main prompt
-	RightPrompt string // Right-side prompt (for left-aligned)
-	LeftChip    string // Left-side chip (for right-aligned)
 }
 
 // PromptContext provides context for prompt generation.
@@ -163,39 +154,6 @@ func (p *Prompt) RightPrompt(ctx PromptContext) string {
 	// Disabled: chzyer/readline doesn't support right prompts.
 	// The cursor positioning sequences break line editing.
 	return ""
-}
-
-// GenerateWithDevMode generates prompt with dev mode support.
-func (p *Prompt) GenerateWithDevMode(ctx PromptContext) PromptResult {
-	result := PromptResult{
-		Prompt: p.Generate(ctx),
-	}
-
-	if !p.config.DevMode {
-		return result
-	}
-
-	label := p.config.DevModeLabel
-	if label == "" {
-		label = "DEV"
-	}
-
-	devChip := p.formatDevModeChip(label)
-
-	switch p.config.Alignment {
-	case "right":
-		result.LeftChip = devChip
-	default: // "left" or unset
-		result.RightPrompt = devChip
-	}
-
-	return result
-}
-
-// formatDevModeChip formats the dev mode chip with colors.
-func (p *Prompt) formatDevModeChip(label string) string {
-	// Red background, white text, bold
-	return fmt.Sprintf("\033[41;37;1m %s \033[0m", label)
 }
 
 // cursorPosRegex matches cursor positioning escape sequences.

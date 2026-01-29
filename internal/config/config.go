@@ -45,9 +45,7 @@ type InputConfig struct {
 type PromptConfig struct {
 	Mode         string `toml:"mode"`
 	StarshipPath string `toml:"starship_path"`
-	Alignment    string `toml:"alignment"`      // "left" or "right"
-	DevMode      bool   `toml:"dev_mode"`       // Show dev mode indicator
-	DevModeLabel string `toml:"dev_mode_label"` // Custom label (default: "DEV")
+	Alignment    string `toml:"alignment"` // "left" or "right"
 }
 
 type AgentConfig struct {

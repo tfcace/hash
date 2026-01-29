@@ -79,8 +79,6 @@ func New(cfg *config.Config) (*Shell, error) {
 		Mode:         cfg.Prompt.Mode,
 		StarshipPath: cfg.Prompt.StarshipPath,
 		Alignment:    cfg.Prompt.Alignment,
-		DevMode:      cfg.Prompt.DevMode,
-		DevModeLabel: cfg.Prompt.DevModeLabel,
 	}
 	p := prompt.New(promptCfg)
 
