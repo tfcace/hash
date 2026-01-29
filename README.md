@@ -108,13 +108,15 @@ keybindings = "helix"  # or "emacs" (coming soon)
 gutter = true          # show visual indicator
 ```
 
-### Three-Tier Completions
+### Tab Completion
 
-Fast completions with intelligent fallback:
+Smart completions with intelligent fallback:
 
-1. **Filesystem** (<10ms) — paths, globs, hidden file toggle
-2. **Tool-native** (10-200ms) — Cobra `__complete` detection for kubectl, docker, helm, etc.
-3. **Agent-assisted** (200-800ms) — when you need AI help mid-command
+1. **Tool-native** (10-200ms) — Cobra `__complete` for kubectl, docker, helm, etc.
+2. **Aliases & functions** (<5ms) — Your defined aliases and shell functions (ƒ icon)
+3. **Executables** — Commands from your PATH
+4. **Filesystem** (<10ms) — Paths, globs, hidden file toggle
+5. **Agent-assisted** (200-800ms) — When you need AI help mid-command
 
 ### Rich History with Full-Text Search
 
@@ -215,7 +217,7 @@ hash-rebuild() {
 hash-upgrade() {
     [[ -z "$HASH_SRC" ]] && echo "Set HASH_SRC to your hash source directory" && return 1
     (cd "$HASH_SRC" && ./scripts/build.sh --install)
-    hash --version
+    /usr/local/bin/hash --version
 }
 ```
 

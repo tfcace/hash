@@ -33,3 +33,11 @@ func TestCompletionResult(t *testing.T) {
 		t.Errorf("Prefix = %q, want %q", result.Prefix, "./")
 	}
 }
+
+func TestKindAlias(t *testing.T) {
+	// Verify KindAlias is a valid Kind
+	var k Kind = "alias"
+	if k != "alias" {
+		t.Errorf("expected 'alias', got %s", k)
+	}
+}

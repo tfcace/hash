@@ -897,3 +897,125 @@ func TestExecutor_AliasWithPipeConvertsToFunction(t *testing.T) {
 		t.Errorf("expected 'fallback', got: %q", stdout.String())
 	}
 }
+
+func TestExecutor_TracksFunctionDefinitions(t *testing.T) {
+	exec := New()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Define a function
+	_, err := exec.Execute(ctx, "myfunc() { echo hello; }", nil, nil)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	// Check that it's tracked
+	funcs := exec.Functions()
+	found := false
+	for _, name := range funcs {
+		if name == "myfunc" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected 'myfunc' in Functions(), got %v", funcs)
+	}
+}
+
+func TestExecutor_TracksAliasConversions(t *testing.T) {
+	exec := New()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Define an alias (converted to function internally)
+	_, err := exec.Execute(ctx, "alias myalias='echo hello'", nil, nil)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	// Check that it's tracked as a function
+	funcs := exec.Functions()
+	found := false
+	for _, name := range funcs {
+		if name == "myalias" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected 'myalias' in Functions(), got %v", funcs)
+	}
+}
+
+func TestExecutor_TracksSourcedFunctions(t *testing.T) {
+	exec := New()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Create a temp file with a function definition
+	tmpDir := t.TempDir()
+	scriptPath := filepath.Join(tmpDir, "funcs.sh")
+	err := os.WriteFile(scriptPath, []byte("sourced_func() { echo sourced; }"), 0644)
+	if err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	// Source the file
+	_, err = exec.Execute(ctx, "source "+scriptPath, nil, nil)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	// Check that it's tracked
+	funcs := exec.Functions()
+	found := false
+	for _, name := range funcs {
+		if name == "sourced_func" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected 'sourced_func' in Functions(), got %v", funcs)
+	}
+}
+
+func TestExecutor_UnsetRemovesFunction(t *testing.T) {
+	exec := New()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Define a function
+	_, err := exec.Execute(ctx, "removeme() { echo hi; }", nil, nil)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	// Verify it's tracked
+	funcs := exec.Functions()
+	found := false
+	for _, name := range funcs {
+		if name == "removeme" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected 'removeme' in Functions() after definition")
+	}
+
+	// Unset the function
+	_, err = exec.Execute(ctx, "unset -f removeme", nil, nil)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	// Verify it's removed from tracking
+	funcs = exec.Functions()
+	for _, name := range funcs {
+		if name == "removeme" {
+			t.Errorf("'removeme' should be removed from Functions() after unset -f")
+		}
+	}
+}

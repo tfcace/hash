@@ -31,7 +31,18 @@ type Priority int
 
 const (
 	PriorityToolNative Priority = 100 // Try first for subcommand completion
+	PriorityAlias      Priority = 125 // User-defined functions/aliases (before executables)
 	PriorityExecutable Priority = 150 // Executable names from PATH (command position only)
 	PriorityFilesystem Priority = 200 // Fallback for file arguments
 	PriorityAgent      Priority = 300 // AI-powered fallback
+)
+
+// Kind represents the type of completion item for icon display.
+type Kind string
+
+const (
+	KindFile       Kind = "file"
+	KindDirectory  Kind = "directory"
+	KindExecutable Kind = "executable"
+	KindAlias      Kind = "alias" // User-defined functions and aliases (ƒ icon)
 )

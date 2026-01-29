@@ -561,6 +561,10 @@ type Executor struct {
 	switchStdout *switchableWriter
 	switchStderr *switchableWriter
 	runnerMu     sync.Mutex // Protects runner access during execution
+
+	// Function tracking for completion
+	functions   map[string]struct{}
+	functionsMu sync.RWMutex
 }
 
 // New creates a new Executor.
@@ -581,6 +585,7 @@ func New() *Executor {
 		captureLimit:      defaultCaptureSize,
 		switchStdout:      switchStdout,
 		switchStderr:      switchStderr,
+		functions:         make(map[string]struct{}),
 		// runner is created lazily on first Execute()
 	}
 	exec.ensureShellEnv()
@@ -665,8 +670,25 @@ func (e *Executor) bashBuiltinHandler(ctx context.Context, args []string) ([]str
 		// on bash syntax like && or ||. We convert these to functions instead.
 		return e.handleBashAlias(ctx, args[1:])
 
+	case "unset":
+		// Track function unsets for completion
+		for i, arg := range args {
+			if arg == "-f" && i+1 < len(args) {
+				// Remove the function from tracking
+				for j := i + 1; j < len(args); j++ {
+					if !strings.HasPrefix(args[j], "-") {
+						e.functionsMu.Lock()
+						delete(e.functions, args[j])
+						e.functionsMu.Unlock()
+					}
+				}
+			}
+		}
+		// Let the default handler process the actual unset
+		return args, nil
+
 	default:
-		// Not source/eval/alias, let Runner handle it normally
+		// Not source/eval/alias/unset, let Runner handle it normally
 		return args, nil
 	}
 }
@@ -705,6 +727,9 @@ func (e *Executor) handleBashSource(ctx context.Context, path string) error {
 		})
 		return nil
 	}
+
+	// Track any function definitions for completion
+	e.trackFunctionsFromAST(prog)
 
 	trace.Emit("compat", "source_execute", trace.LevelVerbose, map[string]any{
 		"path": path,
@@ -808,6 +833,11 @@ func (e *Executor) handleBashAlias(ctx context.Context, args []string) ([]string
 				"name":  name,
 				"error": err.Error(),
 			})
+		} else {
+			// Track the function for completion
+			e.functionsMu.Lock()
+			e.functions[name] = struct{}{}
+			e.functionsMu.Unlock()
 		}
 	}
 
@@ -867,6 +897,32 @@ func (e *Executor) GetRunner() *interp.Runner {
 	return e.runner
 }
 
+// Functions returns the names of all tracked user-defined functions.
+// This is used for tab-completion of aliases and functions.
+func (e *Executor) Functions() []string {
+	e.functionsMu.RLock()
+	defer e.functionsMu.RUnlock()
+
+	names := make([]string, 0, len(e.functions))
+	for name := range e.functions {
+		names = append(names, name)
+	}
+	return names
+}
+
+// trackFunctionsFromAST scans a parsed program for function definitions
+// and adds them to the tracking map.
+func (e *Executor) trackFunctionsFromAST(prog *syntax.File) {
+	syntax.Walk(prog, func(node syntax.Node) bool {
+		if fn, ok := node.(*syntax.FuncDecl); ok {
+			e.functionsMu.Lock()
+			e.functions[fn.Name.Value] = struct{}{}
+			e.functionsMu.Unlock()
+		}
+		return true
+	})
+}
+
 // Execute runs a command using the mvdan/sh interpreter.
 func (e *Executor) Execute(ctx context.Context, command string, stdout, stderr io.Writer) (*Result, error) {
 	e.runnerMu.Lock()
@@ -909,6 +965,9 @@ func (e *Executor) Execute(ctx context.Context, command string, stdout, stderr i
 	if err != nil {
 		return nil, err
 	}
+
+	// Track any function definitions for completion
+	e.trackFunctionsFromAST(prog)
 
 	// Set up capture buffer
 	var captureBuf bytes.Buffer
