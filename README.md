@@ -1,5 +1,9 @@
 # Hash
 
+[![Go Report Card](https://goreportcard.com/badge/github.com/tfcace/hash)](https://goreportcard.com/report/github.com/tfcace/hash)
+[![Go Reference](https://pkg.go.dev/badge/github.com/tfcace/hash.svg)](https://pkg.go.dev/github.com/tfcace/hash)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 **Harness Assisted SHell** — A Go-based shell with editor-style input, Helix keybindings, and agent-agnostic AI integration.
 
 > **⚠️ Early Stage Project**
