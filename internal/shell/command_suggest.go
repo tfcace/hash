@@ -134,7 +134,7 @@ func (s *CommandSuggestor) buildPathCache() {
 func (s *CommandSuggestor) getHistoryCommands() []string {
 	cmds, err := s.historyStore.GetRecent(500)
 	if err != nil {
-		return nil
+		return nil //nolint:nilerr // graceful degradation: return empty if history unavailable
 	}
 
 	seen := make(map[string]bool)

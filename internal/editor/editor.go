@@ -487,10 +487,7 @@ func (e *Editor) render() {
 	if e.completionActive && len(e.completionItems) > 0 {
 		displayItems := make([]CompletionItem, len(e.completionItems))
 		for i, item := range e.completionItems {
-			displayItems[i] = CompletionItem{
-				Text:        item.Text,
-				Description: item.Description,
-			}
+			displayItems[i] = CompletionItem(item)
 		}
 		e.display.RenderCompletionMenu(displayItems, e.completionIndex, e.completionCol)
 	}

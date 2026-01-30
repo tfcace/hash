@@ -161,7 +161,7 @@ func newPTYTrace(cmd *exec.Cmd, ptmx *os.File) *ptyTrace {
 	path := ptyTracePath()
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
-		return nil
+		return nil //nolint:nilerr // graceful degradation: skip tracing if file can't be opened
 	}
 
 	t := &ptyTrace{path: path, f: f}
@@ -641,7 +641,7 @@ func (e *Executor) bashBuiltinHandler(ctx context.Context, args []string) ([]str
 		})
 		err := e.handleBashSource(ctx, args[1])
 		if err != nil {
-			return []string{"false"}, nil
+			return []string{"false"}, nil //nolint:nilerr // return "false" to shell, error handled internally
 		}
 		return []string{":"}, nil // Return no-op, we handled it
 
@@ -656,7 +656,7 @@ func (e *Executor) bashBuiltinHandler(ctx context.Context, args []string) ([]str
 		})
 		err := e.handleBashEval(ctx, args[1:])
 		if err != nil {
-			return []string{"false"}, nil
+			return []string{"false"}, nil //nolint:nilerr // return "false" to shell, error handled internally
 		}
 		return []string{":"}, nil // Return no-op, we handled it
 
@@ -721,7 +721,7 @@ func (e *Executor) handleBashSource(ctx context.Context, path string) error {
 			"path":  path,
 			"error": err.Error(),
 		})
-		return nil
+		return nil //nolint:nilerr // intentional: skip unparseable files for shell compatibility
 	}
 
 	// Track any function definitions for completion
@@ -747,7 +747,7 @@ func (e *Executor) handleBashEval(ctx context.Context, args []string) error {
 			"src_preview": truncateForTrace(src, 200),
 			"error":       err.Error(),
 		})
-		return nil
+		return nil //nolint:nilerr // intentional: skip unparseable eval for shell compatibility
 	}
 
 	trace.Emit("compat", "eval_execute", trace.LevelVerbose, map[string]any{
