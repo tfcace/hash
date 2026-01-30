@@ -14,6 +14,10 @@ go test ./...                     # Run all tests
 go test ./internal/parser/...     # Run tests for a specific package
 go test -run TestName ./...       # Run a single test
 go vet ./...                      # Lint
+
+# Fuzz testing (parser and learning system)
+go test -fuzz=FuzzParse -fuzztime=30s ./internal/parser/...
+go test -fuzz=FuzzNormalizeError -fuzztime=30s ./internal/learning/...
 ```
 
 ## Architecture

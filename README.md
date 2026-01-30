@@ -345,6 +345,35 @@ go test ./...                   # Run all tests
 go vet ./...                    # Lint
 ```
 
+### Fuzz Testing
+
+The parser and learning system have fuzz tests to catch edge cases:
+
+```bash
+# Run fuzz tests (30 seconds each)
+go test -fuzz=FuzzParse -fuzztime=30s ./internal/parser/...
+go test -fuzz=FuzzNormalizeError -fuzztime=30s ./internal/learning/...
+
+# Run all fuzz targets
+go test -fuzz=Fuzz -fuzztime=30s ./internal/...
+```
+
+Fuzz tests run automatically in CI on PRs that modify parser or learning code.
+
+### Demo Recordings
+
+Demo GIFs are generated using [VHS](https://github.com/charmbracelet/vhs):
+
+```bash
+# Install VHS
+brew install vhs  # or: go install github.com/charmbracelet/vhs@latest
+
+# Generate all demos
+for tape in demos/*.tape; do vhs "$tape"; done
+```
+
+See [`demos/README.md`](demos/README.md) for available demos.
+
 This project uses [jj (Jujutsu)](https://github.com/martinvonz/jj) for version control.
 
 ## Advanced

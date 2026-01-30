@@ -1,0 +1,65 @@
+name: Generate Demos
+
+on:
+  # Manual trigger only - demos are expensive to generate
+  workflow_dispatch:
+  # Optionally run when demo tapes change
+  push:
+    branches:
+      - master
+    paths:
+      - "demos/*.tape"
+
+permissions:
+  contents: write
+
+jobs:
+  generate:
+    name: Generate Demo GIFs
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libx11-dev ffmpeg
+
+      - name: Build hash
+        run: |
+          go build -o hash ./cmd/hash
+          sudo mv hash /usr/local/bin/
+
+      - name: Install VHS
+        run: |
+          go install github.com/charmbracelet/vhs@latest
+
+      - name: Generate demos
+        run: |
+          cd demos
+          for tape in *.tape; do
+            echo "Generating ${tape}..."
+            vhs "${tape}" || echo "Warning: ${tape} failed (may need interactive shell)"
+          done
+
+      - name: Upload demo artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: demo-gifs
+          path: demos/*.gif
+          retention-days: 90
+
+      # Optionally commit back to repo (disabled by default)
+      # - name: Commit demos
+      #   run: |
+      #     git config user.name "github-actions[bot]"
+      #     git config user.email "github-actions[bot]@users.noreply.github.com"
+      #     git add demos/*.gif
+      #     git diff --staged --quiet || git commit -m "chore: regenerate demo GIFs"
+      #     git push
