@@ -41,10 +41,10 @@ linters-settings:
 
   gosec:
     excludes:
-      - G104
-    config:
-      G204:
-        audit: true
+      - G104  # Unhandled errors (covered by errcheck)
+      - G204  # Subprocess with variable - expected for a shell
+      - G304  # File inclusion via variable - expected for a shell
+      - G101  # Hardcoded credentials - false positives in tests
 
   govet:
     enable-all: true

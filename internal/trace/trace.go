@@ -64,7 +64,7 @@ func Init() error {
 		path = "hash-trace.jsonl"
 	}
 
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644) //nolint:gosec // G302: trace logs are non-sensitive
 	if err != nil {
 		return err
 	}
