@@ -63,6 +63,11 @@ issues:
       linters:
         - errcheck
 
+    # Terminal output errors are intentionally ignored in editor code
+    - path: internal/editor/
+      linters:
+        - errcheck
+
 run:
   timeout: 5m
   build-tags:
