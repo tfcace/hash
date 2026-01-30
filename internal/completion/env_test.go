@@ -245,9 +245,10 @@ func TestEnvCompleter_MasksSensitiveValues(t *testing.T) {
 	// Find API_KEY and HOME in results
 	var apiKeyDesc, homeDesc string
 	for _, item := range result.Items {
-		if item.Display == "API_KEY" {
+		switch item.Display {
+		case "API_KEY":
 			apiKeyDesc = item.Description
-		} else if item.Display == "HOME" {
+		case "HOME":
 			homeDesc = item.Description
 		}
 	}

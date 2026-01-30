@@ -16,13 +16,13 @@ const (
 
 // Entry is a single trace event.
 type Entry struct {
-	Timestamp     string  `json:"ts"`
-	DeltaMs       float64 `json:"delta_ms"`
-	Goroutine     int     `json:"goroutine"`
-	Subsystem     string  `json:"sub"`
-	Level         Level   `json:"level"`
-	Event         string  `json:"event"`
-	Data          any     `json:"data,omitempty"`
+	Timestamp string  `json:"ts"`
+	DeltaMs   float64 `json:"delta_ms"`
+	Goroutine int     `json:"goroutine"`
+	Subsystem string  `json:"sub"`
+	Level     Level   `json:"level"`
+	Event     string  `json:"event"`
+	Data      any     `json:"data,omitempty"`
 }
 
 // MarshalJSON implements json.Marshaler.

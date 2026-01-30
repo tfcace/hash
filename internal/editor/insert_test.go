@@ -126,8 +126,8 @@ func TestEndsWithBackslash(t *testing.T) {
 		{"hello", false},
 		{"hello\\", true},
 		{"hello \\", true},
-		{"hello \\ ", true},   // Trailing spaces don't matter
-		{"hello \\  ", true},  // Multiple trailing spaces
+		{"hello \\ ", true},  // Trailing spaces don't matter
+		{"hello \\  ", true}, // Multiple trailing spaces
 		{"", false},
 		{"\\", true},
 		{" \\ ", true},
@@ -150,8 +150,8 @@ func TestSplitLines(t *testing.T) {
 		{"a\nb\nc", []string{"a", "b", "c"}},
 		{"", []string{""}},
 		{"\n", []string{"", ""}},
-		{"hello\r\nworld", []string{"hello", "world"}},  // Windows line endings
-		{"hello\rworld", []string{"hello", "world"}},    // Old Mac line endings
+		{"hello\r\nworld", []string{"hello", "world"}}, // Windows line endings
+		{"hello\rworld", []string{"hello", "world"}},   // Old Mac line endings
 	}
 	for _, tt := range tests {
 		got := splitLines(tt.input)
@@ -172,13 +172,13 @@ func TestAddLineContinuations(t *testing.T) {
 		input string
 		want  string
 	}{
-		{"hello", "hello"},                                      // Single line unchanged
-		{"hello\nworld", "hello \\\nworld"},                     // Two lines
-		{"a\nb\nc", "a \\\nb \\\nc"},                            // Three lines
-		{"hello \\\nworld", "hello \\\nworld"},                  // Already has continuation
-		{"hello\\\nworld", "hello\\\nworld"},                    // Continuation without space
-		{"", ""},                                                // Empty string
-		{"hello\n", "hello \\\n"},                               // Trailing newline
+		{"hello", "hello"},                     // Single line unchanged
+		{"hello\nworld", "hello \\\nworld"},    // Two lines
+		{"a\nb\nc", "a \\\nb \\\nc"},           // Three lines
+		{"hello \\\nworld", "hello \\\nworld"}, // Already has continuation
+		{"hello\\\nworld", "hello\\\nworld"},   // Continuation without space
+		{"", ""},                               // Empty string
+		{"hello\n", "hello \\\n"},              // Trailing newline
 	}
 	for _, tt := range tests {
 		got := addLineContinuations(tt.input)

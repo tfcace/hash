@@ -110,7 +110,7 @@ func TestIntegration_LevelFiltering(t *testing.T) {
 	}
 
 	// Emit events at different levels
-	Editor("verbose_event", nil)         // Should be filtered
+	Editor("verbose_event", nil)          // Should be filtered
 	EditorDetailed("detailed_event", nil) // Should be filtered
 	EditorHigh("high_event", nil)         // Should pass
 
@@ -149,10 +149,10 @@ func TestIntegration_SubsystemFiltering(t *testing.T) {
 	}
 
 	// Emit events from different subsystems
-	Editor("editor_event", nil)   // Should pass
-	Shell("shell_event", nil)     // Should pass
-	Agent("agent_event", nil)     // Should be filtered
-	Parser("parser_event", nil)   // Should be filtered
+	Editor("editor_event", nil) // Should pass
+	Shell("shell_event", nil)   // Should pass
+	Agent("agent_event", nil)   // Should be filtered
+	Parser("parser_event", nil) // Should be filtered
 
 	Close()
 

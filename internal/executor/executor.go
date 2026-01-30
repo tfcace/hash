@@ -17,9 +17,9 @@ import (
 	"time"
 
 	"github.com/creack/pty"
-	"golang.org/x/sys/unix"
 	"github.com/tfcace/hash/internal/progress"
 	"github.com/tfcace/hash/internal/trace"
+	"golang.org/x/sys/unix"
 	"golang.org/x/term"
 	"mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/interp"
@@ -1482,7 +1482,6 @@ func (e *Executor) runWithPTYRaw(ctx context.Context, cmd *exec.Cmd, hc interp.H
 	}
 	return cmdErr
 }
-
 
 // environToSlice converts expand.Environ to []string.
 func environToSlice(env expand.Environ) []string {

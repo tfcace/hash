@@ -20,13 +20,13 @@ type Command struct {
 // AgentInteraction represents an agent prompt/response pair.
 type AgentInteraction struct {
 	ID        int64
-	Prompt    string    // What the user asked
-	Response  string    // What the agent suggested
-	Accepted  bool      // Did the user accept the suggestion?
-	CommandID int64     // Link to executed command (if accepted)
-	Context   string    // Context that was sent (JSON)
-	LatencyMs int64     // Agent response time
-	Agent     string    // Which agent (claude, ollama, etc.)
+	Prompt    string // What the user asked
+	Response  string // What the agent suggested
+	Accepted  bool   // Did the user accept the suggestion?
+	CommandID int64  // Link to executed command (if accepted)
+	Context   string // Context that was sent (JSON)
+	LatencyMs int64  // Agent response time
+	Agent     string // Which agent (claude, ollama, etc.)
 	Timestamp time.Time
 }
 

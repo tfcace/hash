@@ -24,15 +24,15 @@ type Completion struct {
 
 // Config configures the editor.
 type Config struct {
-	Keybindings    string                                              // "helix", "emacs", "vim"
-	HistoryFunc    func(dir int, currentLine string) string            // -1=prev, +1=next; currentLine is for saving
-	CompleteFunc   func(line string, pos int) []Completion             // Tab completion
-	PrefetchFunc   func(line string, pos int)                          // Background completion prefetch (on space)
-	OnInputReady   func()                                              // Called after editor chrome is rendered, before input loop
-	Gutter         bool                                                // Show gutter indicator
-	Prompt         string                                              // Prompt string to display before input
-	InputBgColor   string                                              // Background color for submitted input (hex)
-	ScrollbarColor string                                              // Foreground color for scrollbars (hex)
+	Keybindings    string                                   // "helix", "emacs", "vim"
+	HistoryFunc    func(dir int, currentLine string) string // -1=prev, +1=next; currentLine is for saving
+	CompleteFunc   func(line string, pos int) []Completion  // Tab completion
+	PrefetchFunc   func(line string, pos int)               // Background completion prefetch (on space)
+	OnInputReady   func()                                   // Called after editor chrome is rendered, before input loop
+	Gutter         bool                                     // Show gutter indicator
+	Prompt         string                                   // Prompt string to display before input
+	InputBgColor   string                                   // Background color for submitted input (hex)
+	ScrollbarColor string                                   // Foreground color for scrollbars (hex)
 }
 
 // Result is returned when the editor exits.
@@ -72,10 +72,10 @@ type Editor struct {
 	completionCol    int    // Column where completion started
 
 	// Ghost text state (inline suggestions)
-	ghost            *GhostText
-	ghostTextChan    GhostTextChan // Channel for streaming ghost text updates
-	ghostErrChan     <-chan error  // Channel for ghost text errors
-	streamingModel   string        // Model name for "Thinking..." display
+	ghost          *GhostText
+	ghostTextChan  GhostTextChan // Channel for streaming ghost text updates
+	ghostErrChan   <-chan error  // Channel for ghost text errors
+	streamingModel string        // Model name for "Thinking..." display
 }
 
 // New creates a new editor.

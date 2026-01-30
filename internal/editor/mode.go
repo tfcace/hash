@@ -14,7 +14,7 @@ const (
 
 // ModeResult is returned by mode key handlers.
 type ModeResult struct {
-	NewMode       Mode   // Nil means stay in current mode
+	NewMode       Mode // Nil means stay in current mode
 	Action        Action
 	Submit        bool // True = user wants to execute
 	Complete      bool // True = trigger completion

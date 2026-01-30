@@ -14,13 +14,13 @@ import (
 
 // InputReader reads keys from a terminal.
 type InputReader struct {
-	in           io.Reader
-	buf          [64]byte // Buffer for escape sequences
-	escTimeout   time.Duration
-	pending      byte   // Byte to return on next read (0 = none)
-	hasPending   bool
-	pendingKeys  []Key  // Keys to return before reading new input
-	pasteBuffer  []byte // Buffer for paste content
+	in          io.Reader
+	buf         [64]byte // Buffer for escape sequences
+	escTimeout  time.Duration
+	pending     byte // Byte to return on next read (0 = none)
+	hasPending  bool
+	pendingKeys []Key  // Keys to return before reading new input
+	pasteBuffer []byte // Buffer for paste content
 }
 
 // NewInputReader creates a new input reader.

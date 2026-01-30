@@ -57,12 +57,12 @@ func TestCtrlRE2E(t *testing.T) {
 		query    string
 		expected int
 	}{
-		{"ls", 2},        // "ls" and "ls -la"
-		{"docker", 1},    // "docker ps"
-		{"kubectl", 1},   // "kubectl get pods"
-		{"echo", 1},      // "echo test"
+		{"ls", 2},      // "ls" and "ls -la"
+		{"docker", 1},  // "docker ps"
+		{"kubectl", 1}, // "kubectl get pods"
+		{"echo", 1},    // "echo test"
 		{"nonexistent", 0},
-		{"", 7},          // All commands
+		{"", 7}, // All commands
 	}
 
 	for _, test := range searchTests {

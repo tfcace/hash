@@ -14,10 +14,10 @@ func TestDamerauLevenshtein(t *testing.T) {
 		{"", "a", 1},
 		{"a", "a", 0},
 		{"ab", "ab", 0},
-		{"ab", "ba", 1},   // transposition
-		{"sl", "ls", 1},   // transposition
-		{"gti", "git", 1}, // transposition
-		{"cat", "car", 1}, // substitution
+		{"ab", "ba", 1},    // transposition
+		{"sl", "ls", 1},    // transposition
+		{"gti", "git", 1},  // transposition
+		{"cat", "car", 1},  // substitution
 		{"cat", "cats", 1}, // insertion
 		{"cats", "cat", 1}, // deletion
 		{"kitten", "sitting", 3},
@@ -62,11 +62,11 @@ func TestFindSimilar(t *testing.T) {
 		cmd      string
 		expected []string
 	}{
-		{"sl", []string{"ls"}},              // transposition
-		{"gti", []string{"git"}},            // transposition
-		{"dc", []string{"dd", "df", "du"}},  // all within distance 1
-		{"dl", []string{"dd", "df", "du"}},  // multiple matches
-		{"xyz", nil},                        // no match
+		{"sl", []string{"ls"}},             // transposition
+		{"gti", []string{"git"}},           // transposition
+		{"dc", []string{"dd", "df", "du"}}, // all within distance 1
+		{"dl", []string{"dd", "df", "du"}}, // multiple matches
+		{"xyz", nil},                       // no match
 	}
 
 	for _, tt := range tests {

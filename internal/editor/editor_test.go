@@ -13,8 +13,8 @@ func TestEditor_SimpleInput(t *testing.T) {
 	// Simulate typing "hello" and pressing Enter (in normal mode)
 	input := bytes.NewReader([]byte{
 		'h', 'e', 'l', 'l', 'o', // Type hello
-		0x1b,                     // Escape to normal mode
-		'\r',                     // Enter to submit
+		0x1b, // Escape to normal mode
+		'\r', // Enter to submit
 	})
 	var output bytes.Buffer
 
@@ -220,13 +220,13 @@ func TestEditor_FindWordStart(t *testing.T) {
 		col  int
 		want int
 	}{
-		{"hello", 5, 0},           // At end of word
-		{"hello world", 8, 6},     // In middle of second word
-		{"hello world", 6, 6},     // At start of second word
-		{"hello world", 5, 0},     // At space
-		{"", 0, 0},                // Empty line
-		{"  hello", 7, 2},         // Word after spaces
-		{"foo\tbar", 7, 4},        // Tab separator
+		{"hello", 5, 0},       // At end of word
+		{"hello world", 8, 6}, // In middle of second word
+		{"hello world", 6, 6}, // At start of second word
+		{"hello world", 5, 0}, // At space
+		{"", 0, 0},            // Empty line
+		{"  hello", 7, 2},     // Word after spaces
+		{"foo\tbar", 7, 4},    // Tab separator
 	}
 
 	for _, tt := range tests {
