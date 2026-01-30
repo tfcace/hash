@@ -99,10 +99,11 @@ func (u *ResponseUI) showCommand(cmd string) {
 	output := fmt.Sprintf("\033[32m→\033[0m %s\n  \033[90m[Enter: run] [Tab: edit] [Esc: cancel]\033[0m\n", cmd)
 	fmt.Fprint(u.out, output)
 	// Flush if output is buffered
-	if f, ok := u.out.(*os.File); ok {
-		f.Sync()
-	} else if bw, ok := u.out.(*bufio.Writer); ok {
-		bw.Flush()
+	switch w := u.out.(type) {
+	case *os.File:
+		w.Sync()
+	case *bufio.Writer:
+		w.Flush()
 	}
 }
 
