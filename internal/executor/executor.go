@@ -159,7 +159,7 @@ func newPTYTrace(cmd *exec.Cmd, ptmx *os.File) *ptyTrace {
 	}
 
 	path := ptyTracePath()
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644) //nolint:gosec // G302: debug trace logs
 	if err != nil {
 		return nil //nolint:nilerr // graceful degradation: skip tracing if file can't be opened
 	}

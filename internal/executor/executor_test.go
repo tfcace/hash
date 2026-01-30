@@ -344,7 +344,7 @@ func TestExecutor_CdPersistsAcrossCommands(t *testing.T) {
 }
 
 func writeExecutableScript(path, content string) error {
-	return os.WriteFile(path, []byte(content), 0755)
+	return os.WriteFile(path, []byte(content), 0755) //nolint:gosec // G306: test executable
 }
 
 func TestExecutor_SyncRunnerDir(t *testing.T) {
@@ -470,7 +470,7 @@ if [[ -n "$TEST_VAR" ]]; then
   echo "test var is set"
 fi
 `
-	if err := os.WriteFile(scriptPath, []byte(scriptContent), 0644); err != nil {
+	if err := os.WriteFile(scriptPath, []byte(scriptContent), 0644); err != nil { //nolint:gosec // G306: test file
 		t.Fatalf("failed to create test script: %v", err)
 	}
 
@@ -524,7 +524,7 @@ func TestExecutor_SourcePersistsState(t *testing.T) {
 	scriptContent := `export SOURCED_VAR="from-script"
 myalias() { echo "alias output"; }
 `
-	if err := os.WriteFile(scriptPath, []byte(scriptContent), 0644); err != nil {
+	if err := os.WriteFile(scriptPath, []byte(scriptContent), 0644); err != nil { //nolint:gosec // G306: test file
 		t.Fatalf("failed to create test script: %v", err)
 	}
 
