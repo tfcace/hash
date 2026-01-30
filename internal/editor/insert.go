@@ -362,10 +362,11 @@ func splitLines(text string) []string {
 	var lines []string
 	var current []byte
 	for i := 0; i < len(text); i++ {
-		if text[i] == '\n' {
+		switch text[i] {
+		case '\n':
 			lines = append(lines, string(current))
 			current = current[:0]
-		} else if text[i] == '\r' {
+		case '\r':
 			// Handle \r\n (skip \r, \n will be handled next)
 			if i+1 < len(text) && text[i+1] == '\n' {
 				continue
@@ -373,7 +374,7 @@ func splitLines(text string) []string {
 			// Standalone \r treated as newline
 			lines = append(lines, string(current))
 			current = current[:0]
-		} else {
+		default:
 			current = append(current, text[i])
 		}
 	}

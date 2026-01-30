@@ -855,15 +855,16 @@ func (e *Editor) extractText(start, end Position) string {
 	var result string
 	for row := start.Row; row <= end.Row; row++ {
 		line := e.state.Buffer.Line(row)
-		if row == start.Row {
+		switch row {
+		case start.Row:
 			result += line[start.Col:]
-		} else if row == end.Row {
+		case end.Row:
 			endCol := end.Col
 			if endCol > len(line) {
 				endCol = len(line)
 			}
 			result += "\n" + line[:endCol]
-		} else {
+		default:
 			result += "\n" + line
 		}
 	}
