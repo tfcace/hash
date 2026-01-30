@@ -10,6 +10,10 @@
 
 Hash is a shell that treats AI as a first-class citizen without locking you into any particular model or vendor. Drop `??` anywhere in a command to get help:
 
+<p align="center">
+  <img src="demos/hero.gif" alt="Hash demo showing ?? agent invocation" width="800">
+</p>
+
 ```bash
 # Generate a command from natural language
 ?? find all Go files modified today
@@ -48,6 +52,10 @@ model = "codellama:13b"
 
 Hash learns from how you fix errors. After seeing you run `chmod +x` a few times after "Permission denied", it suggests the fix instantly — no agent call needed:
 
+<p align="center">
+  <img src="demos/learning.gif" alt="Hash learning from error fixes" width="800">
+</p>
+
 ```
 $ ./deploy.sh
 bash: ./deploy.sh: Permission denied
@@ -67,6 +75,10 @@ Control exactly what context goes to the agent with an interactive TUI:
 - Add history commands, environment variables, or last output as needed
 - Your selections persist for the shell session
 - Press **Enter** to confirm, **Esc** to cancel
+
+<p align="center">
+  <img src="demos/context-picker.gif" alt="Context picker TUI" width="800">
+</p>
 
 ```
 ┌─ Context for Agent ─────────────────────────────────────┐
