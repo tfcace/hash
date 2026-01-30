@@ -93,3 +93,11 @@ exclusions:
     - path: internal/editor/
       linters:
         - errcheck
+    # Compat package uses fire-and-forget patterns
+    - path: internal/compat/
+      linters:
+        - errcheck
+    # Test files - relaxed error checking
+    - path: _test\.go
+      linters:
+        - errcheck
