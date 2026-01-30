@@ -101,6 +101,7 @@ func (sf ShellFiles) Files() []string {
 
 // DetectPreviousShell detects the user's previous shell and its rc file.
 // Returns shell name, rc file path, and whether detection was successful.
+//
 // Deprecated: Use DetectPreviousShellFiles for full profile + rc support.
 func DetectPreviousShell() (shell string, rcFile string, ok bool) {
 	files := DetectPreviousShellFiles()

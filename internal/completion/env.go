@@ -52,11 +52,12 @@ func (c *EnvCompleter) Complete(ctx context.Context, line string, pos int) (Resu
 
 	// Get environment variables from provider or fallback
 	var environ []string
-	if c.envFunc != nil {
+	switch {
+	case c.envFunc != nil:
 		environ = c.envFunc()
-	} else if c.provider != nil {
+	case c.provider != nil:
 		environ = c.provider.Environ()
-	} else {
+	default:
 		environ = os.Environ()
 	}
 

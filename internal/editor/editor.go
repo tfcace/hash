@@ -157,11 +157,12 @@ func AnnotateDuration(out io.Writer, termWidth, outputLines, cmdLines int, durat
 
 	// Format duration
 	var text string
-	if durationMs < 1000 {
+	switch {
+	case durationMs < 1000:
 		text = fmt.Sprintf(" %dms ", durationMs)
-	} else if durationMs < 60000 {
+	case durationMs < 60000:
 		text = fmt.Sprintf(" %.1fs ", float64(durationMs)/1000)
-	} else {
+	default:
 		mins := durationMs / 60000
 		secs := (durationMs % 60000) / 1000
 		text = fmt.Sprintf(" %dm%ds ", mins, secs)

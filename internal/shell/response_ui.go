@@ -208,6 +208,7 @@ func formatSize(bytes int) string {
 }
 
 // ShowThinking displays a thinking indicator with optional model name.
+//
 // Deprecated: Use ShowState(AgentStateThinking) instead for consistent styling.
 func (u *ResponseUI) ShowThinking(model string) {
 	u.ShowState(AgentStateThinking)
@@ -271,6 +272,7 @@ func (u *ResponseUI) WaitForConfirmation() ConfirmAction {
 }
 
 // ShowThinkingInline displays thinking indicator (for streaming modes).
+//
 // Deprecated: Use ShowState(AgentStateThinking) instead for consistent styling.
 func (u *ResponseUI) ShowThinkingInline(model string) {
 	u.ShowState(AgentStateThinking)
