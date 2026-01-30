@@ -63,7 +63,7 @@ func FilterWithCompat(path, shell string) (string, *Report, error) {
 		if fn, ok := noops[cmd]; ok {
 			// Execute no-op and log
 			args := strings.Fields(trimmed)[1:]
-			fn(args, report)
+			fn(args, report) //nolint:errcheck // no-op functions don't fail
 			// Replace with comment to preserve line numbers
 			filteredLines = append(filteredLines, "# [hash-compat] "+line)
 			// Update line number in last skipped item
@@ -146,7 +146,7 @@ func SourceWithCompat(ctx context.Context, path, shell string, stdout io.Writer)
 		if fn, ok := noops[cmd]; ok {
 			// Execute no-op and log
 			args := strings.Fields(trimmed)[1:]
-			fn(args, report)
+			fn(args, report) //nolint:errcheck // no-op functions don't fail
 			// Replace with comment to preserve line numbers
 			filteredLines = append(filteredLines, "# [hash-compat] "+line)
 			// Update line number in last skipped item

@@ -148,7 +148,7 @@ func (t *ACPTransport) connectLocked(ctx context.Context) error {
 
 	// Initialize protocol
 	if err := t.initialize(ctx); err != nil {
-		t.Close()
+		t.Close() //nolint:errcheck // best-effort cleanup on init failure
 		return fmt.Errorf("initialize: %w", err)
 	}
 
@@ -530,8 +530,8 @@ func (t *ACPTransport) Close() error {
 		t.stdin = nil
 	}
 	if t.cmd != nil && t.cmd.Process != nil {
-		t.cmd.Process.Kill()
-		t.cmd.Wait()
+		t.cmd.Process.Kill() //nolint:errcheck // best-effort kill during cleanup
+		t.cmd.Wait()         //nolint:errcheck // ignore exit status during cleanup
 	}
 	return nil
 }

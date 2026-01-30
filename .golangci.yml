@@ -84,14 +84,14 @@ linters:
     misspell:
       locale: US
 
+  exclusions:
+    rules:
+      # Exclude errcheck from test files - tests use fire-and-forget patterns
+      - path: _test\.go
+        linters:
+          - errcheck
+
 run:
   timeout: 5m
   build-tags:
     - integration
-
-issues:
-  exclude-rules:
-    # Exclude errcheck from test files - tests use fire-and-forget patterns
-    - path: _test\.go
-      linters:
-        - errcheck
