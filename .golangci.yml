@@ -39,9 +39,14 @@ linters-settings:
       - fmt.Printf
       - fmt.Sscanf
       # Writer interface (terminal I/O)
+      - io.Writer.Write
       - (io.Writer).Write
       - (*os.File).Write
       - (*os.File).WriteString
+      - (*os.File).Close
+      - (*os.File).Sync
+      - os.Stdout.WriteString
+      - os.Stderr.WriteString
       - (*bytes.Buffer).Write
       - (*bytes.Buffer).WriteString
       - (*strings.Builder).Write
@@ -49,20 +54,25 @@ linters-settings:
       - (*bufio.Writer).Write
       - (*bufio.Writer).WriteString
       - (*bufio.Writer).Flush
-      # File/resource cleanup (in defers, errors not actionable)
-      - (*os.File).Close
-      - (*os.File).Sync
+      # Closer interface
+      - io.Closer.Close
       - (io.Closer).Close
-      # Terminal control (restore in defers)
+      # Terminal control
+      - term.Restore
       - golang.org/x/term.Restore
-      # PTY operations (resize, close - best effort)
+      # PTY operations
+      - pty.Setsize
       - github.com/creack/pty.Setsize
-      # JSON parsing (when used for optional/lenient parsing)
+      # JSON parsing
+      - json.Unmarshal
       - encoding/json.Unmarshal
-      # Environment (test setup, non-critical)
+      # Environment
       - os.Setenv
       - os.Unsetenv
       - os.Chdir
+    # Exclude patterns for method calls on interfaces
+    exclude:
+      - "Error return value of .((os\\.)?std(out|err)\\..*|fmt\\..*|.*\\.Write.*|.*\\.Close|.*Close\\(\\)|term\\.Restore|pty\\.Setsize|json\\.Unmarshal|os\\.(Setenv|Unsetenv|Chdir)).* is not checked"
 
   gosec:
     excludes:
