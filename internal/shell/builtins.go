@@ -45,14 +45,6 @@ func isBuiltin(cmd string) bool {
 	}
 }
 
-// isBuiltinWithConfig returns true if the command is a shell builtin and is enabled.
-func isBuiltinWithConfig(cfg *config.Config, cmd string) bool {
-	if !isBuiltin(cmd) {
-		return false
-	}
-	return isBuiltinEnabled(cfg, cmd)
-}
-
 // executeBuiltin runs a builtin command. Returns (handled, error).
 func (s *Shell) executeBuiltin(ctx context.Context, line string) (bool, error) {
 	parts := strings.Fields(line)

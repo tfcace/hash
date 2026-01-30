@@ -20,7 +20,6 @@ type InputReader struct {
 	pending      byte   // Byte to return on next read (0 = none)
 	hasPending   bool
 	pendingKeys  []Key  // Keys to return before reading new input
-	inPaste      bool   // Currently reading bracketed paste content
 	pasteBuffer  []byte // Buffer for paste content
 }
 

@@ -395,12 +395,6 @@ func (ui *SearchUI) debounceSearch(id int) tea.Cmd {
 	})
 }
 
-func (ui *SearchUI) clearStatusAfter() tea.Cmd {
-	return tea.Tick(statusDuration, func(t time.Time) tea.Msg {
-		return clearStatusMsg{}
-	})
-}
-
 func (ui *SearchUI) copyToClipboard(text string) error {
 	if err := sysClipboard.Init(); err != nil {
 		return err
