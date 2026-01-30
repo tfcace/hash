@@ -26,63 +26,63 @@ linters:
     # Code quality
     - misspell       # Spelling errors in comments/strings
 
-linters-settings:
-  errcheck:
-    exclude-functions:
-      # Standard print functions (fire-and-forget terminal output)
-      - fmt.Fprint
-      - fmt.Fprintf
-      - fmt.Fprintln
-      - fmt.Print
-      - fmt.Println
-      - fmt.Printf
-      # Writer interface (terminal I/O)
-      - (io.Writer).Write
-      - (*os.File).Write
-      - (*os.File).WriteString
-      - (*os.File).Close
-      - (*os.File).Sync
-      - (*bytes.Buffer).Write
-      - (*bytes.Buffer).WriteString
-      - (*strings.Builder).Write
-      - (*strings.Builder).WriteString
-      - (*bufio.Writer).Write
-      - (*bufio.Writer).WriteString
-      - (*bufio.Writer).Flush
-      # Closer interface
-      - (io.Closer).Close
-      # Terminal control
-      - (golang.org/x/term.State).Restore
-      # PTY operations
-      - (github.com/creack/pty).Setsize
-      # Environment
-      - os.Setenv
-      - os.Unsetenv
-      - os.Chdir
+  settings:
+    errcheck:
+      exclude-functions:
+        # Standard print functions (fire-and-forget terminal output)
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
+        - fmt.Print
+        - fmt.Println
+        - fmt.Printf
+        # Writer interface (terminal I/O)
+        - (io.Writer).Write
+        - (*os.File).Write
+        - (*os.File).WriteString
+        - (*os.File).Close
+        - (*os.File).Sync
+        - (*bytes.Buffer).Write
+        - (*bytes.Buffer).WriteString
+        - (*strings.Builder).Write
+        - (*strings.Builder).WriteString
+        - (*bufio.Writer).Write
+        - (*bufio.Writer).WriteString
+        - (*bufio.Writer).Flush
+        # Closer interface
+        - (io.Closer).Close
+        # Terminal control
+        - (golang.org/x/term.State).Restore
+        # PTY operations
+        - (github.com/creack/pty).Setsize
+        # Environment
+        - os.Setenv
+        - os.Unsetenv
+        - os.Chdir
 
-  gosec:
-    excludes:
-      - G104  # Unhandled errors (covered by errcheck)
-      - G204  # Subprocess with variable - expected for a shell
-      - G304  # File inclusion via variable - expected for a shell
-      - G101  # Hardcoded credentials - false positives in tests
+    gosec:
+      excludes:
+        - G104  # Unhandled errors (covered by errcheck)
+        - G204  # Subprocess with variable - expected for a shell
+        - G304  # File inclusion via variable - expected for a shell
+        - G101  # Hardcoded credentials - false positives in tests
 
-  govet:
-    enable-all: true
-    disable:
-      - fieldalignment
+    govet:
+      enable-all: true
+      disable:
+        - fieldalignment
 
-  gocritic:
-    enabled-tags:
-      - diagnostic
-      - style
-      - performance
-    disabled-checks:
-      - whyNoLint
-      - hugeParam
+    gocritic:
+      enabled-tags:
+        - diagnostic
+        - style
+        - performance
+      disabled-checks:
+        - whyNoLint
+        - hugeParam
 
-  misspell:
-    locale: US
+    misspell:
+      locale: US
 
 run:
   timeout: 5m
