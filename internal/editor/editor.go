@@ -191,7 +191,7 @@ func AnnotateDuration(out io.Writer, termWidth, outputLines, cmdLines int, durat
 		// Parse hex to RGB for background
 		var r, g, b int
 		if len(bgColor) == 7 && bgColor[0] == '#' {
-			fmt.Sscanf(bgColor[1:], "%02x%02x%02x", &r, &g, &b)
+			fmt.Sscanf(bgColor[1:], "%02x%02x%02x", &r, &g, &b) //nolint:errcheck // hex format already validated
 			fmt.Fprintf(&sb, "\x1b[48;2;%d;%d;%dm", r, g, b)
 		}
 	}

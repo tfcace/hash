@@ -81,7 +81,7 @@ func (d *Display) SetInputBgColor(hexColor string) {
 	}
 	// Parse hex to RGB
 	var r, g, b int
-	fmt.Sscanf(hexColor[1:], "%02x%02x%02x", &r, &g, &b)
+	fmt.Sscanf(hexColor[1:], "%02x%02x%02x", &r, &g, &b) //nolint:errcheck // hex format already validated
 	// Generate ANSI true color background code
 	d.inputBgCode = fmt.Sprintf("\x1b[48;2;%d;%d;%dm", r, g, b)
 }
@@ -94,7 +94,7 @@ func (d *Display) SetScrollbarColor(hexColor string) {
 	}
 	// Parse hex to RGB
 	var r, g, b int
-	fmt.Sscanf(hexColor[1:], "%02x%02x%02x", &r, &g, &b)
+	fmt.Sscanf(hexColor[1:], "%02x%02x%02x", &r, &g, &b) //nolint:errcheck // hex format already validated
 	// Generate ANSI true color foreground code
 	d.scrollbarCode = fmt.Sprintf("\x1b[38;2;%d;%d;%dm", r, g, b)
 }

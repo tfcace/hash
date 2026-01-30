@@ -216,7 +216,7 @@ func isGoodInputBg(hex string) bool {
 		return false
 	}
 	var r, g, b int
-	fmt.Sscanf(hex[1:], "%02x%02x%02x", &r, &g, &b)
+	fmt.Sscanf(hex[1:], "%02x%02x%02x", &r, &g, &b) //nolint:errcheck // hex format already validated
 	sum := r + g + b
 	// Skip very dark colors (sum < 100) and very bright (sum > 400)
 	return sum >= 100 && sum <= 400
@@ -228,7 +228,7 @@ func isVisibleColor(hex string) bool {
 		return false
 	}
 	var r, g, b int
-	fmt.Sscanf(hex[1:], "%02x%02x%02x", &r, &g, &b)
+	fmt.Sscanf(hex[1:], "%02x%02x%02x", &r, &g, &b) //nolint:errcheck // hex format already validated
 	sum := r + g + b
 	// Skip very dark colors (sum < 150) - need to be visible on dark terminals
 	return sum >= 150

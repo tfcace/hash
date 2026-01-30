@@ -28,7 +28,6 @@ linters:
 
 linters-settings:
   errcheck:
-    check-tests: false
     exclude-functions:
       # Standard print functions (fire-and-forget terminal output)
       - fmt.Fprint
@@ -37,16 +36,12 @@ linters-settings:
       - fmt.Print
       - fmt.Println
       - fmt.Printf
-      - fmt.Sscanf
       # Writer interface (terminal I/O)
-      - io.Writer.Write
       - (io.Writer).Write
       - (*os.File).Write
       - (*os.File).WriteString
       - (*os.File).Close
       - (*os.File).Sync
-      - os.Stdout.WriteString
-      - os.Stderr.WriteString
       - (*bytes.Buffer).Write
       - (*bytes.Buffer).WriteString
       - (*strings.Builder).Write
@@ -55,24 +50,15 @@ linters-settings:
       - (*bufio.Writer).WriteString
       - (*bufio.Writer).Flush
       # Closer interface
-      - io.Closer.Close
       - (io.Closer).Close
       # Terminal control
-      - term.Restore
-      - golang.org/x/term.Restore
+      - (golang.org/x/term.State).Restore
       # PTY operations
-      - pty.Setsize
-      - github.com/creack/pty.Setsize
-      # JSON parsing
-      - json.Unmarshal
-      - encoding/json.Unmarshal
+      - (github.com/creack/pty).Setsize
       # Environment
       - os.Setenv
       - os.Unsetenv
       - os.Chdir
-    # Exclude patterns for method calls on interfaces
-    exclude:
-      - "Error return value of .((os\\.)?std(out|err)\\..*|fmt\\..*|.*\\.Write.*|.*\\.Close|.*Close\\(\\)|term\\.Restore|pty\\.Setsize|json\\.Unmarshal|os\\.(Setenv|Unsetenv|Chdir)).* is not checked"
 
   gosec:
     excludes:
@@ -102,3 +88,10 @@ run:
   timeout: 5m
   build-tags:
     - integration
+
+issues:
+  exclude-rules:
+    # Exclude errcheck from test files - tests use fire-and-forget patterns
+    - path: _test\.go
+      linters:
+        - errcheck
