@@ -86,3 +86,10 @@ run:
   timeout: 5m
   build-tags:
     - integration
+
+exclusions:
+  # Terminal I/O errors are intentionally ignored
+  rules:
+    - path: internal/editor/
+      linters:
+        - errcheck
