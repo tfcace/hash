@@ -1,5 +1,6 @@
 linters:
   enable:
+    # Default linters
     - gofmt
     - govet
     - errcheck
@@ -7,17 +8,79 @@ linters:
     - unused
     - gosimple
     - ineffassign
-    - gosec
-    - bodyclose
-    - noctx
-    - exportloopref
+
+    # Security - critical for a shell that executes commands
+    - gosec          # Security vulnerabilities, command injection patterns
+    - bodyclose      # HTTP response body closure
+    - noctx          # Context usage in HTTP requests
+
+    # Error handling - shells must handle errors robustly
+    - nilerr         # Returning nil when err != nil
+    - errorlint      # Error wrapping and comparison issues
+
+    # SQL/SQLite - for history storage
+    - sqlclosecheck  # Ensure SQL connections are closed
+    - rowserrcheck   # Check rows.Err() after iteration
+
+    # Resource management
+    - exportloopref  # Loop variable capture in goroutines
+    - gocritic       # Broad set of code quality checks
+    - unconvert      # Unnecessary type conversions
+
+    # Code quality
+    - misspell       # Spelling errors in comments/strings
+    - prealloc       # Slice preallocation hints
+    - makezero       # Slice initialization issues
 
 linters-settings:
   gofmt:
     simplify: true
+
   gosec:
     excludes:
-      - G104 # Duplicates errcheck
+      - G104  # Duplicates errcheck
+    config:
+      # Flag subprocess launches with variables (relevant for shell)
+      G204:
+        audit: true
+
+  govet:
+    enable-all: true
+    disable:
+      - fieldalignment  # Not critical, can hurt readability
+
+  gocritic:
+    enabled-tags:
+      - diagnostic
+      - style
+      - performance
+    disabled-checks:
+      - whyNoLint       # We use nolint pragmatically
+      - hugeParam       # Sometimes unavoidable with TUI state
+
+  errorlint:
+    errorf: true
+    asserts: true
+    comparison: true
+
+  misspell:
+    locale: US
+
+issues:
+  exclude-rules:
+    # Test files can be more relaxed
+    - path: _test\.go
+      linters:
+        - errcheck
+        - gosec
+        - gocritic
+
+    # Main entry point may have deferred error handling
+    - path: cmd/hash/main\.go
+      linters:
+        - errcheck
 
 run:
   timeout: 5m
+  build-tags:
+    - integration

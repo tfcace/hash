@@ -81,3 +81,26 @@ release:
 
     ### Manual
     Download the appropriate archive for your platform, extract, and add to your PATH.
+
+brews:
+  - name: hash
+    repository:
+      owner: tfcace
+      name: homebrew-hash
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    directory: Formula
+    homepage: "https://github.com/tfcace/hash"
+    description: "AI-powered shell with ACP integration"
+    license: "MIT"
+    install: |
+      bin.install "hash"
+    caveats: |
+      To use hash as your login shell:
+        sudo sh -c 'echo #{opt_bin}/hash >> /etc/shells'
+        chsh -s #{opt_bin}/hash
+    test: |
+      assert_match version.to_s, shell_output("#{bin}/hash --version")
+    commit_author:
+      name: github-actions[bot]
+      email: github-actions[bot]@users.noreply.github.com
+    commit_msg_template: "Brew formula update for {{ .ProjectName }} version {{ .Tag }}"
