@@ -984,7 +984,7 @@ func (e *Executor) Execute(ctx context.Context, command string, stdout, stderr i
 
 	// Set up capture buffer
 	var captureBuf bytes.Buffer
-	var captureWriter io.Writer = &captureBuf
+	var captureWriter io.Writer
 	var lw *limitedWriter
 	switch {
 	case e.captureLimit == 0:
@@ -1314,14 +1314,13 @@ func (e *Executor) runWithPTY(ctx context.Context, cmd *exec.Cmd, hc interp.Hand
 	if !stdoutFinished {
 		select {
 		case stdoutErr = <-stdoutDone:
-			stdoutFinished = true
+			// stdout goroutine finished
 		case <-time.After(ptyStopGrace):
 			if trace != nil {
 				trace.logf("pty->stdout still running; closing ptmx")
 			}
 			_ = ptmx.Close()
 			stdoutErr = <-stdoutDone
-			stdoutFinished = true
 		}
 	}
 

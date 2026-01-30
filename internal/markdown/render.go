@@ -54,7 +54,6 @@ func Render(text string) string {
 				continue
 			} else {
 				inCodeBlock = false
-				codeBlockLang = ""
 				continue
 			}
 		}

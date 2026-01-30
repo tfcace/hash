@@ -582,7 +582,6 @@ func (s *Shell) readLineWithEditor(ctx context.Context) (string, error) {
 		ed := editor.New(cfg, os.Stdin, os.Stdout)
 		if initialText != "" {
 			ed.SetInitialText(initialText)
-			initialText = ""
 		}
 
 		// Set ghost text prediction based on last command
