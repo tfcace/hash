@@ -64,7 +64,7 @@ issues:
         - errcheck
 
     # Terminal output errors are intentionally ignored in editor code
-    - path: internal/editor/
+    - path: "internal/editor/.*\\.go"
       linters:
         - errcheck
 
