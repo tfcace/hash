@@ -67,7 +67,7 @@ func (c *FileCompleter) Complete(ctx context.Context, line string, pos int) (Res
 	// Read directory
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return Result{}, nil // Return empty on error, not an error
+		return Result{}, nil //nolint:nilerr // graceful degradation: return empty on unreadable dir
 	}
 
 	// Show hidden files if user is explicitly typing a dot prefix
