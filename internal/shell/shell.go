@@ -1154,26 +1154,6 @@ func (s *Shell) refreshColorPalette() {
 	}
 }
 
-// stripAnsi removes ANSI escape sequences for length calculation.
-func stripAnsi(s string) string {
-	var result []byte
-	inEscape := false
-	for i := 0; i < len(s); i++ {
-		if s[i] == '\033' {
-			inEscape = true
-			continue
-		}
-		if inEscape {
-			if (s[i] >= 'a' && s[i] <= 'z') || (s[i] >= 'A' && s[i] <= 'Z') {
-				inEscape = false
-			}
-			continue
-		}
-		result = append(result, s[i])
-	}
-	return string(result)
-}
-
 func trimSpace(s string) string {
 	start := 0
 	end := len(s)
