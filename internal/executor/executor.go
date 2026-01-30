@@ -1422,12 +1422,12 @@ func (e *Executor) runWithPTYRaw(ctx context.Context, cmd *exec.Cmd, hc interp.H
 
 	if f, ok := hc.Stdin.(*os.File); ok {
 		go func() {
-			copyWithPoll(ptmx, f, done, onInput, nil)
+			copyWithPoll(ptmx, f, done, onInput, nil) //nolint:errcheck // stdin copy errors handled via channel
 			close(stdinDone)
 		}()
 	} else {
 		go func() {
-			copyWithOnInput(ptmx, hc.Stdin, onInput, nil)
+			copyWithOnInput(ptmx, hc.Stdin, onInput, nil) //nolint:errcheck // stdin copy errors handled via channel
 			close(stdinDone)
 		}()
 	}

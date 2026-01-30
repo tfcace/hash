@@ -51,10 +51,11 @@ linters:
         - (*bufio.Writer).Flush
         # Closer interface
         - (io.Closer).Close
+        - (*database/sql.DB).Close
         # Terminal control
-        - (golang.org/x/term.State).Restore
+        - golang.org/x/term.Restore
         # PTY operations
-        - (github.com/creack/pty).Setsize
+        - github.com/creack/pty.Setsize
         # Environment
         - os.Setenv
         - os.Unsetenv
