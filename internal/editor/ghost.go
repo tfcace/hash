@@ -106,15 +106,13 @@ func (g *GhostText) AcceptChar() string {
 	}
 
 	// Get first rune
-	for _, r := range remaining {
-		g.AcceptedAt += len(string(r))
-		if g.AcceptedAt >= len(g.Text) {
-			g.Clear()
-		}
-		return string(r)
+	runes := []rune(remaining)
+	r := runes[0]
+	g.AcceptedAt += len(string(r))
+	if g.AcceptedAt >= len(g.Text) {
+		g.Clear()
 	}
-
-	return ""
+	return string(r)
 }
 
 // IsEmpty returns true if there's no ghost text.

@@ -208,9 +208,10 @@ func (h *AgentHandler) buildContextFromSelection() agent.Context {
 			agentCtx.LastError = item.Value
 		default:
 			// History or env items go to appropriate fields
-			if item.Category == hashcontext.CategoryHistory {
+			switch item.Category {
+			case hashcontext.CategoryHistory:
 				agentCtx.History = append(agentCtx.History, item.Value)
-			} else if item.Category == hashcontext.CategoryEnv {
+			case hashcontext.CategoryEnv:
 				agentCtx.EnvVars[item.Key] = item.Value
 			}
 		}

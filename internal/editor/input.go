@@ -75,11 +75,7 @@ func (r *InputReader) DrainPending() {
 	fd := int(f.Fd())
 
 	// Read any pending input using select() to check availability
-	for {
-		if !hasDataAvailable(fd) {
-			break
-		}
-
+	for hasDataAvailable(fd) {
 		n, err := r.in.Read(r.buf[:1])
 		if err != nil || n == 0 {
 			break

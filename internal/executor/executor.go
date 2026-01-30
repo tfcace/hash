@@ -488,11 +488,7 @@ func drainTerminalResponses(fd int, trace *ptyTrace) {
 
 	buf := make([]byte, 512)
 	drained := 0
-	for {
-		if !hasDataAvailable(fd, 5*time.Millisecond) {
-			break
-		}
-
+	for hasDataAvailable(fd, 5*time.Millisecond) {
 		n, err := syscall.Read(fd, buf)
 		if err != nil || n <= 0 {
 			break
