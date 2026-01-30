@@ -229,11 +229,11 @@ func TestAgentSyntax_WithChaos(t *testing.T) {
 			Command: `find . -name "*.go"`,
 		}).
 		WithChaos(ChaosConfig{
-			FailureRate:    0.3, // 30% chance of failure
-			MinDelay:       10 * time.Millisecond,
-			MaxDelay:       50 * time.Millisecond,
-			TimeoutRate:    0.1, // 10% chance of timeout
-			ErrorMessages:  DefaultChaosErrors,
+			FailureRate:   0.3, // 30% chance of failure
+			MinDelay:      10 * time.Millisecond,
+			MaxDelay:      50 * time.Millisecond,
+			TimeoutRate:   0.1, // 10% chance of timeout
+			ErrorMessages: DefaultChaosErrors,
 		})
 
 	client := agent.NewClient(mock)

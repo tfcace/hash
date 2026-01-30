@@ -206,13 +206,13 @@ func TestMaskValue(t *testing.T) {
 		input    string
 		expected string
 	}{
-		{"sk-proj-abc123xyz", "sk-p••••••••"},   // Long key: 4 visible + 8 bullets
-		{"secret", "secr••"},                     // 6 chars: 4 visible + 2 bullets
-		{"abc", "•••"},                           // Short: all masked
-		{"ab", "••"},                             // Very short: all masked
-		{"", ""},                                 // Empty
-		{"abcd", "••••"},                         // Exactly 4: all masked (nothing to show after)
-		{"abcde", "abcd•"},                       // 5 chars: 4 visible + 1 bullet
+		{"sk-proj-abc123xyz", "sk-p••••••••"}, // Long key: 4 visible + 8 bullets
+		{"secret", "secr••"},                  // 6 chars: 4 visible + 2 bullets
+		{"abc", "•••"},                        // Short: all masked
+		{"ab", "••"},                          // Very short: all masked
+		{"", ""},                              // Empty
+		{"abcd", "••••"},                      // Exactly 4: all masked (nothing to show after)
+		{"abcde", "abcd•"},                    // 5 chars: 4 visible + 1 bullet
 	}
 
 	for _, tt := range tests {

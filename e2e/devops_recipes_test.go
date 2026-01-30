@@ -243,10 +243,10 @@ func TestDevOps_WithChaos(t *testing.T) {
 			Command: `kubectl get pods --all-namespaces`,
 		}).
 		WithChaos(ChaosConfig{
-			FailureRate:   0.2,  // 20% failure rate
-			MinDelay:      5 * time.Millisecond,
-			MaxDelay:      20 * time.Millisecond,
-			TimeoutRate:   0.1,  // 10% timeout rate
+			FailureRate: 0.2, // 20% failure rate
+			MinDelay:    5 * time.Millisecond,
+			MaxDelay:    20 * time.Millisecond,
+			TimeoutRate: 0.1, // 10% timeout rate
 			ErrorMessages: []string{
 				"connection to cluster timed out",
 				"unable to connect to the server",
