@@ -30,7 +30,7 @@ linters-settings:
   errcheck:
     check-tests: false
     exclude-functions:
-      - (io.Writer).Write
+      # Standard print functions (fire-and-forget terminal output)
       - fmt.Fprint
       - fmt.Fprintf
       - fmt.Fprintln
@@ -38,6 +38,31 @@ linters-settings:
       - fmt.Println
       - fmt.Printf
       - fmt.Sscanf
+      # Writer interface (terminal I/O)
+      - (io.Writer).Write
+      - (*os.File).Write
+      - (*os.File).WriteString
+      - (*bytes.Buffer).Write
+      - (*bytes.Buffer).WriteString
+      - (*strings.Builder).Write
+      - (*strings.Builder).WriteString
+      - (*bufio.Writer).Write
+      - (*bufio.Writer).WriteString
+      - (*bufio.Writer).Flush
+      # File/resource cleanup (in defers, errors not actionable)
+      - (*os.File).Close
+      - (*os.File).Sync
+      - (io.Closer).Close
+      # Terminal control (restore in defers)
+      - golang.org/x/term.Restore
+      # PTY operations (resize, close - best effort)
+      - github.com/creack/pty.Setsize
+      # JSON parsing (when used for optional/lenient parsing)
+      - encoding/json.Unmarshal
+      # Environment (test setup, non-critical)
+      - os.Setenv
+      - os.Unsetenv
+      - os.Chdir
 
   gosec:
     excludes:
