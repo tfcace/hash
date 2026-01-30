@@ -1603,7 +1603,8 @@ func exitCodeFromError(err error) int {
 	if err == nil {
 		return 0
 	}
-	if status, ok := interp.IsExitStatus(err); ok {
+	var status interp.ExitStatus
+	if errors.As(err, &status) {
 		return int(status)
 	}
 	return 1
