@@ -65,13 +65,13 @@ linters-settings:
 
 issues:
   exclude-rules:
-    - path: _test\.go
+    - path: ".*_test\\.go$"
       linters:
         - errcheck
         - gosec
         - gocritic
 
-    - path: cmd/hash/main\.go
+    - path: "cmd/hash/main\\.go$"
       linters:
         - errcheck
 
