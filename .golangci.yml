@@ -28,9 +28,7 @@ linters:
 
 linters-settings:
   errcheck:
-    # Don't check test files
     check-tests: false
-    # Ignore these functions - terminal output errors are not recoverable
     exclude-functions:
       - (io.Writer).Write
       - fmt.Fprint
@@ -43,7 +41,7 @@ linters-settings:
 
   gosec:
     excludes:
-      - G104  # Duplicates errcheck
+      - G104
     config:
       G204:
         audit: true
@@ -65,39 +63,21 @@ linters-settings:
   misspell:
     locale: US
 
-issues:
-  exclude-rules:
-    - path: ".*_test\\.go$"
-      linters:
-        - errcheck
-        - gosec
-        - gocritic
-
-    - path: "cmd/hash/main\\.go$"
-      linters:
-        - errcheck
-
-    # Terminal I/O errors are intentionally ignored in editor code
-    - path: "internal/editor/"
-      linters:
-        - errcheck
-
 run:
   timeout: 5m
   build-tags:
     - integration
 
 exclusions:
-  # Terminal I/O errors are intentionally ignored
+  paths:
+    - internal/editor
+    - internal/compat
   rules:
-    - path: internal/editor/
-      linters:
-        - errcheck
-    # Compat package uses fire-and-forget patterns
-    - path: internal/compat/
-      linters:
-        - errcheck
-    # Test files - relaxed error checking
     - path: _test\.go
+      linters:
+        - errcheck
+        - gosec
+        - gocritic
+    - path: cmd/hash/main\.go
       linters:
         - errcheck
