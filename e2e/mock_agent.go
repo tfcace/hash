@@ -351,12 +351,12 @@ func (m *ScenarioMockTransport) ResetChaos() {
 
 // ChaosStats tracks chaos injection statistics.
 type ChaosStats struct {
-	TotalRequests   int
-	Failures        int
-	Timeouts        int
-	Disconnects     int
+	TotalRequests    int
+	Failures         int
+	Timeouts         int
+	Disconnects      int
 	PartialResponses int
-	TotalDelay      time.Duration
+	TotalDelay       time.Duration
 }
 
 // Stats returns chaos injection statistics (useful for verification).

@@ -18,8 +18,8 @@ type Config struct {
 	Keybindings         string // "emacs", "vim", "helix"
 	HistoryFile         string
 	HistoryLimit        int
-	Completer           *CompleterAdapter // Optional completer
-	HistoryStore        *history.Store    // For Ctrl+R search
+	Completer           *CompleterAdapter       // Optional completer
+	HistoryStore        *history.Store          // For Ctrl+R search
 	FuncFilterInputRune func(rune) (rune, bool) // Optional: Filter input runes
 }
 

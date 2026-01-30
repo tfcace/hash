@@ -156,19 +156,20 @@ func parseEscapeSequence(b []byte) Key {
 		key := Key{Special: KeyEnter}
 		// Parse modifier between semicolon and 'u'
 		for i := 4; i < len(b)-1; i++ {
-			if b[i] == ';' && i+1 < len(b)-1 {
-				mod := b[i+1] - '0'
-				if mod == 2 || mod == 4 || mod == 6 || mod == 8 {
-					key.Shift = true
-				}
-				if mod == 3 || mod == 4 || mod == 7 || mod == 8 {
-					key.Alt = true
-				}
-				if mod >= 5 {
-					key.Ctrl = true
-				}
-				break
+			if b[i] != ';' || i+1 >= len(b)-1 {
+				continue
 			}
+			mod := b[i+1] - '0'
+			if mod == 2 || mod == 4 || mod == 6 || mod == 8 {
+				key.Shift = true
+			}
+			if mod == 3 || mod == 4 || mod == 7 || mod == 8 {
+				key.Alt = true
+			}
+			if mod >= 5 {
+				key.Ctrl = true
+			}
+			break
 		}
 		return key
 	}
@@ -178,19 +179,20 @@ func parseEscapeSequence(b []byte) Key {
 		key := Key{Special: KeyTab}
 		// Parse modifier between semicolon and 'u'
 		for i := 3; i < len(b)-1; i++ {
-			if b[i] == ';' && i+1 < len(b)-1 {
-				mod := b[i+1] - '0'
-				if mod == 2 || mod == 4 || mod == 6 || mod == 8 {
-					key.Shift = true
-				}
-				if mod == 3 || mod == 4 || mod == 7 || mod == 8 {
-					key.Alt = true
-				}
-				if mod >= 5 {
-					key.Ctrl = true
-				}
-				break
+			if b[i] != ';' || i+1 >= len(b)-1 {
+				continue
 			}
+			mod := b[i+1] - '0'
+			if mod == 2 || mod == 4 || mod == 6 || mod == 8 {
+				key.Shift = true
+			}
+			if mod == 3 || mod == 4 || mod == 7 || mod == 8 {
+				key.Alt = true
+			}
+			if mod >= 5 {
+				key.Ctrl = true
+			}
+			break
 		}
 		return key
 	}

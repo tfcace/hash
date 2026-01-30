@@ -25,7 +25,7 @@ func NewPickerUI(collection *Collection) *PickerUI {
 }
 
 // Run starts the interactive picker and returns the serialized context.
-// Returns empty string if cancelled.
+// Returns empty string if canceled.
 func (ui *PickerUI) Run() (string, error) {
 	p := tea.NewProgram(ui, tea.WithAltScreen())
 	model, err := p.Run()

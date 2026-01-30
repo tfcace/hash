@@ -12,10 +12,10 @@ import (
 // ExecutableCompleter completes executable names from PATH.
 // It is triggered when completing the first word of a command (or after a pipe).
 type ExecutableCompleter struct {
-	cache      []string
-	cacheTime  time.Time
-	cacheMu    sync.RWMutex
-	cacheTTL   time.Duration
+	cache     []string
+	cacheTime time.Time
+	cacheMu   sync.RWMutex
+	cacheTTL  time.Duration
 }
 
 // NewExecutableCompleter creates a new executable completer.
@@ -133,7 +133,7 @@ func (c *ExecutableCompleter) getExecutables() []string {
 			}
 
 			// On Unix, check executable bit
-			if info.Mode()&0111 != 0 {
+			if info.Mode()&0o111 != 0 {
 				seen[name] = true
 				executables = append(executables, name)
 			}

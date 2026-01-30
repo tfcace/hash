@@ -24,21 +24,21 @@ type Completion struct {
 
 // Config configures the editor.
 type Config struct {
-	Keybindings    string                                              // "helix", "emacs", "vim"
-	HistoryFunc    func(dir int, currentLine string) string            // -1=prev, +1=next; currentLine is for saving
-	CompleteFunc   func(line string, pos int) []Completion             // Tab completion
-	PrefetchFunc   func(line string, pos int)                          // Background completion prefetch (on space)
-	OnInputReady   func()                                              // Called after editor chrome is rendered, before input loop
-	Gutter         bool                                                // Show gutter indicator
-	Prompt         string                                              // Prompt string to display before input
-	InputBgColor   string                                              // Background color for submitted input (hex)
-	ScrollbarColor string                                              // Foreground color for scrollbars (hex)
+	Keybindings    string                                   // "helix", "emacs", "vim"
+	HistoryFunc    func(dir int, currentLine string) string // -1=prev, +1=next; currentLine is for saving
+	CompleteFunc   func(line string, pos int) []Completion  // Tab completion
+	PrefetchFunc   func(line string, pos int)               // Background completion prefetch (on space)
+	OnInputReady   func()                                   // Called after editor chrome is rendered, before input loop
+	Gutter         bool                                     // Show gutter indicator
+	Prompt         string                                   // Prompt string to display before input
+	InputBgColor   string                                   // Background color for submitted input (hex)
+	ScrollbarColor string                                   // Foreground color for scrollbars (hex)
 }
 
 // Result is returned when the editor exits.
 type Result struct {
 	Text          string
-	Cancelled     bool // Ctrl+C - interrupt
+	Canceled      bool // Ctrl+C - interrupt
 	EOF           bool // Ctrl+D - exit shell
 	HistorySearch bool // Ctrl+R - launch history search
 	ContextPicker bool // Ctrl+P - launch context picker
@@ -72,10 +72,10 @@ type Editor struct {
 	completionCol    int    // Column where completion started
 
 	// Ghost text state (inline suggestions)
-	ghost            *GhostText
-	ghostTextChan    GhostTextChan // Channel for streaming ghost text updates
-	ghostErrChan     <-chan error  // Channel for ghost text errors
-	streamingModel   string        // Model name for "Thinking..." display
+	ghost          *GhostText
+	ghostTextChan  GhostTextChan // Channel for streaming ghost text updates
+	ghostErrChan   <-chan error  // Channel for ghost text errors
+	streamingModel string        // Model name for "Thinking..." display
 }
 
 // New creates a new editor.
@@ -157,11 +157,12 @@ func AnnotateDuration(out io.Writer, termWidth, outputLines, cmdLines int, durat
 
 	// Format duration
 	var text string
-	if durationMs < 1000 {
+	switch {
+	case durationMs < 1000:
 		text = fmt.Sprintf(" %dms ", durationMs)
-	} else if durationMs < 60000 {
+	case durationMs < 60000:
 		text = fmt.Sprintf(" %.1fs ", float64(durationMs)/1000)
-	} else {
+	default:
 		mins := durationMs / 60000
 		secs := (durationMs % 60000) / 1000
 		text = fmt.Sprintf(" %dm%ds ", mins, secs)
@@ -190,7 +191,7 @@ func AnnotateDuration(out io.Writer, termWidth, outputLines, cmdLines int, durat
 		// Parse hex to RGB for background
 		var r, g, b int
 		if len(bgColor) == 7 && bgColor[0] == '#' {
-			fmt.Sscanf(bgColor[1:], "%02x%02x%02x", &r, &g, &b)
+			fmt.Sscanf(bgColor[1:], "%02x%02x%02x", &r, &g, &b) //nolint:errcheck // hex format already validated
 			fmt.Fprintf(&sb, "\x1b[48;2;%d;%d;%dm", r, g, b)
 		}
 	}
@@ -295,13 +296,13 @@ func (e *Editor) Run(ctx context.Context) (Result, error) {
 	for {
 		select {
 		case <-ctx.Done():
-			return Result{Cancelled: true}, ctx.Err()
+			return Result{Canceled: true}, ctx.Err()
 		case <-sigCh:
 			e.handleResize()
 			continue
 		case err := <-keyErrCh:
 			if err == io.EOF {
-				return Result{Text: e.state.Buffer.Content(), Cancelled: true}, nil
+				return Result{Text: e.state.Buffer.Content(), Canceled: true}, nil
 			}
 			return Result{}, err
 		case text, ok := <-e.ghostTextChan:
@@ -351,11 +352,11 @@ func (e *Editor) Run(ctx context.Context) (Result, error) {
 					e.ghost.Clear()
 					e.ghostTextChan = nil
 					e.ghostErrChan = nil
-					return Result{Cancelled: true}, nil
+					return Result{Canceled: true}, nil
 				}
 				e.ghost.Clear()
 				if e.state.Buffer.Content() == "" {
-					return Result{Cancelled: true}, nil
+					return Result{Canceled: true}, nil
 				}
 				// Clear buffer
 				e.state.Buffer = NewBuffer()
@@ -487,10 +488,7 @@ func (e *Editor) render() {
 	if e.completionActive && len(e.completionItems) > 0 {
 		displayItems := make([]CompletionItem, len(e.completionItems))
 		for i, item := range e.completionItems {
-			displayItems[i] = CompletionItem{
-				Text:        item.Text,
-				Description: item.Description,
-			}
+			displayItems[i] = CompletionItem(item)
 		}
 		e.display.RenderCompletionMenu(displayItems, e.completionIndex, e.completionCol)
 	}
@@ -858,15 +856,16 @@ func (e *Editor) extractText(start, end Position) string {
 	var result string
 	for row := start.Row; row <= end.Row; row++ {
 		line := e.state.Buffer.Line(row)
-		if row == start.Row {
+		switch row {
+		case start.Row:
 			result += line[start.Col:]
-		} else if row == end.Row {
+		case end.Row:
 			endCol := end.Col
 			if endCol > len(line) {
 				endCol = len(line)
 			}
 			result += "\n" + line[:endCol]
-		} else {
+		default:
 			result += "\n" + line
 		}
 	}

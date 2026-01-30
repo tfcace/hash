@@ -148,7 +148,7 @@ func (t *ACPTransport) connectLocked(ctx context.Context) error {
 
 	// Initialize protocol
 	if err := t.initialize(ctx); err != nil {
-		t.Close()
+		t.Close() //nolint:errcheck // best-effort cleanup on init failure
 		return fmt.Errorf("initialize: %w", err)
 	}
 
@@ -530,17 +530,19 @@ func (t *ACPTransport) Close() error {
 		t.stdin = nil
 	}
 	if t.cmd != nil && t.cmd.Process != nil {
-		t.cmd.Process.Kill()
-		t.cmd.Wait()
+		t.cmd.Process.Kill() //nolint:errcheck // best-effort kill during cleanup
+		t.cmd.Wait()         //nolint:errcheck // ignore exit status during cleanup
 	}
 	return nil
 }
 
 // IdleTimeout is the maximum time to wait without receiving any message from the agent.
-// If exceeded, the request is considered stuck and cancelled.
+// If exceeded, the request is considered stuck and canceled.
 const IdleTimeout = 30 * time.Second
 
 // SendStreaming implements StreamingTransport for real-time text streaming.
+//
+//nolint:gocritic // unnamedResult: can't name receive-only channel returns
 func (t *ACPTransport) SendStreaming(ctx context.Context, req Request) (<-chan string, <-chan error) {
 	textCh := make(chan string, 64)
 	errCh := make(chan error, 1)

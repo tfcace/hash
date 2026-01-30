@@ -14,14 +14,13 @@ import (
 
 // InputReader reads keys from a terminal.
 type InputReader struct {
-	in           io.Reader
-	buf          [64]byte // Buffer for escape sequences
-	escTimeout   time.Duration
-	pending      byte   // Byte to return on next read (0 = none)
-	hasPending   bool
-	pendingKeys  []Key  // Keys to return before reading new input
-	inPaste      bool   // Currently reading bracketed paste content
-	pasteBuffer  []byte // Buffer for paste content
+	in          io.Reader
+	buf         [64]byte // Buffer for escape sequences
+	escTimeout  time.Duration
+	pending     byte // Byte to return on next read (0 = none)
+	hasPending  bool
+	pendingKeys []Key  // Keys to return before reading new input
+	pasteBuffer []byte // Buffer for paste content
 }
 
 // NewInputReader creates a new input reader.
@@ -76,11 +75,7 @@ func (r *InputReader) DrainPending() {
 	fd := int(f.Fd())
 
 	// Read any pending input using select() to check availability
-	for {
-		if !hasDataAvailable(fd) {
-			break
-		}
-
+	for hasDataAvailable(fd) {
 		n, err := r.in.Read(r.buf[:1])
 		if err != nil || n == 0 {
 			break

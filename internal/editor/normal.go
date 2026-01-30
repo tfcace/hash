@@ -2,10 +2,7 @@
 package editor
 
 // NormalMode handles Helix-style normal mode keybindings.
-type NormalMode struct {
-	pendingYank   bool
-	pendingDelete bool
-}
+type NormalMode struct{}
 
 // NewNormalMode creates a normal mode handler.
 func NewNormalMode() *NormalMode {

@@ -17,9 +17,9 @@ import (
 	"time"
 
 	"github.com/creack/pty"
-	"golang.org/x/sys/unix"
 	"github.com/tfcace/hash/internal/progress"
 	"github.com/tfcace/hash/internal/trace"
+	"golang.org/x/sys/unix"
 	"golang.org/x/term"
 	"mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/interp"
@@ -159,9 +159,9 @@ func newPTYTrace(cmd *exec.Cmd, ptmx *os.File) *ptyTrace {
 	}
 
 	path := ptyTracePath()
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644) //nolint:gosec // G302: debug trace logs
 	if err != nil {
-		return nil
+		return nil //nolint:nilerr // graceful degradation: skip tracing if file can't be opened
 	}
 
 	t := &ptyTrace{path: path, f: f}
@@ -426,7 +426,7 @@ func copyWithOnInput(dst io.Writer, src io.Reader, onInput func([]byte), onWrite
 	}
 }
 
-func copyWithRetry(dst io.Writer, src io.Reader, onRead func(int), onWrite func(int)) error {
+func copyWithRetry(dst io.Writer, src io.Reader, onRead, onWrite func(int)) error {
 	buf := make([]byte, 4096)
 	for {
 		n, err := src.Read(buf)
@@ -478,7 +478,7 @@ func hasDataAvailable(fd int, timeout time.Duration) bool {
 // (e.g., current SGR state via DECRQSS). The terminal responds asynchronously with
 // escape sequences. If a PTY command starts before these responses are consumed,
 // they get read by the child process instead.
-func drainTerminalResponses(fd int, trace *ptyTrace) {
+func drainTerminalResponses(fd int, ptyTr *ptyTrace) {
 	// Wait briefly for any terminal responses that may still be in flight.
 	// Terminal responses typically arrive within 10-50ms of the query.
 	if !hasDataAvailable(fd, 50*time.Millisecond) {
@@ -488,11 +488,7 @@ func drainTerminalResponses(fd int, trace *ptyTrace) {
 
 	buf := make([]byte, 512)
 	drained := 0
-	for {
-		if !hasDataAvailable(fd, 5*time.Millisecond) {
-			break
-		}
-
+	for hasDataAvailable(fd, 5*time.Millisecond) {
 		n, err := syscall.Read(fd, buf)
 		if err != nil || n <= 0 {
 			break
@@ -504,8 +500,8 @@ func drainTerminalResponses(fd int, trace *ptyTrace) {
 		// Terminal responses start with ESC (0x1b), DCS (0x90), or CSI (0x9b).
 		// If we see regular printable input, stop - don't discard user keystrokes.
 		if buf[0] != 0x1b && buf[0] != 0x90 && buf[0] != 0x9b {
-			if trace != nil {
-				trace.logf("drain: stopped at non-escape byte 0x%02x after %d bytes", buf[0], drained)
+			if ptyTr != nil {
+				ptyTr.logf("drain: stopped at non-escape byte 0x%02x after %d bytes", buf[0], drained)
 			}
 			// This might be user input - but we already read it, so it's lost.
 			// This is acceptable since escape sequences are more likely than
@@ -513,13 +509,13 @@ func drainTerminalResponses(fd int, trace *ptyTrace) {
 			break
 		}
 
-		if trace != nil {
-			trace.logf("drain: read %d bytes: %q", n, buf[:n])
+		if ptyTr != nil {
+			ptyTr.logf("drain: read %d bytes: %q", n, buf[:n])
 		}
 	}
 
-	if trace != nil && drained > 0 {
-		trace.logf("drain: discarded %d total bytes of terminal responses", drained)
+	if ptyTr != nil && drained > 0 {
+		ptyTr.logf("drain: discarded %d total bytes of terminal responses", drained)
 	}
 }
 
@@ -576,7 +572,7 @@ func New() *Executor {
 	switchStdout := newSwitchableWriter(os.Stdout)
 	switchStderr := newSwitchableWriter(os.Stderr)
 
-	exec := &Executor{
+	e := &Executor{
 		shellName:         "hash",
 		shellPath:         execPath,
 		progressOSC:       progress.NewOSC(os.Stdout),
@@ -588,9 +584,9 @@ func New() *Executor {
 		functions:         make(map[string]struct{}),
 		// runner is created lazily on first Execute()
 	}
-	exec.ensureShellEnv()
-	exec.syncProcessEnv()
-	return exec
+	e.ensureShellEnv()
+	e.syncProcessEnv()
+	return e
 }
 
 // initRunner creates the persistent interpreter runner.
@@ -645,7 +641,7 @@ func (e *Executor) bashBuiltinHandler(ctx context.Context, args []string) ([]str
 		})
 		err := e.handleBashSource(ctx, args[1])
 		if err != nil {
-			return []string{"false"}, nil
+			return []string{"false"}, nil //nolint:nilerr // return "false" to shell, error handled internally
 		}
 		return []string{":"}, nil // Return no-op, we handled it
 
@@ -660,7 +656,7 @@ func (e *Executor) bashBuiltinHandler(ctx context.Context, args []string) ([]str
 		})
 		err := e.handleBashEval(ctx, args[1:])
 		if err != nil {
-			return []string{"false"}, nil
+			return []string{"false"}, nil //nolint:nilerr // return "false" to shell, error handled internally
 		}
 		return []string{":"}, nil // Return no-op, we handled it
 
@@ -725,7 +721,7 @@ func (e *Executor) handleBashSource(ctx context.Context, path string) error {
 			"path":  path,
 			"error": err.Error(),
 		})
-		return nil
+		return nil //nolint:nilerr // intentional: skip unparseable files for shell compatibility
 	}
 
 	// Track any function definitions for completion
@@ -751,7 +747,7 @@ func (e *Executor) handleBashEval(ctx context.Context, args []string) error {
 			"src_preview": truncateForTrace(src, 200),
 			"error":       err.Error(),
 		})
-		return nil
+		return nil //nolint:nilerr // intentional: skip unparseable eval for shell compatibility
 	}
 
 	trace.Emit("compat", "eval_execute", trace.LevelVerbose, map[string]any{
@@ -988,7 +984,7 @@ func (e *Executor) Execute(ctx context.Context, command string, stdout, stderr i
 
 	// Set up capture buffer
 	var captureBuf bytes.Buffer
-	var captureWriter io.Writer = &captureBuf
+	var captureWriter io.Writer
 	var lw *limitedWriter
 	switch {
 	case e.captureLimit == 0:
@@ -1014,8 +1010,8 @@ func (e *Executor) Execute(ctx context.Context, command string, stdout, stderr i
 
 	// Create persistent runner on first use (lazy init)
 	if e.runner == nil {
-		if err := e.initRunner(); err != nil {
-			return nil, err
+		if initErr := e.initRunner(); initErr != nil {
+			return nil, initErr
 		}
 	}
 
@@ -1142,9 +1138,9 @@ func (e *Executor) runWithPTY(ctx context.Context, cmd *exec.Cmd, hc interp.Hand
 	}
 	defer ptmx.Close()
 
-	trace := newPTYTrace(cmd, ptmx)
-	if trace != nil {
-		defer trace.Close()
+	ptyTr := newPTYTrace(cmd, ptmx)
+	if ptyTr != nil {
+		defer ptyTr.Close()
 	}
 
 	// Signal PTY is active to disable progress indicator
@@ -1154,8 +1150,8 @@ func (e *Executor) runWithPTY(ctx context.Context, cmd *exec.Cmd, hc interp.Hand
 	// character-by-character to the PTY, rather than being line-buffered.
 	// This is required for interactive programs like vim, helix, claude, etc.
 	stdinFd := int(os.Stdin.Fd())
-	if trace != nil {
-		trace.logf("terminal stdin fd=%d is_tty=%t", stdinFd, term.IsTerminal(stdinFd))
+	if ptyTr != nil {
+		ptyTr.logf("terminal stdin fd=%d is_tty=%t", stdinFd, term.IsTerminal(stdinFd))
 	}
 	if term.IsTerminal(stdinFd) {
 		oldState, err := term.MakeRaw(stdinFd)
@@ -1171,9 +1167,9 @@ func (e *Executor) runWithPTY(ctx context.Context, cmd *exec.Cmd, hc interp.Hand
 
 	// Set initial PTY size
 	if w, h, err := term.GetSize(stdinFd); err == nil {
-		pty.Setsize(ptmx, &pty.Winsize{Rows: uint16(h), Cols: uint16(w)})
-		if trace != nil {
-			trace.logf("pty size set rows=%d cols=%d", h, w)
+		pty.Setsize(ptmx, &pty.Winsize{Rows: uint16(h), Cols: uint16(w)}) //nolint:gosec // G115: terminal sizes are always positive and small
+		if ptyTr != nil {
+			ptyTr.logf("pty size set rows=%d cols=%d", h, w)
 		}
 	}
 
@@ -1181,7 +1177,7 @@ func (e *Executor) runWithPTY(ctx context.Context, cmd *exec.Cmd, hc interp.Hand
 	go func() {
 		for range sigCh {
 			if w, h, err := term.GetSize(stdinFd); err == nil {
-				pty.Setsize(ptmx, &pty.Winsize{Rows: uint16(h), Cols: uint16(w)})
+				pty.Setsize(ptmx, &pty.Winsize{Rows: uint16(h), Cols: uint16(w)}) //nolint:gosec // G115: terminal sizes are always positive and small
 			}
 		}
 	}()
@@ -1190,7 +1186,7 @@ func (e *Executor) runWithPTY(ctx context.Context, cmd *exec.Cmd, hc interp.Hand
 	// Libraries like bubbletea/colorprofile query terminal capabilities (DECRQSS, etc.)
 	// and responses may still be in the input buffer. Without draining, these responses
 	// would be read by the PTY child process and appear as garbage input.
-	drainTerminalResponses(stdinFd, trace)
+	drainTerminalResponses(stdinFd, ptyTr)
 
 	// Stop stdin->PTY copy on command exit so it doesn't consume the next prompt.
 	done := make(chan struct{})
@@ -1198,15 +1194,15 @@ func (e *Executor) runWithPTY(ctx context.Context, cmd *exec.Cmd, hc interp.Hand
 	cancelable := false
 	var traceStop chan struct{}
 	var traceStopped chan struct{}
-	if trace != nil {
+	if ptyTr != nil {
 		traceStop = make(chan struct{})
 		traceStopped = make(chan struct{})
-		go trace.monitor(traceStop, traceStopped)
+		go ptyTr.monitor(traceStop, traceStopped)
 	}
 	var lastCtrlC time.Time
 	onInput := func(buf []byte) {
-		if trace != nil {
-			trace.markInRead(len(buf))
+		if ptyTr != nil {
+			ptyTr.markInRead(len(buf))
 		}
 		for _, b := range buf {
 			if b != ctrlCByte {
@@ -1220,16 +1216,16 @@ func (e *Executor) runWithPTY(ctx context.Context, cmd *exec.Cmd, hc interp.Hand
 		}
 	}
 	onStdinWrite := func(n int) {
-		if trace != nil {
-			trace.markInWrite(n)
+		if ptyTr != nil {
+			ptyTr.markInWrite(n)
 		}
 	}
 	if dr, ok := supportsReadDeadline(hc.Stdin); ok {
 		cancelable = true
 		go func() {
 			err := copyWithDeadline(ptmx, hc.Stdin, dr, done, onInput, onStdinWrite)
-			if trace != nil {
-				trace.logf("stdin->pty copy (deadline) stopped: %s", describeCopyEnd(err))
+			if ptyTr != nil {
+				ptyTr.logf("stdin->pty copy (deadline) stopped: %s", describeCopyEnd(err))
 			}
 			close(stdinDone)
 		}()
@@ -1237,16 +1233,16 @@ func (e *Executor) runWithPTY(ctx context.Context, cmd *exec.Cmd, hc interp.Hand
 		cancelable = true
 		go func() {
 			err := copyWithPoll(ptmx, f, done, onInput, onStdinWrite)
-			if trace != nil {
-				trace.logf("stdin->pty copy (poll) stopped: %s", describeCopyEnd(err))
+			if ptyTr != nil {
+				ptyTr.logf("stdin->pty copy (poll) stopped: %s", describeCopyEnd(err))
 			}
 			close(stdinDone)
 		}()
 	} else {
 		go func() {
 			err := copyWithOnInput(ptmx, hc.Stdin, onInput, onStdinWrite)
-			if trace != nil {
-				trace.logf("stdin->pty copy stopped: %s", describeCopyEnd(err))
+			if ptyTr != nil {
+				ptyTr.logf("stdin->pty copy stopped: %s", describeCopyEnd(err))
 			}
 			close(stdinDone)
 		}()
@@ -1256,18 +1252,18 @@ func (e *Executor) runWithPTY(ctx context.Context, cmd *exec.Cmd, hc interp.Hand
 	go func() {
 		err := copyWithRetry(hc.Stdout, ptmx,
 			func(n int) {
-				if trace != nil {
-					trace.markOutRead(n)
+				if ptyTr != nil {
+					ptyTr.markOutRead(n)
 				}
 			},
 			func(n int) {
-				if trace != nil {
-					trace.markOutWrite(n)
+				if ptyTr != nil {
+					ptyTr.markOutWrite(n)
 				}
 			},
 		)
-		if trace != nil {
-			trace.logf("pty->stdout copy stopped: %s", describeCopyEnd(err))
+		if ptyTr != nil {
+			ptyTr.logf("pty->stdout copy stopped: %s", describeCopyEnd(err))
 		}
 		stdoutDone <- err
 	}()
@@ -1275,8 +1271,8 @@ func (e *Executor) runWithPTY(ctx context.Context, cmd *exec.Cmd, hc interp.Hand
 	cmdDone := make(chan error, 1)
 	go func() {
 		err := cmd.Wait()
-		if trace != nil {
-			trace.logf("cmd.Wait returned err=%v", err)
+		if ptyTr != nil {
+			ptyTr.logf("cmd.Wait returned err=%v", err)
 		}
 		cmdDone <- err
 	}()
@@ -1292,8 +1288,8 @@ func (e *Executor) runWithPTY(ctx context.Context, cmd *exec.Cmd, hc interp.Hand
 		select {
 		case cmdErr = <-cmdDone:
 		case <-time.After(ptyStopGrace):
-			if trace != nil {
-				trace.logf("pty->stdout ended early; sending SIGTERM to process group")
+			if ptyTr != nil {
+				ptyTr.logf("pty->stdout ended early; sending SIGTERM to process group")
 			}
 			signalProcessGroup(cmd, syscall.SIGTERM)
 			cmdErr = <-cmdDone
@@ -1303,8 +1299,8 @@ func (e *Executor) runWithPTY(ctx context.Context, cmd *exec.Cmd, hc interp.Hand
 		}
 	}
 
-	if trace != nil {
-		trace.logf("closing stdin copy")
+	if ptyTr != nil {
+		ptyTr.logf("closing stdin copy")
 	}
 	close(done)
 	if cancelable {
@@ -1318,14 +1314,13 @@ func (e *Executor) runWithPTY(ctx context.Context, cmd *exec.Cmd, hc interp.Hand
 	if !stdoutFinished {
 		select {
 		case stdoutErr = <-stdoutDone:
-			stdoutFinished = true
+			// stdout goroutine finished
 		case <-time.After(ptyStopGrace):
-			if trace != nil {
-				trace.logf("pty->stdout still running; closing ptmx")
+			if ptyTr != nil {
+				ptyTr.logf("pty->stdout still running; closing ptmx")
 			}
 			_ = ptmx.Close()
 			stdoutErr = <-stdoutDone
-			stdoutFinished = true
 		}
 	}
 
@@ -1395,13 +1390,13 @@ func (e *Executor) runWithPTYRaw(ctx context.Context, cmd *exec.Cmd, hc interp.H
 	defer signal.Stop(sigCh)
 
 	if w, h, err := term.GetSize(stdinFd); err == nil {
-		pty.Setsize(ptmx, &pty.Winsize{Rows: uint16(h), Cols: uint16(w)})
+		pty.Setsize(ptmx, &pty.Winsize{Rows: uint16(h), Cols: uint16(w)}) //nolint:gosec // G115: terminal sizes are always positive and small
 	}
 
 	go func() {
 		for range sigCh {
 			if w, h, err := term.GetSize(stdinFd); err == nil {
-				pty.Setsize(ptmx, &pty.Winsize{Rows: uint16(h), Cols: uint16(w)})
+				pty.Setsize(ptmx, &pty.Winsize{Rows: uint16(h), Cols: uint16(w)}) //nolint:gosec // G115: terminal sizes are always positive and small
 			}
 		}
 	}()
@@ -1427,12 +1422,12 @@ func (e *Executor) runWithPTYRaw(ctx context.Context, cmd *exec.Cmd, hc interp.H
 
 	if f, ok := hc.Stdin.(*os.File); ok {
 		go func() {
-			copyWithPoll(ptmx, f, done, onInput, nil)
+			copyWithPoll(ptmx, f, done, onInput, nil) //nolint:errcheck // stdin copy errors handled via channel
 			close(stdinDone)
 		}()
 	} else {
 		go func() {
-			copyWithOnInput(ptmx, hc.Stdin, onInput, nil)
+			copyWithOnInput(ptmx, hc.Stdin, onInput, nil) //nolint:errcheck // stdin copy errors handled via channel
 			close(stdinDone)
 		}()
 	}
@@ -1486,7 +1481,6 @@ func (e *Executor) runWithPTYRaw(ctx context.Context, cmd *exec.Cmd, hc interp.H
 	}
 	return cmdErr
 }
-
 
 // environToSlice converts expand.Environ to []string.
 func environToSlice(env expand.Environ) []string {
@@ -1609,7 +1603,8 @@ func exitCodeFromError(err error) int {
 	if err == nil {
 		return 0
 	}
-	if status, ok := interp.IsExitStatus(err); ok {
+	var status interp.ExitStatus
+	if errors.As(err, &status) {
 		return int(status)
 	}
 	return 1

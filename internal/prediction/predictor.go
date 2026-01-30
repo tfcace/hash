@@ -115,7 +115,7 @@ func (p *Predictor) Record(prevCmd, cmd, cwd string, paths []string) {
 	// Record command sequence
 	// Normalize prevCmd for matching, but store full cmd for suggestion
 	if prevCmd != "" {
-		p.store.RecordSequence(
+		_ = p.store.RecordSequence(
 			normalizeCommand(prevCmd),
 			cmd, // Store full command so we can suggest "echo world" not just "echo"
 			cwd,
@@ -125,9 +125,9 @@ func (p *Predictor) Record(prevCmd, cmd, cwd string, paths []string) {
 	// Record path usage
 	baseCmd := normalizeCommand(cmd)
 	for _, path := range paths {
-		p.store.RecordPathUsage(baseCmd, path, cwd)
+		_ = p.store.RecordPathUsage(baseCmd, path, cwd)
 		if prevCmd != "" {
-			p.store.RecordPathSequence(normalizeCommand(prevCmd), path)
+			_ = p.store.RecordPathSequence(normalizeCommand(prevCmd), path)
 		}
 	}
 }

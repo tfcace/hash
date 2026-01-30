@@ -136,15 +136,16 @@ func parseANSIColors(s string) []string {
 
 	// Extract true colors first (most specific)
 	for _, match := range trueColorRe.FindAllStringSubmatch(s, -1) {
-		if match[1] == "3" { // foreground only
-			r, _ := strconv.Atoi(match[2])
-			g, _ := strconv.Atoi(match[3])
-			b, _ := strconv.Atoi(match[4])
-			hex := fmt.Sprintf("#%02X%02X%02X", r, g, b)
-			if !seen[hex] {
-				colors = append(colors, hex)
-				seen[hex] = true
-			}
+		if match[1] != "3" { // skip non-foreground
+			continue
+		}
+		r, _ := strconv.Atoi(match[2])
+		g, _ := strconv.Atoi(match[3])
+		b, _ := strconv.Atoi(match[4])
+		hex := fmt.Sprintf("#%02X%02X%02X", r, g, b)
+		if !seen[hex] {
+			colors = append(colors, hex)
+			seen[hex] = true
 		}
 	}
 
@@ -181,15 +182,16 @@ func parseANSIBgColors(s string) []string {
 
 	// Extract true color backgrounds (most specific)
 	for _, match := range trueColorRe.FindAllStringSubmatch(s, -1) {
-		if match[1] == "4" { // background
-			r, _ := strconv.Atoi(match[2])
-			g, _ := strconv.Atoi(match[3])
-			b, _ := strconv.Atoi(match[4])
-			hex := fmt.Sprintf("#%02X%02X%02X", r, g, b)
-			if !seen[hex] {
-				colors = append(colors, hex)
-				seen[hex] = true
-			}
+		if match[1] != "4" { // skip non-background
+			continue
+		}
+		r, _ := strconv.Atoi(match[2])
+		g, _ := strconv.Atoi(match[3])
+		b, _ := strconv.Atoi(match[4])
+		hex := fmt.Sprintf("#%02X%02X%02X", r, g, b)
+		if !seen[hex] {
+			colors = append(colors, hex)
+			seen[hex] = true
 		}
 	}
 
@@ -216,7 +218,7 @@ func isGoodInputBg(hex string) bool {
 		return false
 	}
 	var r, g, b int
-	fmt.Sscanf(hex[1:], "%02x%02x%02x", &r, &g, &b)
+	fmt.Sscanf(hex[1:], "%02x%02x%02x", &r, &g, &b) //nolint:errcheck // hex format already validated
 	sum := r + g + b
 	// Skip very dark colors (sum < 100) and very bright (sum > 400)
 	return sum >= 100 && sum <= 400
@@ -228,7 +230,7 @@ func isVisibleColor(hex string) bool {
 		return false
 	}
 	var r, g, b int
-	fmt.Sscanf(hex[1:], "%02x%02x%02x", &r, &g, &b)
+	fmt.Sscanf(hex[1:], "%02x%02x%02x", &r, &g, &b) //nolint:errcheck // hex format already validated
 	sum := r + g + b
 	// Skip very dark colors (sum < 150) - need to be visible on dark terminals
 	return sum >= 150

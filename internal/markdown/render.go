@@ -27,8 +27,6 @@ const (
 var (
 	// Bold: **text** or __text__
 	boldPattern = regexp.MustCompile(`\*\*(.+?)\*\*|__(.+?)__`)
-	// Italic: *text* or _text_ (but not inside words for underscores)
-	italicPattern = regexp.MustCompile(`(?:^|[^*])\*([^*\n]+?)\*(?:[^*]|$)|(?:^|\s)_([^_\n]+?)_(?:\s|$)`)
 	// Inline code: `code`
 	codePattern = regexp.MustCompile("`([^`\n]+)`")
 	// Strikethrough: ~~text~~
@@ -56,7 +54,6 @@ func Render(text string) string {
 				continue
 			} else {
 				inCodeBlock = false
-				codeBlockLang = ""
 				continue
 			}
 		}

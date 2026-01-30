@@ -31,8 +31,8 @@ func TestIntegration_TypeAndSubmit(t *testing.T) {
 	if result.Text != "hello" {
 		t.Errorf("Text = %q, want %q", result.Text, "hello")
 	}
-	if result.Cancelled {
-		t.Error("Cancelled = true, want false")
+	if result.Canceled {
+		t.Error("Canceled = true, want false")
 	}
 }
 
@@ -173,8 +173,8 @@ func TestIntegration_CtrlC_EmptyBufferCancels(t *testing.T) {
 
 	result, _ := ed.Run(context.Background())
 
-	if !result.Cancelled {
-		t.Error("Cancelled = false, want true")
+	if !result.Canceled {
+		t.Error("Canceled = false, want true")
 	}
 }
 
@@ -220,8 +220,8 @@ func TestIntegration_CtrlA_MoveToStart(t *testing.T) {
 	// Type, Ctrl+A, insert at start
 	input := []byte{
 		'e', 'l', 'l', 'o',
-		0x01,         // Ctrl+A (move to start)
-		'H',          // Type H
+		0x01,       // Ctrl+A (move to start)
+		'H',        // Type H
 		0x1b, '\r', // Submit
 	}
 
@@ -266,8 +266,8 @@ func TestIntegration_ArrowKeys(t *testing.T) {
 	input := []byte{
 		'h', 'e', 'l', 'o',
 		0x1b, '[', 'D', // Left arrow
-		'l',            // Type l (now "hello")
-		0x1b, '\r',     // Submit
+		'l',        // Type l (now "hello")
+		0x1b, '\r', // Submit
 	}
 
 	var output bytes.Buffer
@@ -308,7 +308,7 @@ func TestIntegration_CtrlU_DeleteToStart(t *testing.T) {
 	// Type, Ctrl+U to delete to start
 	input := []byte{
 		'h', 'e', 'l', 'l', 'o',
-		0x15,       // Ctrl+U (delete to start)
+		0x15, // Ctrl+U (delete to start)
 		'w', 'o', 'r', 'l', 'd',
 		0x1b, '\r', // Submit
 	}

@@ -81,7 +81,7 @@ func (d *Display) SetInputBgColor(hexColor string) {
 	}
 	// Parse hex to RGB
 	var r, g, b int
-	fmt.Sscanf(hexColor[1:], "%02x%02x%02x", &r, &g, &b)
+	fmt.Sscanf(hexColor[1:], "%02x%02x%02x", &r, &g, &b) //nolint:errcheck // hex format already validated
 	// Generate ANSI true color background code
 	d.inputBgCode = fmt.Sprintf("\x1b[48;2;%d;%d;%dm", r, g, b)
 }
@@ -94,7 +94,7 @@ func (d *Display) SetScrollbarColor(hexColor string) {
 	}
 	// Parse hex to RGB
 	var r, g, b int
-	fmt.Sscanf(hexColor[1:], "%02x%02x%02x", &r, &g, &b)
+	fmt.Sscanf(hexColor[1:], "%02x%02x%02x", &r, &g, &b) //nolint:errcheck // hex format already validated
 	// Generate ANSI true color foreground code
 	d.scrollbarCode = fmt.Sprintf("\x1b[38;2;%d;%d;%dm", r, g, b)
 }
@@ -224,7 +224,7 @@ func (d *Display) Render(buf *Buffer, cur *Cursor, hasSelection bool) {
 // RenderWithGhost draws the buffer with inline ghost text suggestion.
 // Ghost text appears after the cursor in dim gray, showing the suggested completion.
 // fromAgent indicates whether this is an agent suggestion (show hints) or prediction (fish-style).
-func (d *Display) RenderWithGhost(buf *Buffer, cur *Cursor, hasSelection bool, ghostText string, streaming bool, fromAgent bool, modelName string) {
+func (d *Display) RenderWithGhost(buf *Buffer, cur *Cursor, hasSelection bool, ghostText string, streaming, fromAgent bool, modelName string) {
 	var sb strings.Builder
 
 	// Hide cursor during render for flicker-free updates
@@ -469,11 +469,12 @@ func (d *Display) AnnotateDuration(outputLines int, durationMs int64) {
 
 	// Format duration
 	var text string
-	if durationMs < 1000 {
+	switch {
+	case durationMs < 1000:
 		text = fmt.Sprintf(" %dms ", durationMs)
-	} else if durationMs < 60000 {
+	case durationMs < 60000:
 		text = fmt.Sprintf(" %.1fs ", float64(durationMs)/1000)
-	} else {
+	default:
 		mins := durationMs / 60000
 		secs := (durationMs % 60000) / 1000
 		text = fmt.Sprintf(" %dm%ds ", mins, secs)

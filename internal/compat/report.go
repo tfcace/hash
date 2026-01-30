@@ -99,14 +99,14 @@ type State struct {
 
 // Save writes the state to a JSON file.
 func (s *State) Save(path string) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil { //nolint:gosec // G301: standard user data dir perms
 		return err
 	}
 	data, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0644)
+	return os.WriteFile(path, data, 0o644) //nolint:gosec // G306: non-sensitive migration state
 }
 
 // LoadState reads the state from a JSON file.

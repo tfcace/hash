@@ -43,8 +43,8 @@ func TestLearning_PatternExtraction(t *testing.T) {
 			command:        "cat /tmp/missing.txt",
 			stderr:         "cat: /tmp/missing.txt: No such file or directory",
 			exitCode:       1,
-			wantCmdPattern: "cat",  // normalizeCommand returns first word for non-scripts
-			wantErrPattern: "file not found",  // extractErrorType maps this pattern
+			wantCmdPattern: "cat",            // normalizeCommand returns first word for non-scripts
+			wantErrPattern: "file not found", // extractErrorType maps this pattern
 		},
 	}
 

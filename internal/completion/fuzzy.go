@@ -33,10 +33,10 @@ func FuzzyFilter(items []Item, query string) []Item {
 // fuzzyScore calculates how well target matches query.
 // Returns 0 if no match, higher scores for better matches.
 func fuzzyScore(target, query string) int {
-	if len(query) == 0 {
+	if query == "" {
 		return 1
 	}
-	if len(target) == 0 {
+	if target == "" {
 		return 0
 	}
 
@@ -45,9 +45,9 @@ func fuzzyScore(target, query string) int {
 		return 1000
 	}
 
-	// Prefix match
+	// Prefix match - shorter targets are preferred
 	if strings.HasPrefix(target, query) {
-		return 800 + (100 - len(target)) // Shorter = better
+		return 800 + (100 - len(target))
 	}
 
 	// For path completion (query ends with /), only allow exact and prefix matches.

@@ -19,7 +19,7 @@ func NewCompleterAdapter(router *completion.Router) *CompleterAdapter {
 }
 
 // Do implements readline.AutoCompleter.
-func (c *CompleterAdapter) Do(line []rune, pos int) ([][]rune, int) {
+func (c *CompleterAdapter) Do(line []rune, pos int) (candidates [][]rune, length int) {
 	if c.router == nil {
 		return nil, 0
 	}
@@ -36,13 +36,13 @@ func (c *CompleterAdapter) Do(line []rune, pos int) ([][]rune, int) {
 	// Convert to readline format
 	// chzyer/readline expects SUFFIXES (the part to append), not full words
 	// The second return value (length) tells readline how many chars of input matched
-	candidates := make([][]rune, len(result.Items))
+	candidates = make([][]rune, len(result.Items))
 	wordStr := string(word)
 	for i, item := range result.Items {
 		fullValue := result.Prefix + item.Value
 		// Strip the matched prefix to get just the suffix
 		suffix := fullValue
-		if len(wordStr) > 0 && len(fullValue) >= len(wordStr) &&
+		if wordStr != "" && len(fullValue) >= len(wordStr) &&
 			strings.EqualFold(fullValue[:len(wordStr)], wordStr) {
 			suffix = fullValue[len(wordStr):]
 		}
@@ -50,7 +50,8 @@ func (c *CompleterAdapter) Do(line []rune, pos int) ([][]rune, int) {
 	}
 
 	// Return the length of the matched prefix
-	return candidates, len(word)
+	length = len(word)
+	return
 }
 
 // extractWordBeforePos extracts the word being completed.

@@ -18,6 +18,8 @@ type StreamingTransport interface {
 // StreamRequest sends a request and returns channels for streaming text chunks.
 // This provides real-time text as it arrives, before parsing into Response.
 // Returns (textChan, errChan) - text chunks arrive on textChan, errors on errChan.
+//
+//nolint:gocritic // unnamedResult: can't name receive-only channel returns
 func (c *Client) StreamRequest(ctx context.Context, req Request) (<-chan string, <-chan error) {
 	// Check if transport supports streaming
 	if st, ok := c.transport.(StreamingTransport); ok {

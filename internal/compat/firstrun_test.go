@@ -39,7 +39,7 @@ func TestIsFirstRun_HasMigrationState(t *testing.T) {
 	dataDir := filepath.Join(tmpDir, ".local", "share", "hash")
 
 	// Create migration.json (user declined before)
-	os.MkdirAll(dataDir, 0755)
+	os.MkdirAll(dataDir, 0o755) //nolint:gosec // G301: test directory
 	state := &State{Declined: true}
 	state.Save(filepath.Join(dataDir, "migration.json"))
 

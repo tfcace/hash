@@ -211,11 +211,11 @@ func TestFuzzyMatch_NumericPatterns(t *testing.T) {
 func TestFuzzyMatch_ScoreOrdering(t *testing.T) {
 	// Test that exact > prefix > word-boundary > subsequence
 	items := []Item{
-		{Value: "test", Display: "test"},           // exact
-		{Value: "testing", Display: "testing"},     // prefix
-		{Value: "my test", Display: "my test"},     // word boundary
-		{Value: "atestb", Display: "atestb"},       // contains (no word boundary)
-		{Value: "t_e_s_t", Display: "t_e_s_t"},     // subsequence
+		{Value: "test", Display: "test"},       // exact
+		{Value: "testing", Display: "testing"}, // prefix
+		{Value: "my test", Display: "my test"}, // word boundary
+		{Value: "atestb", Display: "atestb"},   // contains (no word boundary)
+		{Value: "t_e_s_t", Display: "t_e_s_t"}, // subsequence
 	}
 
 	result := FuzzyFilter(items, "test")
@@ -243,8 +243,8 @@ func TestFuzzyMatch_ScoreOrdering(t *testing.T) {
 func TestFuzzyMatch_ConsecutiveBonus(t *testing.T) {
 	// "abc" matching: "abc" in a row vs spread out
 	items := []Item{
-		{Value: "a_b_c", Display: "a_b_c"},     // spread out
-		{Value: "xabcy", Display: "xabcy"},     // consecutive
+		{Value: "a_b_c", Display: "a_b_c"}, // spread out
+		{Value: "xabcy", Display: "xabcy"}, // consecutive
 	}
 
 	result := FuzzyFilter(items, "abc")

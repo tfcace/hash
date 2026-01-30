@@ -270,17 +270,17 @@ func TestRouter_Completers(t *testing.T) {
 func TestRouter_FuzzyGetter(t *testing.T) {
 	router := NewRouter()
 
-	if router.Fuzzy() != false {
+	if router.Fuzzy() {
 		t.Error("Fuzzy should default to false")
 	}
 
 	router.SetFuzzy(true)
-	if router.Fuzzy() != true {
+	if !router.Fuzzy() {
 		t.Error("Fuzzy should be true after SetFuzzy(true)")
 	}
 
 	router.SetFuzzy(false)
-	if router.Fuzzy() != false {
+	if router.Fuzzy() {
 		t.Error("Fuzzy should be false after SetFuzzy(false)")
 	}
 }

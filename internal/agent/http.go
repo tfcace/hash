@@ -13,9 +13,9 @@ import (
 
 // HTTPConfig configures the HTTP transport.
 type HTTPConfig struct {
-	URL     string        // API endpoint URL
-	Model   string        // Model name (e.g., "codellama")
-	Timeout time.Duration // Request timeout
+	URL     string            // API endpoint URL
+	Model   string            // Model name (e.g., "codellama")
+	Timeout time.Duration     // Request timeout
 	Headers map[string]string // Optional custom headers
 }
 

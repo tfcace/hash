@@ -344,7 +344,7 @@ func TestExecutor_CdPersistsAcrossCommands(t *testing.T) {
 }
 
 func writeExecutableScript(path, content string) error {
-	return os.WriteFile(path, []byte(content), 0755)
+	return os.WriteFile(path, []byte(content), 0o755) //nolint:gosec // G306: test executable
 }
 
 func TestExecutor_SyncRunnerDir(t *testing.T) {
@@ -470,7 +470,7 @@ if [[ -n "$TEST_VAR" ]]; then
   echo "test var is set"
 fi
 `
-	if err := os.WriteFile(scriptPath, []byte(scriptContent), 0644); err != nil {
+	if err := os.WriteFile(scriptPath, []byte(scriptContent), 0o644); err != nil { //nolint:gosec // G306: test file
 		t.Fatalf("failed to create test script: %v", err)
 	}
 
@@ -524,7 +524,7 @@ func TestExecutor_SourcePersistsState(t *testing.T) {
 	scriptContent := `export SOURCED_VAR="from-script"
 myalias() { echo "alias output"; }
 `
-	if err := os.WriteFile(scriptPath, []byte(scriptContent), 0644); err != nil {
+	if err := os.WriteFile(scriptPath, []byte(scriptContent), 0o644); err != nil { //nolint:gosec // G306: test file
 		t.Fatalf("failed to create test script: %v", err)
 	}
 
@@ -574,7 +574,7 @@ func TestExecutor_NestedSourceWithBashSyntax(t *testing.T) {
 export INNER_VAR="hello"
 [[ "$INNER_VAR" == "hello" ]] && echo "inner comparison works"
 `
-	if err := os.WriteFile(innerPath, []byte(innerContent), 0644); err != nil {
+	if err := os.WriteFile(innerPath, []byte(innerContent), 0o644); err != nil { //nolint:gosec // G306: test file
 		t.Fatalf("failed to create inner script: %v", err)
 	}
 
@@ -583,7 +583,7 @@ export INNER_VAR="hello"
 source ` + innerPath + `
 [[ -n "$INNER_VAR" ]] && echo "outer sees inner var"
 `
-	if err := os.WriteFile(outerPath, []byte(outerContent), 0644); err != nil {
+	if err := os.WriteFile(outerPath, []byte(outerContent), 0o644); err != nil { //nolint:gosec // G306: test file
 		t.Fatalf("failed to create outer script: %v", err)
 	}
 
@@ -614,7 +614,7 @@ func TestExecutor_EvalInsideScript(t *testing.T) {
 export TEST_VAR="bar"
 eval '[[ "$TEST_VAR" == "bar" ]] && echo "eval in script works"'
 `
-	if err := os.WriteFile(scriptPath, []byte(scriptContent), 0644); err != nil {
+	if err := os.WriteFile(scriptPath, []byte(scriptContent), 0o644); err != nil { //nolint:gosec // G306: test file
 		t.Fatalf("failed to create test script: %v", err)
 	}
 

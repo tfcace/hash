@@ -50,6 +50,8 @@ func (h *AgentHandler) HandleRequest(ctx context.Context, parsed parser.ParseRes
 
 // StreamRequest processes a parsed agent request and returns streaming channels.
 // Text chunks arrive on the text channel, errors on the error channel.
+//
+//nolint:gocritic // unnamedResult: can't name receive-only channel returns
 func (h *AgentHandler) StreamRequest(ctx context.Context, parsed parser.ParseResult) (<-chan string, <-chan error) {
 	trace.AgentHigh("ghost_start", map[string]any{
 		"type":   parsed.Type.String(),
@@ -208,9 +210,10 @@ func (h *AgentHandler) buildContextFromSelection() agent.Context {
 			agentCtx.LastError = item.Value
 		default:
 			// History or env items go to appropriate fields
-			if item.Category == hashcontext.CategoryHistory {
+			switch item.Category {
+			case hashcontext.CategoryHistory:
 				agentCtx.History = append(agentCtx.History, item.Value)
-			} else if item.Category == hashcontext.CategoryEnv {
+			case hashcontext.CategoryEnv:
 				agentCtx.EnvVars[item.Key] = item.Value
 			}
 		}
