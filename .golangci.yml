@@ -7,10 +7,17 @@ linters:
     - unused
     - gosimple
     - ineffassign
+    - gosec
+    - bodyclose
+    - noctx
+    - exportloopref
 
 linters-settings:
   gofmt:
     simplify: true
+  gosec:
+    excludes:
+      - G104 # Duplicates errcheck
 
 run:
   timeout: 5m

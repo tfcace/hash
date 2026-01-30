@@ -1,0 +1,83 @@
+version: 2
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: hash
+    main: ./cmd/hash
+    binary: hash
+    env:
+      - CGO_ENABLED=1
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X github.com/tfcace/hash/internal/version.Version={{.Version}}
+      - -X github.com/tfcace/hash/internal/version.GitCommit={{.ShortCommit}}
+      - -X github.com/tfcace/hash/internal/version.JjChange=unknown
+      - -X github.com/tfcace/hash/internal/version.BuildDate={{.Date}}
+    overrides:
+      # Linux AMD64
+      - goos: linux
+        goarch: amd64
+        env:
+          - CGO_ENABLED=1
+          - CC=gcc
+      # Linux ARM64 - requires cross-compiler
+      - goos: linux
+        goarch: arm64
+        env:
+          - CGO_ENABLED=1
+          - CC=aarch64-linux-gnu-gcc
+      # macOS builds use native toolchain (built on macOS runner)
+      - goos: darwin
+        goarch: amd64
+        env:
+          - CGO_ENABLED=1
+      - goos: darwin
+        goarch: arm64
+        env:
+          - CGO_ENABLED=1
+
+archives:
+  - id: default
+    format: tar.gz
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- .Version }}_
+      {{- .Os }}_
+      {{- .Arch }}
+    files:
+      - LICENSE*
+      - README*
+      - CHANGELOG*
+
+checksum:
+  name_template: 'checksums.txt'
+
+changelog:
+  use: github-native
+
+release:
+  github:
+    owner: tfcace
+    name: hash
+  draft: false
+  prerelease: auto
+  mode: replace
+  footer: |
+    ## Installation
+
+    ### Homebrew (macOS/Linux)
+    ```bash
+    brew install tfcace/hash/hash
+    ```
+
+    ### Manual
+    Download the appropriate archive for your platform, extract, and add to your PATH.
