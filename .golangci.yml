@@ -77,6 +77,11 @@ issues:
       linters:
         - errcheck
 
+    # Terminal I/O errors are intentionally ignored in editor code
+    - path: "internal/editor/"
+      linters:
+        - errcheck
+
 run:
   timeout: 5m
   build-tags:
