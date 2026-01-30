@@ -43,7 +43,7 @@ func ParseSize(value string) (int64, error) {
 	return int64(size), nil
 }
 
-func splitSize(value string) (string, string) {
+func splitSize(value string) (num, unit string) {
 	for i := 0; i < len(value); i++ {
 		ch := value[i]
 		if (ch >= '0' && ch <= '9') || ch == '.' {

@@ -133,7 +133,7 @@ func (c *ExecutableCompleter) getExecutables() []string {
 			}
 
 			// On Unix, check executable bit
-			if info.Mode()&0111 != 0 {
+			if info.Mode()&0o111 != 0 {
 				seen[name] = true
 				executables = append(executables, name)
 			}

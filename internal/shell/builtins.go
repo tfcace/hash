@@ -173,9 +173,9 @@ func (s *Shell) showRecentHistory(n int) error {
 		return err
 	}
 
-	for i, cmd := range commands {
+	for i := range commands {
 		num := len(commands) - i
-		fmt.Printf("%5d  %s\n", num, cmd.Command)
+		fmt.Printf("%5d  %s\n", num, commands[i].Command)
 	}
 	return nil
 }
@@ -189,8 +189,8 @@ func (s *Shell) searchHistory(query string) error {
 		return err
 	}
 
-	for _, cmd := range results {
-		fmt.Printf("  %s  \033[90m(%s)\033[0m\n", cmd.Command, cmd.Timestamp.Format("2006-01-02"))
+	for i := range results {
+		fmt.Printf("  %s  \033[90m(%s)\033[0m\n", results[i].Command, results[i].Timestamp.Format("2006-01-02"))
 	}
 	return nil
 }
@@ -204,8 +204,8 @@ func (s *Shell) showFailedHistory() error {
 		return err
 	}
 
-	for _, cmd := range results {
-		fmt.Printf("  \033[31mx%d\033[0m %s\n", cmd.ExitCode, cmd.Command)
+	for i := range results {
+		fmt.Printf("  \033[31mx%d\033[0m %s\n", results[i].ExitCode, results[i].Command)
 	}
 	return nil
 }
@@ -219,8 +219,8 @@ func (s *Shell) showSudoHistory() error {
 		return err
 	}
 
-	for _, cmd := range results {
-		fmt.Printf("  \033[33m#\033[0m %s  \033[90m(as %s)\033[0m\n", cmd.Command, cmd.SudoUser)
+	for i := range results {
+		fmt.Printf("  \033[33m#\033[0m %s  \033[90m(as %s)\033[0m\n", results[i].Command, results[i].SudoUser)
 	}
 	return nil
 }

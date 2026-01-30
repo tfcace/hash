@@ -21,7 +21,7 @@ func NewErrorHandler(store *learning.FixStore) *ErrorHandler {
 }
 
 // HandleError processes a command error and suggests fixes.
-func (h *ErrorHandler) HandleError(command string, stderr string, exitCode int) {
+func (h *ErrorHandler) HandleError(command, stderr string, exitCode int) {
 	if exitCode == 0 {
 		return
 	}
@@ -124,7 +124,7 @@ func (h *ErrorHandler) FormatErrorPrompt(exitCode int, stderr string) string {
 }
 
 // GetSuggestion returns a fix suggestion for the given error, or empty string.
-func (h *ErrorHandler) GetSuggestion(command string, stderr string, exitCode int) string {
+func (h *ErrorHandler) GetSuggestion(command, stderr string, exitCode int) string {
 	if exitCode == 0 {
 		return ""
 	}
@@ -143,11 +143,11 @@ func (h *ErrorHandler) GetSuggestion(command string, stderr string, exitCode int
 }
 
 // RecordFixAttempt records whether a suggested fix worked.
-func (h *ErrorHandler) RecordFixAttempt(command string, stderr string, exitCode int, fix string, success bool) {
+func (h *ErrorHandler) RecordFixAttempt(command, stderr string, exitCode int, fix string, success bool) {
 	if h.fixStore == nil {
 		return
 	}
 
 	pattern := learning.ExtractPattern(command, stderr, exitCode)
-	h.fixStore.RecordFix(pattern, fix, success)
+	_ = h.fixStore.RecordFix(pattern, fix, success)
 }

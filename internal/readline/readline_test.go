@@ -33,5 +33,5 @@ func TestConfig_HistoryFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
-	defer rl.Close()
+	_ = rl.Close()
 }

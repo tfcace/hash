@@ -95,7 +95,8 @@ func (ui *SearchUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case debounceMsg:
 		if msg.id == ui.debounceID {
-			return ui, ui.search()
+			cmd := ui.search()
+			return ui, cmd
 		}
 
 	case clearStatusMsg:
@@ -136,19 +137,22 @@ func (ui *SearchUI) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 
 	case "backspace":
-		if len(ui.query) > 0 {
+		if ui.query != "" {
 			ui.query = ui.query[:len(ui.query)-1]
 			ui.selected = 0
 			ui.scrollOffset = 0
 			ui.debounceID++
-			return ui, ui.debounceSearch(ui.debounceID)
+			cmd := ui.debounceSearch(ui.debounceID)
+			return ui, cmd
 		}
 
 	case "ctrl+y":
-		return ui, ui.copyCommand()
+		cmd := ui.copyCommand()
+		return ui, cmd
 
 	case "ctrl+o":
-		return ui, ui.copyOutput()
+		cmd := ui.copyOutput()
+		return ui, cmd
 
 	default:
 		if len(msg.String()) == 1 && msg.String()[0] >= 32 {
@@ -156,7 +160,8 @@ func (ui *SearchUI) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			ui.selected = 0
 			ui.scrollOffset = 0
 			ui.debounceID++
-			return ui, ui.debounceSearch(ui.debounceID)
+			cmd := ui.debounceSearch(ui.debounceID)
+			return ui, cmd
 		}
 	}
 
@@ -457,9 +462,9 @@ func filterCommands(commands []Command, query string) []Command {
 
 	query = strings.ToLower(query)
 	var filtered []Command
-	for _, cmd := range commands {
-		if strings.Contains(strings.ToLower(cmd.Command), query) {
-			filtered = append(filtered, cmd)
+	for i := range commands {
+		if strings.Contains(strings.ToLower(commands[i].Command), query) {
+			filtered = append(filtered, commands[i])
 		}
 	}
 	return filtered

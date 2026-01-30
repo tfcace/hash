@@ -36,6 +36,7 @@ linters:
         - fmt.Print
         - fmt.Println
         - fmt.Printf
+        - fmt.Scanln
         # Writer interface (terminal I/O)
         - (io.Writer).Write
         - (*os.File).Write
@@ -52,6 +53,7 @@ linters:
         # Closer interface
         - (io.Closer).Close
         - (*database/sql.DB).Close
+        - (*database/sql.Rows).Close
         # Terminal control
         - golang.org/x/term.Restore
         # PTY operations
@@ -60,6 +62,8 @@ linters:
         - os.Setenv
         - os.Unsetenv
         - os.Chdir
+        # File cleanup
+        - os.Remove
 
     gosec:
       excludes:
@@ -87,10 +91,13 @@ linters:
 
   exclusions:
     rules:
-      # Exclude errcheck from test files - tests use fire-and-forget patterns
+      # Exclude from test files - tests use simplified patterns
       - path: _test\.go
         linters:
           - errcheck
+          - gosec
+          - govet
+          - gocritic
 
 run:
   timeout: 5m

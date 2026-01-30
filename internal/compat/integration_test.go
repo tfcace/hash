@@ -14,7 +14,7 @@ func TestFullMigrationFlow(t *testing.T) {
 	// Set up test environment
 	home := tmpDir
 	dataDir := filepath.Join(tmpDir, ".local", "share", "hash")
-	os.MkdirAll(dataDir, 0755)
+	os.MkdirAll(dataDir, 0o755) //nolint:gosec // G301: test directory
 
 	// Create a realistic .zshrc
 	zshrc := filepath.Join(home, ".zshrc")

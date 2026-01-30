@@ -97,7 +97,7 @@ func extractCompletionQuery(line string, pos int) string {
 // For "cat file | pb", returns ("pb", 3) where 3 is the new position.
 // For "ls -la", returns ("ls -la", 5) unchanged.
 // This allows completers to work correctly with piped commands.
-func ExtractPipeContext(line string, pos int) (string, int) {
+func ExtractPipeContext(line string, pos int) (extracted string, newPos int) {
 	if pos > len(line) {
 		pos = len(line)
 	}
@@ -123,9 +123,9 @@ func ExtractPipeContext(line string, pos int) (string, int) {
 	}
 
 	// Return the segment after the pipe with adjusted position
-	newLine := line[start:pos]
-	newPos := pos - start
-	return newLine, newPos
+	extracted = line[start:pos]
+	newPos = pos - start
+	return extracted, newPos
 }
 
 // Completers returns the registered completers for inspection.

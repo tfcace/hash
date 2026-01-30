@@ -72,7 +72,7 @@ type Shell struct {
 
 // New creates a new Shell instance.
 func New(cfg *config.Config) (*Shell, error) {
-	exec := executor.New()
+	e := executor.New()
 
 	promptCfg := prompt.Config{
 		Mode:         cfg.Prompt.Mode,
@@ -99,10 +99,10 @@ func New(cfg *config.Config) (*Shell, error) {
 	router.Register(fileCompleter, completion.PriorityFilesystem)
 
 	// Alias/function completer for user-defined functions
-	router.Register(completion.NewAliasCompleter(exec), completion.PriorityAlias)
+	router.Register(completion.NewAliasCompleter(e), completion.PriorityAlias)
 
 	// Environment variable completer ($VAR, ${VAR})
-	envCompleter := completion.NewEnvCompleter(exec)
+	envCompleter := completion.NewEnvCompleter(e)
 	envCompleter.SetMaskSensitive(cfg.Completions.MaskSensitiveEnv)
 	router.Register(envCompleter, completion.PriorityEnv)
 
@@ -228,7 +228,7 @@ func New(cfg *config.Config) (*Shell, error) {
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "hash: warning: invalid clipboard max_output_size %q: %v\n", maxOutputSizeStr, err)
 		} else {
-			exec.SetCaptureLimit(maxOutputSize)
+			e.SetCaptureLimit(maxOutputSize)
 			if maxOutputSize < 0 {
 				clipboardBuf.SetMaxOutputSize(-1)
 			} else {
@@ -276,7 +276,7 @@ func New(cfg *config.Config) (*Shell, error) {
 
 	shell := &Shell{
 		config:       cfg,
-		executor:     exec,
+		executor:     e,
 		prompt:       p,
 		readline:     rl,
 		inputHandler: inputHandler,
@@ -331,7 +331,7 @@ func (s *Shell) Mode() Mode {
 
 // Run starts the shell REPL.
 func (s *Shell) Run(ctx context.Context) error {
-	defer s.readline.Close()
+	defer s.readline.Close() //nolint:errcheck // cleanup on exit
 
 	// Run startup files and commands based on mode
 	if err := s.runStartup(ctx); err != nil {
@@ -380,7 +380,7 @@ func (s *Shell) Run(ctx context.Context) error {
 		})
 
 		if err != nil {
-			if readline.IsInterrupt(err) || errors.Is(err, ErrEditorCancelled) {
+			if readline.IsInterrupt(err) || errors.Is(err, ErrEditorCanceled) {
 				fmt.Println("^C")
 				continue
 			}
@@ -399,12 +399,12 @@ func (s *Shell) Run(ctx context.Context) error {
 				fmt.Print("Last command succeeded. Open issue anyway? [y/N] ")
 				var response string
 				fmt.Scanln(&response)
-				if strings.ToLower(response) != "y" {
+				if !strings.EqualFold(response, "y") {
 					s.updatePrompt()
 					continue
 				}
 			}
-			s.builtinIssue([]string{"--last"})
+			_ = s.builtinIssue([]string{"--last"})
 			s.updatePrompt()
 			continue
 		}
@@ -560,8 +560,8 @@ func (s *Shell) runInitCommands(ctx context.Context) error {
 	return nil
 }
 
-// ErrEditorCancelled is returned when the editor is cancelled (Ctrl+C).
-var ErrEditorCancelled = errors.New("editor cancelled")
+// ErrEditorCanceled is returned when the editor is canceled (Ctrl+C).
+var ErrEditorCanceled = errors.New("editor canceled")
 
 // ErrEditorEOF is returned when the editor receives EOF (Ctrl+D).
 var ErrEditorEOF = errors.New("editor EOF")
@@ -587,8 +587,8 @@ func (s *Shell) readLineWithEditor(ctx context.Context) (string, error) {
 		// Set ghost text prediction based on last command
 		if s.predictor != nil && s.lastCommand != "" {
 			cwd, _ := os.Getwd()
-			if prediction := s.predictor.PredictCommand(s.lastCommand, cwd); prediction != "" {
-				ed.SetGhostText(prediction)
+			if predictedCmd := s.predictor.PredictCommand(s.lastCommand, cwd); predictedCmd != "" {
+				ed.SetGhostText(predictedCmd)
 			}
 		}
 
@@ -599,8 +599,8 @@ func (s *Shell) readLineWithEditor(ctx context.Context) (string, error) {
 		if result.EOF {
 			return "", ErrEditorEOF
 		}
-		if result.Cancelled {
-			return "", ErrEditorCancelled
+		if result.Canceled {
+			return "", ErrEditorCanceled
 		}
 		if result.HistorySearch {
 			// Launch history picker
@@ -663,8 +663,8 @@ func (s *Shell) runContextPicker() {
 	if s.history != nil {
 		entries, _ := s.history.Search(history.SearchOptions{Limit: 10})
 		commands := make([]string, len(entries))
-		for i, e := range entries {
-			commands[i] = e.Command
+		for i := range entries {
+			commands[i] = entries[i].Command
 		}
 		builder.WithHistory(commands)
 	}
@@ -685,7 +685,7 @@ func (s *Shell) runContextPicker() {
 	picker := hashcontext.NewPickerUI(collection)
 	_, err := picker.Run()
 	if err != nil {
-		// Picker cancelled or errored, keep existing selection
+		// Picker canceled or errored, keep existing selection
 		return
 	}
 
@@ -767,7 +767,7 @@ func (s *Shell) handleAgentRequest(ctx context.Context, parsed parser.ParseResul
 	signal.Notify(sigCh, syscall.SIGINT)
 	defer signal.Stop(sigCh)
 
-	// Handle SIGINT by cancelling only the agent context
+	// Handle SIGINT by canceling only the agent context
 	go func() {
 		select {
 		case <-sigCh:
@@ -827,7 +827,7 @@ func (s *Shell) handleAgentInlineStreaming(ctx context.Context, parsed parser.Pa
 		return
 	}
 
-	if result.Cancelled {
+	if result.Canceled {
 		s.updatePrompt()
 		return
 	}
@@ -935,7 +935,7 @@ collectLoop:
 		select {
 		case <-ctx.Done():
 			s.responseUI.ClearLine()
-			fmt.Fprintln(os.Stderr, "hash: request cancelled")
+			fmt.Fprintln(os.Stderr, "hash: request canceled")
 			s.lastExitCode = 1
 			s.updatePrompt()
 			return
@@ -1085,7 +1085,7 @@ func (s *Shell) handleEditCommand(ctx context.Context, command string) {
 		return
 	}
 
-	if result.Cancelled || result.EOF {
+	if result.Canceled || result.EOF {
 		s.updatePrompt()
 		return
 	}
@@ -1196,10 +1196,10 @@ func makeEditorPrefetchFunc(router *completion.Router) func(string, int) {
 // Close releases shell resources.
 func (s *Shell) Close() error {
 	if s.history != nil {
-		s.history.Close()
+		_ = s.history.Close()
 	}
 	if s.learning != nil {
-		s.learning.Close()
+		_ = s.learning.Close()
 	}
 	return s.readline.Close()
 }
@@ -1228,7 +1228,7 @@ func (s *Shell) recordCommand(line string, exitCode int, duration time.Duration)
 		RawCommand: sudoResult.RawCommand,
 	}
 
-	s.history.Add(cmd)
+	_, _ = s.history.Add(cmd)
 }
 
 // detectGitBranch returns the current git branch, or empty string if not in a git repo.

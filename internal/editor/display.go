@@ -224,7 +224,7 @@ func (d *Display) Render(buf *Buffer, cur *Cursor, hasSelection bool) {
 // RenderWithGhost draws the buffer with inline ghost text suggestion.
 // Ghost text appears after the cursor in dim gray, showing the suggested completion.
 // fromAgent indicates whether this is an agent suggestion (show hints) or prediction (fish-style).
-func (d *Display) RenderWithGhost(buf *Buffer, cur *Cursor, hasSelection bool, ghostText string, streaming bool, fromAgent bool, modelName string) {
+func (d *Display) RenderWithGhost(buf *Buffer, cur *Cursor, hasSelection bool, ghostText string, streaming, fromAgent bool, modelName string) {
 	var sb strings.Builder
 
 	// Hide cursor during render for flicker-free updates

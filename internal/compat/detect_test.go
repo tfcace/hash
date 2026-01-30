@@ -39,10 +39,10 @@ func TestDetectRCFile(t *testing.T) {
 
 	// Create test rc files
 	zshrc := filepath.Join(home, ".zshrc")
-	os.WriteFile(zshrc, []byte("# zsh"), 0644)
+	os.WriteFile(zshrc, []byte("# zsh"), 0o644) //nolint:gosec // G306: test file
 
 	bashrc := filepath.Join(home, ".bashrc")
-	os.WriteFile(bashrc, []byte("# bash"), 0644)
+	os.WriteFile(bashrc, []byte("# bash"), 0o644) //nolint:gosec // G306: test file
 
 	tests := []struct {
 		shell string
@@ -68,7 +68,7 @@ func TestDetectProfileFile(t *testing.T) {
 
 	// Create test profile files
 	zprofile := filepath.Join(home, ".zprofile")
-	os.WriteFile(zprofile, []byte("# zprofile"), 0644)
+	os.WriteFile(zprofile, []byte("# zprofile"), 0o644) //nolint:gosec // G306: test file
 
 	tests := []struct {
 		shell string

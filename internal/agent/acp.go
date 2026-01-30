@@ -537,10 +537,12 @@ func (t *ACPTransport) Close() error {
 }
 
 // IdleTimeout is the maximum time to wait without receiving any message from the agent.
-// If exceeded, the request is considered stuck and cancelled.
+// If exceeded, the request is considered stuck and canceled.
 const IdleTimeout = 30 * time.Second
 
 // SendStreaming implements StreamingTransport for real-time text streaming.
+//
+//nolint:gocritic // unnamedResult: can't name receive-only channel returns
 func (t *ACPTransport) SendStreaming(ctx context.Context, req Request) (<-chan string, <-chan error) {
 	textCh := make(chan string, 64)
 	errCh := make(chan error, 1)

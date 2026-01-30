@@ -19,7 +19,7 @@ type Store struct {
 func NewStore(dbPath string) (*Store, error) {
 	// Ensure directory exists
 	dir := filepath.Dir(dbPath)
-	if err := os.MkdirAll(dir, 0755); err != nil { //nolint:gosec // G301: standard user data dir
+	if err := os.MkdirAll(dir, 0o755); err != nil { //nolint:gosec // G301: standard user data dir
 		return nil, fmt.Errorf("create history dir: %w", err)
 	}
 

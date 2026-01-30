@@ -30,8 +30,8 @@ func TestEditor_SimpleInput(t *testing.T) {
 	if result.Text != "hello" {
 		t.Errorf("Text = %q, want %q", result.Text, "hello")
 	}
-	if result.Cancelled {
-		t.Error("Cancelled = true, want false")
+	if result.Canceled {
+		t.Error("Canceled = true, want false")
 	}
 }
 

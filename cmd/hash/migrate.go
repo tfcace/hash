@@ -183,7 +183,7 @@ func doMigrationFiles(shellFiles compat.ShellFiles) int {
 	home, _ := os.UserHomeDir()
 	hashrcPath := filepath.Join(home, ".hashrc")
 	content := compat.FormatHashrcCommentFiles(files)
-	if err := os.WriteFile(hashrcPath, []byte(content), 0644); err != nil {
+	if err := os.WriteFile(hashrcPath, []byte(content), 0o644); err != nil { //nolint:gosec // G306: user shell config file
 		fmt.Fprintf(os.Stderr, "hash migrate: could not create .hashrc: %v\n", err)
 	} else {
 		fmt.Printf("Created %s\n", hashrcPath)

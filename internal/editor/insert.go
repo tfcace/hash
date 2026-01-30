@@ -328,10 +328,10 @@ func (m *InsertMode) insertPasteContent(state *EditorState, text string) {
 func endsWithBackslash(s string) bool {
 	// Trim trailing whitespace
 	trimmed := s
-	for len(trimmed) > 0 && (trimmed[len(trimmed)-1] == ' ' || trimmed[len(trimmed)-1] == '\t') {
+	for trimmed != "" && (trimmed[len(trimmed)-1] == ' ' || trimmed[len(trimmed)-1] == '\t') {
 		trimmed = trimmed[:len(trimmed)-1]
 	}
-	return len(trimmed) > 0 && trimmed[len(trimmed)-1] == '\\'
+	return trimmed != "" && trimmed[len(trimmed)-1] == '\\'
 }
 
 // addLineContinuations processes pasted text to add " \" before newlines

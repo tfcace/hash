@@ -117,7 +117,7 @@ func (s *CommandSuggestor) buildPathCache() {
 			if err != nil {
 				continue
 			}
-			if info.Mode()&0111 != 0 {
+			if info.Mode()&0o111 != 0 {
 				seen[name] = true
 				executables = append(executables, name)
 			}
@@ -139,8 +139,8 @@ func (s *CommandSuggestor) getHistoryCommands() []string {
 
 	seen := make(map[string]bool)
 	var result []string
-	for _, cmd := range cmds {
-		parts := strings.Fields(cmd.Command)
+	for i := range cmds {
+		parts := strings.Fields(cmds[i].Command)
 		if len(parts) == 0 {
 			continue
 		}

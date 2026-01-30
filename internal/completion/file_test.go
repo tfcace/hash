@@ -13,7 +13,7 @@ func TestFileCompleter_CurrentDir(t *testing.T) {
 	tmpDir := t.TempDir()
 	os.WriteFile(filepath.Join(tmpDir, "foo.txt"), []byte{}, 0644)
 	os.WriteFile(filepath.Join(tmpDir, "bar.txt"), []byte{}, 0644)
-	os.Mkdir(filepath.Join(tmpDir, "subdir"), 0755)
+	os.Mkdir(filepath.Join(tmpDir, "subdir"), 0o755) //nolint:gosec // G301: test directory
 
 	// Change to temp dir
 	origDir, _ := os.Getwd()
@@ -154,7 +154,7 @@ func TestFileCompleter_SymlinkToDirectory(t *testing.T) {
 	// Create temp directory with a subdirectory and a symlink to it
 	tmpDir := t.TempDir()
 	subDir := filepath.Join(tmpDir, "actual_dir")
-	os.Mkdir(subDir, 0755)
+	os.Mkdir(subDir, 0o755) //nolint:gosec // G301: test directory
 	symlink := filepath.Join(tmpDir, "symlink_dir")
 	if err := os.Symlink(subDir, symlink); err != nil {
 		t.Skipf("Cannot create symlink: %v", err)
@@ -258,8 +258,8 @@ func TestFileCompleter_AbsolutePath(t *testing.T) {
 func TestFileCompleter_DirectoryWithTrailingSlash(t *testing.T) {
 	tmpDir := t.TempDir()
 	subDir := filepath.Join(tmpDir, "mydir")
-	os.Mkdir(subDir, 0755)
-	os.WriteFile(filepath.Join(subDir, "inner.txt"), []byte{}, 0644)
+	os.Mkdir(subDir, 0o755) //nolint:gosec // G301: test directory
+	os.WriteFile(filepath.Join(subDir, "inner.txt"), []byte{}, 0o644)
 
 	oldDir, _ := os.Getwd()
 	os.Chdir(tmpDir)
@@ -285,7 +285,7 @@ func TestFileCompleter_DirectoryWithTrailingSlash(t *testing.T) {
 func TestFileCompleter_EmptyDirectory(t *testing.T) {
 	tmpDir := t.TempDir()
 	emptyDir := filepath.Join(tmpDir, "empty")
-	os.Mkdir(emptyDir, 0755)
+	os.Mkdir(emptyDir, 0o755) //nolint:gosec // G301: test directory
 
 	oldDir, _ := os.Getwd()
 	os.Chdir(tmpDir)

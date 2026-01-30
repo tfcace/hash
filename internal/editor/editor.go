@@ -38,7 +38,7 @@ type Config struct {
 // Result is returned when the editor exits.
 type Result struct {
 	Text          string
-	Cancelled     bool // Ctrl+C - interrupt
+	Canceled      bool // Ctrl+C - interrupt
 	EOF           bool // Ctrl+D - exit shell
 	HistorySearch bool // Ctrl+R - launch history search
 	ContextPicker bool // Ctrl+P - launch context picker
@@ -296,13 +296,13 @@ func (e *Editor) Run(ctx context.Context) (Result, error) {
 	for {
 		select {
 		case <-ctx.Done():
-			return Result{Cancelled: true}, ctx.Err()
+			return Result{Canceled: true}, ctx.Err()
 		case <-sigCh:
 			e.handleResize()
 			continue
 		case err := <-keyErrCh:
 			if err == io.EOF {
-				return Result{Text: e.state.Buffer.Content(), Cancelled: true}, nil
+				return Result{Text: e.state.Buffer.Content(), Canceled: true}, nil
 			}
 			return Result{}, err
 		case text, ok := <-e.ghostTextChan:
@@ -352,11 +352,11 @@ func (e *Editor) Run(ctx context.Context) (Result, error) {
 					e.ghost.Clear()
 					e.ghostTextChan = nil
 					e.ghostErrChan = nil
-					return Result{Cancelled: true}, nil
+					return Result{Canceled: true}, nil
 				}
 				e.ghost.Clear()
 				if e.state.Buffer.Content() == "" {
-					return Result{Cancelled: true}, nil
+					return Result{Canceled: true}, nil
 				}
 				// Clear buffer
 				e.state.Buffer = NewBuffer()

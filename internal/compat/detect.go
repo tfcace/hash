@@ -99,25 +99,6 @@ func (sf ShellFiles) Files() []string {
 	return files
 }
 
-// DetectPreviousShell detects the user's previous shell and its rc file.
-// Returns shell name, rc file path, and whether detection was successful.
-//
-// Deprecated: Use DetectPreviousShellFiles for full profile + rc support.
-func DetectPreviousShell() (shell string, rcFile string, ok bool) {
-	files := DetectPreviousShellFiles()
-	if files.Shell == "" {
-		return "", "", false
-	}
-	// Return the rc file for backwards compatibility
-	if files.RCFile != "" {
-		return files.Shell, files.RCFile, true
-	}
-	if files.ProfileFile != "" {
-		return files.Shell, files.ProfileFile, true
-	}
-	return "", "", false
-}
-
 // DetectPreviousShellFiles detects the user's previous shell and all its config files.
 func DetectPreviousShellFiles() ShellFiles {
 	home, err := os.UserHomeDir()

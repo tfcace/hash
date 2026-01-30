@@ -46,7 +46,7 @@ func StartEntry(version string, subsystems []string, level Level, pid int) Entry
 }
 
 // EndEntry creates the trace_end entry.
-func EndEntry(durationMs int64, eventsWritten int64) Entry {
+func EndEntry(durationMs, eventsWritten int64) Entry {
 	return Entry{
 		Timestamp: time.Now().UTC().Format(time.RFC3339Nano),
 		Event:     "trace_end",

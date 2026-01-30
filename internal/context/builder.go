@@ -152,13 +152,13 @@ func detectKubeContext() string {
 	return strings.TrimSpace(string(out))
 }
 
-// truncateString truncates a string to max length with ellipsis.
-func truncateString(s string, max int) string {
-	if len(s) <= max {
+// truncateString truncates a string to maxLen length with ellipsis.
+func truncateString(s string, maxLen int) string {
+	if len(s) <= maxLen {
 		return s
 	}
-	if max <= 3 {
-		return s[:max]
+	if maxLen <= 3 {
+		return s[:maxLen]
 	}
-	return s[:max-3] + "..."
+	return s[:maxLen-3] + "..."
 }

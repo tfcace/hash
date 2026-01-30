@@ -31,10 +31,10 @@ func (w *Welcome) ShouldShow() bool {
 
 // MarkShown marks the welcome as shown (creates flag file).
 func (w *Welcome) MarkShown() error {
-	if err := os.MkdirAll(w.configDir, 0755); err != nil { //nolint:gosec // G301: standard config dir
+	if err := os.MkdirAll(w.configDir, 0o755); err != nil { //nolint:gosec // G301: standard config dir
 		return err
 	}
-	return os.WriteFile(w.flagFile, []byte(""), 0644) //nolint:gosec // G306: non-sensitive flag file
+	return os.WriteFile(w.flagFile, []byte(""), 0o644) //nolint:gosec // G306: non-sensitive flag file
 }
 
 // Message returns the welcome message.

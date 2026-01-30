@@ -36,7 +36,7 @@ editor = "nvim"
 [prompt]
 mode = "built-in"
 `)
-	if err := os.WriteFile(configPath, content, 0644); err != nil { //nolint:gosec // G306: test file
+	if err := os.WriteFile(configPath, content, 0o644); err != nil { //nolint:gosec // G306: test file
 		t.Fatal(err)
 	}
 
@@ -79,7 +79,7 @@ interactive = [
     "~/.hashrc",
 ]
 `
-	if err := os.WriteFile(configPath, []byte(content), 0644); err != nil { //nolint:gosec // G306: test file
+	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil { //nolint:gosec // G306: test file
 		t.Fatalf("failed to write config: %v", err)
 	}
 

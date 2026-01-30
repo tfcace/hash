@@ -39,16 +39,22 @@ func CheckFirstRun() (bool, error) {
 
 // ShouldShowMigrationPrompt checks if we should show the migration prompt.
 // Returns: shouldShow, previousShell, rcFile
-func ShouldShowMigrationPrompt() (bool, string, string) {
+func ShouldShowMigrationPrompt() (shouldShow bool, previousShell, rcFile string) {
 	isFirst, err := CheckFirstRun()
 	if err != nil || !isFirst {
 		return false, "", ""
 	}
 
-	shell, rcFile, ok := DetectPreviousShell()
-	if !ok {
+	files := DetectPreviousShellFiles()
+	if files.Shell == "" {
 		return false, "", ""
 	}
-
-	return true, shell, rcFile
+	// Return the rc file for the prompt
+	if files.RCFile != "" {
+		return true, files.Shell, files.RCFile
+	}
+	if files.ProfileFile != "" {
+		return true, files.Shell, files.ProfileFile
+	}
+	return false, "", ""
 }

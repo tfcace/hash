@@ -28,7 +28,7 @@ type FixStore struct {
 // NewFixStore creates or opens a learning database.
 func NewFixStore(dbPath string) (*FixStore, error) {
 	dir := filepath.Dir(dbPath)
-	if err := os.MkdirAll(dir, 0755); err != nil { //nolint:gosec // G301: standard user data dir perms
+	if err := os.MkdirAll(dir, 0o755); err != nil { //nolint:gosec // G301: standard user data dir perms
 		return nil, fmt.Errorf("create learning dir: %w", err)
 	}
 

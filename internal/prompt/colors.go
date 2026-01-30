@@ -136,15 +136,16 @@ func parseANSIColors(s string) []string {
 
 	// Extract true colors first (most specific)
 	for _, match := range trueColorRe.FindAllStringSubmatch(s, -1) {
-		if match[1] == "3" { // foreground only
-			r, _ := strconv.Atoi(match[2])
-			g, _ := strconv.Atoi(match[3])
-			b, _ := strconv.Atoi(match[4])
-			hex := fmt.Sprintf("#%02X%02X%02X", r, g, b)
-			if !seen[hex] {
-				colors = append(colors, hex)
-				seen[hex] = true
-			}
+		if match[1] != "3" { // skip non-foreground
+			continue
+		}
+		r, _ := strconv.Atoi(match[2])
+		g, _ := strconv.Atoi(match[3])
+		b, _ := strconv.Atoi(match[4])
+		hex := fmt.Sprintf("#%02X%02X%02X", r, g, b)
+		if !seen[hex] {
+			colors = append(colors, hex)
+			seen[hex] = true
 		}
 	}
 
@@ -181,15 +182,16 @@ func parseANSIBgColors(s string) []string {
 
 	// Extract true color backgrounds (most specific)
 	for _, match := range trueColorRe.FindAllStringSubmatch(s, -1) {
-		if match[1] == "4" { // background
-			r, _ := strconv.Atoi(match[2])
-			g, _ := strconv.Atoi(match[3])
-			b, _ := strconv.Atoi(match[4])
-			hex := fmt.Sprintf("#%02X%02X%02X", r, g, b)
-			if !seen[hex] {
-				colors = append(colors, hex)
-				seen[hex] = true
-			}
+		if match[1] != "4" { // skip non-background
+			continue
+		}
+		r, _ := strconv.Atoi(match[2])
+		g, _ := strconv.Atoi(match[3])
+		b, _ := strconv.Atoi(match[4])
+		hex := fmt.Sprintf("#%02X%02X%02X", r, g, b)
+		if !seen[hex] {
+			colors = append(colors, hex)
+			seen[hex] = true
 		}
 	}
 
