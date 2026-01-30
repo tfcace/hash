@@ -27,6 +27,18 @@ linters:
     - misspell       # Spelling errors in comments/strings
 
 linters-settings:
+  errcheck:
+    # Ignore these functions - terminal output errors are not recoverable
+    exclude-functions:
+      - (io.Writer).Write
+      - fmt.Fprint
+      - fmt.Fprintf
+      - fmt.Fprintln
+      - fmt.Print
+      - fmt.Println
+      - fmt.Printf
+      - fmt.Sscanf
+
   gosec:
     excludes:
       - G104  # Duplicates errcheck
@@ -60,11 +72,6 @@ issues:
         - gocritic
 
     - path: cmd/hash/main\.go
-      linters:
-        - errcheck
-
-    # Terminal output errors are intentionally ignored in editor code
-    - path: "internal/editor/.*\\.go"
       linters:
         - errcheck
 
