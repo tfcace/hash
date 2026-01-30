@@ -28,6 +28,8 @@ linters:
 
 linters-settings:
   errcheck:
+    # Don't check test files
+    check-tests: false
     # Ignore these functions - terminal output errors are not recoverable
     exclude-functions:
       - (io.Writer).Write
