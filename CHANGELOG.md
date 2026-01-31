@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.4.3](https://github.com/tfcace/hash/compare/v0.4.2...v0.4.3) (2026-01-31)
+
+
+### Bug Fixes
+
+* **agent:** broken pipe on context cancelation ([0bcef00](https://github.com/tfcace/hash/commit/0bcef0025f028f085b29832393d8385a4abfe317))
+* lint errors (gofmt, gosec, staticcheck) ([9b39a3d](https://github.com/tfcace/hash/commit/9b39a3d73ecfee27d52c1996689f7306eea4126e))
+* resource leaks and resilience improvements ([b32e0fe](https://github.com/tfcace/hash/commit/b32e0fed596486b511fdf85bd007d957257f2f96))
+
 ## [0.4.2](https://github.com/tfcace/hash/compare/v0.4.1...v0.4.2) (2026-01-31)
 
 
