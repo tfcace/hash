@@ -78,6 +78,7 @@ func ParseKey(b []byte) Key {
 	return Key{Rune: r}
 }
 
+//nolint:gocyclo // escape sequence parsing requires matching multiple terminal protocols
 func parseEscapeSequence(b []byte) Key {
 	if len(b) < 2 {
 		return Key{Special: KeyEscape}
@@ -95,54 +96,14 @@ func parseEscapeSequence(b []byte) Key {
 
 	// Simple arrow keys: ESC [ A/B/C/D
 	if len(b) == 3 {
-		switch b[2] {
-		case 'A':
-			return Key{Special: KeyUp}
-		case 'B':
-			return Key{Special: KeyDown}
-		case 'C':
-			return Key{Special: KeyRight}
-		case 'D':
-			return Key{Special: KeyLeft}
-		case 'H':
-			return Key{Special: KeyHome}
-		case 'F':
-			return Key{Special: KeyEnd}
+		if key, ok := parseSimpleCSI(b[2]); ok {
+			return key
 		}
 	}
 
 	// Modified keys: ESC [ 1 ; <mod> <dir>
-	// mod: 2=Shift, 3=Alt, 4=Shift+Alt, 5=Ctrl, etc.
 	if len(b) >= 6 && b[2] == '1' && b[3] == ';' {
-		mod := b[4] - '0'
-		dir := b[5]
-
-		key := Key{}
-		if mod&0x01 != 0 { // Bit 0 = Shift (2, 4, 6, 8)
-			key.Shift = true
-		}
-		if mod == 3 || mod == 4 || mod == 7 || mod == 8 {
-			key.Alt = true
-		}
-		if mod >= 5 {
-			key.Ctrl = true
-		}
-
-		switch dir {
-		case 'A':
-			key.Special = KeyUp
-		case 'B':
-			key.Special = KeyDown
-		case 'C':
-			key.Special = KeyRight
-		case 'D':
-			key.Special = KeyLeft
-		case 'H':
-			key.Special = KeyHome
-		case 'F':
-			key.Special = KeyEnd
-		}
-		return key
+		return parseModifiedKey(b[4], b[5])
 	}
 
 	// Delete key: ESC [ 3 ~
@@ -151,51 +112,81 @@ func parseEscapeSequence(b []byte) Key {
 	}
 
 	// CSI u encoding for Enter: ESC [ 13 u or ESC [ 13 ; <mod> u
-	// mod: 2=Shift, 3=Alt, 5=Ctrl, etc.
 	if len(b) >= 5 && b[2] == '1' && b[3] == '3' && b[len(b)-1] == 'u' {
-		key := Key{Special: KeyEnter}
-		// Parse modifier between semicolon and 'u'
-		for i := 4; i < len(b)-1; i++ {
-			if b[i] != ';' || i+1 >= len(b)-1 {
-				continue
-			}
-			mod := b[i+1] - '0'
-			if mod == 2 || mod == 4 || mod == 6 || mod == 8 {
-				key.Shift = true
-			}
-			if mod == 3 || mod == 4 || mod == 7 || mod == 8 {
-				key.Alt = true
-			}
-			if mod >= 5 {
-				key.Ctrl = true
-			}
-			break
-		}
-		return key
+		return parseCsiUKey(KeyEnter, b[4:len(b)-1])
 	}
 
 	// CSI u encoding for Tab: ESC [ 9 u or ESC [ 9 ; <mod> u
 	if len(b) >= 4 && b[2] == '9' && b[len(b)-1] == 'u' {
-		key := Key{Special: KeyTab}
-		// Parse modifier between semicolon and 'u'
-		for i := 3; i < len(b)-1; i++ {
-			if b[i] != ';' || i+1 >= len(b)-1 {
-				continue
-			}
-			mod := b[i+1] - '0'
-			if mod == 2 || mod == 4 || mod == 6 || mod == 8 {
-				key.Shift = true
-			}
-			if mod == 3 || mod == 4 || mod == 7 || mod == 8 {
-				key.Alt = true
-			}
-			if mod >= 5 {
-				key.Ctrl = true
-			}
-			break
-		}
-		return key
+		return parseCsiUKey(KeyTab, b[3:len(b)-1])
 	}
 
 	return Key{Special: KeyEscape}
+}
+
+// parseSimpleCSI parses simple CSI sequences (ESC [ X) for arrow/navigation keys.
+func parseSimpleCSI(code byte) (Key, bool) {
+	switch code {
+	case 'A':
+		return Key{Special: KeyUp}, true
+	case 'B':
+		return Key{Special: KeyDown}, true
+	case 'C':
+		return Key{Special: KeyRight}, true
+	case 'D':
+		return Key{Special: KeyLeft}, true
+	case 'H':
+		return Key{Special: KeyHome}, true
+	case 'F':
+		return Key{Special: KeyEnd}, true
+	}
+	return Key{}, false
+}
+
+// parseModifiedKey parses modified key sequences (ESC [ 1 ; <mod> <dir>).
+// mod: 2=Shift, 3=Alt, 4=Shift+Alt, 5=Ctrl, 6=Ctrl+Shift, 7=Ctrl+Alt, 8=Ctrl+Alt+Shift
+func parseModifiedKey(modByte, dirByte byte) Key {
+	key := applyModifier(Key{}, modByte-'0')
+
+	switch dirByte {
+	case 'A':
+		key.Special = KeyUp
+	case 'B':
+		key.Special = KeyDown
+	case 'C':
+		key.Special = KeyRight
+	case 'D':
+		key.Special = KeyLeft
+	case 'H':
+		key.Special = KeyHome
+	case 'F':
+		key.Special = KeyEnd
+	}
+	return key
+}
+
+// parseCsiUKey parses CSI u encoded keys (e.g., ESC [ 13 ; <mod> u for Enter).
+func parseCsiUKey(special KeyCode, modBytes []byte) Key {
+	key := Key{Special: special}
+	for i := 0; i < len(modBytes); i++ {
+		if modBytes[i] == ';' && i+1 < len(modBytes) {
+			key = applyModifier(key, modBytes[i+1]-'0')
+			break
+		}
+	}
+	return key
+}
+
+// applyModifier applies modifier bits to a key.
+// Terminal modifier encoding: value = 1 + (shift?1:0) + (alt?2:0) + (ctrl?4:0)
+// So: 2=Shift, 3=Alt, 4=Shift+Alt, 5=Ctrl, 6=Ctrl+Shift, 7=Ctrl+Alt, 8=Ctrl+Alt+Shift
+func applyModifier(key Key, mod byte) Key {
+	// Subtract 1 to get the bitmask: Shift=bit0, Alt=bit1, Ctrl=bit2
+	if mod >= 2 {
+		bits := mod - 1
+		key.Shift = bits&1 != 0
+		key.Alt = bits&2 != 0
+		key.Ctrl = bits&4 != 0
+	}
+	return key
 }

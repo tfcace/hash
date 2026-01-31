@@ -937,6 +937,8 @@ func (e *Executor) trackFunctionsFromAST(prog *syntax.File) {
 }
 
 // Execute runs a command using the mvdan/sh interpreter.
+//
+//nolint:gocyclo // command execution coordinates parsing, capture, and runner lifecycle
 func (e *Executor) Execute(ctx context.Context, command string, stdout, stderr io.Writer) (*Result, error) {
 	e.runnerMu.Lock()
 	defer e.runnerMu.Unlock()
@@ -1129,13 +1131,13 @@ func (e *Executor) execHandler(next interp.ExecHandlerFunc) interp.ExecHandlerFu
 
 // stdinCopyConfig holds configuration for stdin-to-PTY copying.
 type stdinCopyConfig struct {
-	ptmx        *os.File
-	stdin       io.Reader
-	done        <-chan struct{}
-	stdinDone   chan<- struct{}
-	onInput     func([]byte)
-	onWrite     func(int)
-	ptyTr       *ptyTrace
+	ptmx      *os.File
+	stdin     io.Reader
+	done      <-chan struct{}
+	stdinDone chan<- struct{}
+	onInput   func([]byte)
+	onWrite   func(int)
+	ptyTr     *ptyTrace
 }
 
 // startStdinCopy starts the appropriate stdin copy goroutine based on stdin type.
@@ -1216,6 +1218,8 @@ func setupPTYResize(stdinFd int, ptmx *os.File, ptyTr *ptyTrace) func() {
 // runWithPTY runs a command with a pseudo-terminal.
 // If stdoutIsPipe is true, ONLCR is disabled on the PTY to prevent LF→CRLF
 // translation which would corrupt piped data (e.g., `curl ... | bash`).
+//
+//nolint:gocyclo // PTY coordination requires managing multiple concurrent I/O streams
 func (e *Executor) runWithPTY(ctx context.Context, cmd *exec.Cmd, hc interp.HandlerContext, stdoutIsPipe bool) error {
 	// When stdout is a pipe, we need to disable ONLCR on the PTY slave.
 	// Use pty.Open() to get access to both master and slave for configuration.
@@ -1381,6 +1385,8 @@ func (e *Executor) runWithPTY(ctx context.Context, cmd *exec.Cmd, hc interp.Hand
 
 // runWithPTYRaw runs a command with a PTY that has ONLCR disabled.
 // This is used when stdout is a pipe to prevent LF→CRLF translation.
+//
+//nolint:gocyclo // PTY raw mode coordination requires managing multiple concurrent I/O streams
 func (e *Executor) runWithPTYRaw(ctx context.Context, cmd *exec.Cmd, hc interp.HandlerContext) error {
 	// Use pty.Open() to get access to both master and slave
 	ptmx, pts, err := pty.Open()

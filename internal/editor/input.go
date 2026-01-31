@@ -223,6 +223,24 @@ func (r *InputReader) ReadKeyInterruptible(done <-chan struct{}) (Key, error) {
 	return key, nil
 }
 
+// specialKeyNames maps special key codes to their display names.
+var specialKeyNames = map[KeyCode]string{
+	KeyEnter:     "Enter",
+	KeyTab:       "Tab",
+	KeyBackspace: "Backspace",
+	KeyDelete:    "Delete",
+	KeyEscape:    "Escape",
+	KeyUp:        "Up",
+	KeyDown:      "Down",
+	KeyLeft:      "Left",
+	KeyRight:     "Right",
+	KeyHome:      "Home",
+	KeyEnd:       "End",
+	KeyPageUp:    "PageUp",
+	KeyPageDown:  "PageDown",
+	KeyPaste:     "Paste",
+}
+
 // keyString returns a human-readable string for a Key.
 func keyString(k Key) string {
 	var parts []string
@@ -236,37 +254,10 @@ func keyString(k Key) string {
 		parts = append(parts, "Shift")
 	}
 
-	keyName := ""
-	switch k.Special {
-	case KeyEnter:
-		keyName = "Enter"
-	case KeyTab:
-		keyName = "Tab"
-	case KeyBackspace:
-		keyName = "Backspace"
-	case KeyDelete:
-		keyName = "Delete"
-	case KeyEscape:
-		keyName = "Escape"
-	case KeyUp:
-		keyName = "Up"
-	case KeyDown:
-		keyName = "Down"
-	case KeyLeft:
-		keyName = "Left"
-	case KeyRight:
-		keyName = "Right"
-	case KeyHome:
-		keyName = "Home"
-	case KeyEnd:
-		keyName = "End"
-	case KeyPaste:
-		keyName = "Paste"
-	case KeyNone:
-		if k.Rune != 0 {
-			keyName = string(k.Rune)
-		}
-	default:
+	keyName := specialKeyNames[k.Special]
+	if keyName == "" && k.Special == KeyNone && k.Rune != 0 {
+		keyName = string(k.Rune)
+	} else if keyName == "" && k.Special != KeyNone {
 		keyName = "Unknown"
 	}
 

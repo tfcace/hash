@@ -106,6 +106,8 @@ func FilterWithCompat(path, shell string) (string, *Report, error) {
 // It skips zsh-specific builtins and recovers from parse errors.
 // Note: This creates its own interpreter runner, so aliases/functions won't
 // persist to the caller's shell. Use FilterWithCompat + executor for that.
+//
+//nolint:gocyclo // shell compatibility requires handling multiple file formats
 func SourceWithCompat(ctx context.Context, path, shell string, stdout io.Writer) (*Report, error) {
 	info, err := os.Stat(path)
 	if err != nil {

@@ -293,6 +293,8 @@ func (t *ACPTransport) newSession(ctx context.Context, cwd string) (string, erro
 }
 
 // Send sends a request to the agent.
+//
+//nolint:gocyclo // SSE protocol parsing requires sequential event handling
 func (t *ACPTransport) Send(ctx context.Context, req Request) (<-chan Response, error) {
 	t.mu.Lock()
 
@@ -542,7 +544,7 @@ const IdleTimeout = 30 * time.Second
 
 // SendStreaming implements StreamingTransport for real-time text streaming.
 //
-//nolint:gocritic // unnamedResult: can't name receive-only channel returns
+//nolint:gocritic,gocyclo // unnamedResult + SSE streaming requires sequential event handling
 func (t *ACPTransport) SendStreaming(ctx context.Context, req Request) (<-chan string, <-chan error) {
 	textCh := make(chan string, 64)
 	errCh := make(chan error, 1)

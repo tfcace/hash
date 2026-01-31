@@ -37,6 +37,8 @@ func (c *FileCompleter) SetShowHidden(show bool) {
 }
 
 // Complete returns filesystem completions.
+//
+//nolint:gocyclo // file completion handles multiple path formats and edge cases
 func (c *FileCompleter) Complete(ctx context.Context, line string, pos int) (Result, error) {
 	// Extract the word being completed
 	word := extractWord(line, pos)

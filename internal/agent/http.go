@@ -206,6 +206,8 @@ func (t *HTTPTransport) parseResponse(text string) Response {
 }
 
 // looksLikeCommand checks if the text appears to be a shell command.
+//
+//nolint:gocyclo // heuristic pattern matching requires multiple checks
 func looksLikeCommand(text string) bool {
 	// Multi-line text is likely an explanation
 	if strings.Contains(text, "\n") {

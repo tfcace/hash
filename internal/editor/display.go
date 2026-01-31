@@ -224,6 +224,8 @@ func (d *Display) Render(buf *Buffer, cur *Cursor, hasSelection bool) {
 // RenderWithGhost draws the buffer with inline ghost text suggestion.
 // Ghost text appears after the cursor in dim gray, showing the suggested completion.
 // fromAgent indicates whether this is an agent suggestion (show hints) or prediction (fish-style).
+//
+//nolint:gocyclo // terminal rendering requires many conditional escape sequences
 func (d *Display) RenderWithGhost(buf *Buffer, cur *Cursor, hasSelection bool, ghostText string, streaming, fromAgent bool, modelName string) {
 	var sb strings.Builder
 
@@ -524,6 +526,8 @@ type CompletionItem struct {
 }
 
 // RenderCompletionMenu draws the completion dropdown below the cursor.
+//
+//nolint:gocyclo // completion menu rendering requires layout and scroll calculations
 func (d *Display) RenderCompletionMenu(items []CompletionItem, selected, startCol int) {
 	if len(items) == 0 {
 		return
