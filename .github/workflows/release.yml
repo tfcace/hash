@@ -94,7 +94,7 @@ jobs:
           GOOS: ${{ matrix.goos }}
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: dist-${{ matrix.goos }}
           path: dist/**/*
