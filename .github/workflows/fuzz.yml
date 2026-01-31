@@ -1,0 +1,81 @@
+name: Fuzz Testing
+
+on:
+  # Run weekly on Saturdays
+  schedule:
+    - cron: "0 3 * * 6"
+  # Allow manual trigger
+  workflow_dispatch:
+    inputs:
+      fuzz_time:
+        description: "Fuzz duration per target (e.g., 30s, 5m)"
+        required: false
+        default: "1m"
+  # Run on PRs that modify parser or learning code
+  pull_request:
+    paths:
+      - "internal/parser/**"
+      - "internal/learning/**"
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    name: Fuzz Tests
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - package: "./internal/parser"
+            fuzz: "FuzzParse"
+          - package: "./internal/parser"
+            fuzz: "FuzzParseConsistency"
+          - package: "./internal/learning"
+            fuzz: "FuzzNormalizeError"
+          - package: "./internal/learning"
+            fuzz: "FuzzExtractPattern"
+          - package: "./internal/learning"
+            fuzz: "FuzzExtractPatternConsistency"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libx11-dev
+
+      - name: Determine fuzz duration
+        id: duration
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "time=${{ github.event.inputs.fuzz_time }}" >> $GITHUB_OUTPUT
+          elif [ "${{ github.event_name }}" = "schedule" ]; then
+            echo "time=5m" >> $GITHUB_OUTPUT
+          else
+            # PRs get shorter fuzz time
+            echo "time=30s" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Run fuzz test (${{ matrix.target.fuzz }})
+        run: |
+          go test -fuzz='^${{ matrix.target.fuzz }}$' \
+            -fuzztime=${{ steps.duration.outputs.time }} \
+            ${{ matrix.target.package }}
+
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crash-${{ matrix.target.fuzz }}
+          path: |
+            ${{ matrix.target.package }}/testdata/fuzz/
+          retention-days: 30

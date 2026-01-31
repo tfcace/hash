@@ -1,5 +1,9 @@
 # Hash
 
+[![Go Report Card](https://goreportcard.com/badge/github.com/tfcace/hash)](https://goreportcard.com/report/github.com/tfcace/hash)
+[![Go Reference](https://pkg.go.dev/badge/github.com/tfcace/hash.svg)](https://pkg.go.dev/github.com/tfcace/hash)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 **Harness Assisted SHell** — A Go-based shell with editor-style input, Helix keybindings, and agent-agnostic AI integration.
 
 > **⚠️ Early Stage Project**
@@ -9,6 +13,10 @@
 ## What is Hash?
 
 Hash is a shell that treats AI as a first-class citizen without locking you into any particular model or vendor. Drop `??` anywhere in a command to get help:
+
+<p align="center">
+  <img src="demos/hero.gif" alt="Hash demo showing ?? agent invocation" width="800">
+</p>
 
 ```bash
 # Generate a command from natural language
@@ -48,6 +56,10 @@ model = "codellama:13b"
 
 Hash learns from how you fix errors. After seeing you run `chmod +x` a few times after "Permission denied", it suggests the fix instantly — no agent call needed:
 
+<p align="center">
+  <img src="demos/learning.gif" alt="Hash learning from error fixes" width="800">
+</p>
+
 ```
 $ ./deploy.sh
 bash: ./deploy.sh: Permission denied
@@ -67,6 +79,10 @@ Control exactly what context goes to the agent with an interactive TUI:
 - Add history commands, environment variables, or last output as needed
 - Your selections persist for the shell session
 - Press **Enter** to confirm, **Esc** to cancel
+
+<p align="center">
+  <img src="demos/context-picker.gif" alt="Context picker TUI" width="800">
+</p>
 
 ```
 ┌─ Context for Agent ─────────────────────────────────────┐
@@ -344,6 +360,35 @@ go build -o hash ./cmd/hash    # Build
 go test ./...                   # Run all tests
 go vet ./...                    # Lint
 ```
+
+### Fuzz Testing
+
+The parser and learning system have fuzz tests to catch edge cases:
+
+```bash
+# Run fuzz tests (30 seconds each)
+go test -fuzz=FuzzParse -fuzztime=30s ./internal/parser/...
+go test -fuzz=FuzzNormalizeError -fuzztime=30s ./internal/learning/...
+
+# Run all fuzz targets
+go test -fuzz=Fuzz -fuzztime=30s ./internal/...
+```
+
+Fuzz tests run automatically in CI on PRs that modify parser or learning code.
+
+### Demo Recordings
+
+Demo GIFs are generated using [VHS](https://github.com/charmbracelet/vhs):
+
+```bash
+# Install VHS
+brew install vhs  # or: go install github.com/charmbracelet/vhs@latest
+
+# Generate all demos
+for tape in demos/*.tape; do vhs "$tape"; done
+```
+
+See [`demos/README.md`](demos/README.md) for available demos.
 
 This project uses [jj (Jujutsu)](https://github.com/martinvonz/jj) for version control.
 

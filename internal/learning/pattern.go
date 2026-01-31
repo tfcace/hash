@@ -102,10 +102,13 @@ func extractErrorType(stderr string) string {
 		}
 	}
 
-	// Default: first line, normalized
+	// Default: first non-empty line, normalized
 	lines := strings.Split(stderr, "\n")
-	if len(lines) > 0 {
-		return NormalizeError(lines[0])
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			return NormalizeError(line)
+		}
 	}
 
 	return "unknown error"
