@@ -1127,6 +1127,50 @@ func (e *Executor) execHandler(next interp.ExecHandlerFunc) interp.ExecHandlerFu
 	}
 }
 
+// stdinCopyConfig holds configuration for stdin-to-PTY copying.
+type stdinCopyConfig struct {
+	ptmx        *os.File
+	stdin       io.Reader
+	done        <-chan struct{}
+	stdinDone   chan<- struct{}
+	onInput     func([]byte)
+	onWrite     func(int)
+	ptyTr       *ptyTrace
+}
+
+// startStdinCopy starts the appropriate stdin copy goroutine based on stdin type.
+// Returns true if the copy is cancelable (supports deadline or poll).
+func startStdinCopy(cfg stdinCopyConfig) bool {
+	if dr, ok := supportsReadDeadline(cfg.stdin); ok {
+		go func() {
+			err := copyWithDeadline(cfg.ptmx, cfg.stdin, dr, cfg.done, cfg.onInput, cfg.onWrite)
+			if cfg.ptyTr != nil {
+				cfg.ptyTr.logf("stdin->pty copy (deadline) stopped: %s", describeCopyEnd(err))
+			}
+			close(cfg.stdinDone)
+		}()
+		return true
+	}
+	if f, ok := cfg.stdin.(*os.File); ok {
+		go func() {
+			err := copyWithPoll(cfg.ptmx, f, cfg.done, cfg.onInput, cfg.onWrite)
+			if cfg.ptyTr != nil {
+				cfg.ptyTr.logf("stdin->pty copy (poll) stopped: %s", describeCopyEnd(err))
+			}
+			close(cfg.stdinDone)
+		}()
+		return true
+	}
+	go func() {
+		err := copyWithOnInput(cfg.ptmx, cfg.stdin, cfg.onInput, cfg.onWrite)
+		if cfg.ptyTr != nil {
+			cfg.ptyTr.logf("stdin->pty copy stopped: %s", describeCopyEnd(err))
+		}
+		close(cfg.stdinDone)
+	}()
+	return false
+}
+
 // setupTerminalRawMode puts the terminal in raw mode and returns a cleanup function.
 // Returns nil cleanup if the terminal is not available or setup fails.
 func setupTerminalRawMode(stdinFd int, ptyTr *ptyTrace) func() {
@@ -1243,33 +1287,15 @@ func (e *Executor) runWithPTY(ctx context.Context, cmd *exec.Cmd, hc interp.Hand
 			ptyTr.markInWrite(n)
 		}
 	}
-	if dr, ok := supportsReadDeadline(hc.Stdin); ok {
-		cancelable = true
-		go func() {
-			err := copyWithDeadline(ptmx, hc.Stdin, dr, done, onInput, onStdinWrite)
-			if ptyTr != nil {
-				ptyTr.logf("stdin->pty copy (deadline) stopped: %s", describeCopyEnd(err))
-			}
-			close(stdinDone)
-		}()
-	} else if f, ok := hc.Stdin.(*os.File); ok {
-		cancelable = true
-		go func() {
-			err := copyWithPoll(ptmx, f, done, onInput, onStdinWrite)
-			if ptyTr != nil {
-				ptyTr.logf("stdin->pty copy (poll) stopped: %s", describeCopyEnd(err))
-			}
-			close(stdinDone)
-		}()
-	} else {
-		go func() {
-			err := copyWithOnInput(ptmx, hc.Stdin, onInput, onStdinWrite)
-			if ptyTr != nil {
-				ptyTr.logf("stdin->pty copy stopped: %s", describeCopyEnd(err))
-			}
-			close(stdinDone)
-		}()
-	}
+	cancelable = startStdinCopy(stdinCopyConfig{
+		ptmx:      ptmx,
+		stdin:     hc.Stdin,
+		done:      done,
+		stdinDone: stdinDone,
+		onInput:   onInput,
+		onWrite:   onStdinWrite,
+		ptyTr:     ptyTr,
+	})
 
 	stdoutDone := make(chan error, 1)
 	go func() {
@@ -1426,17 +1452,15 @@ func (e *Executor) runWithPTYRaw(ctx context.Context, cmd *exec.Cmd, hc interp.H
 		}
 	}
 
-	if f, ok := hc.Stdin.(*os.File); ok {
-		go func() {
-			copyWithPoll(ptmx, f, done, onInput, nil) //nolint:errcheck // stdin copy errors handled via channel
-			close(stdinDone)
-		}()
-	} else {
-		go func() {
-			copyWithOnInput(ptmx, hc.Stdin, onInput, nil) //nolint:errcheck // stdin copy errors handled via channel
-			close(stdinDone)
-		}()
-	}
+	startStdinCopy(stdinCopyConfig{
+		ptmx:      ptmx,
+		stdin:     hc.Stdin,
+		done:      done,
+		stdinDone: stdinDone,
+		onInput:   onInput,
+		onWrite:   nil,
+		ptyTr:     nil,
+	})
 
 	// Copy PTY to stdout
 	stdoutDone := make(chan error, 1)
