@@ -153,8 +153,8 @@ func FuzzExtractPattern(f *testing.F) {
 	})
 }
 
-// FuzzDeterministicExtractPattern ensures pattern extraction is deterministic.
-func FuzzDeterministicExtractPattern(f *testing.F) {
+// FuzzExtractPatternConsistency ensures pattern extraction is deterministic.
+func FuzzExtractPatternConsistency(f *testing.F) {
 	f.Add("./script.sh", "Permission denied", 126)
 	f.Add("foo", "command not found", 127)
 
