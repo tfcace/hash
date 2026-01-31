@@ -14,48 +14,48 @@ func TestLooksLikeCommand_EdgeCases(t *testing.T) {
 		expected bool
 	}{
 		// Empty and whitespace
-		{"empty string", "", true},                // short, so considered command
-		{"single space", " ", true},               // short
-		{"multiple spaces", "     ", true},        // short
-		{"tab", "\t", true},                       // short
-		{"newline only", "\n", false},             // has newline
-		{"carriage return", "\r", true},           // short, no \n
-		{"mixed whitespace", " \t \t ", true},     // short
+		{"empty string", "", true},            // short, so considered command
+		{"single space", " ", true},           // short
+		{"multiple spaces", "     ", true},    // short
+		{"tab", "\t", true},                   // short
+		{"newline only", "\n", false},         // has newline
+		{"carriage return", "\r", true},       // short, no \n
+		{"mixed whitespace", " \t \t ", true}, // short
 
 		// Very long inputs
-		{"long command-like", strings.Repeat("a", 79), true},   // under 80
-		{"exactly 80 chars", strings.Repeat("a", 80), false},   // at threshold
-		{"over 80 chars", strings.Repeat("a", 100), false},     // over threshold
+		{"long command-like", strings.Repeat("a", 79), true}, // under 80
+		{"exactly 80 chars", strings.Repeat("a", 80), false}, // at threshold
+		{"over 80 chars", strings.Repeat("a", 100), false},   // over threshold
 
 		// Unicode edge cases
-		{"emoji only", "🚀", true},                                // short
-		{"emoji command", "echo 🎉", true},                        // starts with echo
-		{"japanese text", "これはテストです", true},                   // short
-		{"arabic text", "مرحبا", true},                            // short, RTL
+		{"emoji only", "🚀", true},                       // short
+		{"emoji command", "echo 🎉", true},               // starts with echo
+		{"japanese text", "これはテストです", true},             // short
+		{"arabic text", "مرحبا", true},                  // short, RTL
 		{"chinese short", "这是一个很长的解释关于如何使用命令行工具", true}, // 60 bytes, under 80
 
 		// Special characters
-		{"null byte", "\x00", true},              // short
-		{"control chars", "\x01\x02\x03", true},  // short
-		{"backslash", "\\", true},                // short
-		{"quotes", `""`, true},                   // short
-		{"backticks", "``", true},                // short
+		{"null byte", "\x00", true},             // short
+		{"control chars", "\x01\x02\x03", true}, // short
+		{"backslash", "\\", true},               // short
+		{"quotes", `""`, true},                  // short
+		{"backticks", "``", true},               // short
 
 		// Command-like patterns
 		{"path command", "/usr/bin/python", true},
 		{"relative path", "./script.sh", true},
-		{"home path", "~/bin/tool", true},       // short, not explanation
+		{"home path", "~/bin/tool", true}, // short, not explanation
 		{"pipe", "ls | grep foo", true},
 		{"redirect", "echo hello > file", true},
 		{"background", "sleep 10 &", true},
 
 		// Tricky explanations
-		{"starts with I", "I ls", false},                  // starts with "I "
-		{"The at start", "The command is ls", false},     // starts with "The "
-		{"This at start", "This lists files", false},     // starts with "This "
-		{"contains is", "What is the command", false},    // contains " is "
-		{"contains are", "Files are listed", false},      // contains " are "
-		{"contains will", "It will list files", false},   // contains " will "
+		{"starts with I", "I ls", false},               // starts with "I "
+		{"The at start", "The command is ls", false},   // starts with "The "
+		{"This at start", "This lists files", false},   // starts with "This "
+		{"contains is", "What is the command", false},  // contains " is "
+		{"contains are", "Files are listed", false},    // contains " are "
+		{"contains will", "It will list files", false}, // contains " will "
 	}
 
 	for _, tt := range tests {

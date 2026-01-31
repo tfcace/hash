@@ -4,6 +4,7 @@ package editor
 import (
 	"context"
 	"io"
+	"math"
 	"os"
 	"strings"
 	"time"
@@ -11,6 +12,14 @@ import (
 	"github.com/tfcace/hash/internal/trace"
 	"golang.org/x/sys/unix"
 )
+
+// safeUintToInt converts uint to int, capping at math.MaxInt to prevent overflow.
+func safeUintToInt(u uint) int {
+	if u > math.MaxInt {
+		return math.MaxInt
+	}
+	return int(u)
+}
 
 // DefaultMaxPasteSize is the default maximum size of pasted content (10MB).
 // Prevents memory exhaustion from extremely large pastes.
@@ -352,7 +361,8 @@ func (r *InputReader) readPasteContent() (Key, error) {
 	r.pasteBuffer = r.pasteBuffer[:0] // Reset buffer
 
 	// We keep 6 extra bytes beyond maxPasteSize for end marker detection
-	bufferLimit := int(r.maxPasteSize) + 6
+	maxSize := safeUintToInt(r.maxPasteSize)
+	bufferLimit := maxSize + 6
 
 	// Read until we see the paste end sequence \x1b[201~
 	var singleByte [1]byte
@@ -379,8 +389,8 @@ func (r *InputReader) readPasteContent() (Key, error) {
 		if isPasteEnd(r.pasteBuffer) {
 			// Remove the end marker from the content
 			contentLen := len(r.pasteBuffer) - 6
-			if contentLen > int(r.maxPasteSize) {
-				contentLen = int(r.maxPasteSize)
+			if contentLen > maxSize {
+				contentLen = maxSize
 			}
 			content := r.pasteBuffer[:contentLen]
 			return Key{Special: KeyPaste, PasteText: string(content)}, nil

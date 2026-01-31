@@ -201,7 +201,7 @@ func TestErrorHandler_HandleError_ExitZero(t *testing.T) {
 func TestNewErrorHandler(t *testing.T) {
 	h := NewErrorHandler(nil)
 	if h == nil {
-		t.Error("NewErrorHandler returned nil")
+		t.Fatal("NewErrorHandler returned nil")
 	}
 	if h.fixStore != nil {
 		t.Error("NewErrorHandler with nil should have nil fixStore")

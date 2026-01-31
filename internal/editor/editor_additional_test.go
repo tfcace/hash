@@ -275,10 +275,10 @@ func TestUndoStack_RedoTruncation(t *testing.T) {
 // TestGhostText_AcceptWord_EdgeCases tests word acceptance edge cases.
 func TestGhostText_AcceptWord_EdgeCases(t *testing.T) {
 	tests := []struct {
-		name   string
-		text   string
-		calls  int
-		want   []string
+		name  string
+		text  string
+		calls int
+		want  []string
 	}{
 		{"empty", "", 1, []string{""}},
 		{"single word", "hello", 1, []string{"hello"}},

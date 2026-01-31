@@ -97,13 +97,13 @@ func TestTruncate(t *testing.T) {
 		maxLen int
 		want   string
 	}{
-		{"hello", 10, "hello"},       // under limit
-		{"hello", 5, "hello"},        // at limit
+		{"hello", 10, "hello"},         // under limit
+		{"hello", 5, "hello"},          // at limit
 		{"hello world", 8, "hello..."}, // over limit
-		{"hello world", 4, "h..."},   // minimum with ellipsis
-		{"", 10, ""},                 // empty string
-		{"a", 1, "a"},                // single char under limit
-		{"ab", 2, "ab"},              // at limit
+		{"hello world", 4, "h..."},     // minimum with ellipsis
+		{"", 10, ""},                   // empty string
+		{"a", 1, "a"},                  // single char under limit
+		{"ab", 2, "ab"},                // at limit
 	}
 
 	for _, tt := range tests {
@@ -337,8 +337,8 @@ func TestShellFiles_Files_OnlyExisting(t *testing.T) {
 
 	sf := ShellFiles{
 		Shell:       "zsh",
-		EnvFile:     filepath.Join(tmpDir, ".zshenv"),     // doesn't exist
-		ProfileFile: filepath.Join(tmpDir, ".zprofile"),   // doesn't exist
+		EnvFile:     filepath.Join(tmpDir, ".zshenv"),   // doesn't exist
+		ProfileFile: filepath.Join(tmpDir, ".zprofile"), // doesn't exist
 		RCFile:      rcFile,
 	}
 
