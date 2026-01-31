@@ -1212,7 +1212,10 @@ func setupPTYResize(stdinFd int, ptmx *os.File, ptyTr *ptyTrace) func() {
 		}
 	}()
 
-	return func() { signal.Stop(sigCh) }
+	return func() {
+		signal.Stop(sigCh)
+		close(sigCh)
+	}
 }
 
 // runWithPTY runs a command with a pseudo-terminal.

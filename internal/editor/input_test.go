@@ -121,3 +121,34 @@ func TestIsPasteEnd(t *testing.T) {
 		}
 	}
 }
+
+func TestInputReader_ReadKey_BracketedPaste_LargeContent(t *testing.T) {
+	// Test that large paste content is truncated to maxPasteSize
+	// Use a smaller test size to avoid allocating 10MB in tests
+	const testMaxSize uint = 1024
+
+	pasteStart := []byte{0x1b, '[', '2', '0', '0', '~'}
+	largeContent := bytes.Repeat([]byte("x"), int(testMaxSize)+100)
+	pasteEnd := []byte{0x1b, '[', '2', '0', '1', '~'}
+
+	var inputBytes []byte
+	inputBytes = append(inputBytes, pasteStart...)
+	inputBytes = append(inputBytes, largeContent...)
+	inputBytes = append(inputBytes, pasteEnd...)
+
+	input := bytes.NewReader(inputBytes)
+	reader := NewInputReader(input)
+	reader.SetMaxPasteSize(testMaxSize)
+
+	key, err := reader.ReadKey()
+	if err != nil {
+		t.Fatalf("ReadKey() error = %v", err)
+	}
+	if key.Special != KeyPaste {
+		t.Errorf("Special = %v, want KeyPaste", key.Special)
+	}
+	// Content should be truncated to testMaxSize
+	if uint(len(key.PasteText)) > testMaxSize {
+		t.Errorf("PasteText length = %d, want <= %d", len(key.PasteText), testMaxSize)
+	}
+}

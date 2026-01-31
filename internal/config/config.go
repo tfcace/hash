@@ -1,6 +1,8 @@
 package config
 
 import (
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 
@@ -37,8 +39,22 @@ type StartupFilesConfig struct {
 
 // InputConfig configures the input/editing mode.
 type InputConfig struct {
-	Keybindings string `toml:"keybindings"` // "helix", "emacs", "vim"
-	Gutter      bool   `toml:"gutter"`      // Show visual indicator for multiline
+	Keybindings  string `toml:"keybindings"`    // "helix", "emacs", "vim"
+	Gutter       bool   `toml:"gutter"`         // Show visual indicator for multiline
+	MaxPasteSize string `toml:"max_paste_size"` // Maximum paste size (e.g., "10MB")
+}
+
+// ParseMaxPasteSize parses the MaxPasteSize string and returns bytes.
+// Returns default of 10MB if not set or invalid.
+func (c *InputConfig) ParseMaxPasteSize() uint {
+	if c.MaxPasteSize == "" {
+		return 10 * 1024 * 1024 // 10MB default
+	}
+	size, err := ParseSize(c.MaxPasteSize)
+	if err != nil || size < 0 {
+		return 10 * 1024 * 1024 // 10MB default on error
+	}
+	return uint(size)
 }
 
 type PromptConfig struct {
@@ -109,8 +125,9 @@ func Default() *Config {
 			},
 		},
 		Input: InputConfig{
-			Keybindings: "helix",
-			Gutter:      true,
+			Keybindings:  "helix",
+			Gutter:       true,
+			MaxPasteSize: "10MB",
 		},
 		Prompt: PromptConfig{
 			Mode: "starship",
@@ -148,6 +165,7 @@ func Default() *Config {
 
 // Load reads configuration from the given config directory.
 // Falls back to defaults for missing values.
+// On parse errors, returns defaults with error (shell should warn but continue).
 func Load(configDir string) (*Config, error) {
 	cfg := Default()
 
@@ -161,7 +179,8 @@ func Load(configDir string) (*Config, error) {
 	}
 
 	if err := toml.Unmarshal(data, cfg); err != nil {
-		return nil, err
+		// Return defaults but include error so caller can warn user
+		return Default(), fmt.Errorf("config parse error (using defaults): %w", err)
 	}
 
 	// Apply defaults for empty values
@@ -176,4 +195,14 @@ func Load(configDir string) (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// LoadWithWarnings is like Load but writes warnings to the given writer.
+// This is the preferred way to load config as it handles errors gracefully.
+func LoadWithWarnings(configDir string, warn io.Writer) *Config {
+	cfg, err := Load(configDir)
+	if err != nil {
+		fmt.Fprintf(warn, "Warning: %v\n", err)
+	}
+	return cfg
 }

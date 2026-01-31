@@ -274,6 +274,7 @@ func New(cfg *config.Config) (*Shell, error) {
 		ScrollbarColor: colorPalette.Primary,
 		CompleteFunc:   makeEditorCompleteFunc(router),
 		PrefetchFunc:   makeEditorPrefetchFunc(router),
+		MaxPasteSize:   cfg.Input.ParseMaxPasteSize(),
 	}
 
 	shell := &Shell{

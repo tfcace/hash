@@ -33,6 +33,7 @@ type Config struct {
 	Prompt         string                                   // Prompt string to display before input
 	InputBgColor   string                                   // Background color for submitted input (hex)
 	ScrollbarColor string                                   // Foreground color for scrollbars (hex)
+	MaxPasteSize   uint                                     // Maximum paste size in bytes (default 10MB)
 }
 
 // Result is returned when the editor exits.
@@ -102,9 +103,14 @@ func New(cfg Config, in io.Reader, out io.Writer) *Editor {
 		display.SetScrollbarColor(cfg.ScrollbarColor)
 	}
 
+	inputReader := NewInputReader(in)
+	if cfg.MaxPasteSize > 0 {
+		inputReader.SetMaxPasteSize(cfg.MaxPasteSize)
+	}
+
 	return &Editor{
 		config:  cfg,
-		input:   NewInputReader(in),
+		input:   inputReader,
 		display: display,
 		state:   state,
 		mode:    mode,

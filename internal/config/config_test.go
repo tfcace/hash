@@ -1,8 +1,10 @@
 package config
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -151,5 +153,67 @@ func TestConfig_ClipboardMaxOutputSizeParsing(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("ParseMaxOutputSize(%q) = %d, want %d", tt.input, got, tt.want)
 		}
+	}
+}
+
+func TestLoadConfig_ParseError_ReturnsDefaultsWithError(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.toml")
+
+	// Write invalid TOML
+	invalidContent := []byte(`
+[shell
+keybindings = "vim"
+`)
+	if err := os.WriteFile(configPath, invalidContent, 0o644); err != nil { //nolint:gosec // G306: test file
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(tmpDir)
+
+	// Should return an error
+	if err == nil {
+		t.Error("Load() should return error for invalid TOML")
+	}
+
+	// But should also return usable defaults
+	if cfg == nil {
+		t.Fatal("Load() should return defaults even on parse error")
+	}
+
+	// Check that defaults are applied
+	if cfg.Shell.Keybindings != "emacs" {
+		t.Errorf("Keybindings = %q, want default %q", cfg.Shell.Keybindings, "emacs")
+	}
+	if cfg.Prompt.Mode != "starship" {
+		t.Errorf("Prompt.Mode = %q, want default %q", cfg.Prompt.Mode, "starship")
+	}
+}
+
+func TestLoadWithWarnings_WritesWarning(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.toml")
+
+	// Write invalid TOML
+	invalidContent := []byte(`invalid toml [[[`)
+	if err := os.WriteFile(configPath, invalidContent, 0o644); err != nil { //nolint:gosec // G306: test file
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	cfg := LoadWithWarnings(tmpDir, &buf)
+
+	// Should return usable config
+	if cfg == nil {
+		t.Fatal("LoadWithWarnings() should return config")
+	}
+
+	// Should have written a warning
+	warning := buf.String()
+	if warning == "" {
+		t.Error("LoadWithWarnings() should write warning for invalid config")
+	}
+	if !strings.Contains(warning, "Warning") {
+		t.Errorf("Warning should contain 'Warning', got: %q", warning)
 	}
 }

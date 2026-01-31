@@ -156,6 +156,48 @@ interactive = [
 
 ---
 
+## [input]
+
+Input and editing configuration.
+
+### input.keybindings
+
+**Type:** `"helix"` | `"emacs"` | `"vim"`
+**Default:** `"helix"`
+
+The keybinding style for the built-in editor.
+
+```toml
+keybindings = "helix"
+```
+
+### input.gutter
+
+**Type:** `boolean`
+**Default:** `true`
+
+Show a visual gutter indicator for multiline input.
+
+```toml
+gutter = true
+```
+
+### input.max_paste_size
+
+**Type:** `size string`
+**Default:** `"10MB"`
+
+Maximum size of pasted content. Larger pastes are truncated to prevent
+memory exhaustion from extremely large clipboard contents.
+
+```toml
+max_paste_size = "10MB"    # Default
+max_paste_size = "50MB"    # Allow larger pastes
+max_paste_size = "1MB"     # Restrict to 1MB
+```
+
+---
+
 ## [prompt]
 
 Prompt appearance and behavior.

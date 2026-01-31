@@ -132,11 +132,12 @@ func run(mode ShellMode) error {
 	}
 	defer trace.Close()
 
-	// Load configuration
+	// Load configuration (warns but continues on parse errors)
 	configDir := getConfigDir()
 	cfg, err := config.Load(configDir)
 	if err != nil {
-		return fmt.Errorf("config: %w", err)
+		// Parse errors return defaults with error - warn but continue
+		fmt.Fprintf(os.Stderr, "hash: %v\n", err)
 	}
 
 	// Create shell with mode

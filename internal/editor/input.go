@@ -12,22 +12,35 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// DefaultMaxPasteSize is the default maximum size of pasted content (10MB).
+// Prevents memory exhaustion from extremely large pastes.
+const DefaultMaxPasteSize uint = 10 * 1024 * 1024
+
 // InputReader reads keys from a terminal.
 type InputReader struct {
-	in          io.Reader
-	buf         [64]byte // Buffer for escape sequences
-	escTimeout  time.Duration
-	pending     byte // Byte to return on next read (0 = none)
-	hasPending  bool
-	pendingKeys []Key  // Keys to return before reading new input
-	pasteBuffer []byte // Buffer for paste content
+	in           io.Reader
+	buf          [64]byte // Buffer for escape sequences
+	escTimeout   time.Duration
+	pending      byte // Byte to return on next read (0 = none)
+	hasPending   bool
+	pendingKeys  []Key  // Keys to return before reading new input
+	pasteBuffer  []byte // Buffer for paste content
+	maxPasteSize uint   // Maximum paste size in bytes
 }
 
 // NewInputReader creates a new input reader.
 func NewInputReader(in io.Reader) *InputReader {
 	return &InputReader{
-		in:         in,
-		escTimeout: 50 * time.Millisecond,
+		in:           in,
+		escTimeout:   50 * time.Millisecond,
+		maxPasteSize: DefaultMaxPasteSize,
+	}
+}
+
+// SetMaxPasteSize sets the maximum paste size in bytes.
+func (r *InputReader) SetMaxPasteSize(size uint) {
+	if size > 0 {
+		r.maxPasteSize = size
 	}
 }
 
@@ -334,8 +347,12 @@ func (r *InputReader) readEscapeSequence() (Key, error) {
 }
 
 // readPasteContent reads all content until the paste end marker.
+// Content is truncated to maxPasteSize to prevent memory exhaustion.
 func (r *InputReader) readPasteContent() (Key, error) {
 	r.pasteBuffer = r.pasteBuffer[:0] // Reset buffer
+
+	// We keep 6 extra bytes beyond maxPasteSize for end marker detection
+	bufferLimit := int(r.maxPasteSize) + 6
 
 	// Read until we see the paste end sequence \x1b[201~
 	var singleByte [1]byte
@@ -349,12 +366,23 @@ func (r *InputReader) readPasteContent() (Key, error) {
 			continue
 		}
 
-		r.pasteBuffer = append(r.pasteBuffer, singleByte[0])
+		// Append byte, but maintain sliding window when at limit
+		if len(r.pasteBuffer) < bufferLimit {
+			r.pasteBuffer = append(r.pasteBuffer, singleByte[0])
+		} else {
+			// Sliding window: shift left and add new byte
+			copy(r.pasteBuffer, r.pasteBuffer[1:])
+			r.pasteBuffer[bufferLimit-1] = singleByte[0]
+		}
 
 		// Check if we've reached the end marker
 		if isPasteEnd(r.pasteBuffer) {
 			// Remove the end marker from the content
-			content := r.pasteBuffer[:len(r.pasteBuffer)-6]
+			contentLen := len(r.pasteBuffer) - 6
+			if contentLen > int(r.maxPasteSize) {
+				contentLen = int(r.maxPasteSize)
+			}
+			content := r.pasteBuffer[:contentLen]
 			return Key{Special: KeyPaste, PasteText: string(content)}, nil
 		}
 	}

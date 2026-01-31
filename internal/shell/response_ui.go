@@ -6,11 +6,13 @@ import (
 	"io"
 	"os"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/tfcace/hash/internal/agent"
 	"github.com/tfcace/hash/internal/markdown"
 	"github.com/tfcace/hash/internal/progress"
+	"golang.org/x/sys/unix"
 	"golang.org/x/term"
 )
 
@@ -389,30 +391,31 @@ func (u *ResponseUI) WaitForConfirmationByType(ct ConfirmationType) ConfirmActio
 	}
 }
 
-// isStandaloneEscape reads additional bytes with a timeout to determine if
+// isStandaloneEscape checks if more bytes are available within a timeout to determine if
 // ESC was pressed alone or as part of an escape sequence (like arrow keys).
-// SetReadDeadline doesn't work on terminal file descriptors, so we use
-// a channel-based approach with a goroutine.
+// Uses poll-based I/O to avoid goroutine leaks.
 func (u *ResponseUI) isStandaloneEscape(buf []byte) bool {
-	type readResult struct {
-		n   int
-		err error
-	}
+	fd := int(u.in.Fd())
 
-	resultCh := make(chan readResult, 1)
-	go func() {
-		n, err := u.in.Read(buf)
-		resultCh <- readResult{n, err}
-	}()
+	// Use select/poll to check if more data arrives within 50ms
+	var readSet unix.FdSet
+	readSet.Set(fd)
+	tv := unix.NsecToTimeval((50 * time.Millisecond).Nanoseconds())
 
-	select {
-	case result := <-resultCh:
-		// Got more bytes - this is an escape sequence, not standalone ESC
-		return result.n == 0
-	case <-time.After(50 * time.Millisecond):
-		// Timeout - this is a standalone ESC press
-		// Note: the goroutine will still be blocked on Read, but it will
-		// eventually complete when more input arrives or the fd is closed
+	n, err := unix.Select(fd+1, &readSet, nil, nil, &tv)
+	if err != nil || n == 0 {
+		// Timeout or error - standalone ESC
 		return true
 	}
+
+	// Data available - read it to determine if escape sequence
+	if readSet.IsSet(fd) {
+		nRead, err := syscall.Read(fd, buf)
+		if err != nil || nRead == 0 {
+			return true
+		}
+		return false // Got more bytes, this is an escape sequence
+	}
+
+	return true
 }
