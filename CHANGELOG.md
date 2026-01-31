@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.2](https://github.com/tfcace/hash/compare/v0.4.1...v0.4.2) (2026-01-31)
+
+
+### Bug Fixes
+
+* race condition in spinner ([ed5608d](https://github.com/tfcace/hash/commit/ed5608d4529cd73ee83a44035010cd4a2c42d1a6))
+
 ## [0.4.1](https://github.com/tfcace/hash/compare/v0.4.0...v0.4.1) (2026-01-29)
 
 
