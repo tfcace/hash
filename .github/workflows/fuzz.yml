@@ -31,13 +31,13 @@ jobs:
           - package: "./internal/parser"
             fuzz: "FuzzParse"
           - package: "./internal/parser"
-            fuzz: "FuzzParseConsistency"
+            fuzz: "FuzzDeterministicParse"
           - package: "./internal/learning"
             fuzz: "FuzzNormalizeError"
           - package: "./internal/learning"
             fuzz: "FuzzExtractPattern"
           - package: "./internal/learning"
-            fuzz: "FuzzExtractPatternConsistency"
+            fuzz: "FuzzDeterministicExtractPattern"
 
     steps:
       - name: Checkout

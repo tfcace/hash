@@ -130,8 +130,8 @@ func FuzzParse(f *testing.F) {
 	})
 }
 
-// FuzzParseConsistency ensures Parse is deterministic.
-func FuzzParseConsistency(f *testing.F) {
+// FuzzDeterministicParse ensures Parse is deterministic.
+func FuzzDeterministicParse(f *testing.F) {
 	f.Add("ls | ?? filter")
 	f.Add("?? find files")
 	f.Add("cmd --flag=?? value")
