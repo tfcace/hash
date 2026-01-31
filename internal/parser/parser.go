@@ -95,45 +95,51 @@ func Parse(line string) ParseResult {
 	}
 
 	// Pattern 2: pipe to agent (cmd | ?? prompt)
-	if idx := strings.Index(line, "| ??"); idx != -1 {
+	// Only match if there's actually a command before the pipe
+	if idx := strings.Index(line, "| ??"); idx > 0 {
 		cmd := strings.TrimSpace(line[:idx])
-		prompt := strings.TrimSpace(line[idx+4:])
-		result := ParseResult{
-			Type:        CommandTypeAgentPipe,
-			Command:     cmd,
-			AgentPrompt: prompt,
+		if cmd != "" {
+			prompt := strings.TrimSpace(line[idx+4:])
+			result := ParseResult{
+				Type:        CommandTypeAgentPipe,
+				Command:     cmd,
+				AgentPrompt: prompt,
+			}
+			trace.ParserHigh("detect_agent", map[string]any{
+				"pattern":  "pipe_space",
+				"position": idx,
+			})
+			trace.ParserDetailed("parse_result", map[string]any{
+				"type":    result.Type.String(),
+				"command": result.Command,
+				"prompt":  result.AgentPrompt,
+			})
+			return result
 		}
-		trace.ParserHigh("detect_agent", map[string]any{
-			"pattern":  "pipe_space",
-			"position": idx,
-		})
-		trace.ParserDetailed("parse_result", map[string]any{
-			"type":    result.Type.String(),
-			"command": result.Command,
-			"prompt":  result.AgentPrompt,
-		})
-		return result
 	}
 
 	// Also check without space: cmd |?? prompt
-	if idx := strings.Index(line, "|??"); idx != -1 {
+	// Only match if there's actually a command before the pipe
+	if idx := strings.Index(line, "|??"); idx > 0 {
 		cmd := strings.TrimSpace(line[:idx])
-		prompt := strings.TrimSpace(line[idx+3:])
-		result := ParseResult{
-			Type:        CommandTypeAgentPipe,
-			Command:     cmd,
-			AgentPrompt: prompt,
+		if cmd != "" {
+			prompt := strings.TrimSpace(line[idx+3:])
+			result := ParseResult{
+				Type:        CommandTypeAgentPipe,
+				Command:     cmd,
+				AgentPrompt: prompt,
+			}
+			trace.ParserHigh("detect_agent", map[string]any{
+				"pattern":  "pipe_nospace",
+				"position": idx,
+			})
+			trace.ParserDetailed("parse_result", map[string]any{
+				"type":    result.Type.String(),
+				"command": result.Command,
+				"prompt":  result.AgentPrompt,
+			})
+			return result
 		}
-		trace.ParserHigh("detect_agent", map[string]any{
-			"pattern":  "pipe_nospace",
-			"position": idx,
-		})
-		trace.ParserDetailed("parse_result", map[string]any{
-			"type":    result.Type.String(),
-			"command": result.Command,
-			"prompt":  result.AgentPrompt,
-		})
-		return result
 	}
 
 	// Pattern 3: inline agent (cmd ?? prompt) - but not at start

@@ -54,6 +54,11 @@ func FuzzParse(f *testing.F) {
 		"cmd | | cmd",
 		"--??",
 		"??--",
+		"|??",
+		"|??0",
+		"|?? prompt",
+		"| ??",
+		"| ?? prompt",
 
 		// Unicode
 		"?? 找到大文件",

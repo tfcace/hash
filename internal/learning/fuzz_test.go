@@ -115,6 +115,11 @@ func FuzzExtractPattern(f *testing.F) {
 		{"", "", 0},
 		{"ls", "", 0},
 		{"git push", "error: failed to push", 1},
+		// Edge cases: whitespace-only stderr
+		{"cmd", "\n", 1},
+		{"cmd", "\n\n\n", 1},
+		{"cmd", "   ", 1},
+		{"cmd", "\t\n", 1},
 	}
 
 	for _, s := range seeds {
