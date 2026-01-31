@@ -7,6 +7,11 @@ permissions:
   contents: write
   pull-requests: write
 
+# Prevent concurrent release-please runs to avoid duplicate PRs
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   test:
     strategy:
@@ -102,8 +107,10 @@ jobs:
           cd dist
           for dir in hash-${{ matrix.goos }}_*/; do
             name="${dir%/}"
-            # Extract os and arch from directory name (e.g., hash-linux_linux_amd64)
+            # Extract os and arch from directory name (e.g., hash-linux_linux_amd64_v1)
+            # Remove the build id prefix and any arch version suffix (_v1, _v8.0, etc.)
             os_arch="${name#hash-${{ matrix.goos }}_}"
+            os_arch=$(echo "$os_arch" | sed 's/_v[0-9.]*$//')
             archive_name="hash_${{ needs.release-please.outputs.tag_name }}_${os_arch}.tar.gz"
             tar -czvf "$archive_name" -C "$dir" hash
           done
@@ -152,11 +159,11 @@ jobs:
           VERSION="${VERSION#v}"  # Remove 'v' prefix
           TAG="${{ needs.release-please.outputs.tag_name }}"
 
-          # Calculate SHA256 for each archive
-          DARWIN_AMD64_SHA=$(sha256sum dist/hash_*_darwin_amd64.tar.gz | cut -d' ' -f1)
-          DARWIN_ARM64_SHA=$(sha256sum dist/hash_*_darwin_arm64.tar.gz | cut -d' ' -f1)
-          LINUX_AMD64_SHA=$(sha256sum dist/hash_*_linux_amd64.tar.gz | cut -d' ' -f1)
-          LINUX_ARM64_SHA=$(sha256sum dist/hash_*_linux_arm64.tar.gz | cut -d' ' -f1)
+          # Calculate SHA256 for each archive (using explicit names)
+          DARWIN_AMD64_SHA=$(sha256sum "dist/hash_${TAG}_darwin_amd64.tar.gz" | cut -d' ' -f1)
+          DARWIN_ARM64_SHA=$(sha256sum "dist/hash_${TAG}_darwin_arm64.tar.gz" | cut -d' ' -f1)
+          LINUX_AMD64_SHA=$(sha256sum "dist/hash_${TAG}_linux_amd64.tar.gz" | cut -d' ' -f1)
+          LINUX_ARM64_SHA=$(sha256sum "dist/hash_${TAG}_linux_arm64.tar.gz" | cut -d' ' -f1)
 
           # Generate formula
           cat > hash.rb <<EOF
