@@ -88,8 +88,8 @@ func TestIsVisibleColor(t *testing.T) {
 	}{
 		{"black is not visible", "#000000", false},
 		{"very dark is not visible", "#101010", false},
-		{"threshold edge low", "#323200", false},  // sum = 100 < 150
-		{"threshold edge high", "#323232", true},  // sum = 150 = 150
+		{"threshold edge low", "#323200", false}, // sum = 100 < 150
+		{"threshold edge high", "#323232", true}, // sum = 150 = 150
 		{"bright red is visible", "#FF0000", true},
 		{"bright green is visible", "#00FF00", true},
 		{"white is visible", "#FFFFFF", true},
@@ -116,14 +116,14 @@ func TestIsGoodInputBg(t *testing.T) {
 		input string
 		want  bool
 	}{
-		{"too dark", "#000000", false},         // sum = 0
-		{"too dark edge", "#212121", false},    // sum = 99 < 100
-		{"good dark edge", "#222222", true},    // sum = 102 >= 100
-		{"good mid", "#505050", true},          // sum = 240
-		{"good light edge", "#858585", true},   // sum = 399 <= 400
-		{"too bright edge", "#868686", false},  // sum = 402 > 400
-		{"too bright", "#FFFFFF", false},       // sum = 765
-		{"good subtle dark", "#1a1f2c", true},  // sum = 26+31+44 = 101
+		{"too dark", "#000000", false},        // sum = 0
+		{"too dark edge", "#212121", false},   // sum = 99 < 100
+		{"good dark edge", "#222222", true},   // sum = 102 >= 100
+		{"good mid", "#505050", true},         // sum = 240
+		{"good light edge", "#858585", true},  // sum = 399 <= 400
+		{"too bright edge", "#868686", false}, // sum = 402 > 400
+		{"too bright", "#FFFFFF", false},      // sum = 765
+		{"good subtle dark", "#1a1f2c", true}, // sum = 26+31+44 = 101
 		{"invalid format", "#FFF", false},
 		{"invalid no hash", "1a1f2c", false},
 	}
