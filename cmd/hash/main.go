@@ -15,6 +15,7 @@ import (
 	"github.com/tfcace/hash/internal/version"
 )
 
+//nolint:gocyclo // main has flag parsing branches - inherently sequential
 func main() {
 	mode := DetectMode(os.Args)
 	args := os.Args[1:]

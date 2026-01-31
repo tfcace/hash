@@ -18,14 +18,13 @@ func (m *InsertMode) Name() string {
 
 // HandleKey processes a key in insert mode.
 func (m *InsertMode) HandleKey(key Key, state *EditorState) ModeResult {
-	// Handle bracketed paste - insert content with backslash continuations
+	// Handle bracketed paste
 	if key.Special == KeyPaste {
 		m.insertPasteContent(state, key.PasteText)
 		return ModeResult{Action: ActionPaste}
 	}
 
 	// Alt+Enter or Shift+Enter: insert newline with backslash continuation
-	// Some terminals send ESC+Enter for Shift+Enter
 	if key.Special == KeyEnter && (key.Shift || key.Alt) {
 		m.insertNewlineWithContinuation(state)
 		return ModeResult{Action: ActionInsert}
@@ -40,60 +39,13 @@ func (m *InsertMode) HandleKey(key Key, state *EditorState) ModeResult {
 	}
 
 	// Special keys
-	switch key.Special {
-	case KeyEscape:
-		return ModeResult{NewMode: NewNormalMode(), Action: ActionModeChange}
-
-	case KeyEnter:
-		// Enter: submit command
-		return ModeResult{Submit: true}
-
-	case KeyTab:
-		return ModeResult{Complete: true}
-
-	case KeyBackspace:
-		m.deleteBack(state)
-		return ModeResult{Action: ActionDelete}
-
-	case KeyDelete:
-		m.deleteForward(state)
-		return ModeResult{Action: ActionDelete}
-
-	case KeyLeft:
-		m.moveLeft(state)
-		return ModeResult{}
-
-	case KeyRight:
-		m.moveRight(state)
-		return ModeResult{}
-
-	case KeyUp:
-		if state.Cursor.Pos.Row == 0 {
-			return ModeResult{HistoryPrev: true}
-		}
-		m.moveUp(state)
-		return ModeResult{}
-
-	case KeyDown:
-		if state.Cursor.Pos.Row == state.Buffer.LineCount()-1 {
-			return ModeResult{HistoryNext: true}
-		}
-		m.moveDown(state)
-		return ModeResult{}
-
-	case KeyHome:
-		state.Cursor.Pos.Col = 0
-		return ModeResult{}
-
-	case KeyEnd:
-		state.Cursor.Pos.Col = len(state.Buffer.Line(state.Cursor.Pos.Row))
-		return ModeResult{}
+	if result, handled := m.handleSpecialKey(key, state); handled {
+		return result
 	}
 
 	// Printable character
 	if key.Rune != 0 && unicode.IsPrint(key.Rune) {
 		m.insertChar(state, key.Rune)
-		// Trigger prefetch when space is typed (for Cobra completions)
 		if key.Rune == ' ' {
 			return ModeResult{Action: ActionInsert, Prefetch: true}
 		}
@@ -101,6 +53,49 @@ func (m *InsertMode) HandleKey(key Key, state *EditorState) ModeResult {
 	}
 
 	return ModeResult{}
+}
+
+// handleSpecialKey processes special keys (arrows, home, end, etc.).
+func (m *InsertMode) handleSpecialKey(key Key, state *EditorState) (ModeResult, bool) {
+	switch key.Special {
+	case KeyEscape:
+		return ModeResult{NewMode: NewNormalMode(), Action: ActionModeChange}, true
+	case KeyEnter:
+		return ModeResult{Submit: true}, true
+	case KeyTab:
+		return ModeResult{Complete: true}, true
+	case KeyBackspace:
+		m.deleteBack(state)
+		return ModeResult{Action: ActionDelete}, true
+	case KeyDelete:
+		m.deleteForward(state)
+		return ModeResult{Action: ActionDelete}, true
+	case KeyLeft:
+		m.moveLeft(state)
+		return ModeResult{}, true
+	case KeyRight:
+		m.moveRight(state)
+		return ModeResult{}, true
+	case KeyUp:
+		if state.Cursor.Pos.Row == 0 {
+			return ModeResult{HistoryPrev: true}, true
+		}
+		m.moveUp(state)
+		return ModeResult{}, true
+	case KeyDown:
+		if state.Cursor.Pos.Row == state.Buffer.LineCount()-1 {
+			return ModeResult{HistoryNext: true}, true
+		}
+		m.moveDown(state)
+		return ModeResult{}, true
+	case KeyHome:
+		state.Cursor.Pos.Col = 0
+		return ModeResult{}, true
+	case KeyEnd:
+		state.Cursor.Pos.Col = len(state.Buffer.Line(state.Cursor.Pos.Row))
+		return ModeResult{}, true
+	}
+	return ModeResult{}, false
 }
 
 func (m *InsertMode) handleCtrl(key Key, state *EditorState) ModeResult {

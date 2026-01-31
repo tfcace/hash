@@ -214,33 +214,9 @@ func (e *Editor) SetInitialText(text string) {
 // Run starts the editor and blocks until submit or cancel.
 func (e *Editor) Run(ctx context.Context) (Result, error) {
 	// Enable raw mode if we have a terminal
-	if f, ok := e.in.(*os.File); ok && term.IsTerminal(int(f.Fd())) {
-		oldState, err := term.MakeRaw(int(f.Fd()))
-		if err != nil {
-			return Result{}, err
-		}
-		e.oldState = oldState
-
-		// Drain any input typed during the cooked→raw mode transition.
-		// Uses select() to check for available data without blocking.
-		e.input.DrainPending()
-
-		// Enable enhanced keyboard protocol (CSI u mode) for Shift+Enter etc.
-		// This tells modern terminals (Kitty, WezTerm, Ghostty, iTerm2) to send
-		// modifier information with special keys like Enter.
-		e.out.Write([]byte("\x1b[>4;1u"))
-
-		// Enable bracketed paste mode so we can detect pasted content
-		// Terminal sends \x1b[200~ before paste and \x1b[201~ after
-		e.out.Write([]byte("\x1b[?2004h"))
-
-		defer func() {
-			// Disable bracketed paste mode
-			e.out.Write([]byte("\x1b[?2004l"))
-			// Disable enhanced keyboard protocol
-			e.out.Write([]byte("\x1b[<u"))
-			term.Restore(int(f.Fd()), oldState)
-		}()
+	cleanup := e.setupTerminalMode()
+	if cleanup != nil {
+		defer cleanup()
 	}
 
 	// Handle SIGWINCH for terminal resize
@@ -263,24 +239,57 @@ func (e *Editor) Run(ctx context.Context) (Result, error) {
 		e.config.OnInputReady()
 	}
 
-	// Channel for keyboard input (enables non-blocking ghost text handling)
-	// done channel signals the reader goroutine to exit when editor returns.
-	// This prevents orphaned goroutines from consuming stdin after the editor exits.
-	keyCh := make(chan Key, 1)
-	keyErrCh := make(chan error, 1)
-	done := make(chan struct{})
-	defer close(done) // Signal reader goroutine to exit
+	// Start keyboard reader goroutine
+	keyCh, keyErrCh, done := e.startKeyReader()
+	defer close(done)
+
+	return e.runEventLoop(ctx, sigCh, keyCh, keyErrCh)
+}
+
+// setupTerminalMode enables raw mode and enhanced keyboard protocols.
+// Returns a cleanup function, or nil if not a terminal.
+func (e *Editor) setupTerminalMode() func() {
+	f, ok := e.in.(*os.File)
+	if !ok || !term.IsTerminal(int(f.Fd())) {
+		return nil
+	}
+
+	oldState, err := term.MakeRaw(int(f.Fd()))
+	if err != nil {
+		return nil
+	}
+	e.oldState = oldState
+
+	// Drain any input typed during the cooked-to-raw mode transition.
+	e.input.DrainPending()
+
+	// Enable enhanced keyboard protocol (CSI u mode) for Shift+Enter etc.
+	e.out.Write([]byte("\x1b[>4;1u"))
+	// Enable bracketed paste mode
+	e.out.Write([]byte("\x1b[?2004h"))
+
+	return func() {
+		e.out.Write([]byte("\x1b[?2004l")) // Disable bracketed paste
+		e.out.Write([]byte("\x1b[<u"))     // Disable enhanced keyboard
+		term.Restore(int(f.Fd()), oldState)
+	}
+}
+
+// startKeyReader starts a goroutine that reads keys and returns channels.
+func (e *Editor) startKeyReader() (keyCh chan Key, errCh chan error, done chan struct{}) {
+	keyCh = make(chan Key, 1)
+	errCh = make(chan error, 1)
+	done = make(chan struct{})
 
 	go func() {
 		for {
 			key, err := e.input.ReadKeyInterruptible(done)
 			if err != nil {
-				// context.Canceled means done was closed - exit silently
 				if err == context.Canceled {
 					return
 				}
 				select {
-				case keyErrCh <- err:
+				case errCh <- err:
 				case <-done:
 				}
 				return
@@ -293,181 +302,197 @@ func (e *Editor) Run(ctx context.Context) (Result, error) {
 		}
 	}()
 
+	return keyCh, errCh, done
+}
+
+// runEventLoop is the main editor event loop.
+func (e *Editor) runEventLoop(ctx context.Context, sigCh <-chan os.Signal, keyCh <-chan Key, keyErrCh <-chan error) (Result, error) {
 	for {
 		select {
 		case <-ctx.Done():
 			return Result{Canceled: true}, ctx.Err()
 		case <-sigCh:
 			e.handleResize()
-			continue
+		case text, ok := <-e.ghostTextChan:
+			e.handleGhostTextUpdate(text, ok)
+		case err, ok := <-e.ghostErrChan:
+			e.handleGhostTextError(err, ok)
 		case err := <-keyErrCh:
 			if err == io.EOF {
 				return Result{Text: e.state.Buffer.Content(), Canceled: true}, nil
 			}
 			return Result{}, err
-		case text, ok := <-e.ghostTextChan:
-			// Ghost text streaming update
-			if !ok {
-				// Channel closed, streaming complete
-				e.ghost.SetStreaming(false)
-				e.ghostTextChan = nil
-				e.ghostErrChan = nil // Both channels close together
-				e.render()
-				continue
-			}
-			e.ghost.Append(text)
-			// Dismiss completion menu when ghost text arrives - they shouldn't coexist
-			if e.completionActive {
-				e.dismissCompletion()
-			}
-			e.render()
-			continue
-		case err, ok := <-e.ghostErrChan:
-			// Ghost text error (or channel closed)
-			if !ok {
-				e.ghostErrChan = nil
-				continue
-			}
-			if err != nil {
-				e.ghost.Clear()
-				e.ghostTextChan = nil
-				e.ghostErrChan = nil
-				e.render() // Update display so user sees normal prompt
-			}
-			continue
 		case key := <-keyCh:
-			trace.EditorDetailed("key_dispatch", map[string]any{
-				"key":               keyString(key),
-				"ghost_active":      e.ghost.Active && !e.ghost.IsEmpty(),
-				"ghost_streaming":   e.ghost.Streaming,
-				"completion_active": e.completionActive,
-				"mode":              e.mode.Name(),
-			})
-
-			// Handle Ctrl+C
-			if key.Ctrl && key.Rune == 'c' {
-				e.dismissCompletion()
-				// If ghost text is streaming, cancel and return immediately
-				if e.ghost.Streaming || e.ghostTextChan != nil {
-					e.ghost.Clear()
-					e.ghostTextChan = nil
-					e.ghostErrChan = nil
-					return Result{Canceled: true}, nil
-				}
-				e.ghost.Clear()
-				if e.state.Buffer.Content() == "" {
-					return Result{Canceled: true}, nil
-				}
-				// Clear buffer
-				e.state.Buffer = NewBuffer()
-				e.state.Cursor = NewCursor()
-				e.render()
-				continue
+			if result, done := e.handleKeyEvent(key); done {
+				return result, nil
 			}
-
-			// Handle Ctrl+D - exit shell (EOF)
-			if key.Ctrl && key.Rune == 'd' {
-				if e.state.Buffer.Content() == "" {
-					return Result{EOF: true}, nil
-				}
-				continue
-			}
-
-			// If ghost text is active (streaming or has content), intercept keys
-			if e.ghost.Active && (!e.ghost.IsEmpty() || e.ghost.Streaming) {
-				if e.handleGhostTextKey(key) {
-					e.render()
-					continue
-				}
-				// Key not handled by ghost text, clear it and continue to normal processing
-				e.ghost.Clear()
-				// Also dismiss completion - ghost text and completion shouldn't coexist
-				e.dismissCompletion()
-			}
-
-			// If completion menu is active, intercept keys
-			if e.completionActive {
-				if e.handleCompletionKey(key) {
-					e.render()
-					continue
-				}
-				// Key not handled by completion, continue to normal processing
-			}
-
-			// Delegate to mode
-			result := e.mode.HandleKey(key, e.state)
-
-			// Handle mode switch
-			if result.NewMode != nil {
-				e.mode = result.NewMode
-			}
-
-			// Handle action for undo grouping
-			e.handleAction(result.Action)
-
-			// Handle submit
-			if result.Submit {
-				e.display.Finalize(e.state.Buffer)
-				return Result{Text: e.state.Buffer.Content()}, nil
-			}
-
-			// Handle history search (Ctrl+R) - return to shell to launch picker
-			if result.HistorySearch {
-				e.display.Clear()
-				return Result{Text: e.state.Buffer.Content(), HistorySearch: true}, nil
-			}
-
-			// Handle context picker (Ctrl+P) - return to shell to launch picker
-			if result.ContextPicker {
-				e.display.Clear()
-				return Result{Text: e.state.Buffer.Content(), ContextPicker: true}, nil
-			}
-
-			// Handle history navigation
-			if result.HistoryPrev && e.config.HistoryFunc != nil {
-				currentLine := e.state.Buffer.Content()
-				if entry := e.config.HistoryFunc(-1, currentLine); entry != "" {
-					e.state.Buffer = NewBufferFromString(entry)
-					e.state.Cursor.MoveTo(0, len(e.state.Buffer.Line(0)))
-				}
-			}
-			if result.HistoryNext && e.config.HistoryFunc != nil {
-				currentLine := e.state.Buffer.Content()
-				if entry := e.config.HistoryFunc(1, currentLine); entry != "" {
-					e.state.Buffer = NewBufferFromString(entry)
-					e.state.Cursor.MoveTo(0, len(e.state.Buffer.Line(0)))
-				}
-			}
-
-			// Handle completion (but not while ghost text is streaming)
-			if result.Complete && !e.ghost.Streaming {
-				e.triggerCompletion()
-			}
-
-			// Handle background prefetch (for Cobra completions on space)
-			if result.Prefetch {
-				e.triggerPrefetch()
-			}
-
-			// Handle clipboard operations
-			if result.Yank {
-				e.yank()
-			}
-			if result.Paste {
-				e.handleAction(ActionPaste)
-				e.paste(false)
-			}
-			if result.PasteBefore {
-				e.handleAction(ActionPaste)
-				e.paste(true)
-			}
-
-			// Clamp cursor
-			e.state.Cursor.Clamp(e.state.Buffer)
-
-			// Render
-			e.render()
 		}
+	}
+}
+
+// handleGhostTextUpdate processes ghost text streaming updates.
+func (e *Editor) handleGhostTextUpdate(text string, ok bool) {
+	if !ok {
+		e.ghost.SetStreaming(false)
+		e.ghostTextChan = nil
+		e.ghostErrChan = nil
+		e.render()
+		return
+	}
+	e.ghost.Append(text)
+	if e.completionActive {
+		e.dismissCompletion()
+	}
+	e.render()
+}
+
+// handleGhostTextError processes ghost text errors.
+func (e *Editor) handleGhostTextError(err error, ok bool) {
+	if !ok {
+		e.ghostErrChan = nil
+		return
+	}
+	if err != nil {
+		e.ghost.Clear()
+		e.ghostTextChan = nil
+		e.ghostErrChan = nil
+		e.render()
+	}
+}
+
+// handleKeyEvent processes a key event. Returns (result, true) if the editor should exit.
+func (e *Editor) handleKeyEvent(key Key) (Result, bool) {
+	trace.EditorDetailed("key_dispatch", map[string]any{
+		"key":               keyString(key),
+		"ghost_active":      e.ghost.Active && !e.ghost.IsEmpty(),
+		"ghost_streaming":   e.ghost.Streaming,
+		"completion_active": e.completionActive,
+		"mode":              e.mode.Name(),
+	})
+
+	// Handle Ctrl+C
+	if key.Ctrl && key.Rune == 'c' {
+		return e.handleCtrlC()
+	}
+
+	// Handle Ctrl+D - exit shell (EOF)
+	if key.Ctrl && key.Rune == 'd' {
+		if e.state.Buffer.Content() == "" {
+			return Result{EOF: true}, true
+		}
+		return Result{}, false
+	}
+
+	// Handle ghost text interception
+	if e.ghost.Active && (!e.ghost.IsEmpty() || e.ghost.Streaming) {
+		if e.handleGhostTextKey(key) {
+			e.render()
+			return Result{}, false
+		}
+		e.ghost.Clear()
+		e.dismissCompletion()
+	}
+
+	// Handle completion menu interception
+	if e.completionActive && e.handleCompletionKey(key) {
+		e.render()
+		return Result{}, false
+	}
+
+	// Delegate to mode and process result
+	modeResult := e.mode.HandleKey(key, e.state)
+	if result, done := e.processModeResult(modeResult); done {
+		return result, true
+	}
+
+	e.state.Cursor.Clamp(e.state.Buffer)
+	e.render()
+	return Result{}, false
+}
+
+// handleCtrlC handles Ctrl+C key press.
+func (e *Editor) handleCtrlC() (Result, bool) {
+	e.dismissCompletion()
+	if e.ghost.Streaming || e.ghostTextChan != nil {
+		e.ghost.Clear()
+		e.ghostTextChan = nil
+		e.ghostErrChan = nil
+		return Result{Canceled: true}, true
+	}
+	e.ghost.Clear()
+	if e.state.Buffer.Content() == "" {
+		return Result{Canceled: true}, true
+	}
+	e.state.Buffer = NewBuffer()
+	e.state.Cursor = NewCursor()
+	e.render()
+	return Result{}, false
+}
+
+// processModeResult handles the result from mode.HandleKey.
+// Returns (result, true) if the editor should exit.
+func (e *Editor) processModeResult(result ModeResult) (Result, bool) {
+	if result.NewMode != nil {
+		e.mode = result.NewMode
+	}
+	e.handleAction(result.Action)
+
+	if result.Submit {
+		e.display.Finalize(e.state.Buffer)
+		return Result{Text: e.state.Buffer.Content()}, true
+	}
+	if result.HistorySearch {
+		e.display.Clear()
+		return Result{Text: e.state.Buffer.Content(), HistorySearch: true}, true
+	}
+	if result.ContextPicker {
+		e.display.Clear()
+		return Result{Text: e.state.Buffer.Content(), ContextPicker: true}, true
+	}
+
+	e.handleHistoryNavigation(result)
+	e.handleCompletionAndClipboard(result)
+
+	return Result{}, false
+}
+
+// handleHistoryNavigation processes history prev/next from mode result.
+func (e *Editor) handleHistoryNavigation(result ModeResult) {
+	if e.config.HistoryFunc == nil {
+		return
+	}
+	if result.HistoryPrev {
+		if entry := e.config.HistoryFunc(-1, e.state.Buffer.Content()); entry != "" {
+			e.state.Buffer = NewBufferFromString(entry)
+			e.state.Cursor.MoveTo(0, len(e.state.Buffer.Line(0)))
+		}
+	}
+	if result.HistoryNext {
+		if entry := e.config.HistoryFunc(1, e.state.Buffer.Content()); entry != "" {
+			e.state.Buffer = NewBufferFromString(entry)
+			e.state.Cursor.MoveTo(0, len(e.state.Buffer.Line(0)))
+		}
+	}
+}
+
+// handleCompletionAndClipboard processes completion and clipboard operations.
+func (e *Editor) handleCompletionAndClipboard(result ModeResult) {
+	if result.Complete && !e.ghost.Streaming {
+		e.triggerCompletion()
+	}
+	if result.Prefetch {
+		e.triggerPrefetch()
+	}
+	if result.Yank {
+		e.yank()
+	}
+	if result.Paste {
+		e.handleAction(ActionPaste)
+		e.paste(false)
+	}
+	if result.PasteBefore {
+		e.handleAction(ActionPaste)
+		e.paste(true)
 	}
 }
 

@@ -937,6 +937,8 @@ func (e *Executor) trackFunctionsFromAST(prog *syntax.File) {
 }
 
 // Execute runs a command using the mvdan/sh interpreter.
+//
+//nolint:gocyclo // command execution coordinates parsing, capture, and runner lifecycle
 func (e *Executor) Execute(ctx context.Context, command string, stdout, stderr io.Writer) (*Result, error) {
 	e.runnerMu.Lock()
 	defer e.runnerMu.Unlock()
@@ -1053,6 +1055,42 @@ func (e *Executor) Execute(ctx context.Context, command string, stdout, stderr i
 	}, nil
 }
 
+// pipelineContext holds the results of pipeline/terminal detection for command execution.
+type pipelineContext struct {
+	stdinIsTerm    bool // Real stdin (os.Stdin) is a terminal
+	hcStdinIsTerm  bool // Handler's stdin is a terminal (not piped)
+	hcStdoutIsPipe bool // Handler's stdout is a pipe (upstream in pipeline)
+}
+
+// detectPipelineContext analyzes the handler context to determine terminal/pipeline state.
+func detectPipelineContext(hc interp.HandlerContext) pipelineContext {
+	pc := pipelineContext{
+		stdinIsTerm: term.IsTerminal(int(os.Stdin.Fd())),
+	}
+
+	// Check if hc.Stdin is a terminal (detects downstream pipe position)
+	if f, ok := hc.Stdin.(*os.File); ok {
+		pc.hcStdinIsTerm = term.IsTerminal(int(f.Fd()))
+	}
+
+	// Check if hc.Stdout is a pipe (detects upstream pipe position)
+	// When in a pipeline like `cmd1 | cmd2`, mvdan/sh sets hc.Stdout
+	// to a pipe *os.File for cmd1. We need to know this to disable
+	// ONLCR on the PTY to prevent LF→CRLF translation.
+	if f, ok := hc.Stdout.(*os.File); ok {
+		if fi, err := f.Stat(); err == nil {
+			pc.hcStdoutIsPipe = fi.Mode()&os.ModeNamedPipe != 0
+		}
+	}
+
+	return pc
+}
+
+// needsPTY returns true if the command should run with a PTY.
+func (pc pipelineContext) needsPTY() bool {
+	return pc.stdinIsTerm && pc.hcStdinIsTerm
+}
+
 // execHandler spawns external commands with PTY when needed.
 func (e *Executor) execHandler(next interp.ExecHandlerFunc) interp.ExecHandlerFunc {
 	return func(ctx context.Context, args []string) error {
@@ -1068,45 +1106,17 @@ func (e *Executor) execHandler(next interp.ExecHandlerFunc) interp.ExecHandlerFu
 		cmd.Env = environToSlice(hc.Env)
 		cmd.Env = append(cmd.Env, "HASH_SHELL=1", "SHELL="+e.shellPath)
 
-		// Use PTY if running interactively in a terminal and not in a pipeline.
-		// Check real terminal (os.Stdin/os.Stdout) and hc.Stdin to detect pipeline.
-		// Note: hc.Stdout is always switchableWriter (not *os.File), so we can't
-		// check it directly. Instead, we check hc.Stdin to detect if we're
-		// downstream in a pipeline (e.g., `cat | this_cmd`).
-		// Use PTY if stdin is a terminal and not in a pipeline.
-		// Note: We only check stdin because stdout may be captured/redirected
-		// by the parent process (e.g., Claude Code) while still being interactive.
-		stdinFd := int(os.Stdin.Fd())
-		stdinIsTerm := term.IsTerminal(stdinFd)
+		pc := detectPipelineContext(hc)
 
-		// Check if hc.Stdin is a terminal (detects downstream pipe position)
-		hcStdinTerminal := false
-		if f, ok := hc.Stdin.(*os.File); ok {
-			hcStdinTerminal = term.IsTerminal(int(f.Fd()))
-		}
-
-		// Check if hc.Stdout is a pipe (detects upstream pipe position)
-		// When in a pipeline like `cmd1 | cmd2`, mvdan/sh sets hc.Stdout
-		// to a pipe *os.File for cmd1. We need to know this to disable
-		// ONLCR on the PTY to prevent LF→CRLF translation.
-		hcStdoutIsPipe := false
-		if f, ok := hc.Stdout.(*os.File); ok {
-			if fi, err := f.Stat(); err == nil {
-				hcStdoutIsPipe = fi.Mode()&os.ModeNamedPipe != 0
-			}
-		}
-
-		if stdinIsTerm && hcStdinTerminal {
+		if pc.needsPTY() {
 			// PTY mode: skip OSC 133;C to avoid interference with TUI apps
 			// that send their own terminal queries on startup
-			return e.runWithPTY(ctx, cmd, hc, hcStdoutIsPipe)
+			return e.runWithPTY(ctx, cmd, hc, pc.hcStdoutIsPipe)
 		}
 
 		// Non-PTY: emit OSC 133;C only if running interactively.
 		// This marks the boundary between user input and command output.
-		// Skip when running in non-interactive contexts where the sequence
-		// could interfere with programs that check terminal state.
-		if stdinIsTerm {
+		if pc.stdinIsTerm {
 			os.Stdout.WriteString("\x1b]133;C\x07")
 		}
 
@@ -1119,9 +1129,97 @@ func (e *Executor) execHandler(next interp.ExecHandlerFunc) interp.ExecHandlerFu
 	}
 }
 
+// stdinCopyConfig holds configuration for stdin-to-PTY copying.
+type stdinCopyConfig struct {
+	ptmx      *os.File
+	stdin     io.Reader
+	done      <-chan struct{}
+	stdinDone chan<- struct{}
+	onInput   func([]byte)
+	onWrite   func(int)
+	ptyTr     *ptyTrace
+}
+
+// startStdinCopy starts the appropriate stdin copy goroutine based on stdin type.
+// Returns true if the copy is cancelable (supports deadline or poll).
+func startStdinCopy(cfg stdinCopyConfig) bool {
+	if dr, ok := supportsReadDeadline(cfg.stdin); ok {
+		go func() {
+			err := copyWithDeadline(cfg.ptmx, cfg.stdin, dr, cfg.done, cfg.onInput, cfg.onWrite)
+			if cfg.ptyTr != nil {
+				cfg.ptyTr.logf("stdin->pty copy (deadline) stopped: %s", describeCopyEnd(err))
+			}
+			close(cfg.stdinDone)
+		}()
+		return true
+	}
+	if f, ok := cfg.stdin.(*os.File); ok {
+		go func() {
+			err := copyWithPoll(cfg.ptmx, f, cfg.done, cfg.onInput, cfg.onWrite)
+			if cfg.ptyTr != nil {
+				cfg.ptyTr.logf("stdin->pty copy (poll) stopped: %s", describeCopyEnd(err))
+			}
+			close(cfg.stdinDone)
+		}()
+		return true
+	}
+	go func() {
+		err := copyWithOnInput(cfg.ptmx, cfg.stdin, cfg.onInput, cfg.onWrite)
+		if cfg.ptyTr != nil {
+			cfg.ptyTr.logf("stdin->pty copy stopped: %s", describeCopyEnd(err))
+		}
+		close(cfg.stdinDone)
+	}()
+	return false
+}
+
+// setupTerminalRawMode puts the terminal in raw mode and returns a cleanup function.
+// Returns nil cleanup if the terminal is not available or setup fails.
+func setupTerminalRawMode(stdinFd int, ptyTr *ptyTrace) func() {
+	if ptyTr != nil {
+		ptyTr.logf("terminal stdin fd=%d is_tty=%t", stdinFd, term.IsTerminal(stdinFd))
+	}
+	if !term.IsTerminal(stdinFd) {
+		return nil
+	}
+	oldState, err := term.MakeRaw(stdinFd)
+	if err != nil {
+		return nil
+	}
+	return func() { term.Restore(stdinFd, oldState) }
+}
+
+// setupPTYResize configures PTY size handling and returns a cleanup function.
+// It sets the initial PTY size and starts a goroutine to handle SIGWINCH.
+func setupPTYResize(stdinFd int, ptmx *os.File, ptyTr *ptyTrace) func() {
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGWINCH)
+
+	// Set initial PTY size
+	if w, h, err := term.GetSize(stdinFd); err == nil {
+		pty.Setsize(ptmx, &pty.Winsize{Rows: uint16(h), Cols: uint16(w)}) //nolint:gosec // G115: terminal sizes are always positive and small
+		if ptyTr != nil {
+			ptyTr.logf("pty size set rows=%d cols=%d", h, w)
+		}
+	}
+
+	// Handle resize signals
+	go func() {
+		for range sigCh {
+			if w, h, err := term.GetSize(stdinFd); err == nil {
+				pty.Setsize(ptmx, &pty.Winsize{Rows: uint16(h), Cols: uint16(w)}) //nolint:gosec // G115: terminal sizes are always positive and small
+			}
+		}
+	}()
+
+	return func() { signal.Stop(sigCh) }
+}
+
 // runWithPTY runs a command with a pseudo-terminal.
 // If stdoutIsPipe is true, ONLCR is disabled on the PTY to prevent LF→CRLF
 // translation which would corrupt piped data (e.g., `curl ... | bash`).
+//
+//nolint:gocyclo // PTY coordination requires managing multiple concurrent I/O streams
 func (e *Executor) runWithPTY(ctx context.Context, cmd *exec.Cmd, hc interp.HandlerContext, stdoutIsPipe bool) error {
 	// When stdout is a pipe, we need to disable ONLCR on the PTY slave.
 	// Use pty.Open() to get access to both master and slave for configuration.
@@ -1146,41 +1244,14 @@ func (e *Executor) runWithPTY(ctx context.Context, cmd *exec.Cmd, hc interp.Hand
 	// Signal PTY is active to disable progress indicator
 	e.ptyActive.Store(true)
 
-	// Put the real terminal in raw mode so keystrokes are passed through
-	// character-by-character to the PTY, rather than being line-buffered.
-	// This is required for interactive programs like vim, helix, claude, etc.
+	// Put the real terminal in raw mode
 	stdinFd := int(os.Stdin.Fd())
-	if ptyTr != nil {
-		ptyTr.logf("terminal stdin fd=%d is_tty=%t", stdinFd, term.IsTerminal(stdinFd))
-	}
-	if term.IsTerminal(stdinFd) {
-		oldState, err := term.MakeRaw(stdinFd)
-		if err == nil {
-			defer term.Restore(stdinFd, oldState)
-		}
+	if cleanup := setupTerminalRawMode(stdinFd, ptyTr); cleanup != nil {
+		defer cleanup()
 	}
 
 	// Handle terminal resize - propagate SIGWINCH to PTY
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGWINCH)
-	defer signal.Stop(sigCh)
-
-	// Set initial PTY size
-	if w, h, err := term.GetSize(stdinFd); err == nil {
-		pty.Setsize(ptmx, &pty.Winsize{Rows: uint16(h), Cols: uint16(w)}) //nolint:gosec // G115: terminal sizes are always positive and small
-		if ptyTr != nil {
-			ptyTr.logf("pty size set rows=%d cols=%d", h, w)
-		}
-	}
-
-	// Handle resize signals
-	go func() {
-		for range sigCh {
-			if w, h, err := term.GetSize(stdinFd); err == nil {
-				pty.Setsize(ptmx, &pty.Winsize{Rows: uint16(h), Cols: uint16(w)}) //nolint:gosec // G115: terminal sizes are always positive and small
-			}
-		}
-	}()
+	defer setupPTYResize(stdinFd, ptmx, ptyTr)()
 
 	// Drain any pending terminal responses before starting stdin copy.
 	// Libraries like bubbletea/colorprofile query terminal capabilities (DECRQSS, etc.)
@@ -1220,33 +1291,15 @@ func (e *Executor) runWithPTY(ctx context.Context, cmd *exec.Cmd, hc interp.Hand
 			ptyTr.markInWrite(n)
 		}
 	}
-	if dr, ok := supportsReadDeadline(hc.Stdin); ok {
-		cancelable = true
-		go func() {
-			err := copyWithDeadline(ptmx, hc.Stdin, dr, done, onInput, onStdinWrite)
-			if ptyTr != nil {
-				ptyTr.logf("stdin->pty copy (deadline) stopped: %s", describeCopyEnd(err))
-			}
-			close(stdinDone)
-		}()
-	} else if f, ok := hc.Stdin.(*os.File); ok {
-		cancelable = true
-		go func() {
-			err := copyWithPoll(ptmx, f, done, onInput, onStdinWrite)
-			if ptyTr != nil {
-				ptyTr.logf("stdin->pty copy (poll) stopped: %s", describeCopyEnd(err))
-			}
-			close(stdinDone)
-		}()
-	} else {
-		go func() {
-			err := copyWithOnInput(ptmx, hc.Stdin, onInput, onStdinWrite)
-			if ptyTr != nil {
-				ptyTr.logf("stdin->pty copy stopped: %s", describeCopyEnd(err))
-			}
-			close(stdinDone)
-		}()
-	}
+	cancelable = startStdinCopy(stdinCopyConfig{
+		ptmx:      ptmx,
+		stdin:     hc.Stdin,
+		done:      done,
+		stdinDone: stdinDone,
+		onInput:   onInput,
+		onWrite:   onStdinWrite,
+		ptyTr:     ptyTr,
+	})
 
 	stdoutDone := make(chan error, 1)
 	go func() {
@@ -1332,6 +1385,8 @@ func (e *Executor) runWithPTY(ctx context.Context, cmd *exec.Cmd, hc interp.Hand
 
 // runWithPTYRaw runs a command with a PTY that has ONLCR disabled.
 // This is used when stdout is a pipe to prevent LF→CRLF translation.
+//
+//nolint:gocyclo // PTY raw mode coordination requires managing multiple concurrent I/O streams
 func (e *Executor) runWithPTYRaw(ctx context.Context, cmd *exec.Cmd, hc interp.HandlerContext) error {
 	// Use pty.Open() to get access to both master and slave
 	ptmx, pts, err := pty.Open()
@@ -1377,29 +1432,12 @@ func (e *Executor) runWithPTYRaw(ctx context.Context, cmd *exec.Cmd, hc interp.H
 
 	// Put the real terminal in raw mode
 	stdinFd := int(os.Stdin.Fd())
-	if term.IsTerminal(stdinFd) {
-		oldState, err := term.MakeRaw(stdinFd)
-		if err == nil {
-			defer term.Restore(stdinFd, oldState)
-		}
+	if cleanup := setupTerminalRawMode(stdinFd, nil); cleanup != nil {
+		defer cleanup()
 	}
 
 	// Handle terminal resize
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGWINCH)
-	defer signal.Stop(sigCh)
-
-	if w, h, err := term.GetSize(stdinFd); err == nil {
-		pty.Setsize(ptmx, &pty.Winsize{Rows: uint16(h), Cols: uint16(w)}) //nolint:gosec // G115: terminal sizes are always positive and small
-	}
-
-	go func() {
-		for range sigCh {
-			if w, h, err := term.GetSize(stdinFd); err == nil {
-				pty.Setsize(ptmx, &pty.Winsize{Rows: uint16(h), Cols: uint16(w)}) //nolint:gosec // G115: terminal sizes are always positive and small
-			}
-		}
-	}()
+	defer setupPTYResize(stdinFd, ptmx, nil)()
 
 	drainTerminalResponses(stdinFd, nil)
 
@@ -1420,17 +1458,15 @@ func (e *Executor) runWithPTYRaw(ctx context.Context, cmd *exec.Cmd, hc interp.H
 		}
 	}
 
-	if f, ok := hc.Stdin.(*os.File); ok {
-		go func() {
-			copyWithPoll(ptmx, f, done, onInput, nil) //nolint:errcheck // stdin copy errors handled via channel
-			close(stdinDone)
-		}()
-	} else {
-		go func() {
-			copyWithOnInput(ptmx, hc.Stdin, onInput, nil) //nolint:errcheck // stdin copy errors handled via channel
-			close(stdinDone)
-		}()
-	}
+	startStdinCopy(stdinCopyConfig{
+		ptmx:      ptmx,
+		stdin:     hc.Stdin,
+		done:      done,
+		stdinDone: stdinDone,
+		onInput:   onInput,
+		onWrite:   nil,
+		ptyTr:     nil,
+	})
 
 	// Copy PTY to stdout
 	stdoutDone := make(chan error, 1)

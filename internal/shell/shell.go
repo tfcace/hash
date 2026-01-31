@@ -71,6 +71,8 @@ type Shell struct {
 }
 
 // New creates a new Shell instance.
+//
+//nolint:gocyclo // shell initialization wires up many subsystems sequentially
 func New(cfg *config.Config) (*Shell, error) {
 	e := executor.New()
 
@@ -349,9 +351,7 @@ func (s *Shell) Run(ctx context.Context) error {
 		"mode": "editor",
 	})
 
-	// Track whether we need to emit CommandFinished at start of loop
 	firstPrompt := true
-
 	for {
 		select {
 		case <-ctx.Done():
@@ -359,161 +359,193 @@ func (s *Shell) Run(ctx context.Context) error {
 		default:
 		}
 
-		// Shell integration: emit sequences before prompt
-		if s.osc != nil {
-			// Emit CommandFinished for previous command (skip on very first prompt)
-			if !firstPrompt {
-				s.osc.CommandFinished(s.lastExitCode)
-			}
-			firstPrompt = false
-			s.osc.PromptStart()
-			if cwd, err := os.Getwd(); err == nil {
-				s.osc.ReportDirectory(cwd)
-			}
-		}
+		s.emitShellIntegration(&firstPrompt)
 
 		line, err := s.readLineWithEditor(ctx)
-
 		trace.ShellDetailed("input_ready", map[string]any{
 			"line":  line,
 			"error": errStr(err),
 		})
 
-		if err != nil {
-			if readline.IsInterrupt(err) || errors.Is(err, ErrEditorCanceled) {
-				fmt.Println("^C")
-				continue
-			}
-			if readline.IsEOF(err) || errors.Is(err, ErrEditorEOF) {
-				fmt.Println("exit")
-				return nil
-			}
-			return err
+		if done, exitErr := s.handleInputError(err); done {
+			return exitErr
 		}
 
 		line = trimSpace(line)
-
-		// Handle !! shortcut for quick issue submission
-		if line == "!!" {
-			if s.lastExitCode == 0 {
-				fmt.Print("Last command succeeded. Open issue anyway? [y/N] ")
-				var response string
-				fmt.Scanln(&response)
-				if !strings.EqualFold(response, "y") {
-					s.updatePrompt()
-					continue
-				}
-			}
-			_ = s.builtinIssue([]string{"--last"})
-			s.updatePrompt()
+		if s.handleSpecialInput(line) {
 			continue
 		}
 
-		if line == "" {
-			s.updatePrompt()
-			continue
-		}
-
-		// Parse the line
-		parsed := parser.Parse(line)
-
-		trace.ShellHigh("dispatch", map[string]any{
-			"type":    parsed.Type.String(),
-			"command": parsed.Command,
-			"prompt":  parsed.AgentPrompt,
-		})
-
-		switch parsed.Type {
-		case parser.CommandTypeEmpty:
-			s.updatePrompt()
-			continue
-
-		case parser.CommandTypeAgent, parser.CommandTypeAgentPipe, parser.CommandTypeAgentInline:
-			s.handleAgentRequest(ctx, parsed)
-			continue
-
-		case parser.CommandTypeRegular:
-			// Check for builtins first
-			handled, err := s.executeBuiltin(ctx, line)
-			if err == errExit {
-				return nil
-			}
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "hash: %v\n", err)
-				s.lastExitCode = 1
-				s.updatePrompt()
-				continue
-			}
-			if handled {
-				s.lastExitCode = 0
-				s.updatePrompt()
-				continue
-			}
-
-			// Record command to clipboard buffer before execution
-			if s.clipboard != nil {
-				s.clipboard.AddCommand(line)
-			}
-
-			// Note: OSC 133;C (CommandExecuted) is now emitted by the executor
-			// only for non-PTY commands. This avoids interference with TUI apps
-			// (vim, helix, etc.) that send their own terminal queries on startup.
-
-			// Capture stderr for issue reporting
-			stderrCap := newStderrCapture(os.Stderr)
-
-			// Execute external command
-			result, err := s.executor.Execute(ctx, line, os.Stdout, stderrCap)
-			if err != nil {
-				// Check for command-not-found specifically
-				var cnf *executor.CommandNotFoundError
-				if errors.As(err, &cnf) {
-					suggestions := s.suggestor.Suggest(cnf.Command)
-					// Check typed command first, then suggestions for install hints
-					installHint := s.suggestor.InstallHint(cnf.Command)
-					if installHint == "" {
-						for _, sug := range suggestions {
-							if hint := s.suggestor.InstallHint(sug); hint != "" {
-								installHint = hint
-								break
-							}
-						}
-					}
-					handler := NewErrorHandler(s.learning)
-					handler.HandleCommandNotFound(cnf.Command, suggestions, installHint)
-					s.lastExitCode = 127 // Standard "command not found" exit code
-				} else {
-					fmt.Fprintf(os.Stderr, "hash: %v\n", err)
-					s.lastExitCode = 1
-				}
-			} else {
-				s.lastExitCode = result.ExitCode
-				s.lastDuration = result.Duration
-				// Record captured output to clipboard buffer
-				if s.clipboard != nil && result.CapturedOutput != "" {
-					s.clipboard.SetOutput(result.CapturedOutput)
-				}
-			}
-
-			// Store the previous command for prediction before updating
-			prevCommand := s.lastCommand
-
-			// Store for issue reporting
-			s.lastCommand = line
-			s.lastStderr = stderrCap.String()
-			s.lastCwd, _ = os.Getwd()
-
-			// Record command in history
-			s.recordCommand(line, s.lastExitCode, s.lastDuration)
-
-			// Record command sequence for prediction (only successful commands)
-			if s.predictor != nil && s.lastExitCode == 0 && prevCommand != "" {
-				cwd, _ := os.Getwd()
-				s.predictor.Record(prevCommand, line, cwd, nil)
-			}
+		if err := s.dispatchCommand(ctx, line); err == errExit {
+			return nil
 		}
 
 		s.updatePrompt()
+	}
+}
+
+// emitShellIntegration emits OSC shell integration sequences before prompt.
+func (s *Shell) emitShellIntegration(firstPrompt *bool) {
+	if s.osc == nil {
+		return
+	}
+	if !*firstPrompt {
+		s.osc.CommandFinished(s.lastExitCode)
+	}
+	*firstPrompt = false
+	s.osc.PromptStart()
+	if cwd, err := os.Getwd(); err == nil {
+		s.osc.ReportDirectory(cwd)
+	}
+}
+
+// handleInputError processes readline errors. Returns (shouldContinue, error).
+func (s *Shell) handleInputError(err error) (bool, error) {
+	if err == nil {
+		return false, nil
+	}
+	if readline.IsInterrupt(err) || errors.Is(err, ErrEditorCanceled) {
+		fmt.Println("^C")
+		return true, nil
+	}
+	if readline.IsEOF(err) || errors.Is(err, ErrEditorEOF) {
+		fmt.Println("exit")
+		return true, nil
+	}
+	return true, err
+}
+
+// handleSpecialInput handles empty lines and !! shortcut. Returns true if handled.
+func (s *Shell) handleSpecialInput(line string) bool {
+	if line == "" {
+		s.updatePrompt()
+		return true
+	}
+	if line == "!!" {
+		s.handleIssueShortcut()
+		return true
+	}
+	return false
+}
+
+// handleIssueShortcut handles the !! shortcut for quick issue submission.
+func (s *Shell) handleIssueShortcut() {
+	if s.lastExitCode == 0 {
+		fmt.Print("Last command succeeded. Open issue anyway? [y/N] ")
+		var response string
+		fmt.Scanln(&response)
+		if !strings.EqualFold(response, "y") {
+			s.updatePrompt()
+			return
+		}
+	}
+	_ = s.builtinIssue([]string{"--last"})
+	s.updatePrompt()
+}
+
+// dispatchCommand parses and executes a command line. Returns errExit if shell should exit.
+func (s *Shell) dispatchCommand(ctx context.Context, line string) error {
+	parsed := parser.Parse(line)
+	trace.ShellHigh("dispatch", map[string]any{
+		"type":    parsed.Type.String(),
+		"command": parsed.Command,
+		"prompt":  parsed.AgentPrompt,
+	})
+
+	switch parsed.Type {
+	case parser.CommandTypeEmpty:
+		s.updatePrompt()
+	case parser.CommandTypeAgent, parser.CommandTypeAgentPipe, parser.CommandTypeAgentInline:
+		s.handleAgentRequest(ctx, parsed)
+	case parser.CommandTypeRegular:
+		return s.executeRegularCommand(ctx, line)
+	}
+	return nil
+}
+
+// executeRegularCommand executes a regular shell command.
+func (s *Shell) executeRegularCommand(ctx context.Context, line string) error {
+	// Check for builtins first
+	handled, err := s.executeBuiltin(ctx, line)
+	if err == errExit {
+		return errExit
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "hash: %v\n", err)
+		s.lastExitCode = 1
+		s.updatePrompt()
+		return nil
+	}
+	if handled {
+		s.lastExitCode = 0
+		s.updatePrompt()
+		return nil
+	}
+
+	// Record command to clipboard buffer before execution
+	if s.clipboard != nil {
+		s.clipboard.AddCommand(line)
+	}
+
+	// Capture stderr for issue reporting
+	stderrCap := newStderrCapture(os.Stderr)
+
+	// Execute external command
+	result, err := s.executor.Execute(ctx, line, os.Stdout, stderrCap)
+	s.handleExecutionResult(line, result, err, stderrCap)
+	return nil
+}
+
+// handleExecutionResult processes the result of command execution.
+func (s *Shell) handleExecutionResult(line string, result *executor.Result, err error, stderrCap *stderrCapture) {
+	if err != nil {
+		s.handleExecutionError(err)
+	} else {
+		s.lastExitCode = result.ExitCode
+		s.lastDuration = result.Duration
+		if s.clipboard != nil && result.CapturedOutput != "" {
+			s.clipboard.SetOutput(result.CapturedOutput)
+		}
+	}
+
+	// Store the previous command for prediction before updating
+	prevCommand := s.lastCommand
+
+	// Store for issue reporting
+	s.lastCommand = line
+	s.lastStderr = stderrCap.String()
+	s.lastCwd, _ = os.Getwd()
+
+	// Record command in history
+	s.recordCommand(line, s.lastExitCode, s.lastDuration)
+
+	// Record command sequence for prediction (only successful commands)
+	if s.predictor != nil && s.lastExitCode == 0 && prevCommand != "" {
+		cwd, _ := os.Getwd()
+		s.predictor.Record(prevCommand, line, cwd, nil)
+	}
+}
+
+// handleExecutionError handles errors from command execution.
+func (s *Shell) handleExecutionError(err error) {
+	var cnf *executor.CommandNotFoundError
+	if errors.As(err, &cnf) {
+		suggestions := s.suggestor.Suggest(cnf.Command)
+		installHint := s.suggestor.InstallHint(cnf.Command)
+		if installHint == "" {
+			for _, sug := range suggestions {
+				if hint := s.suggestor.InstallHint(sug); hint != "" {
+					installHint = hint
+					break
+				}
+			}
+		}
+		handler := NewErrorHandler(s.learning)
+		handler.HandleCommandNotFound(cnf.Command, suggestions, installHint)
+		s.lastExitCode = 127
+	} else {
+		fmt.Fprintf(os.Stderr, "hash: %v\n", err)
+		s.lastExitCode = 1
 	}
 }
 
@@ -970,37 +1002,11 @@ collectLoop:
 		fmt.Fprint(os.Stdout, remaining)
 	}
 
-	// Handle error case first - clear spinner before any output
+	// Handle error case first
 	if streamErr != nil {
-		s.responseUI.ClearLine() // Stop spinner and clear the line
-		s.responseUI.ShowError(streamErr.Error())
-
-		// If no response was received, this is a startup/connection failure
-		// (e.g., agent not in PATH). Just return to prompt - retry won't help.
-		if response.Len() == 0 {
-			s.responseUI.ShowAgentHint(
-				s.config.Agent.Transport,
-				s.config.Agent.Command,
-				s.config.Agent.URL,
-			)
-			s.lastExitCode = 1
-			s.updatePrompt()
+		if s.handleAgentStreamError(ctx, parsed, modelName, streamErr, response.Len(), lineCount) {
 			return
 		}
-
-		// Mid-stream error with partial response - offer retry
-		s.responseUI.ShowConfirmation(ConfirmTypeError)
-		action := s.responseUI.WaitForConfirmationByType(ConfirmTypeError)
-		fmt.Println()
-		if action == ConfirmRun { // Retry
-			s.handleAgentFullStreaming(ctx, parsed, modelName)
-			return
-		}
-		// Cancel: clear error + any partial response
-		// lineCount + error line + confirmation line + blank line
-		s.responseUI.ClearLines(lineCount + 3)
-		s.updatePrompt()
-		return
 	}
 
 	// Success path - add newline after response and clear spinner
@@ -1029,41 +1035,86 @@ collectLoop:
 	// Stop progress bar before any action
 	s.responseUI.StopProgress()
 
+	if s.handleAgentConfirmAction(ctx, action, confirmType, resp, responseText, lineCount) {
+		return
+	}
+
+	s.updatePrompt()
+}
+
+// handleAgentConfirmAction processes the user's confirmation choice.
+// Returns true if the caller should return early (e.g., for edit mode).
+func (s *Shell) handleAgentConfirmAction(ctx context.Context, action ConfirmAction, confirmType ConfirmationType, resp agent.Response, responseText string, lineCount int) bool {
 	switch action {
 	case ConfirmRun:
 		if confirmType == ConfirmTypeCommand {
-			// Execute the command
-			result, err := s.executor.Execute(ctx, resp.Command, os.Stdout, os.Stderr)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "hash: %v\n", err)
-				s.lastExitCode = 1
-			} else {
-				s.lastExitCode = result.ExitCode
-				s.lastDuration = result.Duration
-			}
-			s.recordCommand(resp.Command, s.lastExitCode, s.lastDuration)
+			s.executeAgentCommand(ctx, resp.Command)
 		}
 		// For explanations, ConfirmRun just dismisses
 	case ConfirmEdit:
 		if confirmType == ConfirmTypeCommand {
-			// Re-enter with the command for editing
 			s.handleEditCommand(ctx, resp.Command)
-			return
+			return true
+		}
+		// Copy explanation to system clipboard
+		if err := copyToSystemClipboard(responseText); err != nil {
+			fmt.Fprintf(os.Stderr, "\033[90mCould not copy: %v\033[0m\n", err)
 		} else {
-			// Copy explanation to system clipboard
-			if err := copyToSystemClipboard(responseText); err != nil {
-				fmt.Fprintf(os.Stderr, "\033[90mCould not copy: %v\033[0m\n", err)
-			} else {
-				fmt.Fprintf(os.Stdout, "\033[90mCopied to clipboard\033[0m\n")
-			}
+			fmt.Fprintf(os.Stdout, "\033[90mCopied to clipboard\033[0m\n")
 		}
 	case ConfirmCancel:
 		// Clear the streamed response from screen
 		// +1 for confirmation hint line, +1 for the blank line after fmt.Println()
 		s.responseUI.ClearLines(lineCount + 2)
 	}
+	return false
+}
 
+// executeAgentCommand executes a command generated by the agent.
+func (s *Shell) executeAgentCommand(ctx context.Context, command string) {
+	result, err := s.executor.Execute(ctx, command, os.Stdout, os.Stderr)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "hash: %v\n", err)
+		s.lastExitCode = 1
+	} else {
+		s.lastExitCode = result.ExitCode
+		s.lastDuration = result.Duration
+	}
+	s.recordCommand(command, s.lastExitCode, s.lastDuration)
+}
+
+// handleAgentStreamError handles errors during agent streaming.
+// Returns true if the caller should return (error was fully handled).
+func (s *Shell) handleAgentStreamError(ctx context.Context, parsed parser.ParseResult, modelName string, streamErr error, responseLen, lineCount int) bool {
+	s.responseUI.ClearLine() // Stop spinner and clear the line
+	s.responseUI.ShowError(streamErr.Error())
+
+	// If no response was received, this is a startup/connection failure
+	// (e.g., agent not in PATH). Just return to prompt - retry won't help.
+	if responseLen == 0 {
+		s.responseUI.ShowAgentHint(
+			s.config.Agent.Transport,
+			s.config.Agent.Command,
+			s.config.Agent.URL,
+		)
+		s.lastExitCode = 1
+		s.updatePrompt()
+		return true
+	}
+
+	// Mid-stream error with partial response - offer retry
+	s.responseUI.ShowConfirmation(ConfirmTypeError)
+	action := s.responseUI.WaitForConfirmationByType(ConfirmTypeError)
+	fmt.Println()
+	if action == ConfirmRun { // Retry
+		s.handleAgentFullStreaming(ctx, parsed, modelName)
+		return true
+	}
+	// Cancel: clear error + any partial response
+	// lineCount + error line + confirmation line + blank line
+	s.responseUI.ClearLines(lineCount + 3)
 	s.updatePrompt()
+	return true
 }
 
 // handleEditCommand opens editor with command for editing.

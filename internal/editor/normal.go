@@ -25,124 +25,189 @@ func (m *NormalMode) HandleKey(key Key, state *EditorState) ModeResult {
 	}
 
 	// Special keys
-	switch key.Special {
-	case KeyEnter:
-		return ModeResult{Submit: true}
-	case KeyEscape:
-		state.Cursor.ClearSelection()
-		return ModeResult{}
-	case KeyUp:
-		if state.Cursor.Pos.Row == 0 {
-			return ModeResult{HistoryPrev: true}
-		}
-		m.moveUp(state)
-	case KeyDown:
-		if state.Cursor.Pos.Row == state.Buffer.LineCount()-1 {
-			return ModeResult{HistoryNext: true}
-		}
-		m.moveDown(state)
-	case KeyLeft:
-		m.moveLeft(state)
-	case KeyRight:
-		m.moveRight(state)
+	if result, handled := m.handleSpecialKey(key, state); handled {
+		return result
 	}
 
-	// Normal mode commands
-	switch key.Rune {
-	// Movement
-	case 'h':
-		m.moveLeft(state)
-	case 'l':
-		m.moveRight(state)
-	case 'j':
-		if state.Cursor.Pos.Row == state.Buffer.LineCount()-1 {
-			return ModeResult{HistoryNext: true}
-		}
-		m.moveDown(state)
-	case 'k':
+	// Normal mode commands by category
+	if result, handled := m.handleMovement(key, state); handled {
+		return result
+	}
+	if result, handled := m.handleInsertMode(key, state); handled {
+		return result
+	}
+	if result, handled := m.handleSelection(key, state); handled {
+		return result
+	}
+	if result, handled := m.handleEditing(key, state); handled {
+		return result
+	}
+	if result, handled := m.handleUndoRedo(key, state); handled {
+		return result
+	}
+
+	return ModeResult{}
+}
+
+// handleSpecialKey handles arrow keys and special keys.
+func (m *NormalMode) handleSpecialKey(key Key, state *EditorState) (ModeResult, bool) {
+	switch key.Special {
+	case KeyEnter:
+		return ModeResult{Submit: true}, true
+	case KeyEscape:
+		state.Cursor.ClearSelection()
+		return ModeResult{}, true
+	case KeyUp:
 		if state.Cursor.Pos.Row == 0 {
-			return ModeResult{HistoryPrev: true}
+			return ModeResult{HistoryPrev: true}, true
 		}
 		m.moveUp(state)
+		return ModeResult{}, true
+	case KeyDown:
+		if state.Cursor.Pos.Row == state.Buffer.LineCount()-1 {
+			return ModeResult{HistoryNext: true}, true
+		}
+		m.moveDown(state)
+		return ModeResult{}, true
+	case KeyLeft:
+		m.moveLeft(state)
+		return ModeResult{}, true
+	case KeyRight:
+		m.moveRight(state)
+		return ModeResult{}, true
+	}
+	return ModeResult{}, false
+}
+
+// handleMovement handles hjkl and word movement keys.
+func (m *NormalMode) handleMovement(key Key, state *EditorState) (ModeResult, bool) {
+	switch key.Rune {
+	case 'h':
+		m.moveLeft(state)
+		return ModeResult{}, true
+	case 'l':
+		m.moveRight(state)
+		return ModeResult{}, true
+	case 'j':
+		if state.Cursor.Pos.Row == state.Buffer.LineCount()-1 {
+			return ModeResult{HistoryNext: true}, true
+		}
+		m.moveDown(state)
+		return ModeResult{}, true
+	case 'k':
+		if state.Cursor.Pos.Row == 0 {
+			return ModeResult{HistoryPrev: true}, true
+		}
+		m.moveUp(state)
+		return ModeResult{}, true
 	case 'w':
 		m.moveWordForward(state)
+		return ModeResult{}, true
 	case 'b':
 		m.moveWordBack(state)
+		return ModeResult{}, true
 	case 'e':
 		m.moveWordEnd(state)
+		return ModeResult{}, true
 	case '0':
 		state.Cursor.Pos.Col = 0
+		return ModeResult{}, true
 	case '$':
 		state.Cursor.Pos.Col = len(state.Buffer.Line(state.Cursor.Pos.Row))
+		return ModeResult{}, true
+	}
+	return ModeResult{}, false
+}
 
-	// Insert mode entry
+// handleInsertMode handles keys that enter insert mode.
+func (m *NormalMode) handleInsertMode(key Key, state *EditorState) (ModeResult, bool) {
+	switch key.Rune {
 	case 'i':
-		return ModeResult{NewMode: NewInsertMode(), Action: ActionModeChange}
+		return ModeResult{NewMode: NewInsertMode(), Action: ActionModeChange}, true
 	case 'a':
 		m.moveRight(state)
-		return ModeResult{NewMode: NewInsertMode(), Action: ActionModeChange}
+		return ModeResult{NewMode: NewInsertMode(), Action: ActionModeChange}, true
 	case 'I':
 		state.Cursor.Pos.Col = 0
-		return ModeResult{NewMode: NewInsertMode(), Action: ActionModeChange}
+		return ModeResult{NewMode: NewInsertMode(), Action: ActionModeChange}, true
 	case 'A':
 		state.Cursor.Pos.Col = len(state.Buffer.Line(state.Cursor.Pos.Row))
-		return ModeResult{NewMode: NewInsertMode(), Action: ActionModeChange}
+		return ModeResult{NewMode: NewInsertMode(), Action: ActionModeChange}, true
 	case 'o':
 		m.openLineBelow(state)
-		return ModeResult{NewMode: NewInsertMode(), Action: ActionModeChange}
+		return ModeResult{NewMode: NewInsertMode(), Action: ActionModeChange}, true
 	case 'O':
 		m.openLineAbove(state)
-		return ModeResult{NewMode: NewInsertMode(), Action: ActionModeChange}
+		return ModeResult{NewMode: NewInsertMode(), Action: ActionModeChange}, true
+	}
+	return ModeResult{}, false
+}
 
-	// Selection
+// handleSelection handles visual selection keys.
+func (m *NormalMode) handleSelection(key Key, state *EditorState) (ModeResult, bool) {
+	switch key.Rune {
 	case 'v':
 		if !state.Cursor.HasSelection() {
 			state.Cursor.StartSelection()
 		}
+		return ModeResult{}, true
 	case 'x':
 		m.selectLine(state)
+		return ModeResult{}, true
 	case ';':
 		state.Cursor.ClearSelection()
+		return ModeResult{}, true
+	}
+	return ModeResult{}, false
+}
 
-	// Editing
+// handleEditing handles delete, change, yank, and paste keys.
+func (m *NormalMode) handleEditing(key Key, state *EditorState) (ModeResult, bool) {
+	switch key.Rune {
 	case 'd':
 		if state.Cursor.HasSelection() {
 			m.deleteSelection(state)
-			return ModeResult{Action: ActionDelete}
+			return ModeResult{Action: ActionDelete}, true
 		}
+		return ModeResult{}, true
 	case 'c':
 		if state.Cursor.HasSelection() {
 			m.deleteSelection(state)
-			return ModeResult{NewMode: NewInsertMode(), Action: ActionDelete}
+			return ModeResult{NewMode: NewInsertMode(), Action: ActionDelete}, true
 		}
+		return ModeResult{}, true
 	case 'y':
-		// Yank selection to clipboard
 		if state.Cursor.HasSelection() {
-			return ModeResult{Yank: true}
+			return ModeResult{Yank: true}, true
 		}
+		return ModeResult{}, true
 	case 'p':
-		// Paste from clipboard after cursor
-		return ModeResult{Paste: true}
+		return ModeResult{Paste: true}, true
 	case 'P':
-		// Paste from clipboard before cursor
-		return ModeResult{PasteBefore: true}
+		return ModeResult{PasteBefore: true}, true
+	}
+	return ModeResult{}, false
+}
 
-	// Undo/Redo
+// handleUndoRedo handles undo and redo keys.
+func (m *NormalMode) handleUndoRedo(key Key, state *EditorState) (ModeResult, bool) {
+	switch key.Rune {
 	case 'u':
 		if state.UndoStack.CanUndo() {
 			buf, cur := state.UndoStack.Undo()
 			state.Buffer = buf
 			state.Cursor = cur
 		}
+		return ModeResult{}, true
 	case 'U':
 		if state.UndoStack.CanRedo() {
 			buf, cur := state.UndoStack.Redo()
 			state.Buffer = buf
 			state.Cursor = cur
 		}
+		return ModeResult{}, true
 	}
-
-	return ModeResult{}
+	return ModeResult{}, false
 }
 
 func (m *NormalMode) handleCtrl(key Key, state *EditorState) ModeResult {

@@ -25,6 +25,7 @@ linters:
 
     # Code quality
     - misspell       # Spelling errors in comments/strings
+    - gocyclo        # Cyclomatic complexity (Go Report Card check)
 
   settings:
     errcheck:
@@ -89,6 +90,9 @@ linters:
     misspell:
       locale: US
 
+    gocyclo:
+      min-complexity: 15  # Go Report Card uses 10, but 15 is more practical
+
   exclusions:
     rules:
       # Exclude from test files - tests use simplified patterns
@@ -98,6 +102,7 @@ linters:
           - gosec
           - govet
           - gocritic
+          - gocyclo
 
 run:
   timeout: 5m
