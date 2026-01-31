@@ -70,6 +70,7 @@ type ResponseUI struct {
 	spinnerMu      sync.Mutex
 	spinnerRunning bool
 	spinnerStop    chan struct{}
+	spinnerDone    chan struct{} // signals when spinner goroutine has exited
 	spinnerText    string
 }
 
@@ -136,6 +137,7 @@ func (u *ResponseUI) ShowState(state AgentState) {
 	// Start new spinner
 	u.spinnerText = text
 	u.spinnerStop = make(chan struct{})
+	u.spinnerDone = make(chan struct{})
 	u.spinnerRunning = true
 
 	// Start OSC progress bar
@@ -146,6 +148,8 @@ func (u *ResponseUI) ShowState(state AgentState) {
 
 // runSpinner animates the spinner until stopped.
 func (u *ResponseUI) runSpinner() {
+	defer close(u.spinnerDone)
+
 	ticker := time.NewTicker(80 * time.Millisecond)
 	defer ticker.Stop()
 
@@ -166,16 +170,22 @@ func (u *ResponseUI) runSpinner() {
 	}
 }
 
-// StopSpinner stops the animated spinner if running.
+// StopSpinner stops the animated spinner if running and waits for it to exit.
 func (u *ResponseUI) StopSpinner() {
 	u.spinnerMu.Lock()
-	defer u.spinnerMu.Unlock()
-
-	if u.spinnerRunning {
-		close(u.spinnerStop)
-		u.spinnerRunning = false
-		u.progress.Done()
+	if !u.spinnerRunning {
+		u.spinnerMu.Unlock()
+		return
 	}
+
+	close(u.spinnerStop)
+	done := u.spinnerDone
+	u.spinnerRunning = false
+	u.spinnerMu.Unlock()
+
+	// Wait for the spinner goroutine to exit before returning
+	<-done
+	u.progress.Done()
 }
 
 // ShowStateWithSize displays state with context size info.
@@ -194,6 +204,7 @@ func (u *ResponseUI) ShowStateWithSize(state AgentState, sizeBytes int) {
 	// Start new spinner with size info
 	u.spinnerText = text
 	u.spinnerStop = make(chan struct{})
+	u.spinnerDone = make(chan struct{})
 	u.spinnerRunning = true
 	u.progress.Start()
 
