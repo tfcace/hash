@@ -117,13 +117,13 @@ jobs:
           go-version: '1.25'
 
       - name: Download Linux artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: dist-linux
           path: dist
 
       - name: Download Darwin artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: dist-darwin
           path: dist
