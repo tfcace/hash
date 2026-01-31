@@ -1012,7 +1012,7 @@ collectLoop:
 
 // handleAgentConfirmAction processes the user's confirmation choice.
 // Returns true if the caller should return early (e.g., for edit mode).
-func (s *Shell) handleAgentConfirmAction(ctx context.Context, action ConfirmationAction, confirmType ConfirmationType, resp *agent.Response, responseText string, lineCount int) bool {
+func (s *Shell) handleAgentConfirmAction(ctx context.Context, action ConfirmAction, confirmType ConfirmationType, resp agent.Response, responseText string, lineCount int) bool {
 	switch action {
 	case ConfirmRun:
 		if confirmType == ConfirmTypeCommand {
