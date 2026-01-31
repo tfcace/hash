@@ -223,6 +223,9 @@ func (t *ACPTransport) sendRequest(ctx context.Context, method string, params in
 	}
 
 	if _, err := t.stdin.Write(append(data, '\n')); err != nil {
+		// Write failed - pipe is likely broken (e.g., agent exited after cancel).
+		// Reset connection so next Send() will reconnect via lazy connect.
+		t.resetConnection()
 		return nil, fmt.Errorf("write request: %w", err)
 	}
 
@@ -234,6 +237,8 @@ func (t *ACPTransport) sendRequest(ctx context.Context, method string, params in
 			return nil, ctx.Err()
 		case line, ok := <-t.messages:
 			if !ok {
+				// Connection closed (readLoop exited) - reset for reconnect
+				t.resetConnection()
 				return nil, fmt.Errorf("connection closed")
 			}
 
@@ -361,6 +366,8 @@ func (t *ACPTransport) Send(ctx context.Context, req Request) (<-chan Response, 
 		_, err = t.stdin.Write(append(data, '\n'))
 		t.mu.Unlock()
 		if err != nil {
+			// Write failed - reset connection so next Send() reconnects
+			t.resetConnection()
 			respCh <- Response{Type: ResponseTypeError, Error: err.Error()}
 			return
 		}
@@ -393,6 +400,8 @@ func (t *ACPTransport) Send(ctx context.Context, req Request) (<-chan Response, 
 
 			case line, ok := <-t.messages:
 				if !ok {
+					// Connection closed (readLoop exited) - reset for reconnect
+					t.resetConnection()
 					text := textBuilder.String()
 					if text != "" {
 						respCh <- parseAgentResponse(text)
@@ -522,6 +531,32 @@ func buildPromptWithContext(req Request) string {
 	return b.String()
 }
 
+// resetConnection closes the current connection and resets state so that
+// the next Send() will reconnect via lazy connect. This is called when
+// a write error occurs (e.g., broken pipe after agent exits).
+func (t *ACPTransport) resetConnection() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if t.stdin != nil {
+		t.stdin.Close()
+		t.stdin = nil
+	}
+	if t.stdout != nil {
+		t.stdout.Close()
+		t.stdout = nil
+	}
+	t.reader = nil
+	t.sessionID = ""
+	// Note: We don't kill cmd here - it may have already exited.
+	// The next connectLocked() will start a fresh process.
+	if t.cmd != nil && t.cmd.Process != nil {
+		t.cmd.Process.Kill() //nolint:errcheck // best-effort kill
+		t.cmd.Wait()         //nolint:errcheck // ignore exit status
+		t.cmd = nil
+	}
+}
+
 // Close terminates the agent process.
 func (t *ACPTransport) Close() error {
 	t.mu.Lock()
@@ -615,6 +650,8 @@ func (t *ACPTransport) SendStreaming(ctx context.Context, req Request) (<-chan s
 		_, err = t.stdin.Write(append(data, '\n'))
 		t.mu.Unlock()
 		if err != nil {
+			// Write failed - reset connection so next Send() reconnects
+			t.resetConnection()
 			errCh <- err
 			return
 		}
@@ -639,6 +676,8 @@ func (t *ACPTransport) SendStreaming(ctx context.Context, req Request) (<-chan s
 
 			case line, ok := <-t.messages:
 				if !ok {
+					// Connection closed (readLoop exited) - reset for reconnect
+					t.resetConnection()
 					return
 				}
 
