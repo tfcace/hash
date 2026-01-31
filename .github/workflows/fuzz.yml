@@ -67,7 +67,7 @@ jobs:
 
       - name: Run fuzz test (${{ matrix.target.fuzz }})
         run: |
-          go test -fuzz=${{ matrix.target.fuzz }} \
+          go test -fuzz='^${{ matrix.target.fuzz }}$' \
             -fuzztime=${{ steps.duration.outputs.time }} \
             ${{ matrix.target.package }}
 
