@@ -88,16 +88,26 @@ jobs:
         with:
           distribution: goreleaser
           version: '~> v2'
-          args: release --clean --split
+          args: build --clean --id hash-${{ matrix.goos }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GOOS: ${{ matrix.goos }}
+
+      - name: Create archives
+        run: |
+          cd dist
+          for dir in hash-${{ matrix.goos }}_*/; do
+            name="${dir%/}"
+            # Extract os and arch from directory name (e.g., hash-linux_linux_amd64)
+            os_arch="${name#hash-${{ matrix.goos }}_}"
+            archive_name="hash_${{ needs.release-please.outputs.tag_name }}_${os_arch}.tar.gz"
+            tar -czvf "$archive_name" -C "$dir" hash
+          done
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: dist-${{ matrix.goos }}
-          path: dist/**/*
+          path: dist/*.tar.gz
           retention-days: 1
 
   goreleaser-release:
@@ -105,16 +115,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Fetch tags
-        run: git fetch --force --tags
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.25'
 
       - name: Download Linux artifacts
         uses: actions/download-artifact@v4
@@ -128,12 +128,94 @@ jobs:
           name: dist-darwin
           path: dist
 
-      - name: Run GoReleaser (release)
-        uses: goreleaser/goreleaser-action@v6
-        with:
-          distribution: goreleaser
-          version: '~> v2'
-          args: continue --merge
+      - name: Generate checksums
+        run: |
+          cd dist
+          sha256sum *.tar.gz > checksums.txt
+
+      - name: Upload release assets
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          gh release upload ${{ needs.release-please.outputs.tag_name }} dist/*.tar.gz dist/checksums.txt --clobber
+
+      - name: Update Homebrew tap
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          VERSION="${{ needs.release-please.outputs.tag_name }}"
+          VERSION="${VERSION#v}"  # Remove 'v' prefix
+          TAG="${{ needs.release-please.outputs.tag_name }}"
+
+          # Calculate SHA256 for each archive
+          DARWIN_AMD64_SHA=$(sha256sum dist/hash_*_darwin_amd64.tar.gz | cut -d' ' -f1)
+          DARWIN_ARM64_SHA=$(sha256sum dist/hash_*_darwin_arm64.tar.gz | cut -d' ' -f1)
+          LINUX_AMD64_SHA=$(sha256sum dist/hash_*_linux_amd64.tar.gz | cut -d' ' -f1)
+          LINUX_ARM64_SHA=$(sha256sum dist/hash_*_linux_arm64.tar.gz | cut -d' ' -f1)
+
+          # Generate formula
+          cat > hash.rb <<EOF
+          class Hash < Formula
+            desc "AI-powered shell with ACP integration"
+            homepage "https://github.com/tfcace/hash"
+            license "MIT"
+            version "${VERSION}"
+
+            on_macos do
+              if Hardware::CPU.arm?
+                url "https://github.com/tfcace/hash/releases/download/${TAG}/hash_${TAG}_darwin_arm64.tar.gz"
+                sha256 "${DARWIN_ARM64_SHA}"
+              else
+                url "https://github.com/tfcace/hash/releases/download/${TAG}/hash_${TAG}_darwin_amd64.tar.gz"
+                sha256 "${DARWIN_AMD64_SHA}"
+              end
+            end
+
+            on_linux do
+              if Hardware::CPU.arm?
+                url "https://github.com/tfcace/hash/releases/download/${TAG}/hash_${TAG}_linux_arm64.tar.gz"
+                sha256 "${LINUX_ARM64_SHA}"
+              else
+                url "https://github.com/tfcace/hash/releases/download/${TAG}/hash_${TAG}_linux_amd64.tar.gz"
+                sha256 "${LINUX_AMD64_SHA}"
+              end
+            end
+
+            def install
+              bin.install "hash"
+            end
+
+            def caveats
+              <<~EOS
+                To use hash as your login shell:
+                  sudo sh -c 'echo #{opt_bin}/hash >> /etc/shells'
+                  chsh -s #{opt_bin}/hash
+              EOS
+            end
+
+            test do
+              assert_match version.to_s, shell_output("#{bin}/hash --version")
+            end
+          end
+          EOF
+
+          # Strip leading whitespace from formula
+          sed -i 's/^          //' hash.rb
+
+          # Use gh to commit the formula to the tap repo
+          # First try without sha (new file), then with sha (update existing)
+          SHA=$(gh api repos/tfcace/homebrew-hash/contents/Formula/hash.rb --jq .sha 2>/dev/null || echo "")
+          if [ -z "$SHA" ]; then
+            gh api repos/tfcace/homebrew-hash/contents/Formula/hash.rb \
+              --method PUT \
+              -f message="Brew formula update for hash version ${TAG}" \
+              -f content="$(base64 -w0 hash.rb)" \
+              -f branch=main
+          else
+            gh api repos/tfcace/homebrew-hash/contents/Formula/hash.rb \
+              --method PUT \
+              -f message="Brew formula update for hash version ${TAG}" \
+              -f content="$(base64 -w0 hash.rb)" \
+              -f sha="$SHA" \
+              -f branch=main
+          fi

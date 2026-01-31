@@ -5,14 +5,14 @@ before:
     - go mod tidy
 
 builds:
-  - id: hash
+  # Linux builds - run on Linux runner with cross-compiler for ARM64
+  - id: hash-linux
     main: ./cmd/hash
     binary: hash
     env:
       - CGO_ENABLED=1
     goos:
       - linux
-      - darwin
     goarch:
       - amd64
       - arm64
@@ -23,27 +23,34 @@ builds:
       - -X github.com/tfcace/hash/internal/version.JjChange=unknown
       - -X github.com/tfcace/hash/internal/version.BuildDate={{.Date}}
     overrides:
-      # Linux AMD64
       - goos: linux
         goarch: amd64
         env:
           - CGO_ENABLED=1
           - CC=gcc
-      # Linux ARM64 - requires cross-compiler
       - goos: linux
         goarch: arm64
         env:
           - CGO_ENABLED=1
           - CC=aarch64-linux-gnu-gcc
-      # macOS builds use native toolchain (built on macOS runner)
-      - goos: darwin
-        goarch: amd64
-        env:
-          - CGO_ENABLED=1
-      - goos: darwin
-        goarch: arm64
-        env:
-          - CGO_ENABLED=1
+
+  # macOS builds - run on macOS runner (native toolchain)
+  - id: hash-darwin
+    main: ./cmd/hash
+    binary: hash
+    env:
+      - CGO_ENABLED=1
+    goos:
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X github.com/tfcace/hash/internal/version.Version={{.Version}}
+      - -X github.com/tfcace/hash/internal/version.GitCommit={{.ShortCommit}}
+      - -X github.com/tfcace/hash/internal/version.JjChange=unknown
+      - -X github.com/tfcace/hash/internal/version.BuildDate={{.Date}}
 
 archives:
   - id: default
