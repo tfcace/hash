@@ -12,7 +12,10 @@ import (
 	"syscall"
 	"time"
 
+	"golang.org/x/term"
+
 	"github.com/tfcace/hash/internal/agent"
+	"github.com/tfcace/hash/internal/allowlist"
 	"github.com/tfcace/hash/internal/clipboard"
 	"github.com/tfcace/hash/internal/completion"
 	"github.com/tfcace/hash/internal/config"
@@ -53,6 +56,7 @@ type Shell struct {
 	predictor    *prediction.Predictor
 	suggestor    *CommandSuggestor
 	colorPalette prompt.Palette
+	allowlist    *allowlist.Manager
 
 	lastExitCode int
 	lastDuration time.Duration
@@ -121,6 +125,7 @@ func New(cfg *config.Config) (*Shell, error) {
 
 	// Select transport based on config
 	var transport agent.Transport
+	var acpTransport *agent.ACPTransport
 	switch cfg.Agent.Transport {
 	case "http":
 		if cfg.Agent.URL != "" {
@@ -131,11 +136,50 @@ func New(cfg *config.Config) (*Shell, error) {
 		}
 	default: // "stdio" or "acp" or unset - use ACP protocol
 		if cfg.Agent.Command != "" {
-			transport = agent.NewACPTransport(agent.ACPConfig{
+			acpTransport = agent.NewACPTransport(agent.ACPConfig{
 				Command: cfg.Agent.Command,
 				Args:    cfg.Agent.Args,
 			})
+			transport = acpTransport
 		}
+	}
+
+	// Create allowlist manager for agent permission requests
+	// Reuse cwd from earlier in the function
+	allowlistMgr := allowlist.New(
+		cfg.Agent.AllowedCommandsScope,
+		cwd,
+		getConfigDir(),
+	)
+
+	// Wire up permission handler for ACP transport
+	if acpTransport != nil {
+		acpTransport.SetPermissionHandler(func(command string) (allow bool, always bool) {
+			// Check allowlist first
+			if allowlistMgr.IsAllowed(command) {
+				return true, false
+			}
+
+			// Render permission prompt
+			display := editor.NewDisplay(os.Stdout, 80, 24)
+			display.RenderPermissionPrompt(command, colorPalette.Primary)
+
+			// Read single keypress
+			key := readSingleKey()
+
+			// Clear the prompt
+			display.ClearPermissionPrompt()
+
+			switch key {
+			case 'y', 'Y', '\r', '\n':
+				return true, false
+			case 'a', 'A':
+				allowlistMgr.Allow(command)
+				return true, true
+			default: // 'n', 'N', Esc, or anything else
+				return false, false
+			}
+		})
 	}
 
 	if transport != nil {
@@ -292,6 +336,7 @@ func New(cfg *config.Config) (*Shell, error) {
 		predictor:    predictor,
 		suggestor:    suggestor,
 		colorPalette: colorPalette,
+		allowlist:    allowlistMgr,
 		historyIndex: -1, // Start before history (current line)
 		osc:          osc,
 	}
@@ -1305,6 +1350,15 @@ func getDataDir() string {
 	return filepath.Join(home, ".local", "share", "hash")
 }
 
+// getConfigDir returns the config directory for hash.
+func getConfigDir() string {
+	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
+		return filepath.Join(xdg, "hash")
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".config", "hash")
+}
+
 // History returns the history store for use by builtins.
 func (s *Shell) History() *history.Store {
 	return s.history
@@ -1320,4 +1374,30 @@ func errStr(err error) string {
 		return ""
 	}
 	return err.Error()
+}
+
+// readSingleKey reads a single keypress from stdin.
+// Returns the key byte (handles escape sequences for special keys).
+func readSingleKey() byte {
+	fd := int(os.Stdin.Fd())
+
+	// Put terminal in raw mode to read single character
+	oldState, err := term.MakeRaw(fd)
+	if err != nil {
+		return 'n' // Default to deny on error
+	}
+	defer term.Restore(fd, oldState)
+
+	buf := make([]byte, 1)
+	n, err := os.Stdin.Read(buf)
+	if err != nil || n == 0 {
+		return 'n'
+	}
+
+	// Handle escape key (0x1b)
+	if buf[0] == 0x1b {
+		return 0x1b // Return ESC
+	}
+
+	return buf[0]
 }
