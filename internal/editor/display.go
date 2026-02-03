@@ -685,3 +685,50 @@ func (d *Display) ClearCompletionMenu(numItems int) {
 	// Reset tracked menu size
 	d.lastMenuItems = 0
 }
+
+// RenderPermissionPrompt draws the permission request UI.
+// Returns after drawing - caller should handle input and then call ClearPermissionPrompt.
+func (d *Display) RenderPermissionPrompt(command, accentColor string) {
+	var sb strings.Builder
+
+	// Build accent color ANSI code
+	accentCode := ""
+	if accentColor != "" && len(accentColor) == 7 && accentColor[0] == '#' {
+		var r, g, b int
+		fmt.Sscanf(accentColor[1:], "%02x%02x%02x", &r, &g, &b)
+		accentCode = fmt.Sprintf("\x1b[38;2;%d;%d;%dm", r, g, b)
+	} else {
+		accentCode = "\x1b[36m" // Fallback to cyan
+	}
+
+	// Render the prompt box
+	lines := []string{
+		"",
+		accentCode + "▌" + ansiReset + " Agent wants to run:",
+		accentCode + "▌" + ansiReset + " " + ansiBold + command + ansiReset,
+		accentCode + "▌" + ansiReset,
+		accentCode + "▌" + ansiReset + " [y]allow  [n]deny  [a]always allow this command",
+	}
+
+	for _, line := range lines {
+		sb.WriteString("\r\n")
+		sb.WriteString(ansiClearLine)
+		sb.WriteString(line)
+	}
+
+	d.out.Write([]byte(sb.String()))
+}
+
+// ClearPermissionPrompt removes the permission prompt from display.
+func (d *Display) ClearPermissionPrompt() {
+	var sb strings.Builder
+
+	// Move up 5 lines and clear each
+	for i := 0; i < 5; i++ {
+		fmt.Fprintf(&sb, ansiCursorUp, 1)
+		sb.WriteString("\r")
+		sb.WriteString(ansiClearLine)
+	}
+
+	d.out.Write([]byte(sb.String()))
+}
