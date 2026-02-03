@@ -400,14 +400,17 @@ func (s *Shell) emitShellIntegration(firstPrompt *bool) {
 	}
 }
 
-// handleInputError processes readline errors. Returns (shouldContinue, error).
+// handleInputError processes readline errors. Returns (done, error).
+// done=true means exit the shell loop (with optional error).
+// done=false means continue the loop (error is ignored).
 func (s *Shell) handleInputError(err error) (bool, error) {
 	if err == nil {
 		return false, nil
 	}
 	if readline.IsInterrupt(err) || errors.Is(err, ErrEditorCanceled) {
+		// Ctrl+C at empty prompt: just print ^C and continue (like Fish)
 		fmt.Println("^C")
-		return true, nil
+		return false, nil
 	}
 	if readline.IsEOF(err) || errors.Is(err, ErrEditorEOF) {
 		fmt.Println("exit")
