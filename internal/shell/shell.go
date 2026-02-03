@@ -161,8 +161,19 @@ func New(cfg *config.Config) (*Shell, error) {
 			}
 
 			// Render permission prompt
-			display := editor.NewDisplay(os.Stdout, 80, 24)
+			// Get terminal size for proper display
+			width, height, _ := term.GetSize(int(os.Stdout.Fd()))
+			if width == 0 {
+				width = 80
+			}
+			if height == 0 {
+				height = 24
+			}
+			display := editor.NewDisplay(os.Stdout, width, height)
 			display.RenderPermissionPrompt(command, colorPalette.Primary)
+
+			// Flush stdout to ensure prompt is visible before reading input
+			os.Stdout.Sync()
 
 			// Read single keypress
 			key := readSingleKey()
