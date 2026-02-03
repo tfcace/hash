@@ -804,13 +804,14 @@ func (e *Executor) handleBashAlias(ctx context.Context, args []string) ([]string
 			}
 		}
 
-		// Convert alias to function: alias foo='cmd' becomes foo() { cmd; }
+		// Convert alias to function: alias foo='cmd' becomes foo() { cmd "$@"; }
+		// The "$@" is critical - without it, arguments aren't passed through
 		trace.Emit("compat", "alias_to_function", trace.LevelVerbose, map[string]any{
 			"name":  name,
 			"value": truncateForTrace(value, 100),
 		})
 
-		funcDef := fmt.Sprintf("%s() { %s; }", name, value)
+		funcDef := fmt.Sprintf("%s() { %s \"$@\"; }", name, value)
 		funcParser := syntax.NewParser(syntax.Variant(syntax.LangBash))
 		prog, err := funcParser.Parse(strings.NewReader(funcDef), "alias-func")
 		if err != nil {

@@ -898,6 +898,30 @@ func TestExecutor_AliasWithPipeConvertsToFunction(t *testing.T) {
 	}
 }
 
+func TestExecutor_AliasPassesArguments(t *testing.T) {
+	exec := New()
+	ctx := context.Background()
+	var stdout, stderr bytes.Buffer
+
+	// Define an alias - it should pass through arguments
+	_, err := exec.Execute(ctx, `alias myecho='echo'`, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("alias definition failed: %v", err)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	// Call the alias with arguments - they should be passed through
+	_, err = exec.Execute(ctx, "myecho hello world", &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("myecho execution failed: %v, stderr: %s", err, stderr.String())
+	}
+
+	if strings.TrimSpace(stdout.String()) != "hello world" {
+		t.Errorf("expected 'hello world', got: %q (arguments not passed through)", stdout.String())
+	}
+}
+
 func TestExecutor_TracksFunctionDefinitions(t *testing.T) {
 	exec := New()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
