@@ -18,3 +18,7 @@ Thumbs.db
 
 # Go
 /vendor/
+
+# Trace/debug logs
+hash-*.log
+hash-*.jsonl
