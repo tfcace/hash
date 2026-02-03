@@ -380,6 +380,23 @@ timeout = "1m"
 timeout = "2m30s"
 ```
 
+### agent.allowed_commands_scope
+
+**Type:** `"project"` | `"global"` | `"session"`
+**Default:** `"project"`
+
+Where to store commands that are "always allowed" when the agent requests permission to run them.
+
+- **project**: Per-directory in `.hash/allowed_commands.json`. Commands approved in one project don't affect others.
+- **global**: In `~/.config/hash/allowed_commands.json`. Shared across all projects.
+- **session**: In memory only, cleared when shell exits.
+
+Each scope is strictly isolated - there's no fallback between scopes.
+
+```toml
+allowed_commands_scope = "project"
+```
+
 ---
 
 ## [agent.<name>]

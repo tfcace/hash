@@ -64,13 +64,14 @@ type PromptConfig struct {
 }
 
 type AgentConfig struct {
-	Default   string   `toml:"default"`
-	Timeout   string   `toml:"timeout"`
-	Transport string   `toml:"transport"` // "stdio" or "http"
-	Command   string   `toml:"command"`   // For stdio transport
-	Args      []string `toml:"args"`      // For stdio transport
-	URL       string   `toml:"url"`       // For http transport (e.g., "http://localhost:11434/api/generate")
-	Model     string   `toml:"model"`     // For http transport (e.g., "codellama")
+	Default              string   `toml:"default"`
+	Timeout              string   `toml:"timeout"`
+	Transport            string   `toml:"transport"`             // "stdio" or "http"
+	Command              string   `toml:"command"`               // For stdio transport
+	Args                 []string `toml:"args"`                  // For stdio transport
+	URL                  string   `toml:"url"`                   // For http transport (e.g., "http://localhost:11434/api/generate")
+	Model                string   `toml:"model"`                 // For http transport (e.g., "codellama")
+	AllowedCommandsScope string   `toml:"allowed_commands_scope"` // "project", "global", "session"
 }
 
 type HistoryConfig struct {
@@ -133,9 +134,10 @@ func Default() *Config {
 			Mode: "starship",
 		},
 		Agent: AgentConfig{
-			Default: "claude-code-acp",
-			Command: "claude-code-acp",
-			Timeout: "120s",
+			Default:              "claude-code-acp",
+			Command:              "claude-code-acp",
+			Timeout:              "120s",
+			AllowedCommandsScope: "project",
 		},
 		History: HistoryConfig{
 			Enabled:    true,
