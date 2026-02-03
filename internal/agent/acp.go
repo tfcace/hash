@@ -52,6 +52,9 @@ type ACPTransport struct {
 	// Channel for incoming messages
 	messages chan []byte
 	done     chan struct{}
+
+	// Permission handler callback
+	permissionHandler func(command string) (allow bool, always bool)
 }
 
 // JSON-RPC 2.0 message types
@@ -114,6 +117,40 @@ type contentBlock struct {
 	Text string `json:"text,omitempty"`
 }
 
+// requestPermission types (agent -> client request)
+type requestPermissionParams struct {
+	SessionID string `json:"sessionId"`
+	ToolCall  struct {
+		ToolCallID string          `json:"toolCallId"`
+		Title      string          `json:"title"`
+		RawInput   json.RawMessage `json:"rawInput"`
+	} `json:"toolCall"`
+	Options []permissionOption `json:"options"`
+}
+
+type permissionOption struct {
+	Kind     string `json:"kind"`     // "allow_once", "allow_always", "reject_once"
+	Name     string `json:"name"`     // Display name
+	OptionID string `json:"optionId"` // ID to return
+}
+
+type permissionResponse struct {
+	Outcome *permissionOutcome `json:"outcome"`
+}
+
+type permissionOutcome struct {
+	Outcome  string `json:"outcome"`  // "selected" or "cancelled"
+	OptionID string `json:"optionId"` // Which option was selected
+}
+
+// jsonRPCResponse is used to send responses to agent requests.
+type jsonRPCResponse struct {
+	JSONRPC string        `json:"jsonrpc"`
+	ID      int64         `json:"id"`
+	Result  interface{}   `json:"result,omitempty"`
+	Error   *jsonRPCError `json:"error,omitempty"`
+}
+
 // NewACPTransport creates a new ACP transport.
 func NewACPTransport(cfg ACPConfig) *ACPTransport {
 	return &ACPTransport{
@@ -121,6 +158,15 @@ func NewACPTransport(cfg ACPConfig) *ACPTransport {
 		messages: make(chan []byte, 1024),
 		done:     make(chan struct{}),
 	}
+}
+
+// SetPermissionHandler sets the callback for handling permission requests.
+// The callback receives the command and returns (allow, always).
+// If always is true, the command should be added to the allowlist.
+func (t *ACPTransport) SetPermissionHandler(handler func(command string) (allow bool, always bool)) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.permissionHandler = handler
 }
 
 // Name returns the transport name.
@@ -452,6 +498,12 @@ func (t *ACPTransport) Send(ctx context.Context, req Request) (<-chan Response, 
 					continue
 				}
 
+				// Check if this is an incoming request (has both ID and Method)
+				if msg.ID != nil && msg.Method != "" {
+					go t.handleIncomingRequest(*msg.ID, msg.Method, msg.Params)
+					continue
+				}
+
 				// Check if it's our response (end of prompt)
 				if msg.ID != nil && *msg.ID == id {
 					if msg.Error != nil {
@@ -501,6 +553,89 @@ func parseAgentResponse(text string) Response {
 	return Response{
 		Type:        ResponseTypeExplanation,
 		Explanation: text,
+	}
+}
+
+// handleIncomingRequest processes requests from the agent (like requestPermission).
+func (t *ACPTransport) handleIncomingRequest(id int64, method string, params json.RawMessage) {
+	switch method {
+	case "requestPermission":
+		t.handleRequestPermission(id, params)
+	default:
+		// Unknown method - send error response
+		t.sendResponse(id, nil, &jsonRPCError{
+			Code:    -32601,
+			Message: "Method not found",
+		})
+	}
+}
+
+// handleRequestPermission handles permission requests from the agent.
+func (t *ACPTransport) handleRequestPermission(id int64, params json.RawMessage) {
+	var p requestPermissionParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		t.sendResponse(id, nil, &jsonRPCError{
+			Code:    -32602,
+			Message: "Invalid params",
+		})
+		return
+	}
+
+	// Extract command from tool call title or raw input
+	command := p.ToolCall.Title
+	if command == "" {
+		// Try to extract from rawInput (usually has "command" field for Bash)
+		var input struct {
+			Command string `json:"command"`
+		}
+		if err := json.Unmarshal(p.ToolCall.RawInput, &input); err == nil && input.Command != "" {
+			command = input.Command
+		}
+	}
+
+	// Call the permission handler
+	t.mu.Lock()
+	handler := t.permissionHandler
+	t.mu.Unlock()
+
+	var outcome permissionOutcome
+	if handler == nil {
+		// No handler - deny by default
+		outcome = permissionOutcome{Outcome: "selected", OptionID: "reject"}
+	} else {
+		allow, always := handler(command)
+		if allow {
+			if always {
+				outcome = permissionOutcome{Outcome: "selected", OptionID: "allow_always"}
+			} else {
+				outcome = permissionOutcome{Outcome: "selected", OptionID: "allow"}
+			}
+		} else {
+			outcome = permissionOutcome{Outcome: "selected", OptionID: "reject"}
+		}
+	}
+
+	t.sendResponse(id, permissionResponse{Outcome: &outcome}, nil)
+}
+
+// sendResponse sends a JSON-RPC response.
+func (t *ACPTransport) sendResponse(id int64, result interface{}, err *jsonRPCError) {
+	resp := jsonRPCResponse{
+		JSONRPC: "2.0",
+		ID:      id,
+		Result:  result,
+		Error:   err,
+	}
+
+	data, marshalErr := json.Marshal(resp)
+	if marshalErr != nil {
+		return
+	}
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.stdin != nil {
+		t.stdin.Write(append(data, '\n'))
 	}
 }
 
@@ -719,6 +854,12 @@ func (t *ACPTransport) SendStreaming(ctx context.Context, req Request) (<-chan s
 					Error   *jsonRPCError   `json:"error"`
 				}
 				if err := json.Unmarshal(line, &msg); err != nil {
+					continue
+				}
+
+				// Check if this is an incoming request (has both ID and Method)
+				if msg.ID != nil && msg.Method != "" {
+					go t.handleIncomingRequest(*msg.ID, msg.Method, msg.Params)
 					continue
 				}
 
