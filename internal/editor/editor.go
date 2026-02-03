@@ -570,17 +570,12 @@ func (e *Editor) handleGhostTextKey(key Key) bool {
 		return true
 
 	case KeyEnter:
-		// Enter accepts and submits (if ghost is a command)
-		text := e.ghost.AcceptAll()
+		// Enter dismisses ghost and submits what's typed (fish-style)
 		trace.AgentHigh("ghost_accept", map[string]any{
-			"key":      "Enter",
-			"accepted": text,
-			"action":   "accept_and_submit",
+			"key":    "Enter",
+			"action": "dismiss_and_submit",
 		})
-		if text != "" {
-			e.insertText(text)
-		}
-		// Stop any active streaming
+		e.ghost.Clear()
 		e.ghostTextChan = nil
 		e.ghostErrChan = nil
 		// Don't return true - let Enter propagate to submit

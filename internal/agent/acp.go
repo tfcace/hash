@@ -556,10 +556,10 @@ func parseAgentResponse(text string) Response {
 	}
 }
 
-// handleIncomingRequest processes requests from the agent (like requestPermission).
+// handleIncomingRequest processes requests from the agent (like session/request_permission).
 func (t *ACPTransport) handleIncomingRequest(id int64, method string, params json.RawMessage) {
 	switch method {
-	case "requestPermission":
+	case "session/request_permission":
 		t.handleRequestPermission(id, params)
 	default:
 		// Unknown method - send error response

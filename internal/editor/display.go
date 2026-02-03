@@ -701,13 +701,15 @@ func (d *Display) RenderPermissionPrompt(command, accentColor string) {
 		accentCode = "\x1b[36m" // Fallback to cyan
 	}
 
-	// Render the prompt box
+	// Render the prompt box with colored bar and background
+	// Use bold + color for high visibility
+	barStyle := accentCode + ansiBold
 	lines := []string{
 		"",
-		accentCode + "▌" + ansiReset + " Agent wants to run:",
-		accentCode + "▌" + ansiReset + " " + ansiBold + command + ansiReset,
-		accentCode + "▌" + ansiReset,
-		accentCode + "▌" + ansiReset + " [y]allow  [n]deny  [a]always allow this command",
+		barStyle + "│" + ansiReset + " " + ansiBold + "Agent wants to run:" + ansiReset,
+		barStyle + "│" + ansiReset + " " + accentCode + ansiBold + command + ansiReset,
+		barStyle + "│" + ansiReset,
+		barStyle + "│" + ansiReset + " [y]allow  [n]deny  [a]always allow",
 	}
 
 	for _, line := range lines {
