@@ -52,6 +52,32 @@ url = "http://localhost:11434/api/generate"
 model = "codellama:13b"
 ```
 
+### Agent Permissions
+
+When the agent wants to run a command, Hash asks for permission:
+
+```
+▌ Agent wants to run:
+▌ kubectl get pods
+▌
+▌ [y]allow  [n]deny  [a]always allow this command
+```
+
+- Press **y** or **Enter** to allow once
+- Press **n** or **Esc** to deny
+- Press **a** to allow and remember (won't ask again for this exact command)
+
+Configure where "always allowed" commands are stored:
+
+```toml
+[agent]
+allowed_commands_scope = "project"  # or "global" or "session"
+```
+
+- **project** — Per-directory in `.hash/allowed_commands.json`
+- **global** — Shared across all projects in `~/.config/hash/allowed_commands.json`
+- **session** — In memory only, cleared when shell exits
+
 ### Adaptive Learning
 
 Hash learns from how you fix errors. After seeing you run `chmod +x` a few times after "Permission denied", it suggests the fix instantly — no agent call needed:
