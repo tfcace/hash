@@ -150,3 +150,48 @@ func TestAgentOutputCoordinator_MultiplePermissionRequests(t *testing.T) {
 		}
 	}
 }
+
+func TestAgentOutputCoordinator_RenderPermission(t *testing.T) {
+	var buf bytes.Buffer
+	aoc := NewAgentOutputCoordinator(&buf)
+
+	aoc.StartStreaming()
+	aoc.WriteStream("response text\n")
+
+	// Render permission prompt
+	aoc.RenderPermissionPrompt("kubectl get pods", "#00ff00")
+
+	output := buf.String()
+	if !strings.Contains(output, "Agent wants to run") {
+		t.Errorf("missing permission header in output: %q", output)
+	}
+	if !strings.Contains(output, "kubectl get pods") {
+		t.Errorf("missing command in output: %q", output)
+	}
+	if !strings.Contains(output, "[y]allow") {
+		t.Errorf("missing keybindings in output: %q", output)
+	}
+}
+
+func TestAgentOutputCoordinator_ClearPermission(t *testing.T) {
+	var buf bytes.Buffer
+	aoc := NewAgentOutputCoordinator(&buf)
+
+	aoc.StartStreaming()
+	aoc.RenderPermissionPrompt("ls -la", "")
+
+	initialLen := buf.Len()
+
+	aoc.ClearPermissionPrompt()
+
+	// Should have added cursor-up and clear-line sequences
+	if buf.Len() <= initialLen {
+		t.Error("expected clear sequences to be written")
+	}
+
+	output := buf.String()
+	// Should contain cursor up sequences (5 lines)
+	if strings.Count(output, "\033[1A") < 5 {
+		t.Errorf("expected 5 cursor-up sequences, got fewer in: %q", output)
+	}
+}

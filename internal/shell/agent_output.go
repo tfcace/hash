@@ -141,3 +141,73 @@ func (aoc *AgentOutputCoordinator) ClearLine() {
 	defer aoc.mu.Unlock()
 	fmt.Fprint(aoc.out, "\r\033[K")
 }
+
+// ANSI escape codes for permission prompt rendering.
+const (
+	ansiReset     = "\033[0m"
+	ansiBold      = "\033[1m"
+	ansiClearLine = "\033[2K"
+	ansiCursorUp  = "\033[1A"
+)
+
+// RenderPermissionPrompt displays the permission request UI.
+// Automatically enters permission state and pauses streaming.
+func (aoc *AgentOutputCoordinator) RenderPermissionPrompt(command, accentColor string) {
+	wasStreaming := aoc.EnterPermission()
+
+	aoc.mu.Lock()
+	defer aoc.mu.Unlock()
+
+	// If we were streaming, clear the current line first
+	if wasStreaming {
+		fmt.Fprint(aoc.out, "\r\033[K")
+	}
+
+	// Build accent color ANSI code
+	accentCode := ""
+	if accentColor != "" && len(accentColor) == 7 && accentColor[0] == '#' {
+		var r, g, b int
+		fmt.Sscanf(accentColor[1:], "%02x%02x%02x", &r, &g, &b)
+		accentCode = fmt.Sprintf("\033[38;2;%d;%d;%dm", r, g, b)
+	} else {
+		accentCode = "\033[36m" // Fallback to cyan
+	}
+
+	// Render the prompt box with colored bar
+	barStyle := accentCode + ansiBold
+	lines := []string{
+		"",
+		barStyle + "│" + ansiReset + " " + ansiBold + "Agent wants to run:" + ansiReset,
+		barStyle + "│" + ansiReset + " " + accentCode + ansiBold + command + ansiReset,
+		barStyle + "│" + ansiReset,
+		barStyle + "│" + ansiReset + " [y]allow  [n]deny  [a]always allow",
+	}
+
+	var sb strings.Builder
+	for _, line := range lines {
+		sb.WriteString("\r\n")
+		sb.WriteString(ansiClearLine)
+		sb.WriteString(line)
+	}
+
+	aoc.out.Write([]byte(sb.String()))
+}
+
+// ClearPermissionPrompt removes the permission prompt and resumes streaming.
+func (aoc *AgentOutputCoordinator) ClearPermissionPrompt() {
+	aoc.mu.Lock()
+
+	// Move up 5 lines and clear each
+	var sb strings.Builder
+	for i := 0; i < 5; i++ {
+		sb.WriteString(ansiCursorUp)
+		sb.WriteString("\r")
+		sb.WriteString(ansiClearLine)
+	}
+	aoc.out.Write([]byte(sb.String()))
+
+	aoc.mu.Unlock()
+
+	// Resume streaming (this handles flushing buffered content)
+	aoc.ExitPermission()
+}
