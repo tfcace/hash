@@ -182,17 +182,21 @@ func TestAgentOutputCoordinator_ClearPermission(t *testing.T) {
 
 	initialLen := buf.Len()
 
-	aoc.ClearPermissionPrompt()
+	aoc.ClearPermissionPrompt(true)
 
-	// Should have added cursor-up and clear-line sequences
+	// Should have added cursor-up and clear-line sequences plus feedback
 	if buf.Len() <= initialLen {
 		t.Error("expected clear sequences to be written")
 	}
 
 	output := buf.String()
-	// Should contain cursor up sequences (5 lines)
-	if strings.Count(output, "\033[1A") < 5 {
-		t.Errorf("expected 5 cursor-up sequences, got fewer in: %q", output)
+	// Should contain cursor up sequences (4 lines - we clear current line first)
+	if strings.Count(output, "\033[1A") < 4 {
+		t.Errorf("expected 4 cursor-up sequences, got fewer in: %q", output)
+	}
+	// Should show allowed feedback with the command
+	if !strings.Contains(output, "✓") || !strings.Contains(output, "ls -la") {
+		t.Errorf("expected allowed feedback with command, got: %q", output)
 	}
 }
 
@@ -265,9 +269,32 @@ func TestAgentOutputCoordinator_PermissionWithoutStreaming(t *testing.T) {
 		t.Errorf("permission prompt should still render: %q", output)
 	}
 
-	aoc.ClearPermissionPrompt()
+	aoc.ClearPermissionPrompt(true)
 
 	if aoc.State() != AgentOutputStateIdle {
 		t.Errorf("should return to IDLE, got %v", aoc.State())
+	}
+}
+
+func TestAgentOutputCoordinator_ClearPermission_Denied(t *testing.T) {
+	var buf bytes.Buffer
+	aoc := NewAgentOutputCoordinator(&buf)
+
+	aoc.StartStreaming()
+	aoc.RenderPermissionPrompt("rm -rf /", "")
+
+	initialLen := buf.Len()
+
+	aoc.ClearPermissionPrompt(false)
+
+	// Should have added cursor-up and clear-line sequences plus feedback
+	if buf.Len() <= initialLen {
+		t.Error("expected clear sequences to be written")
+	}
+
+	output := buf.String()
+	// Should show denied feedback with the command
+	if !strings.Contains(output, "✗") || !strings.Contains(output, "rm -rf /") {
+		t.Errorf("expected denied feedback with command, got: %q", output)
 	}
 }

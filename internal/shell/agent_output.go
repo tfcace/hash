@@ -3,6 +3,7 @@ package shell
 import (
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"sync"
 )
@@ -42,11 +43,13 @@ func (s AgentOutputState) String() string {
 //
 // Other TUI components (ContextPicker, History search) are not managed here.
 type AgentOutputCoordinator struct {
-	mu           sync.Mutex
-	out          io.Writer
-	state        AgentOutputState
-	streamBuffer strings.Builder // Buffers text when permission is active
-	wasStreaming bool            // Track if we were streaming before permission
+	mu             sync.Mutex
+	out            io.Writer
+	state          AgentOutputState
+	streamBuffer   strings.Builder // Buffers text when permission is active
+	wasStreaming   bool            // Track if we were streaming before permission
+	pendingCommand string          // Command currently being prompted for permission
+	accentColorFn  func() string   // Callback to get current accent color
 }
 
 // NewAgentOutputCoordinator creates a new agent output coordinator.
@@ -55,6 +58,14 @@ func NewAgentOutputCoordinator(out io.Writer) *AgentOutputCoordinator {
 		out:   out,
 		state: AgentOutputStateIdle,
 	}
+}
+
+// SetAccentColorFunc sets a callback to get the current accent color.
+// This allows the color to be updated dynamically (e.g., after starship extraction).
+func (aoc *AgentOutputCoordinator) SetAccentColorFunc(fn func() string) {
+	aoc.mu.Lock()
+	defer aoc.mu.Unlock()
+	aoc.accentColorFn = fn
 }
 
 // State returns the current output state.
@@ -139,38 +150,43 @@ func (aoc *AgentOutputCoordinator) Write(p []byte) (n int, err error) {
 func (aoc *AgentOutputCoordinator) ClearLine() {
 	aoc.mu.Lock()
 	defer aoc.mu.Unlock()
-	fmt.Fprint(aoc.out, "\r\033[K")
+	fmt.Fprint(aoc.out, "\r\x1b[K")
 }
 
 // ANSI escape codes for permission prompt rendering.
 const (
-	ansiReset     = "\033[0m"
-	ansiBold      = "\033[1m"
-	ansiClearLine = "\033[2K"
-	ansiCursorUp  = "\033[1A"
+	ansiReset     = "\x1b[0m"
+	ansiBold      = "\x1b[1m"
+	ansiClearLine = "\x1b[2K"
+	ansiCursorUp  = "\x1b[1A"
 )
 
 // RenderPermissionPrompt displays the permission request UI.
 // Automatically enters permission state and pauses streaming.
 func (aoc *AgentOutputCoordinator) RenderPermissionPrompt(command, accentColor string) {
-	wasStreaming := aoc.EnterPermission()
+	aoc.EnterPermission()
 
 	aoc.mu.Lock()
 	defer aoc.mu.Unlock()
 
-	// If we were streaming, clear the current line first
-	if wasStreaming {
-		fmt.Fprint(aoc.out, "\r\033[K")
+	// Store command for feedback when cleared
+	aoc.pendingCommand = command
+
+	// Use callback for accent color if available, otherwise use passed-in color
+	color := accentColor
+	if aoc.accentColorFn != nil {
+		if c := aoc.accentColorFn(); c != "" {
+			color = c
+		}
 	}
 
 	// Build accent color ANSI code
-	accentCode := ""
-	if accentColor != "" && len(accentColor) == 7 && accentColor[0] == '#' {
+	accentCode := "\x1b[36m" // Default to cyan
+	if color != "" && len(color) == 7 && color[0] == '#' {
 		var r, g, b int
-		fmt.Sscanf(accentColor[1:], "%02x%02x%02x", &r, &g, &b)
-		accentCode = fmt.Sprintf("\033[38;2;%d;%d;%dm", r, g, b)
-	} else {
-		accentCode = "\033[36m" // Fallback to cyan
+		if _, err := fmt.Sscanf(color[1:], "%02x%02x%02x", &r, &g, &b); err == nil {
+			accentCode = fmt.Sprintf("\x1b[38;2;%d;%d;%dm", r, g, b)
+		}
 	}
 
 	// Render the prompt box with colored bar
@@ -194,22 +210,51 @@ func (aoc *AgentOutputCoordinator) RenderPermissionPrompt(command, accentColor s
 }
 
 // ClearPermissionPrompt removes the permission prompt and resumes streaming.
-func (aoc *AgentOutputCoordinator) ClearPermissionPrompt() {
+// Shows feedback with the command that was allowed/denied.
+func (aoc *AgentOutputCoordinator) ClearPermissionPrompt(allowed bool) {
 	aoc.mu.Lock()
 
-	// Move up 5 lines and clear each
+	// First clear the current line (line 5 - keybindings), then move up and clear the rest
 	var sb strings.Builder
-	for i := 0; i < 5; i++ {
+	sb.WriteString("\r")
+	sb.WriteString(ansiClearLine)
+	for i := 0; i < 4; i++ {
 		sb.WriteString(ansiCursorUp)
 		sb.WriteString("\r")
 		sb.WriteString(ansiClearLine)
 	}
+
+	// Truncate command if too long
+	cmd := aoc.pendingCommand
+	if len(cmd) > 60 {
+		cmd = cmd[:57] + "..."
+	}
+
+	// Show feedback with the command (dim style to not distract from main output)
+	if allowed {
+		sb.WriteString(fmt.Sprintf("\x1b[32m✓\x1b[0m \x1b[90m%s\x1b[0m\n", cmd))
+	} else {
+		sb.WriteString(fmt.Sprintf("\x1b[31m✗\x1b[0m \x1b[90m%s\x1b[0m\n", cmd))
+	}
+
+	aoc.pendingCommand = "" // Clear for next prompt
 	aoc.out.Write([]byte(sb.String()))
+
+	// Flush output to ensure clear sequences are sent immediately
+	aoc.flushLocked()
 
 	aoc.mu.Unlock()
 
 	// Resume streaming (this handles flushing buffered content)
 	aoc.ExitPermission()
+}
+
+// flushLocked flushes the output if it supports syncing.
+// Must be called with mu held.
+func (aoc *AgentOutputCoordinator) flushLocked() {
+	if f, ok := aoc.out.(*os.File); ok {
+		f.Sync()
+	}
 }
 
 // EnterConfirming transitions to confirming state (after streaming completes).
@@ -239,7 +284,7 @@ func (aoc *AgentOutputCoordinator) ShowHints(ct ConfirmationType) {
 		hint = "[Enter: retry] [Esc: cancel]"
 	}
 
-	fmt.Fprintf(aoc.out, "  \033[90m%s\033[0m\n", hint)
+	fmt.Fprintf(aoc.out, "  \x1b[90m%s\x1b[0m\n", hint)
 }
 
 // ExitConfirming returns to idle state.
@@ -251,14 +296,30 @@ func (aoc *AgentOutputCoordinator) ExitConfirming() {
 
 // Cancel aborts current operation and returns to idle state.
 // Clears any buffered content without writing it.
+// If a permission prompt was visible, clears all 5 lines.
 func (aoc *AgentOutputCoordinator) Cancel() {
 	aoc.mu.Lock()
 	defer aoc.mu.Unlock()
+
+	wasPermission := aoc.state == AgentOutputStatePermission
 
 	aoc.state = AgentOutputStateIdle
 	aoc.streamBuffer.Reset()
 	aoc.wasStreaming = false
 
-	// Clear current line to clean up any partial output
-	fmt.Fprint(aoc.out, "\r\033[K")
+	if wasPermission {
+		// Clear all 5 lines of the permission prompt
+		var sb strings.Builder
+		for i := 0; i < 5; i++ {
+			sb.WriteString(ansiCursorUp)
+			sb.WriteString("\r")
+			sb.WriteString(ansiClearLine)
+		}
+		aoc.out.Write([]byte(sb.String()))
+	} else {
+		// Just clear current line to clean up any partial output
+		fmt.Fprint(aoc.out, "\r\x1b[K")
+	}
+
+	aoc.flushLocked()
 }

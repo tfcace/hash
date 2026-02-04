@@ -174,16 +174,17 @@ func New(cfg *config.Config) (*Shell, error) {
 			// Read single keypress
 			key := readSingleKey()
 
-			// Clear the prompt and resume streaming via coordinator
-			agentOutput.ClearPermissionPrompt()
-
+			// Determine if allowed/denied based on key and clear prompt
 			switch key {
 			case 'y', 'Y', '\r', '\n':
+				agentOutput.ClearPermissionPrompt(true)
 				return true, false
 			case 'a', 'A':
 				allowlistMgr.Allow(command) //nolint:errcheck
+				agentOutput.ClearPermissionPrompt(true)
 				return true, true
 			default: // 'n', 'N', Esc, or anything else
+				agentOutput.ClearPermissionPrompt(false)
 				return false, false
 			}
 		})
@@ -366,6 +367,12 @@ func New(cfg *config.Config) (*Shell, error) {
 	// Set prompt refresh callback for Ctrl+R history picker
 	// This prints the Starship prefix (info bar) when returning from the picker
 	inputHandler.SetPromptRefreshFunc(shell.printPromptPrefix)
+
+	// Set accent color callback for permission prompts
+	// This allows the permission prompt to use the dynamically-updated colorPalette
+	shell.agentOutput.SetAccentColorFunc(func() string {
+		return shell.colorPalette.Primary
+	})
 
 	return shell, nil
 }
@@ -1167,8 +1174,10 @@ func (s *Shell) handleAgentStreamError(ctx context.Context, parsed parser.ParseR
 	}
 
 	// Mid-stream error with partial response - offer retry
-	s.responseUI.ShowConfirmation(ConfirmTypeError)
+	s.agentOutput.EnterConfirming()
+	s.agentOutput.ShowHints(ConfirmTypeError)
 	action := s.responseUI.WaitForConfirmationByType(ConfirmTypeError)
+	s.agentOutput.ExitConfirming()
 	fmt.Println()
 	if action == ConfirmRun { // Retry
 		s.handleAgentFullStreaming(ctx, parsed, modelName)

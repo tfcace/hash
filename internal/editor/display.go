@@ -688,6 +688,9 @@ func (d *Display) ClearCompletionMenu(numItems int) {
 
 // RenderPermissionPrompt draws the permission request UI.
 // Returns after drawing - caller should handle input and then call ClearPermissionPrompt.
+//
+// Deprecated: Use AgentOutputCoordinator.RenderPermissionPrompt instead for
+// proper coordination with streaming output.
 func (d *Display) RenderPermissionPrompt(command, accentColor string) {
 	var sb strings.Builder
 
@@ -722,6 +725,9 @@ func (d *Display) RenderPermissionPrompt(command, accentColor string) {
 }
 
 // ClearPermissionPrompt removes the permission prompt from display.
+//
+// Deprecated: Use AgentOutputCoordinator.ClearPermissionPrompt instead for
+// proper coordination with streaming output.
 func (d *Display) ClearPermissionPrompt() {
 	var sb strings.Builder
 

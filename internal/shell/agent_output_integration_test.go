@@ -46,7 +46,7 @@ func TestAgentOutputCoordinator_FullAgentFlow(t *testing.T) {
 
 		aoc.RenderPermissionPrompt("find . -size +100M", "#00ff00")
 		time.Sleep(50 * time.Millisecond) // User thinks
-		aoc.ClearPermissionPrompt()
+		aoc.ClearPermissionPrompt(true)   // User allowed
 	}()
 
 	wg.Wait()
