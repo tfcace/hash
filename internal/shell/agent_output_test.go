@@ -234,3 +234,40 @@ func TestAgentOutputCoordinator_HintsOnlyInConfirmingState(t *testing.T) {
 		t.Error("hints should not appear when not in confirming state")
 	}
 }
+
+func TestAgentOutputCoordinator_CancelDuringPermission(t *testing.T) {
+	var buf bytes.Buffer
+	aoc := NewAgentOutputCoordinator(&buf)
+
+	aoc.StartStreaming()
+	aoc.WriteStream("partial response")
+
+	aoc.EnterPermission()
+	aoc.WriteStream("buffered text") // Would be buffered
+
+	// Simulate cancel - should clean up and not crash
+	aoc.Cancel()
+
+	if aoc.State() != AgentOutputStateIdle {
+		t.Errorf("expected IDLE after cancel, got %v", aoc.State())
+	}
+}
+
+func TestAgentOutputCoordinator_PermissionWithoutStreaming(t *testing.T) {
+	var buf bytes.Buffer
+	aoc := NewAgentOutputCoordinator(&buf)
+
+	// Permission request when not streaming (edge case)
+	aoc.RenderPermissionPrompt("whoami", "")
+
+	output := buf.String()
+	if !strings.Contains(output, "whoami") {
+		t.Errorf("permission prompt should still render: %q", output)
+	}
+
+	aoc.ClearPermissionPrompt()
+
+	if aoc.State() != AgentOutputStateIdle {
+		t.Errorf("should return to IDLE, got %v", aoc.State())
+	}
+}

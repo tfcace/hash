@@ -248,3 +248,17 @@ func (aoc *AgentOutputCoordinator) ExitConfirming() {
 	defer aoc.mu.Unlock()
 	aoc.state = AgentOutputStateIdle
 }
+
+// Cancel aborts current operation and returns to idle state.
+// Clears any buffered content without writing it.
+func (aoc *AgentOutputCoordinator) Cancel() {
+	aoc.mu.Lock()
+	defer aoc.mu.Unlock()
+
+	aoc.state = AgentOutputStateIdle
+	aoc.streamBuffer.Reset()
+	aoc.wasStreaming = false
+
+	// Clear current line to clean up any partial output
+	fmt.Fprint(aoc.out, "\r\033[K")
+}
