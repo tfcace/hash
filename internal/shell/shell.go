@@ -1089,8 +1089,10 @@ collectLoop:
 		confirmType = ConfirmTypeExplanation
 	}
 
-	s.responseUI.ShowConfirmation(confirmType)
+	s.agentOutput.EnterConfirming()
+	s.agentOutput.ShowHints(confirmType)
 	action := s.responseUI.WaitForConfirmationByType(confirmType)
+	s.agentOutput.ExitConfirming()
 	fmt.Println()
 
 	// Stop progress bar before any action
