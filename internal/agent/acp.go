@@ -15,8 +15,27 @@ import (
 
 // ACPConfig configures the ACP transport.
 type ACPConfig struct {
-	Command string   // Command to execute (e.g., "claude-code-acp")
-	Args    []string // Arguments for the command
+	Command string   // Command to execute (e.g., "claude-code-acp" or "gemini --experimental-acp")
+	Args    []string // Additional arguments for the command
+}
+
+// ParsedCommand parses the Command string and returns the program and combined arguments.
+// If Command contains spaces, it's split into program + args, which are prepended to Args.
+// This allows users to write "gemini --experimental-acp" as a single command string.
+func (c ACPConfig) ParsedCommand() (program string, args []string) {
+	parts := strings.Fields(c.Command)
+	if len(parts) == 0 {
+		return c.Command, c.Args
+	}
+
+	program = parts[0]
+	if len(parts) > 1 {
+		// Command string has embedded args - combine with explicit args
+		args = append(parts[1:], c.Args...)
+	} else {
+		args = c.Args
+	}
+	return program, args
 }
 
 // ACPTransport communicates with an ACP-compatible agent via JSON-RPC 2.0.
@@ -121,7 +140,8 @@ func (t *ACPTransport) connectLocked(ctx context.Context) error {
 		return nil // Already connected
 	}
 
-	t.cmd = exec.Command(t.config.Command, t.config.Args...)
+	program, args := t.config.ParsedCommand()
+	t.cmd = exec.Command(program, args...)
 
 	var err error
 	t.stdin, err = t.cmd.StdinPipe()
