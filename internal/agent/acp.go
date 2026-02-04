@@ -139,7 +139,7 @@ type permissionResponse struct {
 }
 
 type permissionOutcome struct {
-	Outcome  string `json:"outcome"`  // "selected" or "cancelled"
+	Outcome  string `json:"outcome"`  // "selected" or "canceled"
 	OptionID string `json:"optionId"` // Which option was selected
 }
 

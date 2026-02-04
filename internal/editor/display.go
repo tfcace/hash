@@ -695,7 +695,7 @@ func (d *Display) RenderPermissionPrompt(command, accentColor string) {
 	accentCode := ""
 	if accentColor != "" && len(accentColor) == 7 && accentColor[0] == '#' {
 		var r, g, b int
-		fmt.Sscanf(accentColor[1:], "%02x%02x%02x", &r, &g, &b)
+		fmt.Sscanf(accentColor[1:], "%02x%02x%02x", &r, &g, &b) //nolint:errcheck
 		accentCode = fmt.Sprintf("\x1b[38;2;%d;%d;%dm", r, g, b)
 	} else {
 		accentCode = "\x1b[36m" // Fallback to cyan

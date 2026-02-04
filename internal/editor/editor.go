@@ -546,16 +546,19 @@ func (e *Editor) handleGhostTextKey(key Key) bool {
 		return true
 
 	case KeyRight:
-		// Right arrow accepts one character
-		text := e.ghost.AcceptChar()
+		// Right arrow accepts the full ghost text (fish-style)
+		text := e.ghost.AcceptAll()
 		trace.Agent("ghost_accept", map[string]any{
 			"key":      "Right",
 			"accepted": text,
-			"action":   "accept_char",
+			"action":   "accept_all",
 		})
 		if text != "" {
 			e.insertText(text)
 		}
+		// Stop any active streaming
+		e.ghostTextChan = nil
+		e.ghostErrChan = nil
 		return true
 
 	case KeyEscape:

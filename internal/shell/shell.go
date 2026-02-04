@@ -185,7 +185,7 @@ func New(cfg *config.Config) (*Shell, error) {
 			case 'y', 'Y', '\r', '\n':
 				return true, false
 			case 'a', 'A':
-				allowlistMgr.Allow(command)
+				allowlistMgr.Allow(command) //nolint:errcheck
 				return true, true
 			default: // 'n', 'N', Esc, or anything else
 				return false, false
@@ -1401,14 +1401,15 @@ func readSingleKey() byte {
 
 	buf := make([]byte, 1)
 	n, err := os.Stdin.Read(buf)
-	if err != nil || n == 0 {
+	if err != nil || n != 1 {
 		return 'n'
 	}
 
 	// Handle escape key (0x1b)
-	if buf[0] == 0x1b {
+	char := buf[0] //nolint:gosec // n == 1 guarantees buf[0] is valid
+	if char == 0x1b {
 		return 0x1b // Return ESC
 	}
 
-	return buf[0]
+	return char
 }
