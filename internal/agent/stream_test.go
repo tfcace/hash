@@ -116,3 +116,55 @@ func TestLooksLikeCommand(t *testing.T) {
 		})
 	}
 }
+
+func TestProcessAgentResponse(t *testing.T) {
+	tests := []struct {
+		name         string
+		input        string
+		wantText     string
+		wantExpects  bool
+	}{
+		{
+			name:        "no marker",
+			input:       "Here is your answer.",
+			wantText:    "Here is your answer.",
+			wantExpects: false,
+		},
+		{
+			name:        "with marker at end",
+			input:       "Would you like more details?\n[AWAITING_INPUT]",
+			wantText:    "Would you like more details?",
+			wantExpects: true,
+		},
+		{
+			name:        "marker with trailing whitespace",
+			input:       "Choose an option:\n[AWAITING_INPUT]\n  ",
+			wantText:    "Choose an option:",
+			wantExpects: true,
+		},
+		{
+			name:        "marker in middle is not stripped",
+			input:       "Use [AWAITING_INPUT] to signal.\nDone.",
+			wantText:    "Use [AWAITING_INPUT] to signal.\nDone.",
+			wantExpects: false,
+		},
+		{
+			name:        "empty after marker stripped",
+			input:       "[AWAITING_INPUT]",
+			wantText:    "",
+			wantExpects: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotText, gotExpects := ProcessAgentResponse(tt.input)
+			if gotText != tt.wantText {
+				t.Errorf("text = %q, want %q", gotText, tt.wantText)
+			}
+			if gotExpects != tt.wantExpects {
+				t.Errorf("expectsInput = %v, want %v", gotExpects, tt.wantExpects)
+			}
+		})
+	}
+}

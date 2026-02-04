@@ -98,3 +98,18 @@ func (c *StreamCollector) Response() Response {
 	}
 	return Response{Type: ResponseTypeExplanation, Explanation: text}
 }
+
+// AwaitingInputMarker is the marker agents use to signal they expect user input.
+const AwaitingInputMarker = "[AWAITING_INPUT]"
+
+// ProcessAgentResponse strips the [AWAITING_INPUT] marker if present at the end.
+// Returns the display text and whether the agent expects further input.
+func ProcessAgentResponse(text string) (display string, expectsInput bool) {
+	trimmed := strings.TrimSpace(text)
+	if strings.HasSuffix(trimmed, AwaitingInputMarker) {
+		display = strings.TrimSuffix(trimmed, AwaitingInputMarker)
+		display = strings.TrimSpace(display)
+		return display, true
+	}
+	return text, false
+}
