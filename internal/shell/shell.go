@@ -57,6 +57,7 @@ type Shell struct {
 	suggestor    *CommandSuggestor
 	colorPalette prompt.Palette
 	allowlist    *allowlist.Manager
+	agentOutput  *AgentOutputCoordinator
 
 	lastExitCode int
 	lastDuration time.Duration
@@ -348,6 +349,7 @@ func New(cfg *config.Config) (*Shell, error) {
 		suggestor:    suggestor,
 		colorPalette: colorPalette,
 		allowlist:    allowlistMgr,
+		agentOutput:  NewAgentOutputCoordinator(os.Stdout),
 		historyIndex: -1, // Start before history (current line)
 		osc:          osc,
 	}
@@ -1044,23 +1046,27 @@ collectLoop:
 				break collectLoop
 			}
 			if response.Len() == 0 {
-				// First chunk - transition to receiving state, then clear for output
+				// First chunk - start streaming via coordinator, transition to receiving state
+				s.agentOutput.StartStreaming()
 				s.responseUI.ShowState(AgentStateReceiving)
 				s.responseUI.ClearLine()
 			}
 			response.WriteString(text)
 			// Count newlines for clearing on cancel
 			lineCount += strings.Count(text, "\n")
-			// Stream output with markdown rendering
+			// Stream output with markdown rendering via coordinator
 			rendered := renderer.Write(text)
-			fmt.Fprint(os.Stdout, rendered)
+			s.agentOutput.WriteStream(rendered)
 		}
 	}
 
 	// Flush any remaining buffered content from the renderer
 	if remaining := renderer.Flush(); remaining != "" {
-		fmt.Fprint(os.Stdout, remaining)
+		s.agentOutput.WriteStream(remaining)
 	}
+
+	// End streaming mode
+	s.agentOutput.EndStreaming()
 
 	// Handle error case first
 	if streamErr != nil {
