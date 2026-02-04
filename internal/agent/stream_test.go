@@ -154,6 +154,24 @@ func TestProcessAgentResponse(t *testing.T) {
 			wantText:    "",
 			wantExpects: true,
 		},
+		{
+			name:        "conversation start marker only",
+			input:       "[CONVERSATION]\nHere is a question.",
+			wantText:    "Here is a question.",
+			wantExpects: false,
+		},
+		{
+			name:        "both markers",
+			input:       "[CONVERSATION]\nWhat would you like?\n[AWAITING_INPUT]",
+			wantText:    "What would you like?",
+			wantExpects: true,
+		},
+		{
+			name:        "both markers with extra whitespace",
+			input:       "  [CONVERSATION]\n\nChoose an option:\n\n[AWAITING_INPUT]  ",
+			wantText:    "Choose an option:",
+			wantExpects: true,
+		},
 	}
 
 	for _, tt := range tests {

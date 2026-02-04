@@ -24,9 +24,13 @@ func (m *InsertMode) HandleKey(key Key, state *EditorState) ModeResult {
 		return ModeResult{Action: ActionPaste}
 	}
 
-	// Alt+Enter or Shift+Enter: insert newline with backslash continuation
+	// Alt+Enter or Shift+Enter: insert newline (with optional shell continuation)
 	if key.Special == KeyEnter && (key.Shift || key.Alt) {
-		m.insertNewlineWithContinuation(state)
+		if state.LineContinuation {
+			m.insertNewlineWithContinuation(state)
+		} else {
+			m.insertNewline(state)
+		}
 		return ModeResult{Action: ActionInsert}
 	}
 
@@ -109,7 +113,9 @@ func (m *InsertMode) handleCtrl(key Key, state *EditorState) ModeResult {
 	case 'f': // Ctrl+F: forward one char (emacs)
 		m.moveRight(state)
 	case 'p': // Ctrl+P: context picker
-		return ModeResult{ContextPicker: true}
+		if state.AllowContextPicker {
+			return ModeResult{ContextPicker: true}
+		}
 	case 'w': // Ctrl+W: delete word back
 		m.deleteWordBack(state)
 		return ModeResult{Action: ActionDelete}
@@ -120,7 +126,9 @@ func (m *InsertMode) handleCtrl(key Key, state *EditorState) ModeResult {
 		m.deleteToLineEnd(state)
 		return ModeResult{Action: ActionDelete}
 	case 'r': // Ctrl+R: history search
-		return ModeResult{HistorySearch: true}
+		if state.AllowHistorySearch {
+			return ModeResult{HistorySearch: true}
+		}
 	}
 	return ModeResult{}
 }
@@ -299,8 +307,11 @@ func (m *InsertMode) insertPasteContent(state *EditorState, text string) {
 		return
 	}
 
+	processed := text
 	// Process the pasted text to add continuations where needed
-	processed := addLineContinuations(text)
+	if state.LineContinuation {
+		processed = addLineContinuations(text)
+	}
 
 	// Insert the processed text
 	row, col := state.Cursor.Pos.Row, state.Cursor.Pos.Col
@@ -317,6 +328,14 @@ func (m *InsertMode) insertPasteContent(state *EditorState, text string) {
 	}
 	state.Cursor.Pos.Row = row
 	state.Cursor.Pos.Col = col
+}
+
+// insertNewline inserts a plain newline without continuation.
+func (m *InsertMode) insertNewline(state *EditorState) {
+	row, col := state.Cursor.Pos.Row, state.Cursor.Pos.Col
+	state.Buffer.Insert(row, col, "\n")
+	state.Cursor.Pos.Row++
+	state.Cursor.Pos.Col = 0
 }
 
 // endsWithBackslash checks if a string ends with a backslash (ignoring trailing whitespace).

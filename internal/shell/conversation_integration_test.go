@@ -8,8 +8,8 @@ import (
 )
 
 func TestConversation_MarkerDetectionIntegration(t *testing.T) {
-	// Test the full flow: response with marker -> conversation mode
-	input := "Here is your answer.\n\nWould you like more details?\n[AWAITING_INPUT]"
+	// Test the full flow: response with markers -> conversation mode
+	input := "[CONVERSATION]\nHere is your answer.\n\nWould you like more details?\n[AWAITING_INPUT]"
 
 	display, expects := agent.ProcessAgentResponse(input)
 
@@ -20,6 +20,47 @@ func TestConversation_MarkerDetectionIntegration(t *testing.T) {
 	expectedDisplay := "Here is your answer.\n\nWould you like more details?"
 	if display != expectedDisplay {
 		t.Errorf("display = %q, want %q", display, expectedDisplay)
+	}
+}
+
+func TestConversation_HasConversationStart(t *testing.T) {
+	tests := []struct {
+		input string
+		want  bool
+	}{
+		{"[CONVERSATION]\nHello", true},
+		{"  [CONVERSATION]\nHello", true},
+		{"\n[CONVERSATION]\nHello", true}, // Leading newlines are OK
+		{"\n\n[CONVERSATION]\nHello", true},
+		{"Hello [CONVERSATION]", false}, // Must be at start (after whitespace trim)
+		{"Hello", false},
+	}
+
+	for _, tt := range tests {
+		got := agent.HasConversationStart(tt.input)
+		if got != tt.want {
+			t.Errorf("HasConversationStart(%q) = %v, want %v", tt.input, got, tt.want)
+		}
+	}
+}
+
+func TestConversation_StripConversationStart(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"[CONVERSATION]\nHello", "Hello"},
+		{"  [CONVERSATION]\nHello", "Hello"},
+		{"[CONVERSATION]Hello", "Hello"},
+		{"\n[CONVERSATION]\n\nHello", "Hello"}, // Leading/trailing whitespace stripped
+		{"Hello", "Hello"},
+	}
+
+	for _, tt := range tests {
+		got := agent.StripConversationStart(tt.input)
+		if got != tt.want {
+			t.Errorf("StripConversationStart(%q) = %q, want %q", tt.input, got, tt.want)
+		}
 	}
 }
 
@@ -38,10 +79,10 @@ func TestConversation_UIRendering(t *testing.T) {
 	if !bytes.Contains([]byte(output), []byte("How can I help you?")) {
 		t.Error("missing agent message")
 	}
-	if !bytes.Contains([]byte(output), []byte("║")) {
+	if !bytes.Contains([]byte(output), []byte("│")) {
 		t.Error("missing input prompt")
 	}
-	if !bytes.Contains([]byte(output), []byte("Esc exit")) {
+	if !bytes.Contains([]byte(output), []byte("Ctrl+C exit")) {
 		t.Error("missing hints")
 	}
 }

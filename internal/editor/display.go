@@ -40,6 +40,17 @@ type Display struct {
 	finalizedLines int    // Lines rendered by last Finalize call
 	scrollbarCode  string // ANSI code for scrollbar foreground color
 	lastMenuItems  int    // Number of items in last rendered completion menu
+	frame          *InputFrame
+}
+
+// InputFrame customizes how the input area is rendered.
+// PrefixWidth is the visible width of Prefix (ANSI excluded).
+type InputFrame struct {
+	TopLine     string // Rendered above input lines (no trailing newline)
+	BottomLine  string // Rendered below input lines (no trailing newline)
+	Prefix      string // Rendered before each input line
+	PrefixWidth int
+	LineBg      string // Optional ANSI background code for line padding
 }
 
 // NewDisplay creates a new display.
@@ -73,6 +84,11 @@ func (d *Display) SetPrompt(prompt string) {
 	d.promptWidth = visibleWidth(prompt)
 }
 
+// SetFrame configures a custom frame for input rendering.
+func (d *Display) SetFrame(frame *InputFrame) {
+	d.frame = frame
+}
+
 // SetInputBgColor sets the background color for submitted input.
 // hexColor should be in format "#RRGGBB".
 func (d *Display) SetInputBgColor(hexColor string) {
@@ -102,6 +118,9 @@ func (d *Display) SetScrollbarColor(hexColor string) {
 // calcPrefixWidth calculates the prefix width for cursor positioning on a given row.
 // Structure: [mode bar "i│" or "n│" if gutter] + [prompt on line 0, space on others]
 func (d *Display) calcPrefixWidth(row int) int {
+	if d.frame != nil {
+		return d.frame.PrefixWidth
+	}
 	prefixWidth := 0
 	if d.gutter {
 		prefixWidth = 2 // Mode bar "i│" or "n│"
@@ -136,6 +155,10 @@ func visibleWidth(s string) int {
 
 // Render draws the buffer content with cursor.
 func (d *Display) Render(buf *Buffer, cur *Cursor, hasSelection bool) {
+	if d.frame != nil {
+		d.renderWithFrame(buf, cur, hasSelection, "", false, false, "")
+		return
+	}
 	var sb strings.Builder
 
 	// Hide cursor during render for flicker-free updates
@@ -227,6 +250,10 @@ func (d *Display) Render(buf *Buffer, cur *Cursor, hasSelection bool) {
 //
 //nolint:gocyclo // terminal rendering requires many conditional escape sequences
 func (d *Display) RenderWithGhost(buf *Buffer, cur *Cursor, hasSelection bool, ghostText string, streaming, fromAgent bool, modelName string) {
+	if d.frame != nil {
+		d.renderWithFrame(buf, cur, hasSelection, ghostText, streaming, fromAgent, modelName)
+		return
+	}
 	var sb strings.Builder
 
 	// Hide cursor during render for flicker-free updates
@@ -344,6 +371,96 @@ func (d *Display) RenderWithGhost(buf *Buffer, cur *Cursor, hasSelection bool, g
 	d.out.Write([]byte(sb.String()))
 }
 
+func (d *Display) renderWithFrame(buf *Buffer, cur *Cursor, hasSelection bool, ghostText string, streaming, fromAgent bool, modelName string) {
+	frame := d.frame
+	var sb strings.Builder
+
+	// Hide cursor during render for flicker-free updates
+	sb.WriteString(ansiHideCursor)
+
+	// Move up from where cursor was left to first line of our content
+	if d.lastCursorRow > 0 {
+		fmt.Fprintf(&sb, ansiCursorUp, d.lastCursorRow)
+	}
+	sb.WriteString("\r")
+
+	topOffset := 0
+	if frame.TopLine != "" {
+		d.renderFrameLine(&sb, frame.TopLine, frame.LineBg)
+		sb.WriteString("\r\n")
+		topOffset = 1
+	}
+
+	cursorRow := cur.Pos.Row
+	cursorCol := cur.Pos.Col
+
+	for i := 0; i < buf.LineCount(); i++ {
+		if i > 0 {
+			sb.WriteString("\r\n")
+		}
+		sb.WriteString(ansiClearLine)
+		sb.WriteString(frame.Prefix)
+
+		line := buf.Line(i)
+		if hasSelection && cur.HasSelection() {
+			d.renderLineWithSelection(&sb, line, i, cur)
+		} else {
+			sb.WriteString(line)
+		}
+
+		// Optional line padding with background
+		if frame.LineBg != "" && d.width > 0 {
+			contentWidth := frame.PrefixWidth + visibleWidth(line)
+			if d.width > contentWidth {
+				sb.WriteString(frame.LineBg)
+				padding := d.width - contentWidth
+				for j := 0; j < padding; j++ {
+					sb.WriteByte(' ')
+				}
+				sb.WriteString(ansiReset)
+			}
+		}
+	}
+
+	if frame.BottomLine != "" {
+		if buf.LineCount() > 0 {
+			sb.WriteString("\r\n")
+		}
+		d.renderFrameLine(&sb, frame.BottomLine, frame.LineBg)
+	}
+
+	// Clear everything below the buffer
+	sb.WriteString(ansiClearToEnd)
+
+	totalLines := topOffset + buf.LineCount()
+	if frame.BottomLine != "" {
+		totalLines++
+	}
+
+	// Move to cursor position
+	cursorLine := topOffset + cursorRow
+	linesBelowCursor := totalLines - 1 - cursorLine
+	if linesBelowCursor > 0 {
+		fmt.Fprintf(&sb, ansiCursorUp, linesBelowCursor)
+	}
+
+	// Position cursor within the line
+	sb.WriteString("\r")
+	prefixWidth := frame.PrefixWidth
+	if cursorCol+prefixWidth > 0 {
+		fmt.Fprintf(&sb, ansiCursorForward, cursorCol+prefixWidth)
+	}
+
+	// Show cursor
+	sb.WriteString(ansiShowCursor)
+
+	// Remember where we left the cursor for next render
+	d.lastCursorRow = cursorLine
+	d.lastLines = totalLines
+
+	d.out.Write([]byte(sb.String()))
+}
+
 func (d *Display) renderLineWithSelection(sb *strings.Builder, line string, row int, cur *Cursor) {
 	start, end := cur.SelectionRange()
 
@@ -393,6 +510,10 @@ func (d *Display) Clear() {
 // Finalize leaves the content on screen and moves to a new line.
 // Re-renders with background highlight to distinguish from output.
 func (d *Display) Finalize(buf *Buffer) {
+	if d.frame != nil {
+		d.finalizeWithFrame(buf)
+		return
+	}
 	var sb strings.Builder
 
 	// Move cursor to beginning of the displayed content
@@ -454,6 +575,70 @@ func (d *Display) Finalize(buf *Buffer) {
 	d.finalizedLines = buf.LineCount()
 	d.lastLines = 0
 	d.lastCursorRow = 0
+}
+
+func (d *Display) finalizeWithFrame(buf *Buffer) {
+	frame := d.frame
+	var sb strings.Builder
+
+	// Move cursor to beginning of the displayed content
+	if d.lastCursorRow > 0 {
+		fmt.Fprintf(&sb, ansiCursorUp, d.lastCursorRow)
+	}
+	sb.WriteString("\r")
+
+	linesWritten := 0
+	if frame.TopLine != "" {
+		d.renderFrameLine(&sb, frame.TopLine, frame.LineBg)
+		sb.WriteString("\r\n")
+		linesWritten++
+	}
+
+	for i := 0; i < buf.LineCount(); i++ {
+		sb.WriteString(ansiClearLine)
+		sb.WriteString(frame.Prefix)
+		sb.WriteString(buf.Line(i))
+
+		if frame.LineBg != "" && d.width > 0 {
+			contentWidth := frame.PrefixWidth + visibleWidth(buf.Line(i))
+			if d.width > contentWidth {
+				sb.WriteString(frame.LineBg)
+				padding := d.width - contentWidth
+				for j := 0; j < padding; j++ {
+					sb.WriteByte(' ')
+				}
+				sb.WriteString(ansiReset)
+			}
+		}
+
+		sb.WriteString("\r\n")
+		linesWritten++
+	}
+
+	if frame.BottomLine != "" {
+		d.renderFrameLine(&sb, frame.BottomLine, frame.LineBg)
+		sb.WriteString("\r\n")
+		linesWritten++
+	}
+
+	d.out.Write([]byte(sb.String()))
+	d.finalizedLines = linesWritten
+	d.lastLines = 0
+	d.lastCursorRow = 0
+}
+
+func (d *Display) renderFrameLine(sb *strings.Builder, line string, lineBg string) {
+	sb.WriteString(ansiClearLine)
+	sb.WriteString(line)
+
+	if lineBg == "" {
+		return
+	}
+
+	// Fill to end of line with the frame background to avoid off-by-one gaps.
+	sb.WriteString(lineBg)
+	sb.WriteString("\x1b[K")
+	sb.WriteString(ansiReset)
 }
 
 // FinalizedLines returns how many lines were rendered by Finalize.

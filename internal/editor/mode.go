@@ -39,13 +39,22 @@ type EditorState struct {
 	Buffer    *Buffer
 	Cursor    *Cursor
 	UndoStack *UndoStack
+	// LineContinuation controls shell-style "\" continuation on newline/paste.
+	LineContinuation bool
+	// AllowHistorySearch controls Ctrl+R history search.
+	AllowHistorySearch bool
+	// AllowContextPicker controls Ctrl+P context picker.
+	AllowContextPicker bool
 }
 
 // NewEditorState creates a new editor state.
 func NewEditorState() *EditorState {
 	return &EditorState{
-		Buffer:    NewBuffer(),
-		Cursor:    NewCursor(),
-		UndoStack: NewUndoStack(),
+		Buffer:             NewBuffer(),
+		Cursor:             NewCursor(),
+		UndoStack:          NewUndoStack(),
+		LineContinuation:   true,
+		AllowHistorySearch: true,
+		AllowContextPicker: true,
 	}
 }

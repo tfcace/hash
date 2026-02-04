@@ -60,8 +60,9 @@ type Shell struct {
 	agentOutput  *AgentOutputCoordinator
 
 	// Conversation mode state
-	conversation *ConversationState
-	convUI       *ConversationUI
+	conversation    *ConversationState
+	convUI          *ConversationUI
+	convCancelArmed bool
 
 	lastExitCode int
 	lastDuration time.Duration
@@ -1031,12 +1032,22 @@ func (s *Shell) handleAgentFullStreaming(ctx context.Context, parsed parser.Pars
 	var streamErr error
 	lineCount := 0 // Track lines for clearing on cancel
 	renderer := markdown.NewStreamingRenderer()
+	inConversation := false // Track if we detected conversation mode
+	streamingStarted := false
+
+	// Buffer for detecting conversation marker (may arrive in multiple chunks)
+	var markerBuffer strings.Builder
+	markerDetected := false
+	const markerLen = len(agent.ConversationStartMarker) // "[CONVERSATION]" = 14 chars
 
 collectLoop:
 	for {
 		select {
 		case <-ctx.Done():
 			s.responseUI.ClearLine()
+			if inConversation {
+				s.exitConversationMode()
+			}
 			fmt.Fprintln(os.Stderr, "hash: request canceled")
 			s.lastExitCode = 1
 			s.updatePrompt()
@@ -1053,24 +1064,63 @@ collectLoop:
 			if !ok {
 				break collectLoop
 			}
-			if response.Len() == 0 {
-				// First chunk - start streaming via coordinator, transition to receiving state
+
+			// Start streaming UI on first chunk
+			if !streamingStarted {
+				streamingStarted = true
 				s.agentOutput.StartStreaming()
 				s.responseUI.ShowState(AgentStateReceiving)
 				s.responseUI.ClearLine()
 			}
+
+			// Buffer initial text to detect conversation marker
+			if !markerDetected {
+				markerBuffer.WriteString(text)
+				buffered := markerBuffer.String()
+
+				// Check if we have enough to detect the marker
+				if len(strings.TrimSpace(buffered)) >= markerLen || !strings.HasPrefix(strings.TrimSpace(agent.ConversationStartMarker), strings.TrimSpace(buffered)) {
+					markerDetected = true
+
+					if agent.HasConversationStart(buffered) {
+						inConversation = true
+						text = agent.StripConversationStart(buffered)
+						s.setupConversationMode()
+					} else {
+						// Not a conversation - output buffered content
+						text = buffered
+					}
+				} else {
+					// Need more data to determine - continue buffering
+					continue
+				}
+			}
+
+			if inConversation {
+				text = strings.ReplaceAll(text, agent.ConversationStartMarker, "")
+			}
+
 			response.WriteString(text)
 			// Count newlines for clearing on cancel
 			lineCount += strings.Count(text, "\n")
-			// Stream output with markdown rendering via coordinator
+
+			// Stream output with markdown rendering
 			rendered := renderer.Write(text)
-			s.agentOutput.WriteStream(rendered)
+			if inConversation && s.convUI != nil {
+				s.convUI.WriteStreamTinted(rendered)
+			} else {
+				s.agentOutput.WriteStream(rendered)
+			}
 		}
 	}
 
 	// Flush any remaining buffered content from the renderer
 	if remaining := renderer.Flush(); remaining != "" {
-		s.agentOutput.WriteStream(remaining)
+		if inConversation && s.convUI != nil {
+			s.convUI.WriteStreamTinted(remaining)
+		} else {
+			s.agentOutput.WriteStream(remaining)
+		}
 	}
 
 	// End streaming mode
@@ -1078,23 +1128,42 @@ collectLoop:
 
 	// Handle error case first
 	if streamErr != nil {
+		if inConversation {
+			s.exitConversationMode()
+		}
 		if s.handleAgentStreamError(ctx, parsed, modelName, streamErr, response.Len(), lineCount) {
 			return
 		}
 	}
 
 	// Success path - add newline after response and clear spinner
-	fmt.Println()
+	if inConversation {
+		fmt.Print("\x1b[K\x1b[0m\n") // Fill line, reset, newline
+	} else {
+		fmt.Println()
+	}
 	lineCount++
 	s.responseUI.ClearLine() // Stop spinner
 
 	// Check for conversation marker
 	responseText := strings.TrimSpace(response.String())
-	displayText, expectsInput := agent.ProcessAgentResponse(responseText)
+	_, expectsInput := agent.ProcessAgentResponse(responseText)
 
-	if expectsInput {
-		// Enter conversation mode
-		s.enterConversationMode(ctx, displayText)
+	if expectsInput || inConversation {
+		// Erase the [AWAITING_INPUT] marker from display if present
+		if strings.HasSuffix(strings.TrimSpace(responseText), agent.AwaitingInputMarker) {
+			fmt.Print("\x1b[1A\x1b[2K") // Move up, clear line
+		}
+
+		// If we already set up conversation mode during streaming, just run the loop
+		if inConversation {
+			s.conversation.SetSubState(ConversationAwaitingInput)
+			s.runConversationLoop(ctx)
+		} else {
+			// Late detection - need to set up conversation mode now
+			displayText, _ := agent.ProcessAgentResponse(responseText)
+			s.enterConversationMode(ctx, displayText)
+		}
 		return
 	}
 
@@ -1407,7 +1476,27 @@ func (s *Shell) Learning() *learning.FixStore {
 	return s.learning
 }
 
+// setupConversationMode initializes conversation UI for streaming.
+// Called when [CONVERSATION] marker is detected at the start of a response.
+// The content will be streamed directly with tinting - no re-rendering needed.
+func (s *Shell) setupConversationMode() {
+	accentColor := "#7c3aed" // Default purple
+	if s.colorPalette.Primary != "" {
+		accentColor = s.colorPalette.Primary
+	}
+	s.convUI = NewConversationUI(os.Stdout, accentColor)
+	s.agentOutput.SetStreamTint(s.convUI.TintBg())
+	s.agentOutput.SetStreamBorder(s.convUI.StreamBorder())
+	s.conversation.Activate()
+	s.conversation.SetSubState(ConversationStreaming)
+	s.convCancelArmed = false
+
+	// Write the top border to start the visual frame
+	s.convUI.WriteTopBorder()
+}
+
 // enterConversationMode enters multi-turn conversation with the agent.
+// Used for late detection (when [CONVERSATION] wasn't at the start).
 func (s *Shell) enterConversationMode(ctx context.Context, initialResponse string) {
 	// Create conversation UI with accent color
 	accentColor := "#7c3aed" // Default purple
@@ -1415,13 +1504,25 @@ func (s *Shell) enterConversationMode(ctx context.Context, initialResponse strin
 		accentColor = s.colorPalette.Primary
 	}
 	s.convUI = NewConversationUI(os.Stdout, accentColor)
+	s.agentOutput.SetStreamTint(s.convUI.TintBg())
+	s.agentOutput.SetStreamBorder(s.convUI.StreamBorder())
 	s.conversation.Activate()
+	s.convCancelArmed = false
 
-	// The initial response was already streamed, just show input prompt
-	fmt.Println() // Newline after streamed response
+	// Clear the un-framed response that was already streamed
+	// Count lines in the response to know how many to clear
+	lineCount := strings.Count(initialResponse, "\n") + 1
+	for i := 0; i < lineCount; i++ {
+		fmt.Print("\x1b[1A\x1b[2K") // Move up, clear line
+	}
+
+	// Now re-render the response within the conversation frame
+	s.convUI.WriteTopBorder()
+	// Re-render the initial response with framing
+	s.convUI.WriteStreamTinted(initialResponse)
+	fmt.Print("\x1b[K\x1b[0m\n") // Fill and newline
+
 	s.conversation.SetSubState(ConversationAwaitingInput)
-	s.convUI.WriteInputPrompt()
-	s.convUI.WriteHints()
 
 	// Conversation input loop
 	s.runConversationLoop(ctx)
@@ -1429,19 +1530,33 @@ func (s *Shell) enterConversationMode(ctx context.Context, initialResponse strin
 
 // runConversationLoop handles the conversation input loop.
 func (s *Shell) runConversationLoop(ctx context.Context) {
+	// Hints are now integrated into the top border
+
 	for s.conversation.IsActive() {
-		// Read input using readline
-		line, err := s.readline.ReadLine()
+		line, err := s.readConversationInput(ctx)
 
 		if err != nil {
-			// EOF or error - exit conversation mode
+			if err == ErrEditorCanceled {
+				if s.convCancelArmed {
+					s.convCancelArmed = false
+					s.exitConversationMode()
+					return
+				}
+				s.convCancelArmed = true
+				if s.convUI != nil {
+					s.convUI.WriteCancelHint()
+				}
+				continue
+			}
+			// Ctrl+D or other error - exit conversation mode
 			s.exitConversationMode()
 			return
 		}
 
+		s.convCancelArmed = false
 		input := strings.TrimSpace(line)
 
-		// Handle exit commands
+		// Handle explicit exit commands (/done, /exit, /quit)
 		if s.conversation.IsExitCommand(input) {
 			s.exitConversationMode()
 			return
@@ -1454,25 +1569,55 @@ func (s *Shell) runConversationLoop(ctx context.Context) {
 			continue
 		}
 
-		// Handle empty input (just show prompt again)
-		if input == "" {
-			s.convUI.WriteInputPrompt()
-			s.convUI.WriteHints()
-			continue
-		}
-
 		// Send reply to agent
 		s.sendConversationReply(ctx, input)
 	}
+}
+
+// readConversationInput reads a reply inside the conversation user box.
+func (s *Shell) readConversationInput(ctx context.Context) (string, error) {
+	cfg := s.editorCfg
+	cfg.Gutter = false
+	cfg.Prompt = ""
+	cfg.HistoryFunc = nil
+	cfg.CompleteFunc = nil
+	cfg.PrefetchFunc = nil
+	cfg.OnInputReady = nil
+	cfg.DisableLineContinuation = true
+	cfg.PreventEmptySubmit = true
+	cfg.DisableHistorySearch = true
+	cfg.DisableContextPicker = true
+	cfg.ClearOnCancel = true
+	if s.convUI != nil {
+		cfg.InputFrame = s.convUI.InputFrame()
+	}
+
+	ed := editor.New(cfg, os.Stdin, os.Stdout)
+	result, err := ed.Run(ctx)
+	if err != nil {
+		return "", err
+	}
+	if result.EOF {
+		return "", ErrEditorEOF
+	}
+	if result.Canceled {
+		return "", ErrEditorCanceled
+	}
+	return result.Text, nil
 }
 
 // exitConversationMode exits conversation mode cleanly.
 func (s *Shell) exitConversationMode() {
 	s.conversation.Deactivate()
 	if s.convUI != nil {
+		s.convUI.WriteBottomBorder() // Close the visual frame
 		s.convUI.ClearTint()
 	}
+	s.agentOutput.ClearStreamStyle()
 	fmt.Println() // Clean line
+
+	// Restore normal shell prompt
+	s.readline.SetPrompt(s.currentPromptLine())
 	s.updatePrompt()
 }
 
@@ -1488,10 +1633,8 @@ func (s *Shell) executeShellEscape(ctx context.Context, cmd string) {
 		s.lastExitCode = result.ExitCode
 	}
 
-	// Return to awaiting input
+	// Return to awaiting input (readline will show prompt)
 	s.conversation.SetSubState(ConversationAwaitingInput)
-	s.convUI.WriteInputPrompt()
-	s.convUI.WriteHints()
 }
 
 // sendConversationReply sends a follow-up message to the agent.
@@ -1504,8 +1647,10 @@ func (s *Shell) sendConversationReply(ctx context.Context, reply string) {
 		AgentPrompt: reply,
 	}
 
-	// Show thinking indicator
-	s.responseUI.ShowState(AgentStateThinking)
+	// Start conversation-mode spinner (tinted)
+	spinnerCtx, spinnerCancel := context.WithCancel(ctx)
+	spinnerDone := make(chan struct{})
+	go s.runConversationSpinner(spinnerCtx, spinnerDone)
 
 	// Stream request
 	textCh, errCh := s.agentHandler.StreamRequest(ctx, parsed)
@@ -1513,12 +1658,20 @@ func (s *Shell) sendConversationReply(ctx context.Context, reply string) {
 	// Collect and display response
 	var response strings.Builder
 	renderer := markdown.NewStreamingRenderer()
+	spinnerStopped := false
+
+	// Buffer for detecting/stripping conversation marker in follow-ups
+	var markerBuffer strings.Builder
+	markerStripped := false
+	const markerLen = len(agent.ConversationStartMarker)
 
 collectLoop:
 	for {
 		select {
 		case <-ctx.Done():
-			s.responseUI.ClearLine()
+			spinnerCancel()
+			<-spinnerDone
+			s.convUI.ClearThinkingIndicator()
 			s.conversation.SetSubState(ConversationAwaitingInput)
 			return
 		case err, ok := <-errCh:
@@ -1527,45 +1680,100 @@ collectLoop:
 				continue
 			}
 			if err != nil {
-				s.responseUI.ClearLine()
+				spinnerCancel()
+				<-spinnerDone
+				s.convUI.ClearThinkingIndicator()
 				s.responseUI.ShowError(err.Error())
 				s.conversation.SetSubState(ConversationAwaitingInput)
-				s.convUI.WriteInputPrompt()
-				s.convUI.WriteHints()
 				return
 			}
 		case text, ok := <-textCh:
 			if !ok {
 				break collectLoop
 			}
-			if response.Len() == 0 {
-				s.responseUI.ClearLine() // Clear thinking indicator
+			if response.Len() == 0 && !spinnerStopped {
+				// First chunk - stop spinner and clear line
+				spinnerCancel()
+				<-spinnerDone
+				s.convUI.ClearThinkingIndicator()
+				spinnerStopped = true
 			}
+
+			// Buffer initial text to detect and strip conversation marker
+			if !markerStripped {
+				markerBuffer.WriteString(text)
+				buffered := markerBuffer.String()
+
+				// Check if we have enough to detect the marker
+				if len(strings.TrimSpace(buffered)) >= markerLen || !strings.HasPrefix(strings.TrimSpace(agent.ConversationStartMarker), strings.TrimSpace(buffered)) {
+					markerStripped = true
+					if agent.HasConversationStart(buffered) {
+						text = agent.StripConversationStart(buffered)
+					} else {
+						text = buffered
+					}
+				} else {
+					continue // Need more data
+				}
+			}
+
+			if s.conversation.IsActive() {
+				text = strings.ReplaceAll(text, agent.ConversationStartMarker, "")
+			}
+
 			response.WriteString(text)
 			rendered := renderer.Write(text)
-			fmt.Print(rendered) // Stream to output
+			s.convUI.WriteStreamTinted(rendered) // Stream with conversation tint
 		}
+	}
+
+	// Stop spinner if not already stopped
+	if !spinnerStopped {
+		spinnerCancel()
+		<-spinnerDone
+		s.convUI.ClearThinkingIndicator()
 	}
 
 	// Flush remaining
 	if remaining := renderer.Flush(); remaining != "" {
-		fmt.Print(remaining)
+		s.convUI.WriteStreamTinted(remaining)
 	}
-	fmt.Println()
+	fmt.Print("\x1b[K\x1b[0m\n") // Fill line, reset tint, newline
 
 	// Check for another follow-up
 	responseText := strings.TrimSpace(response.String())
-	displayText, expectsInput := agent.ProcessAgentResponse(responseText)
-	_ = displayText // Already streamed
+	_, expectsInput := agent.ProcessAgentResponse(responseText)
 
 	if expectsInput {
+		// Erase the [AWAITING_INPUT] marker from display
+		fmt.Print("\x1b[1A\x1b[2K") // Move up, clear line
+
 		// Continue conversation
 		s.conversation.SetSubState(ConversationAwaitingInput)
-		s.convUI.WriteInputPrompt()
-		s.convUI.WriteHints()
+		// readline will use the prompt we already set
 	} else {
 		// Agent done, exit conversation mode
 		s.exitConversationMode()
+	}
+}
+
+// runConversationSpinner runs an animated spinner within the conversation zone.
+func (s *Shell) runConversationSpinner(ctx context.Context, done chan struct{}) {
+	defer close(done)
+
+	frames := []rune{'⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'}
+	ticker := time.NewTicker(80 * time.Millisecond)
+	defer ticker.Stop()
+
+	frame := 0
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.convUI.WriteThinkingIndicator(frames[frame%len(frames)], "Agent thinking...")
+			frame++
+		}
 	}
 }
 

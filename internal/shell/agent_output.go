@@ -50,6 +50,8 @@ type AgentOutputCoordinator struct {
 	wasStreaming   bool            // Track if we were streaming before permission
 	pendingCommand string          // Command currently being prompted for permission
 	accentColorFn  func() string   // Callback to get current accent color
+	streamTint     string          // Background tint for streaming (empty = no tint)
+	streamBorder   string          // Left border prefix for streaming (e.g., "║ ")
 }
 
 // NewAgentOutputCoordinator creates a new agent output coordinator.
@@ -66,6 +68,35 @@ func (aoc *AgentOutputCoordinator) SetAccentColorFunc(fn func() string) {
 	aoc.mu.Lock()
 	defer aoc.mu.Unlock()
 	aoc.accentColorFn = fn
+}
+
+// SetStreamTint sets the background tint for streamed text.
+// Pass an empty string to disable tinting.
+func (aoc *AgentOutputCoordinator) SetStreamTint(tint string) {
+	aoc.mu.Lock()
+	defer aoc.mu.Unlock()
+	aoc.streamTint = tint
+}
+
+// SetStreamBorder sets the left border prefix for streamed text.
+// This creates a visual frame for the conversation zone.
+func (aoc *AgentOutputCoordinator) SetStreamBorder(border string) {
+	aoc.mu.Lock()
+	defer aoc.mu.Unlock()
+	aoc.streamBorder = border
+}
+
+// ClearStreamStyle disables background tinting and border for streamed text.
+func (aoc *AgentOutputCoordinator) ClearStreamStyle() {
+	aoc.mu.Lock()
+	defer aoc.mu.Unlock()
+	aoc.streamTint = ""
+	aoc.streamBorder = ""
+}
+
+// ClearStreamTint disables background tinting for streamed text.
+func (aoc *AgentOutputCoordinator) ClearStreamTint() {
+	aoc.SetStreamTint("")
 }
 
 // State returns the current output state.
@@ -90,14 +121,37 @@ func (aoc *AgentOutputCoordinator) WriteStream(text string) {
 
 	switch aoc.state {
 	case AgentOutputStateStreaming:
-		// Write directly to output
-		fmt.Fprint(aoc.out, text)
+		// Write directly to output, with optional tinting
+		aoc.writeWithTint(text)
 	case AgentOutputStatePermission:
-		// Buffer for later
+		// Buffer for later (tint will be applied when flushed)
 		aoc.streamBuffer.WriteString(text)
 	default:
 		// Ignore writes in other states (shouldn't happen, but be safe)
 	}
+}
+
+// writeWithTint writes text with background tint and optional left border.
+// Creates a visual "zone" by filling each line to the terminal edge.
+// Must be called with mu held.
+func (aoc *AgentOutputCoordinator) writeWithTint(text string) {
+	if aoc.streamTint == "" || text == "" {
+		fmt.Fprint(aoc.out, text)
+		return
+	}
+
+	// Start with tint and border
+	fmt.Fprint(aoc.out, aoc.streamTint+aoc.streamBorder)
+
+	// The markdown renderer adds \x1b[0m resets which wipe our background.
+	// We need to reapply tint after every reset.
+	tinted := strings.ReplaceAll(text, "\x1b[0m", "\x1b[0m"+aoc.streamTint)
+
+	// For newlines: fill to end of line with background (\x1b[K), then newline,
+	// then reapply tint and border for the visual frame
+	tinted = strings.ReplaceAll(tinted, "\n", "\x1b[K\n"+aoc.streamTint+aoc.streamBorder)
+
+	fmt.Fprint(aoc.out, tinted)
 }
 
 // EndStreaming transitions back to idle state.
@@ -161,6 +215,29 @@ const (
 	ansiCursorUp  = "\x1b[1A"
 )
 
+// ComputeTintBackground derives a subtle background tint from an accent color.
+// accentColor should be a hex color like "#7c3aed".
+func ComputeTintBackground(accentColor string) string {
+	// Parse hex color
+	var r, g, b int
+	if len(accentColor) == 7 && accentColor[0] == '#' {
+		fmt.Sscanf(accentColor[1:], "%02x%02x%02x", &r, &g, &b)
+	} else {
+		// Fallback to a subtle dark blue-gray
+		r, g, b = 30, 30, 46 // #1e1e2e
+	}
+
+	// Blend with dark background at ~15% opacity
+	// Assuming terminal background is ~#1a1a1a (26, 26, 26)
+	bgR, bgG, bgB := 26, 26, 26
+	blend := 0.15
+	finalR := int(float64(bgR)*(1-blend) + float64(r)*blend)
+	finalG := int(float64(bgG)*(1-blend) + float64(g)*blend)
+	finalB := int(float64(bgB)*(1-blend) + float64(b)*blend)
+
+	return fmt.Sprintf("\x1b[48;2;%d;%d;%dm", finalR, finalG, finalB)
+}
+
 // RenderPermissionPrompt displays the permission request UI.
 // Automatically enters permission state and pauses streaming.
 func (aoc *AgentOutputCoordinator) RenderPermissionPrompt(command, accentColor string) {
@@ -199,6 +276,14 @@ func (aoc *AgentOutputCoordinator) RenderPermissionPrompt(command, accentColor s
 		barStyle + "│" + ansiReset + " [y]allow  [n]deny  [a]always allow",
 	}
 
+	if aoc.streamTint != "" {
+		for _, line := range lines {
+			fmt.Fprint(aoc.out, "\r\n")
+			aoc.writeWithTint(line + "\x1b[K")
+		}
+		return
+	}
+
 	var sb strings.Builder
 	for _, line := range lines {
 		sb.WriteString("\r\n")
@@ -214,16 +299,6 @@ func (aoc *AgentOutputCoordinator) RenderPermissionPrompt(command, accentColor s
 func (aoc *AgentOutputCoordinator) ClearPermissionPrompt(allowed bool) {
 	aoc.mu.Lock()
 
-	// First clear the current line (line 5 - keybindings), then move up and clear the rest
-	var sb strings.Builder
-	sb.WriteString("\r")
-	sb.WriteString(ansiClearLine)
-	for i := 0; i < 4; i++ {
-		sb.WriteString(ansiCursorUp)
-		sb.WriteString("\r")
-		sb.WriteString(ansiClearLine)
-	}
-
 	// Truncate command if too long
 	cmd := aoc.pendingCommand
 	if len(cmd) > 60 {
@@ -231,14 +306,54 @@ func (aoc *AgentOutputCoordinator) ClearPermissionPrompt(allowed bool) {
 	}
 
 	// Show feedback with the command (dim style to not distract from main output)
+	feedback := ""
 	if allowed {
-		sb.WriteString(fmt.Sprintf("\x1b[32m✓\x1b[0m \x1b[90m%s\x1b[0m\n", cmd))
+		feedback = fmt.Sprintf("\x1b[32m✓\x1b[0m \x1b[90m%s\x1b[0m", cmd)
 	} else {
-		sb.WriteString(fmt.Sprintf("\x1b[31m✗\x1b[0m \x1b[90m%s\x1b[0m\n", cmd))
+		feedback = fmt.Sprintf("\x1b[31m✗\x1b[0m \x1b[90m%s\x1b[0m", cmd)
+	}
+
+	if aoc.streamTint != "" {
+		// Move to top of prompt
+		var sb strings.Builder
+		sb.WriteString("\r")
+		for i := 0; i < 4; i++ {
+			sb.WriteString(ansiCursorUp)
+		}
+		aoc.out.Write([]byte(sb.String()))
+
+		// Feedback line (tinted)
+		aoc.writeWithTint(feedback + "\x1b[K")
+		fmt.Fprint(aoc.out, "\n")
+
+		// Fill remaining prompt lines with tinted blanks, then restore cursor
+		fmt.Fprint(aoc.out, "\x1b[s")
+		for i := 0; i < 4; i++ {
+			aoc.writeWithTint("\x1b[K")
+			if i < 3 {
+				fmt.Fprint(aoc.out, "\n")
+			}
+		}
+		fmt.Fprint(aoc.out, "\x1b[u")
+	} else {
+		// First clear the current line (line 5 - keybindings), then move up and clear the rest
+		var sb strings.Builder
+		sb.WriteString("\r")
+		sb.WriteString(ansiClearLine)
+		for i := 0; i < 4; i++ {
+			sb.WriteString(ansiCursorUp)
+			sb.WriteString("\r")
+			sb.WriteString(ansiClearLine)
+		}
+		if allowed {
+			sb.WriteString(fmt.Sprintf("\x1b[32m✓\x1b[0m \x1b[90m%s\x1b[0m\n", cmd))
+		} else {
+			sb.WriteString(fmt.Sprintf("\x1b[31m✗\x1b[0m \x1b[90m%s\x1b[0m\n", cmd))
+		}
+		aoc.out.Write([]byte(sb.String()))
 	}
 
 	aoc.pendingCommand = "" // Clear for next prompt
-	aoc.out.Write([]byte(sb.String()))
 
 	// Flush output to ensure clear sequences are sent immediately
 	aoc.flushLocked()

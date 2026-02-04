@@ -643,6 +643,14 @@ func (t *ACPTransport) sendResponse(id int64, result interface{}, err *jsonRPCEr
 func buildPromptWithContext(req Request) string {
 	var b strings.Builder
 
+	// Add conversation marker instruction
+	b.WriteString(`For multi-turn conversations (questions, offering options, asking for clarification):
+- Start with [CONVERSATION] on the first line
+- End with [AWAITING_INPUT] on the last line
+Do NOT use these markers for complete answers, commands, or when the conversation naturally concludes.
+
+`)
+
 	ctx := req.Context
 
 	// Build context section

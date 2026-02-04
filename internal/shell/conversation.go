@@ -95,8 +95,9 @@ func (cs *ConversationState) ExtractShellCommand(input string) string {
 	return input
 }
 
-// IsExitCommand checks if the input is an exit command (/done).
+// IsExitCommand checks if the input is an exit command.
+// Accepts: /done, /exit, /quit
 func (cs *ConversationState) IsExitCommand(input string) bool {
 	trimmed := strings.TrimSpace(input)
-	return trimmed == "/done"
+	return trimmed == "/done" || trimmed == "/exit" || trimmed == "/quit"
 }

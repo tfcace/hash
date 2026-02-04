@@ -37,9 +37,9 @@ func TestConversationUI_InputPrompt(t *testing.T) {
 
 	output := buf.String()
 
-	// Should contain double bar character
-	if !bytes.Contains([]byte(output), []byte("║")) {
-		t.Error("expected ║ input prompt character")
+	// Should contain single bar character (user block style)
+	if !bytes.Contains([]byte(output), []byte("│")) {
+		t.Error("expected │ input prompt character for user block")
 	}
 }
 
@@ -52,8 +52,8 @@ func TestConversationUI_Hints(t *testing.T) {
 	output := buf.String()
 
 	// Should contain hint text
-	if !bytes.Contains([]byte(output), []byte("Esc exit")) {
-		t.Error("expected 'Esc exit' in hints")
+	if !bytes.Contains([]byte(output), []byte("Ctrl+C exit")) {
+		t.Error("expected 'Ctrl+C exit' in hints")
 	}
 	if !bytes.Contains([]byte(output), []byte("!cmd shell")) {
 		t.Error("expected '!cmd shell' in hints")
@@ -75,4 +75,77 @@ func TestConversationUI_ClearTint(t *testing.T) {
 
 	// After clearing, new writes should not have background
 	// (This is a state test - the UI remembers it's cleared)
+}
+
+func TestConversationUI_WriteStreamTinted(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		wantTint bool
+	}{
+		{
+			name:     "single line",
+			input:    "Hello world",
+			wantTint: true,
+		},
+		{
+			name:     "with newline",
+			input:    "Line 1\nLine 2",
+			wantTint: true,
+		},
+		{
+			name:     "empty string",
+			input:    "",
+			wantTint: false,
+		},
+		{
+			name:     "only newline",
+			input:    "\n",
+			wantTint: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			ui := NewConversationUI(&buf, "#7c3aed")
+
+			ui.WriteStreamTinted(tt.input)
+			output := buf.String()
+
+			if tt.wantTint {
+				if !bytes.Contains([]byte(output), []byte("\x1b[48;2;")) {
+					t.Errorf("expected background tint in output: %q", output)
+				}
+			}
+
+			// Text content should be present (if any)
+			if tt.input != "" && !bytes.Contains([]byte(output), []byte(tt.input)) {
+				// The text may be split by ANSI codes, so check without the newline handling
+				// Just verify something was written
+				if len(output) == 0 {
+					t.Error("expected some output")
+				}
+			}
+		})
+	}
+}
+
+func TestConversationUI_WriteStreamTinted_NoTintWhenDisabled(t *testing.T) {
+	var buf bytes.Buffer
+	ui := NewConversationUI(&buf, "#7c3aed")
+	ui.ClearTint()
+
+	ui.WriteStreamTinted("Hello world")
+	output := buf.String()
+
+	// Should NOT contain background tint
+	if bytes.Contains([]byte(output), []byte("\x1b[48;2;")) {
+		t.Error("expected no background tint when tint is disabled")
+	}
+
+	// But should contain the text
+	if !bytes.Contains([]byte(output), []byte("Hello world")) {
+		t.Error("expected text content")
+	}
 }

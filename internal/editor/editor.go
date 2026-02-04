@@ -24,16 +24,22 @@ type Completion struct {
 
 // Config configures the editor.
 type Config struct {
-	Keybindings    string                                   // "helix", "emacs", "vim"
-	HistoryFunc    func(dir int, currentLine string) string // -1=prev, +1=next; currentLine is for saving
-	CompleteFunc   func(line string, pos int) []Completion  // Tab completion
-	PrefetchFunc   func(line string, pos int)               // Background completion prefetch (on space)
-	OnInputReady   func()                                   // Called after editor chrome is rendered, before input loop
-	Gutter         bool                                     // Show gutter indicator
-	Prompt         string                                   // Prompt string to display before input
-	InputBgColor   string                                   // Background color for submitted input (hex)
-	ScrollbarColor string                                   // Foreground color for scrollbars (hex)
-	MaxPasteSize   uint                                     // Maximum paste size in bytes (default 10MB)
+	Keybindings             string                                   // "helix", "emacs", "vim"
+	HistoryFunc             func(dir int, currentLine string) string // -1=prev, +1=next; currentLine is for saving
+	CompleteFunc            func(line string, pos int) []Completion  // Tab completion
+	PrefetchFunc            func(line string, pos int)               // Background completion prefetch (on space)
+	OnInputReady            func()                                   // Called after editor chrome is rendered, before input loop
+	Gutter                  bool                                     // Show gutter indicator
+	Prompt                  string                                   // Prompt string to display before input
+	InputBgColor            string                                   // Background color for submitted input (hex)
+	ScrollbarColor          string                                   // Foreground color for scrollbars (hex)
+	MaxPasteSize            uint                                     // Maximum paste size in bytes (default 10MB)
+	DisableLineContinuation bool                                     // Disable shell-style line continuations on newline/paste
+	InputFrame              *InputFrame                              // Optional frame for custom input rendering
+	PreventEmptySubmit      bool                                     // Keep editor open when submitting an empty buffer
+	DisableHistorySearch    bool                                     // Disable Ctrl+R history search
+	DisableContextPicker    bool                                     // Disable Ctrl+P context picker
+	ClearOnCancel           bool                                     // Clear display when Ctrl+C cancels input
 }
 
 // Result is returned when the editor exits.
@@ -102,11 +108,18 @@ func New(cfg Config, in io.Reader, out io.Writer) *Editor {
 	if cfg.ScrollbarColor != "" {
 		display.SetScrollbarColor(cfg.ScrollbarColor)
 	}
+	if cfg.InputFrame != nil {
+		display.SetFrame(cfg.InputFrame)
+	}
 
 	inputReader := NewInputReader(in)
 	if cfg.MaxPasteSize > 0 {
 		inputReader.SetMaxPasteSize(cfg.MaxPasteSize)
 	}
+
+	state.LineContinuation = !cfg.DisableLineContinuation
+	state.AllowHistorySearch = !cfg.DisableHistorySearch
+	state.AllowContextPicker = !cfg.DisableContextPicker
 
 	return &Editor{
 		config:  cfg,
@@ -427,6 +440,9 @@ func (e *Editor) handleCtrlC() (Result, bool) {
 	}
 	e.ghost.Clear()
 	if e.state.Buffer.Content() == "" {
+		if e.config.ClearOnCancel {
+			e.display.Clear()
+		}
 		return Result{Canceled: true}, true
 	}
 	e.state.Buffer = NewBuffer()
@@ -444,6 +460,10 @@ func (e *Editor) processModeResult(result ModeResult) (Result, bool) {
 	e.handleAction(result.Action)
 
 	if result.Submit {
+		if e.config.PreventEmptySubmit && e.state.Buffer.Content() == "" {
+			e.render()
+			return Result{}, false
+		}
 		e.display.Finalize(e.state.Buffer)
 		return Result{Text: e.state.Buffer.Content()}, true
 	}
