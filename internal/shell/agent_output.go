@@ -211,3 +211,40 @@ func (aoc *AgentOutputCoordinator) ClearPermissionPrompt() {
 	// Resume streaming (this handles flushing buffered content)
 	aoc.ExitPermission()
 }
+
+// EnterConfirming transitions to confirming state (after streaming completes).
+func (aoc *AgentOutputCoordinator) EnterConfirming() {
+	aoc.mu.Lock()
+	defer aoc.mu.Unlock()
+	aoc.state = AgentOutputStateConfirming
+}
+
+// ShowHints displays confirmation keybindings.
+// Only works in CONFIRMING state to prevent hint overlap.
+func (aoc *AgentOutputCoordinator) ShowHints(ct ConfirmationType) {
+	aoc.mu.Lock()
+	defer aoc.mu.Unlock()
+
+	if aoc.state != AgentOutputStateConfirming {
+		return // Don't show hints unless in confirming state
+	}
+
+	var hint string
+	switch ct {
+	case ConfirmTypeCommand:
+		hint = "[Enter: run] [Tab: edit] [Esc: cancel]"
+	case ConfirmTypeExplanation:
+		hint = "[Enter: ok] [Tab: copy] [Esc: cancel]"
+	case ConfirmTypeError:
+		hint = "[Enter: retry] [Esc: cancel]"
+	}
+
+	fmt.Fprintf(aoc.out, "  \033[90m%s\033[0m\n", hint)
+}
+
+// ExitConfirming returns to idle state.
+func (aoc *AgentOutputCoordinator) ExitConfirming() {
+	aoc.mu.Lock()
+	defer aoc.mu.Unlock()
+	aoc.state = AgentOutputStateIdle
+}

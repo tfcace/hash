@@ -195,3 +195,42 @@ func TestAgentOutputCoordinator_ClearPermission(t *testing.T) {
 		t.Errorf("expected 5 cursor-up sequences, got fewer in: %q", output)
 	}
 }
+
+func TestAgentOutputCoordinator_ShowHints(t *testing.T) {
+	tests := []struct {
+		name     string
+		hintType ConfirmationType
+		expected string
+	}{
+		{"command", ConfirmTypeCommand, "[Enter: run]"},
+		{"explanation", ConfirmTypeExplanation, "[Enter: ok]"},
+		{"error", ConfirmTypeError, "[Enter: retry]"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			aoc := NewAgentOutputCoordinator(&buf)
+
+			aoc.EnterConfirming()
+			aoc.ShowHints(tt.hintType)
+
+			output := buf.String()
+			if !strings.Contains(output, tt.expected) {
+				t.Errorf("expected %q in output, got: %q", tt.expected, output)
+			}
+		})
+	}
+}
+
+func TestAgentOutputCoordinator_HintsOnlyInConfirmingState(t *testing.T) {
+	var buf bytes.Buffer
+	aoc := NewAgentOutputCoordinator(&buf)
+
+	// Should not show hints when not in confirming state
+	aoc.ShowHints(ConfirmTypeCommand)
+
+	if strings.Contains(buf.String(), "[Enter:") {
+		t.Error("hints should not appear when not in confirming state")
+	}
+}
