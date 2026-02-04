@@ -860,6 +860,7 @@ func (s *Shell) handleAgentRequest(ctx context.Context, parsed parser.ParseResul
 	go func() {
 		select {
 		case <-sigCh:
+			s.agentOutput.Cancel()
 			agentCancel()
 		case <-agentCtx.Done():
 		}
