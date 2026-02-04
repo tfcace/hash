@@ -59,6 +59,10 @@ type Shell struct {
 	allowlist    *allowlist.Manager
 	agentOutput  *AgentOutputCoordinator
 
+	// Conversation mode state
+	conversation *ConversationState
+	convUI       *ConversationUI
+
 	lastExitCode int
 	lastDuration time.Duration
 	lastCommand  string // Last executed command
@@ -346,6 +350,7 @@ func New(cfg *config.Config) (*Shell, error) {
 		colorPalette: colorPalette,
 		allowlist:    allowlistMgr,
 		agentOutput:  agentOutput,
+		conversation: NewConversationState(),
 		historyIndex: -1, // Start before history (current line)
 		osc:          osc,
 	}
@@ -1083,8 +1088,17 @@ collectLoop:
 	lineCount++
 	s.responseUI.ClearLine() // Stop spinner
 
-	// Determine response type
+	// Check for conversation marker
 	responseText := strings.TrimSpace(response.String())
+	displayText, expectsInput := agent.ProcessAgentResponse(responseText)
+
+	if expectsInput {
+		// Enter conversation mode
+		s.enterConversationMode(ctx, displayText)
+		return
+	}
+
+	// Determine response type (single-turn flow)
 	collector := agent.NewStreamCollector()
 	collector.Append(responseText)
 	resp := collector.Response()
@@ -1391,6 +1405,168 @@ func (s *Shell) History() *history.Store {
 // Learning returns the learning store for use by builtins.
 func (s *Shell) Learning() *learning.FixStore {
 	return s.learning
+}
+
+// enterConversationMode enters multi-turn conversation with the agent.
+func (s *Shell) enterConversationMode(ctx context.Context, initialResponse string) {
+	// Create conversation UI with accent color
+	accentColor := "#7c3aed" // Default purple
+	if s.colorPalette.Primary != "" {
+		accentColor = s.colorPalette.Primary
+	}
+	s.convUI = NewConversationUI(os.Stdout, accentColor)
+	s.conversation.Activate()
+
+	// The initial response was already streamed, just show input prompt
+	fmt.Println() // Newline after streamed response
+	s.conversation.SetSubState(ConversationAwaitingInput)
+	s.convUI.WriteInputPrompt()
+	s.convUI.WriteHints()
+
+	// Conversation input loop
+	s.runConversationLoop(ctx)
+}
+
+// runConversationLoop handles the conversation input loop.
+func (s *Shell) runConversationLoop(ctx context.Context) {
+	for s.conversation.IsActive() {
+		// Read input using readline
+		line, err := s.readline.ReadLine()
+
+		if err != nil {
+			// EOF or error - exit conversation mode
+			s.exitConversationMode()
+			return
+		}
+
+		input := strings.TrimSpace(line)
+
+		// Handle exit commands
+		if s.conversation.IsExitCommand(input) {
+			s.exitConversationMode()
+			return
+		}
+
+		// Handle shell escape
+		if s.conversation.IsShellEscape(input) {
+			cmd := s.conversation.ExtractShellCommand(input)
+			s.executeShellEscape(ctx, cmd)
+			continue
+		}
+
+		// Handle empty input (just show prompt again)
+		if input == "" {
+			s.convUI.WriteInputPrompt()
+			s.convUI.WriteHints()
+			continue
+		}
+
+		// Send reply to agent
+		s.sendConversationReply(ctx, input)
+	}
+}
+
+// exitConversationMode exits conversation mode cleanly.
+func (s *Shell) exitConversationMode() {
+	s.conversation.Deactivate()
+	if s.convUI != nil {
+		s.convUI.ClearTint()
+	}
+	fmt.Println() // Clean line
+	s.updatePrompt()
+}
+
+// executeShellEscape runs a shell command within conversation mode.
+func (s *Shell) executeShellEscape(ctx context.Context, cmd string) {
+	s.conversation.SetSubState(ConversationExecutingShell)
+
+	// Execute command
+	result, err := s.executor.Execute(ctx, cmd, os.Stdout, os.Stderr)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "hash: %v\n", err)
+	} else {
+		s.lastExitCode = result.ExitCode
+	}
+
+	// Return to awaiting input
+	s.conversation.SetSubState(ConversationAwaitingInput)
+	s.convUI.WriteInputPrompt()
+	s.convUI.WriteHints()
+}
+
+// sendConversationReply sends a follow-up message to the agent.
+func (s *Shell) sendConversationReply(ctx context.Context, reply string) {
+	s.conversation.SetSubState(ConversationStreaming)
+
+	// Build request with reply as prompt
+	parsed := parser.ParseResult{
+		Type:        parser.CommandTypeAgent,
+		AgentPrompt: reply,
+	}
+
+	// Show thinking indicator
+	s.responseUI.ShowState(AgentStateThinking)
+
+	// Stream request
+	textCh, errCh := s.agentHandler.StreamRequest(ctx, parsed)
+
+	// Collect and display response
+	var response strings.Builder
+	renderer := markdown.NewStreamingRenderer()
+
+collectLoop:
+	for {
+		select {
+		case <-ctx.Done():
+			s.responseUI.ClearLine()
+			s.conversation.SetSubState(ConversationAwaitingInput)
+			return
+		case err, ok := <-errCh:
+			if !ok {
+				errCh = nil
+				continue
+			}
+			if err != nil {
+				s.responseUI.ClearLine()
+				s.responseUI.ShowError(err.Error())
+				s.conversation.SetSubState(ConversationAwaitingInput)
+				s.convUI.WriteInputPrompt()
+				s.convUI.WriteHints()
+				return
+			}
+		case text, ok := <-textCh:
+			if !ok {
+				break collectLoop
+			}
+			if response.Len() == 0 {
+				s.responseUI.ClearLine() // Clear thinking indicator
+			}
+			response.WriteString(text)
+			rendered := renderer.Write(text)
+			fmt.Print(rendered) // Stream to output
+		}
+	}
+
+	// Flush remaining
+	if remaining := renderer.Flush(); remaining != "" {
+		fmt.Print(remaining)
+	}
+	fmt.Println()
+
+	// Check for another follow-up
+	responseText := strings.TrimSpace(response.String())
+	displayText, expectsInput := agent.ProcessAgentResponse(responseText)
+	_ = displayText // Already streamed
+
+	if expectsInput {
+		// Continue conversation
+		s.conversation.SetSubState(ConversationAwaitingInput)
+		s.convUI.WriteInputPrompt()
+		s.convUI.WriteHints()
+	} else {
+		// Agent done, exit conversation mode
+		s.exitConversationMode()
+	}
 }
 
 func errStr(err error) string {
