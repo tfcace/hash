@@ -153,6 +153,10 @@ func New(cfg *config.Config) (*Shell, error) {
 		getConfigDir(),
 	)
 
+	// Create agent output coordinator for serialized output during agent interactions
+	// Created early so permission handler can use it
+	agentOutput := NewAgentOutputCoordinator(os.Stdout)
+
 	// Wire up permission handler for ACP transport
 	if acpTransport != nil {
 		acpTransport.SetPermissionHandler(func(command string) (allow bool, always bool) {
@@ -161,17 +165,8 @@ func New(cfg *config.Config) (*Shell, error) {
 				return true, false
 			}
 
-			// Render permission prompt
-			// Get terminal size for proper display
-			width, height, _ := term.GetSize(int(os.Stdout.Fd()))
-			if width == 0 {
-				width = 80
-			}
-			if height == 0 {
-				height = 24
-			}
-			display := editor.NewDisplay(os.Stdout, width, height)
-			display.RenderPermissionPrompt(command, colorPalette.Primary)
+			// Render permission prompt via coordinator (pauses streaming)
+			agentOutput.RenderPermissionPrompt(command, colorPalette.Primary)
 
 			// Flush stdout to ensure prompt is visible before reading input
 			os.Stdout.Sync()
@@ -179,8 +174,8 @@ func New(cfg *config.Config) (*Shell, error) {
 			// Read single keypress
 			key := readSingleKey()
 
-			// Clear the prompt
-			display.ClearPermissionPrompt()
+			// Clear the prompt and resume streaming via coordinator
+			agentOutput.ClearPermissionPrompt()
 
 			switch key {
 			case 'y', 'Y', '\r', '\n':
@@ -349,7 +344,7 @@ func New(cfg *config.Config) (*Shell, error) {
 		suggestor:    suggestor,
 		colorPalette: colorPalette,
 		allowlist:    allowlistMgr,
-		agentOutput:  NewAgentOutputCoordinator(os.Stdout),
+		agentOutput:  agentOutput,
 		historyIndex: -1, // Start before history (current line)
 		osc:          osc,
 	}
