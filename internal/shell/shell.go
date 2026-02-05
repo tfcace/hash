@@ -1022,6 +1022,8 @@ func (s *Shell) handleAgentRequestUnified(ctx context.Context, parsed parser.Par
 }
 
 // handleAgentFullStreaming handles full ?? and pipe modes with streaming.
+//
+//nolint:gocyclo // streaming loop handles markers, conversation detection, and error recovery
 func (s *Shell) handleAgentFullStreaming(ctx context.Context, parsed parser.ParseResult, modelName string) {
 	// Show thinking indicator (multi-stage: thinking -> receiving)
 	s.responseUI.ShowState(AgentStateThinking)
@@ -1646,6 +1648,8 @@ func (s *Shell) executeShellEscape(ctx context.Context, cmd string) {
 }
 
 // sendConversationReply sends a follow-up message to the agent.
+//
+//nolint:gocyclo // conversation reply handles marker buffering, spinner lifecycle, and stream state
 func (s *Shell) sendConversationReply(ctx context.Context, reply string) {
 	s.conversation.SetSubState(ConversationStreaming)
 

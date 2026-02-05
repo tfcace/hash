@@ -371,6 +371,7 @@ func (d *Display) RenderWithGhost(buf *Buffer, cur *Cursor, hasSelection bool, g
 	d.out.Write([]byte(sb.String()))
 }
 
+//nolint:gocyclo // frame rendering requires handling many layout cases sequentially
 func (d *Display) renderWithFrame(buf *Buffer, cur *Cursor, hasSelection bool, ghostText string, streaming, fromAgent bool, modelName string) {
 	frame := d.frame
 	var sb strings.Builder
@@ -627,7 +628,7 @@ func (d *Display) finalizeWithFrame(buf *Buffer) {
 	d.lastCursorRow = 0
 }
 
-func (d *Display) renderFrameLine(sb *strings.Builder, line string, lineBg string) {
+func (d *Display) renderFrameLine(sb *strings.Builder, line, lineBg string) {
 	sb.WriteString(ansiClearLine)
 	sb.WriteString(line)
 

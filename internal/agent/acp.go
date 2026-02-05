@@ -31,7 +31,8 @@ func (c ACPConfig) ParsedCommand() (program string, args []string) {
 	program = parts[0]
 	if len(parts) > 1 {
 		// Command string has embedded args - combine with explicit args
-		args = append(parts[1:], c.Args...)
+		args = append(args, parts[1:]...)
+		args = append(args, c.Args...)
 	} else {
 		args = c.Args
 	}
@@ -203,7 +204,7 @@ func (t *ACPTransport) connectLocked(ctx context.Context) error {
 	// Discard stderr to avoid blocking
 	t.cmd.Stderr = nil
 
-	if err := t.cmd.Start(); err != nil {
+	if err = t.cmd.Start(); err != nil {
 		return fmt.Errorf("start agent: %w", err)
 	}
 

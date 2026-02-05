@@ -45,7 +45,9 @@ func NewConversationUI(out io.Writer, accentColor string) *ConversationUI {
 	// Compute colored border: │ in accent color (single line)
 	var r, g, b int
 	if len(accentColor) == 7 && accentColor[0] == '#' {
-		fmt.Sscanf(accentColor[1:], "%02x%02x%02x", &r, &g, &b)
+		if _, err := fmt.Sscanf(accentColor[1:], "%02x%02x%02x", &r, &g, &b); err != nil {
+			r, g, b = 124, 58, 237 // Fallback on parse error
+		}
 	} else {
 		r, g, b = 124, 58, 237
 	}
@@ -371,9 +373,9 @@ func (ui *ConversationUI) bottomBorderLine() string {
 	return "╰" + strings.Repeat("─", width-1)
 }
 
-func (ui *ConversationUI) userBoxPrefix() (string, int) {
-	prefix := ui.tintBg + ui.border + ui.userIndent + ui.userBorder + "│" + ui.resetTint + " "
-	prefixWidth := 2 + len(ui.userIndent) + 2
+func (ui *ConversationUI) userBoxPrefix() (prefix string, prefixWidth int) {
+	prefix = ui.tintBg + ui.border + ui.userIndent + ui.userBorder + "│" + ui.resetTint + " "
+	prefixWidth = 2 + len(ui.userIndent) + 2
 	return prefix, prefixWidth
 }
 

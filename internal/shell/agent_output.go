@@ -221,7 +221,9 @@ func ComputeTintBackground(accentColor string) string {
 	// Parse hex color
 	var r, g, b int
 	if len(accentColor) == 7 && accentColor[0] == '#' {
-		fmt.Sscanf(accentColor[1:], "%02x%02x%02x", &r, &g, &b)
+		if _, err := fmt.Sscanf(accentColor[1:], "%02x%02x%02x", &r, &g, &b); err != nil {
+			r, g, b = 30, 30, 46 // Fallback on parse error
+		}
 	} else {
 		// Fallback to a subtle dark blue-gray
 		r, g, b = 30, 30, 46 // #1e1e2e

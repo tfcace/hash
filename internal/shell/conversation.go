@@ -9,7 +9,7 @@ import (
 type ConversationSubState int
 
 const (
-	ConversationStreaming     ConversationSubState = iota // Agent is responding
+	ConversationStreaming      ConversationSubState = iota // Agent is responding
 	ConversationPermission                                 // Tool permission prompt active
 	ConversationAwaitingInput                              // User's turn to reply
 	ConversationExecutingShell                             // Running !cmd
