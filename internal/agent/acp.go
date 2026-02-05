@@ -212,9 +212,14 @@ func (t *ACPTransport) connectLocked(ctx context.Context) error {
 	// Start reading messages in background
 	go t.readLoop()
 
-	// Initialize protocol
-	if err := t.initialize(ctx); err != nil {
-		t.Close() //nolint:errcheck // best-effort cleanup on init failure
+	// Release the lock before initialize — it calls sendRequest which may
+	// call sendCancel or resetConnection, both of which acquire mu.
+	t.mu.Unlock()
+	err = t.initialize(ctx)
+	t.mu.Lock()
+
+	if err != nil {
+		t.resetConnectionLocked()
 		return fmt.Errorf("initialize: %w", err)
 	}
 
@@ -700,7 +705,12 @@ Do NOT use these markers for complete answers, commands, or when the conversatio
 func (t *ACPTransport) resetConnection() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	t.resetConnectionLocked()
+}
 
+// resetConnectionLocked closes the current connection and resets state.
+// Must be called with mu held.
+func (t *ACPTransport) resetConnectionLocked() {
 	if t.stdin != nil {
 		t.stdin.Close()
 		t.stdin = nil
@@ -711,13 +721,15 @@ func (t *ACPTransport) resetConnection() {
 	}
 	t.reader = nil
 	t.sessionID = ""
-	// Note: We don't kill cmd here - it may have already exited.
-	// The next connectLocked() will start a fresh process.
 	if t.cmd != nil && t.cmd.Process != nil {
 		t.cmd.Process.Kill() //nolint:errcheck // best-effort kill
 		t.cmd.Wait()         //nolint:errcheck // ignore exit status
 		t.cmd = nil
 	}
+	// Recreate channels so the next connectLocked()/readLoop() cycle
+	// doesn't close already-closed channels (panic on double close).
+	t.messages = make(chan []byte, 1024)
+	t.done = make(chan struct{})
 }
 
 // Close terminates the agent process.

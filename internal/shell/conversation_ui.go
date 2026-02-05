@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"sync"
 	"unicode/utf8"
 
 	"github.com/tfcace/hash/internal/editor"
@@ -12,7 +13,10 @@ import (
 )
 
 // ConversationUI renders the tinted conversation zone.
+// Methods that write to out are protected by mu to prevent interleaving
+// between the spinner goroutine and the main goroutine.
 type ConversationUI struct {
+	mu           sync.Mutex
 	out          io.Writer
 	accentColor  string
 	tintBg       string // Pre-computed background escape sequence
@@ -186,7 +190,11 @@ func (ui *ConversationUI) WriteCancelHint() {
 }
 
 // WriteThinkingIndicator displays a thinking/spinner message with tinting.
+// Called from the spinner goroutine — acquires mu to avoid interleaving
+// with ClearThinkingIndicator or WriteStreamTinted on the main goroutine.
 func (ui *ConversationUI) WriteThinkingIndicator(char rune, text string) {
+	ui.mu.Lock()
+	defer ui.mu.Unlock()
 	if ui.tintActive {
 		fmt.Fprintf(ui.out, "\r%s%s\x1b[90m%c %s\x1b[0m%s\x1b[K", ui.tintBg, ui.border, char, text, ui.tintBg)
 	} else {
@@ -195,7 +203,11 @@ func (ui *ConversationUI) WriteThinkingIndicator(char rune, text string) {
 }
 
 // ClearThinkingIndicator clears the thinking indicator line.
+// Called from the main goroutine after canceling the spinner context and
+// waiting for it to exit, but mu ensures no in-flight tick interleaves.
 func (ui *ConversationUI) ClearThinkingIndicator() {
+	ui.mu.Lock()
+	defer ui.mu.Unlock()
 	if ui.tintActive {
 		fmt.Fprintf(ui.out, "\r%s%s\x1b[K\x1b[0m", ui.tintBg, ui.border)
 	} else {
@@ -206,17 +218,23 @@ func (ui *ConversationUI) ClearThinkingIndicator() {
 // ClearTint disables the background tint for future writes.
 // Existing content on screen is not affected.
 func (ui *ConversationUI) ClearTint() {
+	ui.mu.Lock()
+	defer ui.mu.Unlock()
 	ui.tintActive = false
 }
 
 // SetTintActive enables or disables the background tint.
 func (ui *ConversationUI) SetTintActive(active bool) {
+	ui.mu.Lock()
+	defer ui.mu.Unlock()
 	ui.tintActive = active
 }
 
 // WriteStreamTinted writes streamed text with background tint and border.
 // Handles partial chunks that may or may not contain newlines.
 func (ui *ConversationUI) WriteStreamTinted(text string) {
+	ui.mu.Lock()
+	defer ui.mu.Unlock()
 	if !ui.tintActive || text == "" {
 		fmt.Fprint(ui.out, text)
 		return

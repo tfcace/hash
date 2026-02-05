@@ -60,9 +60,10 @@ type Shell struct {
 	agentOutput  *AgentOutputCoordinator
 
 	// Conversation mode state
-	conversation    *ConversationState
-	convUI          *ConversationUI
-	convCancelArmed bool
+	conversation       *ConversationState
+	convUI             *ConversationUI
+	convCancelArmed    bool
+	agentTimeoutCancel context.CancelFunc // Cancel per-request timeout when entering conversation
 
 	lastExitCode int
 	lastDuration time.Duration
@@ -888,6 +889,7 @@ func (s *Shell) handleAgentRequest(ctx context.Context, parsed parser.ParseResul
 	}
 	agentCtx, timeoutCancel := context.WithTimeout(agentCtx, timeout)
 	defer timeoutCancel()
+	s.agentTimeoutCancel = timeoutCancel
 
 	// Pass selected context to agent handler
 	s.agentHandler.SetSelectedContext(s.selectedContext)
@@ -1530,7 +1532,13 @@ func (s *Shell) enterConversationMode(ctx context.Context, initialResponse strin
 
 // runConversationLoop handles the conversation input loop.
 func (s *Shell) runConversationLoop(ctx context.Context) {
-	// Hints are now integrated into the top border
+	// Cancel the per-request timeout — conversation mode is interactive and
+	// should not be killed by the initial 30s agent timeout. Each individual
+	// reply still has its own idle timeout via SendStreaming.
+	if s.agentTimeoutCancel != nil {
+		s.agentTimeoutCancel()
+		s.agentTimeoutCancel = nil
+	}
 
 	for s.conversation.IsActive() {
 		line, err := s.readConversationInput(ctx)
