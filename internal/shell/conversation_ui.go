@@ -307,15 +307,21 @@ func (ui *ConversationUI) topBorderLine() string {
 	right := " ───"
 	hint := "Ctrl+C exit · !cmd shell · /done finish"
 
-	minLen := len(left) + len(right)
+	// Use rune counts for display width (box-drawing chars are 3 bytes but 1 column)
+	leftWidth := utf8.RuneCountInString(left)
+	rightWidth := utf8.RuneCountInString(right)
+	hintWidth := utf8.RuneCountInString(hint)
+
+	minLen := leftWidth + rightWidth
 	if width < minLen {
-		if width <= len(left) {
-			return left[:width]
+		if width <= leftWidth {
+			// Truncate by runes to avoid splitting multi-byte characters
+			return string([]rune(left)[:width])
 		}
-		return left + strings.Repeat("─", width-len(left))
+		return left + strings.Repeat("─", width-leftWidth)
 	}
 
-	fixedWithHint := len(left) + 1 + len(hint) + len(right)
+	fixedWithHint := leftWidth + 1 + hintWidth + rightWidth
 	if width >= fixedWithHint {
 		filler := width - fixedWithHint
 		if filler < 0 {
