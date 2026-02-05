@@ -1657,6 +1657,7 @@ func (s *Shell) sendConversationReply(ctx context.Context, reply string) {
 
 	// Start conversation-mode spinner (tinted)
 	spinnerCtx, spinnerCancel := context.WithCancel(ctx)
+	defer spinnerCancel() // Ensure context is always released
 	spinnerDone := make(chan struct{})
 	go s.runConversationSpinner(spinnerCtx, spinnerDone)
 
