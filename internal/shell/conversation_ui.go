@@ -5,14 +5,19 @@ import (
 	"io"
 	"os"
 	"strings"
+	"sync"
 	"unicode/utf8"
 
 	"github.com/tfcace/hash/internal/editor"
+	"github.com/tfcace/hash/internal/trace"
 	"golang.org/x/term"
 )
 
 // ConversationUI renders the tinted conversation zone.
+// Methods that write to out are protected by mu to prevent interleaving
+// between the spinner goroutine and the main goroutine.
 type ConversationUI struct {
+	mu           sync.Mutex
 	out          io.Writer
 	accentColor  string
 	tintBg       string // Pre-computed background escape sequence
@@ -41,7 +46,9 @@ func NewConversationUI(out io.Writer, accentColor string) *ConversationUI {
 	// Compute colored border: │ in accent color (single line)
 	var r, g, b int
 	if len(accentColor) == 7 && accentColor[0] == '#' {
-		fmt.Sscanf(accentColor[1:], "%02x%02x%02x", &r, &g, &b)
+		if _, err := fmt.Sscanf(accentColor[1:], "%02x%02x%02x", &r, &g, &b); err != nil {
+			r, g, b = 124, 58, 237 // Fallback on parse error
+		}
 	} else {
 		r, g, b = 124, 58, 237
 	}
@@ -106,13 +113,25 @@ func (ui *ConversationUI) InputFrame() *editor.InputFrame {
 	ui.refreshTermWidth()
 	prefix, prefixWidth := ui.userBoxPrefix()
 
-	return &editor.InputFrame{
+	frame := &editor.InputFrame{
 		TopLine:     ui.userBoxTopLine(),
 		BottomLine:  ui.userBoxBottomLine(),
 		Prefix:      prefix,
 		PrefixWidth: prefixWidth,
 		LineBg:      ui.tintBg,
 	}
+	if trace.Enabled("shell") {
+		trace.ShellHigh("conversation_input_frame", map[string]any{
+			"term_width":           ui.termWidth,
+			"user_box_width":       ui.userBoxWidth,
+			"prefix_width":         prefixWidth,
+			"top_visible_width":    visibleWidth(frame.TopLine),
+			"bottom_visible_width": visibleWidth(frame.BottomLine),
+			"line_bg":              frame.LineBg != "",
+			"tint_active":          ui.tintActive,
+		})
+	}
+	return frame
 }
 
 // WriteUserBoxTop draws the top line of the user input box.
@@ -186,7 +205,11 @@ func (ui *ConversationUI) WriteCancelHint() {
 }
 
 // WriteThinkingIndicator displays a thinking/spinner message with tinting.
+// Called from the spinner goroutine — acquires mu to avoid interleaving
+// with ClearThinkingIndicator or WriteStreamTinted on the main goroutine.
 func (ui *ConversationUI) WriteThinkingIndicator(char rune, text string) {
+	ui.mu.Lock()
+	defer ui.mu.Unlock()
 	if ui.tintActive {
 		fmt.Fprintf(ui.out, "\r%s%s\x1b[90m%c %s\x1b[0m%s\x1b[K", ui.tintBg, ui.border, char, text, ui.tintBg)
 	} else {
@@ -195,7 +218,11 @@ func (ui *ConversationUI) WriteThinkingIndicator(char rune, text string) {
 }
 
 // ClearThinkingIndicator clears the thinking indicator line.
+// Called from the main goroutine after canceling the spinner context and
+// waiting for it to exit, but mu ensures no in-flight tick interleaves.
 func (ui *ConversationUI) ClearThinkingIndicator() {
+	ui.mu.Lock()
+	defer ui.mu.Unlock()
 	if ui.tintActive {
 		fmt.Fprintf(ui.out, "\r%s%s\x1b[K\x1b[0m", ui.tintBg, ui.border)
 	} else {
@@ -206,17 +233,23 @@ func (ui *ConversationUI) ClearThinkingIndicator() {
 // ClearTint disables the background tint for future writes.
 // Existing content on screen is not affected.
 func (ui *ConversationUI) ClearTint() {
+	ui.mu.Lock()
+	defer ui.mu.Unlock()
 	ui.tintActive = false
 }
 
 // SetTintActive enables or disables the background tint.
 func (ui *ConversationUI) SetTintActive(active bool) {
+	ui.mu.Lock()
+	defer ui.mu.Unlock()
 	ui.tintActive = active
 }
 
 // WriteStreamTinted writes streamed text with background tint and border.
 // Handles partial chunks that may or may not contain newlines.
 func (ui *ConversationUI) WriteStreamTinted(text string) {
+	ui.mu.Lock()
+	defer ui.mu.Unlock()
 	if !ui.tintActive || text == "" {
 		fmt.Fprint(ui.out, text)
 		return
@@ -252,12 +285,7 @@ func (ui *ConversationUI) StreamBorder() string {
 }
 
 func (ui *ConversationUI) refreshTermWidth() {
-	width := 0
-	if f, ok := ui.out.(*os.File); ok {
-		if w, _, err := term.GetSize(int(f.Fd())); err == nil && w > 0 {
-			width = w
-		}
-	}
+	width := terminalWidth(ui.out)
 	if width == 0 {
 		width = 80
 	}
@@ -279,8 +307,11 @@ func (ui *ConversationUI) computeUserBoxWidth() int {
 	if available < 0 {
 		available = 0
 	}
-	margin := ui.termWidth / 8
-	if margin < 6 {
+
+	// Keep a small right margin so the box feels inset but still spans most
+	// of the conversation width on large terminals.
+	margin := 4
+	if ui.termWidth <= 80 {
 		margin = 6
 	}
 	target := available - margin
@@ -307,15 +338,19 @@ func (ui *ConversationUI) topBorderLine() string {
 	right := " ───"
 	hint := "Ctrl+C exit · !cmd shell · /done finish"
 
-	minLen := len(left) + len(right)
+	leftWidth := visibleWidth(left)
+	rightWidth := visibleWidth(right)
+	hintWidth := visibleWidth(hint)
+
+	minLen := leftWidth + rightWidth
 	if width < minLen {
-		if width <= len(left) {
-			return left[:width]
+		if width <= leftWidth {
+			return truncateWidth(left, width)
 		}
-		return left + strings.Repeat("─", width-len(left))
+		return left + strings.Repeat("─", width-leftWidth)
 	}
 
-	fixedWithHint := len(left) + 1 + len(hint) + len(right)
+	fixedWithHint := leftWidth + 1 + hintWidth + rightWidth
 	if width >= fixedWithHint {
 		filler := width - fixedWithHint
 		if filler < 0 {
@@ -335,6 +370,67 @@ func (ui *ConversationUI) topBorderLine() string {
 	return left + strings.Repeat("─", filler) + right
 }
 
+// terminalWidth returns the best-known terminal width for the current UI stream.
+// It prefers the configured output file descriptor, then falls back to stdio FDs.
+func terminalWidth(out io.Writer) int {
+	candidates := make([]*os.File, 0, 4)
+	if f, ok := out.(*os.File); ok {
+		candidates = append(candidates, f)
+	}
+	candidates = append(candidates, os.Stdout, os.Stdin, os.Stderr)
+
+	seen := map[uintptr]struct{}{}
+	for _, f := range candidates {
+		if f == nil {
+			continue
+		}
+		fd := f.Fd()
+		if _, ok := seen[fd]; ok {
+			continue
+		}
+		seen[fd] = struct{}{}
+		if !term.IsTerminal(int(fd)) {
+			continue
+		}
+		if w, _, err := term.GetSize(int(fd)); err == nil && w > 0 {
+			return w
+		}
+	}
+
+	return 0
+}
+
+// visibleWidth returns the visible character width of s, excluding ANSI escapes.
+func visibleWidth(s string) int {
+	width := 0
+	inEscape := false
+	for _, r := range s {
+		if r == '\x1b' {
+			inEscape = true
+			continue
+		}
+		if inEscape {
+			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
+				inEscape = false
+			}
+			continue
+		}
+		width++
+	}
+	return width
+}
+
+func truncateWidth(s string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	runes := []rune(s)
+	if len(runes) <= width {
+		return s
+	}
+	return string(runes[:width])
+}
+
 func (ui *ConversationUI) bottomBorderLine() string {
 	ui.refreshTermWidth()
 	width := ui.termWidth
@@ -347,9 +443,9 @@ func (ui *ConversationUI) bottomBorderLine() string {
 	return "╰" + strings.Repeat("─", width-1)
 }
 
-func (ui *ConversationUI) userBoxPrefix() (string, int) {
-	prefix := ui.tintBg + ui.border + ui.userIndent + ui.userBorder + "│" + ui.resetTint + " "
-	prefixWidth := 2 + len(ui.userIndent) + 2
+func (ui *ConversationUI) userBoxPrefix() (prefix string, prefixWidth int) {
+	prefix = ui.tintBg + ui.border + ui.userIndent + ui.userBorder + "│" + ui.resetTint + " "
+	prefixWidth = 2 + len(ui.userIndent) + 2
 	return prefix, prefixWidth
 }
 

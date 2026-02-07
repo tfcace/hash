@@ -149,3 +149,26 @@ func TestConversationUI_WriteStreamTinted_NoTintWhenDisabled(t *testing.T) {
 		t.Error("expected text content")
 	}
 }
+
+func TestConversationUI_TopBorderLine_UsesFullWidth(t *testing.T) {
+	var buf bytes.Buffer
+	ui := NewConversationUI(&buf, "#7c3aed")
+
+	// bytes.Buffer is not a terminal, so ConversationUI falls back to width 80.
+	line := ui.topBorderLine()
+	if got, want := visibleWidth(line), 80; got != want {
+		t.Fatalf("top border width = %d, want %d; line=%q", got, want, line)
+	}
+}
+
+func TestConversationUI_ComputeUserBoxWidth_WideTerminal(t *testing.T) {
+	var buf bytes.Buffer
+	ui := NewConversationUI(&buf, "#7c3aed")
+	ui.termWidth = 227
+
+	got := ui.computeUserBoxWidth()
+	const want = 213
+	if got != want {
+		t.Fatalf("user box width = %d, want %d", got, want)
+	}
+}

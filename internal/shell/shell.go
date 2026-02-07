@@ -60,9 +60,10 @@ type Shell struct {
 	agentOutput  *AgentOutputCoordinator
 
 	// Conversation mode state
-	conversation    *ConversationState
-	convUI          *ConversationUI
-	convCancelArmed bool
+	conversation       *ConversationState
+	convUI             *ConversationUI
+	convCancelArmed    bool
+	agentTimeoutCancel context.CancelFunc // Cancel per-request timeout when entering conversation
 
 	lastExitCode int
 	lastDuration time.Duration
@@ -888,6 +889,7 @@ func (s *Shell) handleAgentRequest(ctx context.Context, parsed parser.ParseResul
 	}
 	agentCtx, timeoutCancel := context.WithTimeout(agentCtx, timeout)
 	defer timeoutCancel()
+	s.agentTimeoutCancel = timeoutCancel
 
 	// Pass selected context to agent handler
 	s.agentHandler.SetSelectedContext(s.selectedContext)
@@ -1020,6 +1022,8 @@ func (s *Shell) handleAgentRequestUnified(ctx context.Context, parsed parser.Par
 }
 
 // handleAgentFullStreaming handles full ?? and pipe modes with streaming.
+//
+//nolint:gocyclo // streaming loop handles markers, conversation detection, and error recovery
 func (s *Shell) handleAgentFullStreaming(ctx context.Context, parsed parser.ParseResult, modelName string) {
 	// Show thinking indicator (multi-stage: thinking -> receiving)
 	s.responseUI.ShowState(AgentStateThinking)
@@ -1530,7 +1534,13 @@ func (s *Shell) enterConversationMode(ctx context.Context, initialResponse strin
 
 // runConversationLoop handles the conversation input loop.
 func (s *Shell) runConversationLoop(ctx context.Context) {
-	// Hints are now integrated into the top border
+	// Cancel the per-request timeout — conversation mode is interactive and
+	// should not be killed by the initial 30s agent timeout. Each individual
+	// reply still has its own idle timeout via SendStreaming.
+	if s.agentTimeoutCancel != nil {
+		s.agentTimeoutCancel()
+		s.agentTimeoutCancel = nil
+	}
 
 	for s.conversation.IsActive() {
 		line, err := s.readConversationInput(ctx)
@@ -1638,6 +1648,8 @@ func (s *Shell) executeShellEscape(ctx context.Context, cmd string) {
 }
 
 // sendConversationReply sends a follow-up message to the agent.
+//
+//nolint:gocyclo // conversation reply handles marker buffering, spinner lifecycle, and stream state
 func (s *Shell) sendConversationReply(ctx context.Context, reply string) {
 	s.conversation.SetSubState(ConversationStreaming)
 
@@ -1649,6 +1661,7 @@ func (s *Shell) sendConversationReply(ctx context.Context, reply string) {
 
 	// Start conversation-mode spinner (tinted)
 	spinnerCtx, spinnerCancel := context.WithCancel(ctx)
+	defer spinnerCancel() // Ensure context is always released
 	spinnerDone := make(chan struct{})
 	go s.runConversationSpinner(spinnerCtx, spinnerDone)
 

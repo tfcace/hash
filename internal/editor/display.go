@@ -6,6 +6,8 @@ import (
 	"io"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/tfcace/hash/internal/trace"
 )
 
 // ANSI escape sequences
@@ -371,9 +373,11 @@ func (d *Display) RenderWithGhost(buf *Buffer, cur *Cursor, hasSelection bool, g
 	d.out.Write([]byte(sb.String()))
 }
 
+//nolint:gocyclo // frame rendering requires handling many layout cases sequentially
 func (d *Display) renderWithFrame(buf *Buffer, cur *Cursor, hasSelection bool, ghostText string, streaming, fromAgent bool, modelName string) {
 	frame := d.frame
 	var sb strings.Builder
+	traceEnabled := trace.Enabled("editor")
 
 	// Hide cursor during render for flicker-free updates
 	sb.WriteString(ansiHideCursor)
@@ -393,6 +397,19 @@ func (d *Display) renderWithFrame(buf *Buffer, cur *Cursor, hasSelection bool, g
 
 	cursorRow := cur.Pos.Row
 	cursorCol := cur.Pos.Col
+	if traceEnabled {
+		trace.EditorHigh("frame_render", map[string]any{
+			"width":        d.width,
+			"height":       d.height,
+			"lines":        buf.LineCount(),
+			"cursor_row":   cursorRow,
+			"cursor_col":   cursorCol,
+			"prefix_width": frame.PrefixWidth,
+			"line_bg":      frame.LineBg != "",
+			"top_line":     frame.TopLine != "",
+			"bottom_line":  frame.BottomLine != "",
+		})
+	}
 
 	for i := 0; i < buf.LineCount(); i++ {
 		if i > 0 {
@@ -408,17 +425,19 @@ func (d *Display) renderWithFrame(buf *Buffer, cur *Cursor, hasSelection bool, g
 			sb.WriteString(line)
 		}
 
-		// Optional line padding with background
-		if frame.LineBg != "" && d.width > 0 {
-			contentWidth := frame.PrefixWidth + visibleWidth(line)
-			if d.width > contentWidth {
-				sb.WriteString(frame.LineBg)
-				padding := d.width - contentWidth
-				for j := 0; j < padding; j++ {
-					sb.WriteByte(' ')
-				}
-				sb.WriteString(ansiReset)
-			}
+		if traceEnabled {
+			trace.EditorDetailed("frame_render_line", map[string]any{
+				"index":          i,
+				"line_width":     visibleWidth(line),
+				"content_width":  frame.PrefixWidth + visibleWidth(line),
+				"display_width":  d.width,
+				"line_bg_active": frame.LineBg != "",
+			})
+		}
+
+		// Fill to terminal EOL with the frame background to avoid width mismatches.
+		if frame.LineBg != "" {
+			fillLineBg(&sb, frame.LineBg)
 		}
 	}
 
@@ -429,8 +448,22 @@ func (d *Display) renderWithFrame(buf *Buffer, cur *Cursor, hasSelection bool, g
 		d.renderFrameLine(&sb, frame.BottomLine, frame.LineBg)
 	}
 
-	// Clear everything below the buffer
+	// Clear everything below the buffer.
+	// Use frame background during clear so any same-line remainder stays tinted.
+	if frame.LineBg != "" {
+		sb.WriteString(frame.LineBg)
+	}
 	sb.WriteString(ansiClearToEnd)
+	if frame.LineBg != "" {
+		sb.WriteString(ansiReset)
+	}
+	if traceEnabled {
+		trace.EditorDetailed("frame_render_clear", map[string]any{
+			"clear_strategy": "line_bg_clear_to_end",
+			"display_width":  d.width,
+			"line_bg":        frame.LineBg != "",
+		})
+	}
 
 	totalLines := topOffset + buf.LineCount()
 	if frame.BottomLine != "" {
@@ -599,16 +632,8 @@ func (d *Display) finalizeWithFrame(buf *Buffer) {
 		sb.WriteString(frame.Prefix)
 		sb.WriteString(buf.Line(i))
 
-		if frame.LineBg != "" && d.width > 0 {
-			contentWidth := frame.PrefixWidth + visibleWidth(buf.Line(i))
-			if d.width > contentWidth {
-				sb.WriteString(frame.LineBg)
-				padding := d.width - contentWidth
-				for j := 0; j < padding; j++ {
-					sb.WriteByte(' ')
-				}
-				sb.WriteString(ansiReset)
-			}
+		if frame.LineBg != "" {
+			fillLineBg(&sb, frame.LineBg)
 		}
 
 		sb.WriteString("\r\n")
@@ -627,7 +652,7 @@ func (d *Display) finalizeWithFrame(buf *Buffer) {
 	d.lastCursorRow = 0
 }
 
-func (d *Display) renderFrameLine(sb *strings.Builder, line string, lineBg string) {
+func (d *Display) renderFrameLine(sb *strings.Builder, line, lineBg string) {
 	sb.WriteString(ansiClearLine)
 	sb.WriteString(line)
 
@@ -636,6 +661,10 @@ func (d *Display) renderFrameLine(sb *strings.Builder, line string, lineBg strin
 	}
 
 	// Fill to end of line with the frame background to avoid off-by-one gaps.
+	fillLineBg(sb, lineBg)
+}
+
+func fillLineBg(sb *strings.Builder, lineBg string) {
 	sb.WriteString(lineBg)
 	sb.WriteString("\x1b[K")
 	sb.WriteString(ansiReset)

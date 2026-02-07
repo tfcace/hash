@@ -119,10 +119,10 @@ func TestLooksLikeCommand(t *testing.T) {
 
 func TestProcessAgentResponse(t *testing.T) {
 	tests := []struct {
-		name         string
-		input        string
-		wantText     string
-		wantExpects  bool
+		name        string
+		input       string
+		wantText    string
+		wantExpects bool
 	}{
 		{
 			name:        "no marker",
