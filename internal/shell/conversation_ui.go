@@ -9,6 +9,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/tfcace/hash/internal/editor"
+	"github.com/tfcace/hash/internal/trace"
 	"golang.org/x/term"
 )
 
@@ -112,13 +113,25 @@ func (ui *ConversationUI) InputFrame() *editor.InputFrame {
 	ui.refreshTermWidth()
 	prefix, prefixWidth := ui.userBoxPrefix()
 
-	return &editor.InputFrame{
+	frame := &editor.InputFrame{
 		TopLine:     ui.userBoxTopLine(),
 		BottomLine:  ui.userBoxBottomLine(),
 		Prefix:      prefix,
 		PrefixWidth: prefixWidth,
 		LineBg:      ui.tintBg,
 	}
+	if trace.Enabled("shell") {
+		trace.ShellHigh("conversation_input_frame", map[string]any{
+			"term_width":           ui.termWidth,
+			"user_box_width":       ui.userBoxWidth,
+			"prefix_width":         prefixWidth,
+			"top_visible_width":    visibleWidth(frame.TopLine),
+			"bottom_visible_width": visibleWidth(frame.BottomLine),
+			"line_bg":              frame.LineBg != "",
+			"tint_active":          ui.tintActive,
+		})
+	}
+	return frame
 }
 
 // WriteUserBoxTop draws the top line of the user input box.
@@ -272,12 +285,7 @@ func (ui *ConversationUI) StreamBorder() string {
 }
 
 func (ui *ConversationUI) refreshTermWidth() {
-	width := 0
-	if f, ok := ui.out.(*os.File); ok {
-		if w, _, err := term.GetSize(int(f.Fd())); err == nil && w > 0 {
-			width = w
-		}
-	}
+	width := terminalWidth(ui.out)
 	if width == 0 {
 		width = 80
 	}
@@ -299,8 +307,11 @@ func (ui *ConversationUI) computeUserBoxWidth() int {
 	if available < 0 {
 		available = 0
 	}
-	margin := ui.termWidth / 8
-	if margin < 6 {
+
+	// Keep a small right margin so the box feels inset but still spans most
+	// of the conversation width on large terminals.
+	margin := 4
+	if ui.termWidth <= 80 {
 		margin = 6
 	}
 	target := available - margin
@@ -327,16 +338,14 @@ func (ui *ConversationUI) topBorderLine() string {
 	right := " ───"
 	hint := "Ctrl+C exit · !cmd shell · /done finish"
 
-	// Use rune counts for display width (box-drawing chars are 3 bytes but 1 column)
-	leftWidth := utf8.RuneCountInString(left)
-	rightWidth := utf8.RuneCountInString(right)
-	hintWidth := utf8.RuneCountInString(hint)
+	leftWidth := visibleWidth(left)
+	rightWidth := visibleWidth(right)
+	hintWidth := visibleWidth(hint)
 
 	minLen := leftWidth + rightWidth
 	if width < minLen {
 		if width <= leftWidth {
-			// Truncate by runes to avoid splitting multi-byte characters
-			return string([]rune(left)[:width])
+			return truncateWidth(left, width)
 		}
 		return left + strings.Repeat("─", width-leftWidth)
 	}
@@ -359,6 +368,67 @@ func (ui *ConversationUI) topBorderLine() string {
 		filler = 0
 	}
 	return left + strings.Repeat("─", filler) + right
+}
+
+// terminalWidth returns the best-known terminal width for the current UI stream.
+// It prefers the configured output file descriptor, then falls back to stdio FDs.
+func terminalWidth(out io.Writer) int {
+	candidates := make([]*os.File, 0, 4)
+	if f, ok := out.(*os.File); ok {
+		candidates = append(candidates, f)
+	}
+	candidates = append(candidates, os.Stdout, os.Stdin, os.Stderr)
+
+	seen := map[uintptr]struct{}{}
+	for _, f := range candidates {
+		if f == nil {
+			continue
+		}
+		fd := f.Fd()
+		if _, ok := seen[fd]; ok {
+			continue
+		}
+		seen[fd] = struct{}{}
+		if !term.IsTerminal(int(fd)) {
+			continue
+		}
+		if w, _, err := term.GetSize(int(fd)); err == nil && w > 0 {
+			return w
+		}
+	}
+
+	return 0
+}
+
+// visibleWidth returns the visible character width of s, excluding ANSI escapes.
+func visibleWidth(s string) int {
+	width := 0
+	inEscape := false
+	for _, r := range s {
+		if r == '\x1b' {
+			inEscape = true
+			continue
+		}
+		if inEscape {
+			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
+				inEscape = false
+			}
+			continue
+		}
+		width++
+	}
+	return width
+}
+
+func truncateWidth(s string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	runes := []rune(s)
+	if len(runes) <= width {
+		return s
+	}
+	return string(runes[:width])
 }
 
 func (ui *ConversationUI) bottomBorderLine() string {

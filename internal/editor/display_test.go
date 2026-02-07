@@ -151,3 +151,71 @@ func TestDisplay_RenderCompletionMenu_WithGutter(t *testing.T) {
 		t.Error("Menu should restore cursor position at end")
 	}
 }
+
+func TestDisplay_RenderWithFrame_FillsLineBgToEOL(t *testing.T) {
+	var out bytes.Buffer
+	d := NewDisplay(&out, 20, 24)
+	d.SetFrame(&InputFrame{
+		Prefix:      "P ",
+		PrefixWidth: 2,
+		LineBg:      "\x1b[48;2;1;2;3m",
+	})
+
+	buf := NewBufferFromString("hello")
+	cur := NewCursor()
+	cur.MoveTo(0, 5)
+
+	d.Render(buf, cur, false)
+
+	output := out.String()
+	if !strings.Contains(output, "P hello") {
+		t.Fatalf("output should contain framed line content, got %q", output)
+	}
+	if !strings.Contains(output, "\x1b[48;2;1;2;3m\x1b[K\x1b[0m") {
+		t.Fatalf("output should fill frame line background to EOL, got %q", output)
+	}
+}
+
+func TestDisplay_FinalizeWithFrame_FillsLineBgToEOL(t *testing.T) {
+	var out bytes.Buffer
+	d := NewDisplay(&out, 20, 24)
+	d.SetFrame(&InputFrame{
+		Prefix:      "P ",
+		PrefixWidth: 2,
+		LineBg:      "\x1b[48;2;1;2;3m",
+	})
+
+	buf := NewBufferFromString("hello")
+	cur := NewCursor()
+	cur.MoveTo(0, 5)
+
+	d.Render(buf, cur, false)
+	out.Reset()
+	d.Finalize(buf)
+
+	output := out.String()
+	if !strings.Contains(output, "\x1b[48;2;1;2;3m\x1b[K\x1b[0m") {
+		t.Fatalf("finalize output should fill frame line background to EOL, got %q", output)
+	}
+}
+
+func TestDisplay_RenderWithFrame_ClearsFromLineEnd(t *testing.T) {
+	var out bytes.Buffer
+	d := NewDisplay(&out, 20, 24)
+	d.SetFrame(&InputFrame{
+		Prefix:      "P ",
+		PrefixWidth: 2,
+		LineBg:      "\x1b[48;2;1;2;3m",
+	})
+
+	buf := NewBufferFromString("hello")
+	cur := NewCursor()
+	cur.MoveTo(0, 5)
+
+	d.Render(buf, cur, false)
+	output := out.String()
+
+	if !strings.Contains(output, "\x1b[48;2;1;2;3m\x1b[J\x1b[0m") {
+		t.Fatalf("render should clear-to-end with frame background active, got %q", output)
+	}
+}
