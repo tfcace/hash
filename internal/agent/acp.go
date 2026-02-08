@@ -599,6 +599,17 @@ func (t *ACPTransport) handleRequestPermission(id int64, params json.RawMessage)
 		}
 	}
 
+	// Reject if we can't determine what command the agent wants to run
+	if command == "" {
+		t.sendResponse(id, permissionResponse{
+			Outcome: &permissionOutcome{
+				Outcome:  "selected",
+				OptionID: resolveOptionID(p.Options, "reject_once", "reject"),
+			},
+		}, nil)
+		return
+	}
+
 	// Call the permission handler
 	t.mu.Lock()
 	handler := t.permissionHandler
@@ -607,21 +618,45 @@ func (t *ACPTransport) handleRequestPermission(id int64, params json.RawMessage)
 	var outcome permissionOutcome
 	if handler == nil {
 		// No handler - deny by default
-		outcome = permissionOutcome{Outcome: "selected", OptionID: "reject"}
+		outcome = permissionOutcome{
+			Outcome:  "selected",
+			OptionID: resolveOptionID(p.Options, "reject_once", "reject"),
+		}
 	} else {
 		allow, always := handler(command)
 		if allow {
 			if always {
-				outcome = permissionOutcome{Outcome: "selected", OptionID: "allow_always"}
+				outcome = permissionOutcome{
+					Outcome:  "selected",
+					OptionID: resolveOptionID(p.Options, "allow_always", "allow_always"),
+				}
 			} else {
-				outcome = permissionOutcome{Outcome: "selected", OptionID: "allow"}
+				outcome = permissionOutcome{
+					Outcome:  "selected",
+					OptionID: resolveOptionID(p.Options, "allow_once", "allow"),
+				}
 			}
 		} else {
-			outcome = permissionOutcome{Outcome: "selected", OptionID: "reject"}
+			outcome = permissionOutcome{
+				Outcome:  "selected",
+				OptionID: resolveOptionID(p.Options, "reject_once", "reject"),
+			}
 		}
 	}
 
 	t.sendResponse(id, permissionResponse{Outcome: &outcome}, nil)
+}
+
+// resolveOptionID finds the optionId for the given kind from the agent's
+// provided options. If no options were provided or no match is found, falls
+// back to the given default ID for backwards compatibility.
+func resolveOptionID(options []permissionOption, kind, fallback string) string {
+	for _, opt := range options {
+		if opt.Kind == kind {
+			return opt.OptionID
+		}
+	}
+	return fallback
 }
 
 // sendResponse sends a JSON-RPC response.

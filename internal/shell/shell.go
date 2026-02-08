@@ -1809,16 +1809,18 @@ func readSingleKey() byte {
 	}
 	defer term.Restore(fd, oldState)
 
-	buf := make([]byte, 1)
+	// Read into a larger buffer so that multi-byte escape sequences
+	// (e.g., arrow keys: \x1b[A) are consumed in one read rather than
+	// leaving trailing bytes in stdin for subsequent reads.
+	buf := make([]byte, 16)
 	n, err := os.Stdin.Read(buf)
-	if err != nil || n != 1 {
+	if err != nil || n < 1 {
 		return 'n'
 	}
 
-	// Handle escape key (0x1b)
-	char := buf[0] //nolint:gosec // n == 1 guarantees buf[0] is valid
+	char := buf[0] //nolint:gosec // n >= 1 guarantees buf[0] is valid
 	if char == 0x1b {
-		return 0x1b // Return ESC
+		return 0x1b // Return ESC (sequence bytes already consumed)
 	}
 
 	return char
