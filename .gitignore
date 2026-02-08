@@ -19,6 +19,9 @@ Thumbs.db
 # Go
 /vendor/
 
+# Claude Code local settings
+.claude/settings.local.json
+
 # Trace/debug logs
 hash-*.log
 hash-*.jsonl
