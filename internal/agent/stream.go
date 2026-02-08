@@ -5,56 +5,13 @@ import (
 	"strings"
 )
 
-// StreamingTransport extends Transport with streaming text capability.
-type StreamingTransport interface {
-	Transport
-
-	// SendStreaming sends a request and returns a channel of text chunks.
-	// The channel receives incremental text as it arrives from the agent.
-	// The channel is closed when the response is complete.
-	SendStreaming(ctx context.Context, req Request) (<-chan string, <-chan error)
-}
-
 // StreamRequest sends a request and returns channels for streaming text chunks.
 // This provides real-time text as it arrives, before parsing into Response.
 // Returns (textChan, errChan) - text chunks arrive on textChan, errors on errChan.
 //
 //nolint:gocritic // unnamedResult: can't name receive-only channel returns
 func (c *Client) StreamRequest(ctx context.Context, req Request) (<-chan string, <-chan error) {
-	// Check if transport supports streaming
-	if st, ok := c.transport.(StreamingTransport); ok {
-		return st.SendStreaming(ctx, req)
-	}
-
-	// Fallback: use regular Send and emit full response at once
-	textCh := make(chan string, 1)
-	errCh := make(chan error, 1)
-
-	go func() {
-		defer close(textCh)
-		defer close(errCh)
-
-		respCh, err := c.transport.Send(ctx, req)
-		if err != nil {
-			errCh <- err
-			return
-		}
-
-		for resp := range respCh {
-			if resp.Type == ResponseTypeError {
-				errCh <- &AgentError{Message: resp.Error}
-				return
-			}
-			// Emit the full text
-			if resp.Command != "" {
-				textCh <- resp.Command
-			} else if resp.Explanation != "" {
-				textCh <- resp.Explanation
-			}
-		}
-	}()
-
-	return textCh, errCh
+	return c.transport.SendStreaming(ctx, req)
 }
 
 // AgentError represents an error from the agent.

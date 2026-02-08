@@ -47,18 +47,28 @@ func TestHTTPTransport_SendSuccess(t *testing.T) {
 	})
 
 	ctx := context.Background()
-	respCh, err := transport.Send(ctx, Request{
+	textCh, errCh := transport.SendStreaming(ctx, Request{
 		Prompt: "find all go files",
 		Context: Context{
 			Cwd: "/home/user/project",
 		},
 	})
 
-	if err != nil {
-		t.Fatalf("Send() error = %v", err)
+	var text string
+	for chunk := range textCh {
+		text += chunk
+	}
+	for err := range errCh {
+		if err != nil {
+			t.Fatalf("SendStreaming() error = %v", err)
+		}
 	}
 
-	resp := <-respCh
+	// Use StreamCollector to parse the response
+	collector := NewStreamCollector()
+	collector.Append(text)
+	resp := collector.Response()
+
 	if resp.Type != ResponseTypeCommand {
 		t.Errorf("expected command type, got %v", resp.Type)
 	}
@@ -84,13 +94,22 @@ func TestHTTPTransport_SendExplanation(t *testing.T) {
 	})
 
 	ctx := context.Background()
-	respCh, err := transport.Send(ctx, Request{Prompt: "explain find command"})
+	textCh, errCh := transport.SendStreaming(ctx, Request{Prompt: "explain find command"})
 
-	if err != nil {
-		t.Fatalf("Send() error = %v", err)
+	var text string
+	for chunk := range textCh {
+		text += chunk
+	}
+	for err := range errCh {
+		if err != nil {
+			t.Fatalf("SendStreaming() error = %v", err)
+		}
 	}
 
-	resp := <-respCh
+	collector := NewStreamCollector()
+	collector.Append(text)
+	resp := collector.Response()
+
 	if resp.Type != ResponseTypeExplanation {
 		t.Errorf("expected explanation type, got %v", resp.Type)
 	}
@@ -112,18 +131,23 @@ func TestHTTPTransport_SendAPIError(t *testing.T) {
 	})
 
 	ctx := context.Background()
-	respCh, err := transport.Send(ctx, Request{Prompt: "test"})
+	textCh, errCh := transport.SendStreaming(ctx, Request{Prompt: "test"})
 
-	if err != nil {
-		t.Fatalf("Send() error = %v", err)
+	for range textCh {
 	}
 
-	resp := <-respCh
-	if resp.Type != ResponseTypeError {
-		t.Errorf("expected error type, got %v", resp.Type)
+	var gotErr error
+	for err := range errCh {
+		if err != nil {
+			gotErr = err
+		}
 	}
-	if !strings.Contains(resp.Error, "model not found") {
-		t.Errorf("expected model not found error, got %q", resp.Error)
+
+	if gotErr == nil {
+		t.Fatal("expected error for API error response")
+	}
+	if !strings.Contains(gotErr.Error(), "model not found") {
+		t.Errorf("expected model not found error, got %q", gotErr.Error())
 	}
 }
 
@@ -141,18 +165,23 @@ func TestHTTPTransport_SendHTTPError(t *testing.T) {
 	})
 
 	ctx := context.Background()
-	respCh, err := transport.Send(ctx, Request{Prompt: "test"})
+	textCh, errCh := transport.SendStreaming(ctx, Request{Prompt: "test"})
 
-	if err != nil {
-		t.Fatalf("Send() error = %v", err)
+	for range textCh {
 	}
 
-	resp := <-respCh
-	if resp.Type != ResponseTypeError {
-		t.Errorf("expected error type, got %v", resp.Type)
+	var gotErr error
+	for err := range errCh {
+		if err != nil {
+			gotErr = err
+		}
 	}
-	if !strings.Contains(resp.Error, "500") {
-		t.Errorf("expected HTTP 500 error, got %q", resp.Error)
+
+	if gotErr == nil {
+		t.Fatal("expected error for HTTP 500")
+	}
+	if !strings.Contains(gotErr.Error(), "500") {
+		t.Errorf("expected HTTP 500 error, got %q", gotErr.Error())
 	}
 }
 
@@ -169,18 +198,23 @@ func TestHTTPTransport_SendInvalidJSON(t *testing.T) {
 	})
 
 	ctx := context.Background()
-	respCh, err := transport.Send(ctx, Request{Prompt: "test"})
+	textCh, errCh := transport.SendStreaming(ctx, Request{Prompt: "test"})
 
-	if err != nil {
-		t.Fatalf("Send() error = %v", err)
+	for range textCh {
 	}
 
-	resp := <-respCh
-	if resp.Type != ResponseTypeError {
-		t.Errorf("expected error type, got %v", resp.Type)
+	var gotErr error
+	for err := range errCh {
+		if err != nil {
+			gotErr = err
+		}
 	}
-	if !strings.Contains(resp.Error, "parse response") {
-		t.Errorf("expected parse error, got %q", resp.Error)
+
+	if gotErr == nil {
+		t.Fatal("expected error for invalid JSON")
+	}
+	if !strings.Contains(gotErr.Error(), "parse response") {
+		t.Errorf("expected parse error, got %q", gotErr.Error())
 	}
 }
 
@@ -203,15 +237,20 @@ func TestHTTPTransport_SendContextCanceled(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 
-	respCh, err := transport.Send(ctx, Request{Prompt: "test"})
+	textCh, errCh := transport.SendStreaming(ctx, Request{Prompt: "test"})
 
-	if err != nil {
-		t.Fatalf("Send() error = %v", err)
+	for range textCh {
 	}
 
-	resp := <-respCh
-	if resp.Type != ResponseTypeError {
-		t.Errorf("expected error type for canceled context, got %v", resp.Type)
+	var gotErr error
+	for err := range errCh {
+		if err != nil {
+			gotErr = err
+		}
+	}
+
+	if gotErr == nil {
+		t.Error("expected error for canceled context")
 	}
 }
 
@@ -224,15 +263,20 @@ func TestHTTPTransport_SendConnectionRefused(t *testing.T) {
 	})
 
 	ctx := context.Background()
-	respCh, err := transport.Send(ctx, Request{Prompt: "test"})
+	textCh, errCh := transport.SendStreaming(ctx, Request{Prompt: "test"})
 
-	if err != nil {
-		t.Fatalf("Send() error = %v", err)
+	for range textCh {
 	}
 
-	resp := <-respCh
-	if resp.Type != ResponseTypeError {
-		t.Errorf("expected error type for connection refused, got %v", resp.Type)
+	var gotErr error
+	for err := range errCh {
+		if err != nil {
+			gotErr = err
+		}
+	}
+
+	if gotErr == nil {
+		t.Error("expected error for connection refused")
 	}
 }
 
@@ -257,8 +301,11 @@ func TestHTTPTransport_SendWithCustomHeaders(t *testing.T) {
 	})
 
 	ctx := context.Background()
-	respCh, _ := transport.Send(ctx, Request{Prompt: "test"})
-	<-respCh
+	textCh, errCh := transport.SendStreaming(ctx, Request{Prompt: "test"})
+	for range textCh {
+	}
+	for range errCh {
+	}
 
 	if receivedHeaders.Get("X-Custom-Header") != "custom-value" {
 		t.Errorf("custom header not received: %v", receivedHeaders)
@@ -287,7 +334,7 @@ func TestHTTPTransport_BuildPromptAllFields(t *testing.T) {
 	})
 
 	ctx := context.Background()
-	respCh, _ := transport.Send(ctx, Request{
+	textCh, errCh := transport.SendStreaming(ctx, Request{
 		Prompt:      "find large files",
 		CommandLine: "find . -size",
 		Context: Context{
@@ -296,7 +343,10 @@ func TestHTTPTransport_BuildPromptAllFields(t *testing.T) {
 			LastError: "permission denied",
 		},
 	})
-	<-respCh
+	for range textCh {
+	}
+	for range errCh {
+	}
 
 	// Verify prompt contains context
 	if !strings.Contains(receivedPrompt, "/home/user") {
@@ -333,14 +383,17 @@ func TestHTTPTransport_EmptyResponse(t *testing.T) {
 	})
 
 	ctx := context.Background()
-	respCh, _ := transport.Send(ctx, Request{Prompt: "test"})
-	resp := <-respCh
+	textCh, errCh := transport.SendStreaming(ctx, Request{Prompt: "test"})
 
-	// Empty response is parsed as command (short text)
-	// This documents current behavior
-	if resp.Type == ResponseTypeError {
-		t.Logf("Empty response treated as error: %s", resp.Error)
-	} else {
-		t.Logf("Empty response type: %v, command: %q", resp.Type, resp.Command)
+	var text string
+	for chunk := range textCh {
+		text += chunk
+	}
+	for range errCh {
+	}
+
+	// Empty response produces no text chunks
+	if text != "" {
+		t.Logf("Empty response produced text: %q", text)
 	}
 }

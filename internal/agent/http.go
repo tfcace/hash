@@ -65,12 +65,18 @@ type ollamaResponse struct {
 	Error    string `json:"error,omitempty"`
 }
 
-// Send sends a request to the HTTP API.
-func (t *HTTPTransport) Send(ctx context.Context, req Request) (<-chan Response, error) {
-	respCh := make(chan Response, 1)
+// SendStreaming sends a request to the HTTP API and streams the response text.
+// HTTP transport is inherently non-streaming (Stream: false), so the full
+// response text is emitted as a single chunk on the text channel.
+//
+//nolint:gocritic // unnamedResult: can't name receive-only channel returns
+func (t *HTTPTransport) SendStreaming(ctx context.Context, req Request) (<-chan string, <-chan error) {
+	textCh := make(chan string, 1)
+	errCh := make(chan error, 1)
 
 	go func() {
-		defer close(respCh)
+		defer close(textCh)
+		defer close(errCh)
 
 		// Build prompt with context
 		prompt := t.buildPrompt(req)
@@ -84,20 +90,14 @@ func (t *HTTPTransport) Send(ctx context.Context, req Request) (<-chan Response,
 
 		body, err := json.Marshal(ollamaReq)
 		if err != nil {
-			respCh <- Response{
-				Type:  ResponseTypeError,
-				Error: fmt.Sprintf("marshal request: %v", err),
-			}
+			errCh <- fmt.Errorf("marshal request: %v", err)
 			return
 		}
 
 		// Create HTTP request
 		httpReq, err := http.NewRequestWithContext(ctx, "POST", t.config.URL, bytes.NewReader(body))
 		if err != nil {
-			respCh <- Response{
-				Type:  ResponseTypeError,
-				Error: fmt.Sprintf("create request: %v", err),
-			}
+			errCh <- fmt.Errorf("create request: %v", err)
 			return
 		}
 
@@ -109,10 +109,7 @@ func (t *HTTPTransport) Send(ctx context.Context, req Request) (<-chan Response,
 		// Send request
 		httpResp, err := t.client.Do(httpReq)
 		if err != nil {
-			respCh <- Response{
-				Type:  ResponseTypeError,
-				Error: fmt.Sprintf("http request: %v", err),
-			}
+			errCh <- fmt.Errorf("http request: %v", err)
 			return
 		}
 		defer httpResp.Body.Close()
@@ -120,44 +117,34 @@ func (t *HTTPTransport) Send(ctx context.Context, req Request) (<-chan Response,
 		// Read response
 		respBody, err := io.ReadAll(httpResp.Body)
 		if err != nil {
-			respCh <- Response{
-				Type:  ResponseTypeError,
-				Error: fmt.Sprintf("read response: %v", err),
-			}
+			errCh <- fmt.Errorf("read response: %v", err)
 			return
 		}
 
 		if httpResp.StatusCode != http.StatusOK {
-			respCh <- Response{
-				Type:  ResponseTypeError,
-				Error: fmt.Sprintf("http status %d: %s", httpResp.StatusCode, string(respBody)),
-			}
+			errCh <- fmt.Errorf("http status %d: %s", httpResp.StatusCode, string(respBody))
 			return
 		}
 
 		// Parse Ollama response
 		var ollamaResp ollamaResponse
 		if err := json.Unmarshal(respBody, &ollamaResp); err != nil {
-			respCh <- Response{
-				Type:  ResponseTypeError,
-				Error: fmt.Sprintf("parse response: %v", err),
-			}
+			errCh <- fmt.Errorf("parse response: %v", err)
 			return
 		}
 
 		if ollamaResp.Error != "" {
-			respCh <- Response{
-				Type:  ResponseTypeError,
-				Error: ollamaResp.Error,
-			}
+			errCh <- fmt.Errorf("%s", ollamaResp.Error)
 			return
 		}
 
-		// Parse the response text to determine type
-		respCh <- t.parseResponse(ollamaResp.Response)
+		// Emit the full response text as a single chunk
+		if ollamaResp.Response != "" {
+			textCh <- ollamaResp.Response
+		}
 	}()
 
-	return respCh, nil
+	return textCh, errCh
 }
 
 // buildPrompt constructs the prompt with context.
@@ -186,24 +173,6 @@ func (t *HTTPTransport) buildPrompt(req Request) string {
 	b.WriteString(fmt.Sprintf("\nUser request: %s\n", req.Prompt))
 
 	return b.String()
-}
-
-// parseResponse determines the response type from the text.
-func (t *HTTPTransport) parseResponse(text string) Response {
-	text = strings.TrimSpace(text)
-
-	// If it looks like a command (starts with common command prefixes or is short)
-	if looksLikeCommand(text) {
-		return Response{
-			Type:    ResponseTypeCommand,
-			Command: text,
-		}
-	}
-
-	return Response{
-		Type:        ResponseTypeExplanation,
-		Explanation: text,
-	}
 }
 
 // looksLikeCommand checks if the text appears to be a shell command.
@@ -263,5 +232,5 @@ func (t *HTTPTransport) Close() error {
 	return nil
 }
 
-// Compile-time check that HTTPTransport implements Transport
+// Compile-time check
 var _ Transport = (*HTTPTransport)(nil)

@@ -8,7 +8,7 @@ import (
 
 // TestACPTransport_ConnectionClosedResetsState tests that when the messages
 // channel closes (agent process exits), the connection state is reset so
-// the next Send() can reconnect.
+// the next SendStreaming() can reconnect.
 func TestACPTransport_ConnectionClosedResetsState(t *testing.T) {
 	transport := &ACPTransport{
 		config:   ACPConfig{Command: "test"},
@@ -28,21 +28,21 @@ func TestACPTransport_ConnectionClosedResetsState(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 
-	respCh, err := transport.Send(ctx, Request{Prompt: "test"})
-	if err != nil {
-		t.Logf("Send returned early error: %v", err)
-	} else {
-		resp := <-respCh
-		if resp.Type == ResponseTypeError {
-			t.Logf("Got error response: %s", resp.Error)
+	textCh, errCh := transport.SendStreaming(ctx, Request{Prompt: "test"})
+
+	// Drain channels
+	for range textCh {
+	}
+	for err := range errCh {
+		if err != nil {
+			t.Logf("Got error: %v", err)
 		}
 	}
 
 	// Give goroutine time to process
 	time.Sleep(50 * time.Millisecond)
 
-	// BUG: After "connection closed" error, stdin should be reset
-	// Currently it's NOT reset, so next Send would fail again
+	// After "connection closed", stdin should be reset
 	transport.mu.Lock()
 	stdinAfterClose := transport.stdin
 	transport.mu.Unlock()
@@ -53,7 +53,7 @@ func TestACPTransport_ConnectionClosedResetsState(t *testing.T) {
 	}
 }
 
-// TestACPTransport_SendAfterClose tests behavior when Send is called
+// TestACPTransport_SendAfterClose tests behavior when SendStreaming is called
 // after the transport has been closed.
 func TestACPTransport_SendAfterClose(t *testing.T) {
 	// Use a non-existent command to fail fast
@@ -69,13 +69,24 @@ func TestACPTransport_SendAfterClose(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 
-	_, err := transport.Send(ctx, Request{Prompt: "test"})
+	textCh, errCh := transport.SendStreaming(ctx, Request{Prompt: "test"})
+
+	// Drain channels
+	for range textCh {
+	}
+
+	var gotErr error
+	for err := range errCh {
+		if err != nil {
+			gotErr = err
+		}
+	}
 
 	// Should get an error (can't connect) but not panic
-	if err == nil {
-		t.Error("Send after Close should return error, got nil")
+	if gotErr == nil {
+		t.Error("SendStreaming after Close should return error, got nil")
 	} else {
-		t.Logf("Send after Close returned error (expected): %v", err)
+		t.Logf("SendStreaming after Close returned error (expected): %v", gotErr)
 	}
 }
 
@@ -99,7 +110,7 @@ func TestACPTransport_DoubleClose(t *testing.T) {
 }
 
 // TestACPTransport_ContextAlreadyCanceled tests behavior when context
-// is already canceled before Send is called.
+// is already canceled before SendStreaming is called.
 func TestACPTransport_ContextAlreadyCanceled(t *testing.T) {
 	transport := &ACPTransport{
 		config:   ACPConfig{Command: "test"},
@@ -116,19 +127,22 @@ func TestACPTransport_ContextAlreadyCanceled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // Cancel immediately
 
-	// Send with already-canceled context
-	respCh, err := transport.Send(ctx, Request{Prompt: "test"})
+	// SendStreaming with already-canceled context
+	textCh, errCh := transport.SendStreaming(ctx, Request{Prompt: "test"})
 
-	if err != nil {
-		// Early error is acceptable
-		t.Logf("Send returned early error (good): %v", err)
-		return
+	// Drain channels
+	for range textCh {
 	}
 
-	// If no early error, goroutine should detect canceled context
-	resp := <-respCh
-	if resp.Type != ResponseTypeError {
-		t.Errorf("Expected error response for canceled context, got type %v", resp.Type)
+	var gotErr error
+	for err := range errCh {
+		if err != nil {
+			gotErr = err
+		}
+	}
+
+	if gotErr == nil {
+		t.Error("Expected error for canceled context")
 	}
 }
 
@@ -171,18 +185,16 @@ func TestACPTransport_RapidCancelAndResend(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
 
-		respCh, err := transport.Send(ctx, Request{Prompt: "test"})
-		if err != nil {
-			cancel()
-			continue
-		}
+		textCh, errCh := transport.SendStreaming(ctx, Request{Prompt: "test"})
 
 		// Cancel almost immediately
 		cancel()
 
-		// Drain response
+		// Drain channels
+		for range textCh {
+		}
 		select {
-		case <-respCh:
+		case <-errCh:
 		case <-time.After(50 * time.Millisecond):
 		}
 	}

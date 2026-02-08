@@ -43,8 +43,7 @@ func TestStreamCollector_Explanation(t *testing.T) {
 	}
 }
 
-func TestClient_StreamRequest_Fallback(t *testing.T) {
-	// Create a mock transport that doesn't support streaming
+func TestClient_StreamRequest(t *testing.T) {
 	mock := NewMockTransport(Response{
 		Type:    ResponseTypeCommand,
 		Command: "ls -la",
@@ -62,12 +61,10 @@ func TestClient_StreamRequest_Fallback(t *testing.T) {
 	}
 
 	// Check for errors
-	select {
-	case err := <-errCh:
+	for err := range errCh {
 		if err != nil {
 			t.Errorf("unexpected error: %v", err)
 		}
-	default:
 	}
 
 	if text != "ls -la" {

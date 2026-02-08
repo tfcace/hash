@@ -170,8 +170,18 @@ func New(cfg *config.Config) (*Shell, error) {
 		acpTransport.SetPermissionHandler(func(req agent.ToolPermissionRequest) (allow bool, always bool) {
 			// Check allowlist first
 			if allowlistMgr.IsAllowed(req.Command) {
+				trace.AgentHigh("tool_permission", map[string]any{
+					"command":  req.Command,
+					"tool":     req.ToolName,
+					"decision": "allowlist",
+				})
 				return true, false
 			}
+
+			trace.AgentHigh("tool_permission_prompt", map[string]any{
+				"command": req.Command,
+				"tool":    req.ToolName,
+			})
 
 			// Render permission prompt via coordinator (pauses streaming)
 			agentOutput.RenderPermissionPrompt(req.Command, req.ToolName, colorPalette.Primary)
@@ -184,14 +194,32 @@ func New(cfg *config.Config) (*Shell, error) {
 
 			// Determine if allowed/denied based on key and clear prompt
 			switch key {
-			case 'y', 'Y', '\r', '\n':
+			case 'y', 'Y':
+				trace.AgentHigh("tool_permission", map[string]any{
+					"command":  req.Command,
+					"tool":     req.ToolName,
+					"decision": "allow",
+					"key":      string(key),
+				})
 				agentOutput.ClearPermissionPrompt(true)
 				return true, false
 			case 'a', 'A':
+				trace.AgentHigh("tool_permission", map[string]any{
+					"command":  req.Command,
+					"tool":     req.ToolName,
+					"decision": "always",
+					"key":      string(key),
+				})
 				allowlistMgr.Allow(req.Command) //nolint:errcheck
 				agentOutput.ClearPermissionPrompt(true)
 				return true, true
 			default: // 'n', 'N', Esc, or anything else
+				trace.AgentHigh("tool_permission", map[string]any{
+					"command":  req.Command,
+					"tool":     req.ToolName,
+					"decision": "deny",
+					"key":      string(key),
+				})
 				agentOutput.ClearPermissionPrompt(false)
 				return false, false
 			}
@@ -1010,6 +1038,7 @@ func (s *Shell) handleAgentRequestUnified(ctx context.Context, parsed parser.Par
 		}
 		// Update context with pipe output
 		if s.clipboard != nil {
+			s.clipboard.AddCommand(parsed.Command)
 			s.clipboard.SetOutput(pipeOutput)
 		}
 	}
@@ -1058,6 +1087,15 @@ func (s *Shell) handleAgentFullStreaming(ctx context.Context, parsed parser.Pars
 	markerDetected := false
 	const markerLen = len(agent.ConversationStartMarker) // "[CONVERSATION]" = 14 chars
 
+	// Flush timer ensures partial lines appear on screen promptly.
+	// The markdown renderer buffers text until \n; this timer flushes
+	// incomplete lines so they're visible before events like permission
+	// prompts steal the screen.
+	const flushDelay = 50 * time.Millisecond
+	flushTimer := time.NewTimer(flushDelay)
+	flushTimer.Stop() // Don't fire until we have buffered content
+	defer flushTimer.Stop()
+
 collectLoop:
 	for {
 		select {
@@ -1077,6 +1115,15 @@ collectLoop:
 			}
 			if err != nil {
 				streamErr = err
+			}
+		case <-flushTimer.C:
+			// Flush partial line from markdown renderer so it appears on screen
+			if partial := renderer.Flush(); partial != "" {
+				if inConversation && s.convUI != nil {
+					s.convUI.WriteStreamTinted(partial)
+				} else {
+					s.agentOutput.WriteStream(partial)
+				}
 			}
 		case text, ok := <-textCh:
 			if !ok {
@@ -1129,6 +1176,10 @@ collectLoop:
 			} else {
 				s.agentOutput.WriteStream(rendered)
 			}
+
+			// Reset flush timer — if the renderer still has buffered content
+			// (incomplete line), it will be flushed after the delay
+			flushTimer.Reset(flushDelay)
 		}
 	}
 
@@ -1857,6 +1908,10 @@ func readSingleKey() byte {
 	}
 	defer term.Restore(fd, oldState)
 
+	// Drain any stale input (e.g., lingering newline from Enter that
+	// submitted the original command) so it doesn't auto-answer the prompt.
+	drainStdin(fd)
+
 	// Read into a larger buffer so that multi-byte escape sequences
 	// (e.g., arrow keys: \x1b[A) are consumed in one read rather than
 	// leaving trailing bytes in stdin for subsequent reads.
@@ -1872,4 +1927,19 @@ func readSingleKey() byte {
 	}
 
 	return char
+}
+
+// drainStdin discards any bytes already buffered in stdin.
+// Uses non-blocking reads so it returns immediately when the buffer is empty.
+func drainStdin(fd int) {
+	if err := syscall.SetNonblock(fd, true); err != nil {
+		return
+	}
+	defer syscall.SetNonblock(fd, false) //nolint:errcheck
+	discard := make([]byte, 256)
+	for {
+		if _, err := os.Stdin.Read(discard); err != nil {
+			return
+		}
+	}
 }

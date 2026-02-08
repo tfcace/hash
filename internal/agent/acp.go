@@ -376,183 +376,6 @@ func (t *ACPTransport) newSession(ctx context.Context, cwd string) (string, erro
 	return sessionResult.SessionID, nil
 }
 
-// Send sends a request to the agent.
-//
-//nolint:gocyclo // SSE protocol parsing requires sequential event handling
-func (t *ACPTransport) Send(ctx context.Context, req Request) (<-chan Response, error) {
-	t.mu.Lock()
-
-	// Lazy connect
-	if t.stdin == nil {
-		if err := t.connectLocked(ctx); err != nil {
-			t.mu.Unlock()
-			return nil, fmt.Errorf("connect: %w", err)
-		}
-	}
-
-	// Check if we need a new session
-	needSession := t.sessionID == ""
-	t.mu.Unlock()
-
-	// Create session if needed (outside lock to avoid deadlock on timeout)
-	if needSession {
-		cwd := req.Context.Cwd
-		if cwd == "" {
-			cwd = "."
-		}
-		sessionID, err := t.newSession(ctx, cwd)
-		if err != nil {
-			return nil, fmt.Errorf("new session: %w", err)
-		}
-		t.mu.Lock()
-		t.sessionID = sessionID
-		t.mu.Unlock()
-	}
-
-	t.mu.Lock()
-	sessionID := t.sessionID
-	t.mu.Unlock()
-
-	respCh := make(chan Response, 1)
-
-	go func() {
-		defer close(respCh)
-
-		// Build prompt with context
-		promptText := buildPromptWithContext(req)
-
-		// Send prompt request
-		id := t.requestID.Add(1)
-		rpcReq := jsonRPCRequest{
-			JSONRPC: "2.0",
-			ID:      id,
-			Method:  "session/prompt",
-			Params: promptParams{
-				SessionID: sessionID,
-				Prompt: []promptPart{
-					{Type: "text", Text: promptText},
-				},
-			},
-		}
-
-		data, err := json.Marshal(rpcReq)
-		if err != nil {
-			respCh <- Response{Type: ResponseTypeError, Error: err.Error()}
-			return
-		}
-
-		t.mu.Lock()
-		_, err = t.stdin.Write(append(data, '\n'))
-		t.mu.Unlock()
-		if err != nil {
-			// Write failed - reset connection so next Send() reconnects
-			t.resetConnection()
-			respCh <- Response{Type: ResponseTypeError, Error: err.Error()}
-			return
-		}
-
-		// Collect response text from streaming notifications
-		var textBuilder strings.Builder
-
-		// Create idle timer
-		idleTimer := time.NewTimer(IdleTimeout)
-		defer idleTimer.Stop()
-
-		for {
-			select {
-			case <-ctx.Done():
-				t.sendCancel()
-				respCh <- Response{Type: ResponseTypeError, Error: ctx.Err().Error()}
-				return
-
-			case <-idleTimer.C:
-				// No message received for IdleTimeout - agent may be stuck
-				t.sendCancel()
-				text := textBuilder.String()
-				if text != "" {
-					// Return partial response with warning
-					respCh <- parseAgentResponse(text)
-				} else {
-					respCh <- Response{Type: ResponseTypeError, Error: fmt.Sprintf("agent idle timeout (%v without response)", IdleTimeout)}
-				}
-				return
-
-			case line, ok := <-t.messages:
-				if !ok {
-					// Connection closed (readLoop exited) - reset for reconnect
-					t.resetConnection()
-					text := textBuilder.String()
-					if text != "" {
-						respCh <- parseAgentResponse(text)
-					} else {
-						respCh <- Response{Type: ResponseTypeError, Error: "connection closed"}
-					}
-					return
-				}
-
-				// Reset idle timer on any message
-				if !idleTimer.Stop() {
-					select {
-					case <-idleTimer.C:
-					default:
-					}
-				}
-				idleTimer.Reset(IdleTimeout)
-
-				var msg struct {
-					JSONRPC string          `json:"jsonrpc"`
-					ID      *int64          `json:"id"`
-					Method  string          `json:"method"`
-					Params  json.RawMessage `json:"params"`
-					Result  json.RawMessage `json:"result"`
-					Error   *jsonRPCError   `json:"error"`
-				}
-				if err := json.Unmarshal(line, &msg); err != nil {
-					continue
-				}
-
-				// Check if this is an incoming request (has both ID and Method)
-				if msg.ID != nil && msg.Method != "" {
-					go t.handleIncomingRequest(*msg.ID, msg.Method, msg.Params)
-					continue
-				}
-
-				// Check if it's our response (end of prompt)
-				if msg.ID != nil && *msg.ID == id {
-					if msg.Error != nil {
-						respCh <- Response{Type: ResponseTypeError, Error: msg.Error.Message}
-						return
-					}
-					// Prompt complete
-					text := textBuilder.String()
-					if text != "" {
-						respCh <- parseAgentResponse(text)
-					} else {
-						respCh <- Response{Type: ResponseTypeError, Error: "agent returned empty response"}
-					}
-					return
-				}
-
-				// Handle session/update notification
-				if msg.Method == "session/update" {
-					var updateParams sessionUpdateParams
-					if err := json.Unmarshal(msg.Params, &updateParams); err != nil {
-						continue
-					}
-
-					if updateParams.Update.SessionUpdate == "agent_message_chunk" &&
-						updateParams.Update.Content != nil &&
-						updateParams.Update.Content.Type == "text" {
-						textBuilder.WriteString(updateParams.Update.Content.Text)
-					}
-				}
-			}
-		}
-	}()
-
-	return respCh, nil
-}
-
 func parseAgentResponse(text string) Response {
 	text = strings.TrimSpace(text)
 
@@ -772,7 +595,7 @@ Do NOT use these markers for complete answers, commands, or when the conversatio
 }
 
 // resetConnection closes the current connection and resets state so that
-// the next Send() will reconnect via lazy connect. This is called when
+// the next SendStreaming() will reconnect via lazy connect. This is called when
 // a write error occurs (e.g., broken pipe after agent exits).
 func (t *ACPTransport) resetConnection() {
 	t.mu.Lock()
@@ -824,7 +647,7 @@ func (t *ACPTransport) Close() error {
 // If exceeded, the request is considered stuck and canceled.
 const IdleTimeout = 30 * time.Second
 
-// SendStreaming implements StreamingTransport for real-time text streaming.
+// SendStreaming implements Transport for real-time text streaming.
 //
 //nolint:gocritic,gocyclo // unnamedResult + SSE streaming requires sequential event handling
 func (t *ACPTransport) SendStreaming(ctx context.Context, req Request) (<-chan string, <-chan error) {
@@ -897,7 +720,7 @@ func (t *ACPTransport) SendStreaming(ctx context.Context, req Request) (<-chan s
 		_, err = t.stdin.Write(append(data, '\n'))
 		t.mu.Unlock()
 		if err != nil {
-			// Write failed - reset connection so next Send() reconnects
+			// Write failed - reset connection so next request reconnects
 			t.resetConnection()
 			errCh <- err
 			return
@@ -984,6 +807,5 @@ func (t *ACPTransport) SendStreaming(ctx context.Context, req Request) (<-chan s
 	return textCh, errCh
 }
 
-// Compile-time checks
+// Compile-time check
 var _ Transport = (*ACPTransport)(nil)
-var _ StreamingTransport = (*ACPTransport)(nil)

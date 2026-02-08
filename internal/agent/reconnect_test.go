@@ -89,7 +89,7 @@ func TestACPTransport_ReconnectAfterBrokenPipe(t *testing.T) {
 func TestACPTransport_WriteErrorResetsConnection(t *testing.T) {
 	// This test verifies the fix for the broken pipe issue.
 	// When stdin.Write fails, the connection should be reset so that
-	// the next Send() call will trigger a reconnect via lazy connect.
+	// the next SendStreaming() call will trigger a reconnect via lazy connect.
 
 	transport := &ACPTransport{
 		config:   ACPConfig{Command: "test"},
@@ -109,25 +109,28 @@ func TestACPTransport_WriteErrorResetsConnection(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 
-	respCh, err := transport.Send(ctx, Request{Prompt: "test"})
+	textCh, errCh := transport.SendStreaming(ctx, Request{Prompt: "test"})
 
-	// Send() returns a channel - the error occurs in the goroutine
-	if err != nil {
-		// Early error (e.g., in newSession) - connection should be reset
-		t.Logf("Send returned early error: %v", err)
-	} else {
-		// Wait for the response from the goroutine
-		resp := <-respCh
-		if resp.Type == ResponseTypeError {
-			t.Logf("Got error response: %s", resp.Error)
+	// Drain channels
+	for range textCh {
+	}
+
+	var gotErr error
+	for err := range errCh {
+		if err != nil {
+			gotErr = err
 		}
+	}
+
+	if gotErr != nil {
+		t.Logf("Got error (expected): %v", gotErr)
 	}
 
 	// Give the goroutine time to call resetConnection
 	time.Sleep(50 * time.Millisecond)
 
 	// After a write error, stdin should be reset to nil
-	// so the next Send() will trigger lazy reconnect.
+	// so the next SendStreaming() will trigger lazy reconnect.
 	transport.mu.Lock()
 	stdinAfterError := transport.stdin
 	transport.mu.Unlock()
@@ -150,13 +153,13 @@ SCENARIO: User cancels request, next request fails with broken pipe
    - cancel notification sent to agent
 4. Agent process may exit after receiving cancel
 5. User runs: ?? jj move pointer to master bookmark
-6. Send() is called:
+6. SendStreaming() is called:
    - stdin != nil (still points to broken pipe)
    - needSession is true (sessionID was cleared)
    - newSession() calls sendRequest()
    - sendRequest() tries stdin.Write()
    - FAILS with "broken pipe"
 
-FIX: When write fails, reset stdin to nil so next Send() reconnects.
+FIX: When write fails, reset stdin to nil so next SendStreaming() reconnects.
 	`)
 }
