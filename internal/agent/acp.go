@@ -39,6 +39,13 @@ func (c ACPConfig) ParsedCommand() (program string, args []string) {
 	return program, args
 }
 
+// ToolPermissionRequest contains details about a tool call that requires permission.
+type ToolPermissionRequest struct {
+	Command    string // The command or operation to execute
+	ToolName   string // Tool name/type (e.g., "Bash", "Read", "Write")
+	ToolCallID string // Unique tool call ID
+}
+
 // ACPTransport communicates with an ACP-compatible agent via JSON-RPC 2.0.
 type ACPTransport struct {
 	config    ACPConfig
@@ -55,7 +62,7 @@ type ACPTransport struct {
 	done     chan struct{}
 
 	// Permission handler callback
-	permissionHandler func(command string) (allow bool, always bool)
+	permissionHandler func(req ToolPermissionRequest) (allow bool, always bool)
 }
 
 // JSON-RPC 2.0 message types
@@ -162,9 +169,9 @@ func NewACPTransport(cfg ACPConfig) *ACPTransport {
 }
 
 // SetPermissionHandler sets the callback for handling permission requests.
-// The callback receives the command and returns (allow, always).
+// The callback receives a ToolPermissionRequest and returns (allow, always).
 // If always is true, the command should be added to the allowlist.
-func (t *ACPTransport) SetPermissionHandler(handler func(command string) (allow bool, always bool)) {
+func (t *ACPTransport) SetPermissionHandler(handler func(req ToolPermissionRequest) (allow bool, always bool)) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.permissionHandler = handler
@@ -599,29 +606,93 @@ func (t *ACPTransport) handleRequestPermission(id int64, params json.RawMessage)
 		}
 	}
 
+	// Extract tool name from rawInput if available
+	toolName := extractToolName(p.ToolCall.RawInput)
+
+	// Reject if we can't determine what command the agent wants to run
+	if command == "" {
+		t.sendResponse(id, permissionResponse{
+			Outcome: &permissionOutcome{
+				Outcome:  "selected",
+				OptionID: resolveOptionID(p.Options, "reject_once", "reject"),
+			},
+		}, nil)
+		return
+	}
+
 	// Call the permission handler
 	t.mu.Lock()
 	handler := t.permissionHandler
 	t.mu.Unlock()
 
+	req := ToolPermissionRequest{
+		Command:    command,
+		ToolName:   toolName,
+		ToolCallID: p.ToolCall.ToolCallID,
+	}
+
 	var outcome permissionOutcome
 	if handler == nil {
 		// No handler - deny by default
-		outcome = permissionOutcome{Outcome: "selected", OptionID: "reject"}
+		outcome = permissionOutcome{
+			Outcome:  "selected",
+			OptionID: resolveOptionID(p.Options, "reject_once", "reject"),
+		}
 	} else {
-		allow, always := handler(command)
+		allow, always := handler(req)
 		if allow {
 			if always {
-				outcome = permissionOutcome{Outcome: "selected", OptionID: "allow_always"}
+				outcome = permissionOutcome{
+					Outcome:  "selected",
+					OptionID: resolveOptionID(p.Options, "allow_always", "allow_always"),
+				}
 			} else {
-				outcome = permissionOutcome{Outcome: "selected", OptionID: "allow"}
+				outcome = permissionOutcome{
+					Outcome:  "selected",
+					OptionID: resolveOptionID(p.Options, "allow_once", "allow"),
+				}
 			}
 		} else {
-			outcome = permissionOutcome{Outcome: "selected", OptionID: "reject"}
+			outcome = permissionOutcome{
+				Outcome:  "selected",
+				OptionID: resolveOptionID(p.Options, "reject_once", "reject"),
+			}
 		}
 	}
 
 	t.sendResponse(id, permissionResponse{Outcome: &outcome}, nil)
+}
+
+// resolveOptionID finds the optionId for the given kind from the agent's
+// provided options. If no options were provided or no match is found, falls
+// back to the given default ID for backwards compatibility.
+func resolveOptionID(options []permissionOption, kind, fallback string) string {
+	for _, opt := range options {
+		if opt.Kind == kind {
+			return opt.OptionID
+		}
+	}
+	return fallback
+}
+
+// extractToolName attempts to extract a tool name from the rawInput JSON.
+// Agents typically include a "tool" or "name" field. Returns empty string
+// if no tool name can be determined.
+func extractToolName(rawInput json.RawMessage) string {
+	if len(rawInput) == 0 {
+		return ""
+	}
+	var fields struct {
+		Tool string `json:"tool"`
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(rawInput, &fields); err != nil {
+		return ""
+	}
+	if fields.Tool != "" {
+		return fields.Tool
+	}
+	return fields.Name
 }
 
 // sendResponse sends a JSON-RPC response.

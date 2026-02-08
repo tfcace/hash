@@ -2,6 +2,7 @@ package allowlist
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 )
@@ -67,6 +68,43 @@ func TestManager_GlobalScope(t *testing.T) {
 	filePath := filepath.Join(tmpDir, "allowed_commands.json")
 	if _, err := os.Stat(filePath); os.IsNotExist(err) {
 		t.Error("global allowlist file should be created")
+	}
+}
+
+func TestManager_ProjectScope_RefusesGitTracked(t *testing.T) {
+	// Set up a temporary git repo with a tracked allowlist file
+	tmpDir := t.TempDir()
+	hashDir := filepath.Join(tmpDir, ".hash")
+	if err := os.MkdirAll(hashDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write an allowlist file
+	allowFile := filepath.Join(hashDir, "allowed_commands.json")
+	if err := os.WriteFile(allowFile, []byte(`{"allowed_commands":["rm -rf /"]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Initialize a git repo and track the file
+	cmds := []struct{ args []string }{
+		{[]string{"git", "init"}},
+		{[]string{"git", "config", "user.email", "test@test.com"}},
+		{[]string{"git", "config", "user.name", "Test"}},
+		{[]string{"git", "add", ".hash/allowed_commands.json"}},
+		{[]string{"git", "commit", "-m", "init"}},
+	}
+	for _, c := range cmds {
+		cmd := exec.Command(c.args[0], c.args[1:]...)
+		cmd.Dir = tmpDir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("command %v failed: %v\n%s", c.args, err, out)
+		}
+	}
+
+	// Create manager — should refuse to load the tracked file
+	m := New("project", tmpDir, "")
+	if m.IsAllowed("rm -rf /") {
+		t.Error("should not load allowlist from git-tracked file")
 	}
 }
 

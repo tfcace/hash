@@ -159,7 +159,7 @@ func TestAgentOutputCoordinator_RenderPermission(t *testing.T) {
 	aoc.WriteStream("response text\n")
 
 	// Render permission prompt
-	aoc.RenderPermissionPrompt("kubectl get pods", "#00ff00")
+	aoc.RenderPermissionPrompt("kubectl get pods", "", "#00ff00")
 
 	output := buf.String()
 	if !strings.Contains(output, "Agent wants to run") {
@@ -173,12 +173,48 @@ func TestAgentOutputCoordinator_RenderPermission(t *testing.T) {
 	}
 }
 
+func TestAgentOutputCoordinator_RenderPermissionWithToolName(t *testing.T) {
+	var buf bytes.Buffer
+	aoc := NewAgentOutputCoordinator(&buf)
+
+	aoc.StartStreaming()
+
+	// Render permission prompt with a tool name
+	aoc.RenderPermissionPrompt("cat /etc/hosts", "Read", "#00ff00")
+
+	output := buf.String()
+	if !strings.Contains(output, "(Read)") {
+		t.Errorf("missing tool name context in output: %q", output)
+	}
+	if !strings.Contains(output, "Agent wants to run") {
+		t.Errorf("missing permission header in output: %q", output)
+	}
+	if !strings.Contains(output, "cat /etc/hosts") {
+		t.Errorf("missing command in output: %q", output)
+	}
+}
+
+func TestAgentOutputCoordinator_RenderPermissionWithoutToolName(t *testing.T) {
+	var buf bytes.Buffer
+	aoc := NewAgentOutputCoordinator(&buf)
+
+	aoc.StartStreaming()
+
+	// Render permission prompt without a tool name — should not show parentheses
+	aoc.RenderPermissionPrompt("ls -la", "", "#00ff00")
+
+	output := buf.String()
+	if strings.Contains(output, "(") {
+		t.Errorf("should not contain parentheses when no tool name: %q", output)
+	}
+}
+
 func TestAgentOutputCoordinator_ClearPermission(t *testing.T) {
 	var buf bytes.Buffer
 	aoc := NewAgentOutputCoordinator(&buf)
 
 	aoc.StartStreaming()
-	aoc.RenderPermissionPrompt("ls -la", "")
+	aoc.RenderPermissionPrompt("ls -la", "", "")
 
 	initialLen := buf.Len()
 
@@ -262,7 +298,7 @@ func TestAgentOutputCoordinator_PermissionWithoutStreaming(t *testing.T) {
 	aoc := NewAgentOutputCoordinator(&buf)
 
 	// Permission request when not streaming (edge case)
-	aoc.RenderPermissionPrompt("whoami", "")
+	aoc.RenderPermissionPrompt("whoami", "", "")
 
 	output := buf.String()
 	if !strings.Contains(output, "whoami") {
@@ -281,7 +317,7 @@ func TestAgentOutputCoordinator_ClearPermission_Denied(t *testing.T) {
 	aoc := NewAgentOutputCoordinator(&buf)
 
 	aoc.StartStreaming()
-	aoc.RenderPermissionPrompt("rm -rf /", "")
+	aoc.RenderPermissionPrompt("rm -rf /", "", "")
 
 	initialLen := buf.Len()
 

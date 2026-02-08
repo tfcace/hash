@@ -24,6 +24,9 @@ func TestLoadConfig_DefaultValues(t *testing.T) {
 	if cfg.Prompt.Mode != "starship" {
 		t.Errorf("Prompt.Mode = %q, want %q", cfg.Prompt.Mode, "starship")
 	}
+	if cfg.Agent.ConversationIdleTimeout != "10m" {
+		t.Errorf("Agent.ConversationIdleTimeout = %q, want %q", cfg.Agent.ConversationIdleTimeout, "10m")
+	}
 }
 
 func TestLoadConfig_FromFile(t *testing.T) {
@@ -215,5 +218,27 @@ func TestLoadWithWarnings_WritesWarning(t *testing.T) {
 	}
 	if !strings.Contains(warning, "Warning") {
 		t.Errorf("Warning should contain 'Warning', got: %q", warning)
+	}
+}
+
+func TestLoadConfig_AgentConversationIdleTimeout(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.toml")
+
+	content := []byte(`
+[agent]
+conversation_idle_timeout = "30m"
+`)
+	if err := os.WriteFile(configPath, content, 0o644); err != nil { //nolint:gosec // G306: test file
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(tmpDir)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	if cfg.Agent.ConversationIdleTimeout != "30m" {
+		t.Errorf("Agent.ConversationIdleTimeout = %q, want %q", cfg.Agent.ConversationIdleTimeout, "30m")
 	}
 }

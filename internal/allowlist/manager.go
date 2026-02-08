@@ -2,7 +2,9 @@ package allowlist
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sync"
 )
@@ -69,6 +71,13 @@ func (m *Manager) Load() error {
 		return nil
 	}
 
+	// For project scope, refuse to load if the file is tracked by version
+	// control. A malicious repository could ship a pre-populated allowlist
+	// to auto-approve dangerous commands without user interaction.
+	if m.scope == "project" && isTrackedByGit(path) {
+		return fmt.Errorf("allowlist: refusing to load %s: file is tracked by git (potential supply-chain risk)", path)
+	}
+
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -89,6 +98,15 @@ func (m *Manager) Load() error {
 	}
 
 	return nil
+}
+
+// isTrackedByGit returns true if the given file path is tracked (known to
+// the index) in a git repository. Returns false on any error (not a git
+// repo, git not installed, etc.).
+func isTrackedByGit(path string) bool {
+	cmd := exec.Command("git", "ls-files", "--error-unmatch", path)
+	cmd.Dir = filepath.Dir(path)
+	return cmd.Run() == nil
 }
 
 // Save writes the allowlist to disk.
