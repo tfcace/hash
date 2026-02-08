@@ -44,7 +44,7 @@ func TestAgentOutputCoordinator_FullAgentFlow(t *testing.T) {
 
 		time.Sleep(25 * time.Millisecond) // Let some chunks through
 
-		aoc.RenderPermissionPrompt("find . -size +100M", "#00ff00")
+		aoc.RenderPermissionPrompt("find . -size +100M", "", "#00ff00")
 		time.Sleep(50 * time.Millisecond) // User thinks
 		aoc.ClearPermissionPrompt(true)   // User allowed
 	}()
@@ -86,7 +86,7 @@ func TestAgentOutputCoordinator_NoHintsOverlap(t *testing.T) {
 	aoc.ShowHints(ConfirmTypeCommand)
 
 	// Simulate late permission request (shouldn't happen, but test the guard)
-	aoc.RenderPermissionPrompt("dangerous command", "")
+	aoc.RenderPermissionPrompt("dangerous command", "", "")
 
 	output := buf.String()
 

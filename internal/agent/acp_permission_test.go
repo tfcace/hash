@@ -27,10 +27,10 @@ func TestACPTransport_HandleRequestPermission_Allow(t *testing.T) {
 	var handlerCalled bool
 	var handlerCommand string
 	var mu sync.Mutex
-	transport.SetPermissionHandler(func(command string) (bool, bool) {
+	transport.SetPermissionHandler(func(req ToolPermissionRequest) (bool, bool) {
 		mu.Lock()
 		handlerCalled = true
-		handlerCommand = command
+		handlerCommand = req.Command
 		mu.Unlock()
 		return true, false // allow once
 	})
@@ -97,7 +97,7 @@ func TestACPTransport_HandleRequestPermission_AlwaysAllow(t *testing.T) {
 	}
 
 	// Set up permission handler that returns "always allow"
-	transport.SetPermissionHandler(func(command string) (bool, bool) {
+	transport.SetPermissionHandler(func(req ToolPermissionRequest) (bool, bool) {
 		return true, true // allow always
 	})
 
@@ -145,7 +145,7 @@ func TestACPTransport_HandleRequestPermission_Deny(t *testing.T) {
 	}
 
 	// Set up permission handler that denies
-	transport.SetPermissionHandler(func(command string) (bool, bool) {
+	transport.SetPermissionHandler(func(req ToolPermissionRequest) (bool, bool) {
 		return false, false // deny
 	})
 
@@ -239,8 +239,8 @@ func TestACPTransport_HandleRequestPermission_ExtractFromRawInput(t *testing.T) 
 	}
 
 	var receivedCommand string
-	transport.SetPermissionHandler(func(command string) (bool, bool) {
-		receivedCommand = command
+	transport.SetPermissionHandler(func(req ToolPermissionRequest) (bool, bool) {
+		receivedCommand = req.Command
 		return true, false
 	})
 
@@ -286,7 +286,7 @@ func TestACPTransport_HandleRequestPermission_UsesAgentOptionIDs(t *testing.T) {
 		done:     make(chan struct{}),
 	}
 
-	transport.SetPermissionHandler(func(command string) (bool, bool) {
+	transport.SetPermissionHandler(func(req ToolPermissionRequest) (bool, bool) {
 		return true, false // allow once
 	})
 
@@ -333,7 +333,7 @@ func TestACPTransport_HandleRequestPermission_EmptyCommandAutoRejects(t *testing
 	}
 
 	handlerCalled := false
-	transport.SetPermissionHandler(func(command string) (bool, bool) {
+	transport.SetPermissionHandler(func(req ToolPermissionRequest) (bool, bool) {
 		handlerCalled = true
 		return true, false
 	})
@@ -369,6 +369,79 @@ func TestACPTransport_HandleRequestPermission_EmptyCommandAutoRejects(t *testing
 
 	agentWrite.Close()
 	clientWrite.Close()
+}
+
+func TestACPTransport_HandleRequestPermission_ExtractsToolName(t *testing.T) {
+	// Tool name should be extracted from rawInput and passed to the handler.
+	_, agentWrite := io.Pipe()
+	agentRead, clientWrite := io.Pipe()
+
+	transport := &ACPTransport{
+		stdin:    clientWrite,
+		messages: make(chan []byte, 100),
+		done:     make(chan struct{}),
+	}
+
+	var receivedReq ToolPermissionRequest
+	transport.SetPermissionHandler(func(req ToolPermissionRequest) (bool, bool) {
+		receivedReq = req
+		return true, false
+	})
+
+	// rawInput includes a "tool" field
+	params := `{"sessionId":"test","toolCall":{"toolCallId":"abc","title":"cat /etc/passwd","rawInput":{"tool":"Read","command":"cat /etc/passwd"}}}`
+
+	done := make(chan struct{})
+	go func() {
+		buf := make([]byte, 1024)
+		agentRead.Read(buf)
+		close(done)
+	}()
+
+	transport.handleRequestPermission(1, json.RawMessage(params))
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Timeout waiting for response")
+	}
+
+	if receivedReq.ToolName != "Read" {
+		t.Errorf("Expected tool name 'Read', got: %q", receivedReq.ToolName)
+	}
+	if receivedReq.Command != "cat /etc/passwd" {
+		t.Errorf("Expected command 'cat /etc/passwd', got: %q", receivedReq.Command)
+	}
+	if receivedReq.ToolCallID != "abc" {
+		t.Errorf("Expected toolCallId 'abc', got: %q", receivedReq.ToolCallID)
+	}
+
+	agentWrite.Close()
+	clientWrite.Close()
+}
+
+func TestExtractToolName(t *testing.T) {
+	tests := []struct {
+		name     string
+		rawInput string
+		want     string
+	}{
+		{"empty input", `{}`, ""},
+		{"tool field", `{"tool":"Bash"}`, "Bash"},
+		{"name field", `{"name":"Write"}`, "Write"},
+		{"tool takes priority over name", `{"tool":"Read","name":"Other"}`, "Read"},
+		{"null input", ``, ""},
+		{"invalid json", `not json`, ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := extractToolName(json.RawMessage(tt.rawInput))
+			if got != tt.want {
+				t.Errorf("extractToolName(%q) = %q, want %q", tt.rawInput, got, tt.want)
+			}
+		})
+	}
 }
 
 func TestResolveOptionID(t *testing.T) {

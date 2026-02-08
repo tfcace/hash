@@ -242,7 +242,8 @@ func ComputeTintBackground(accentColor string) string {
 
 // RenderPermissionPrompt displays the permission request UI.
 // Automatically enters permission state and pauses streaming.
-func (aoc *AgentOutputCoordinator) RenderPermissionPrompt(command, accentColor string) {
+// toolName is optional — if non-empty, it's shown as context (e.g., "Bash", "Write").
+func (aoc *AgentOutputCoordinator) RenderPermissionPrompt(command, toolName, accentColor string) {
 	aoc.EnterPermission()
 
 	aoc.mu.Lock()
@@ -268,11 +269,17 @@ func (aoc *AgentOutputCoordinator) RenderPermissionPrompt(command, accentColor s
 		}
 	}
 
+	// Build the header line with optional tool name context
+	header := ansiBold + "Agent wants to run:" + ansiReset
+	if toolName != "" {
+		header = ansiBold + "Agent wants to run " + ansiReset + "\x1b[90m(" + toolName + ")\x1b[0m" + ansiReset + ":"
+	}
+
 	// Render the prompt box with colored bar
 	barStyle := accentCode + ansiBold
 	lines := []string{
 		"",
-		barStyle + "│" + ansiReset + " " + ansiBold + "Agent wants to run:" + ansiReset,
+		barStyle + "│" + ansiReset + " " + header,
 		barStyle + "│" + ansiReset + " " + accentCode + ansiBold + command + ansiReset,
 		barStyle + "│" + ansiReset,
 		barStyle + "│" + ansiReset + " [y]allow  [n]deny  [a]always allow",

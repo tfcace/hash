@@ -397,6 +397,19 @@ Each scope is strictly isolated - there's no fallback between scopes.
 allowed_commands_scope = "project"
 ```
 
+### agent.conversation_idle_timeout
+
+**Type:** `duration string`
+**Default:** `"10m"`
+
+How long to wait for user input during a multi-turn conversation before automatically exiting conversation mode. Set to `"0"` to disable the idle timeout.
+
+```toml
+conversation_idle_timeout = "10m"
+conversation_idle_timeout = "30m"
+conversation_idle_timeout = "0"   # disable
+```
+
 ---
 
 ## [agent.<name>]

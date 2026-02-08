@@ -204,6 +204,15 @@ func (ui *ConversationUI) WriteCancelHint() {
 	fmt.Fprintln(ui.out, "Press Ctrl+C again to exit")
 }
 
+// WriteIdleTimeout shows a message when conversation mode exits due to idle timeout.
+func (ui *ConversationUI) WriteIdleTimeout() {
+	if ui.tintActive {
+		ui.WriteTintedLine("\x1b[90mConversation ended (idle timeout)\x1b[39m")
+		return
+	}
+	fmt.Fprintln(ui.out, "Conversation ended (idle timeout)")
+}
+
 // WriteThinkingIndicator displays a thinking/spinner message with tinting.
 // Called from the spinner goroutine — acquires mu to avoid interleaving
 // with ClearThinkingIndicator or WriteStreamTinted on the main goroutine.

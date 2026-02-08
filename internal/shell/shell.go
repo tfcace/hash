@@ -165,14 +165,14 @@ func New(cfg *config.Config) (*Shell, error) {
 
 	// Wire up permission handler for ACP transport
 	if acpTransport != nil {
-		acpTransport.SetPermissionHandler(func(command string) (allow bool, always bool) {
+		acpTransport.SetPermissionHandler(func(req agent.ToolPermissionRequest) (allow bool, always bool) {
 			// Check allowlist first
-			if allowlistMgr.IsAllowed(command) {
+			if allowlistMgr.IsAllowed(req.Command) {
 				return true, false
 			}
 
 			// Render permission prompt via coordinator (pauses streaming)
-			agentOutput.RenderPermissionPrompt(command, colorPalette.Primary)
+			agentOutput.RenderPermissionPrompt(req.Command, req.ToolName, colorPalette.Primary)
 
 			// Flush stdout to ensure prompt is visible before reading input
 			os.Stdout.Sync()
@@ -186,7 +186,7 @@ func New(cfg *config.Config) (*Shell, error) {
 				agentOutput.ClearPermissionPrompt(true)
 				return true, false
 			case 'a', 'A':
-				allowlistMgr.Allow(command) //nolint:errcheck
+				allowlistMgr.Allow(req.Command) //nolint:errcheck
 				agentOutput.ClearPermissionPrompt(true)
 				return true, true
 			default: // 'n', 'N', Esc, or anything else
@@ -1542,10 +1542,37 @@ func (s *Shell) runConversationLoop(ctx context.Context) {
 		s.agentTimeoutCancel = nil
 	}
 
+	// Parse conversation idle timeout from config
+	idleTimeout := 10 * time.Minute // default
+	if s.config.Agent.ConversationIdleTimeout != "" {
+		if parsed, err := time.ParseDuration(s.config.Agent.ConversationIdleTimeout); err == nil {
+			idleTimeout = parsed
+		}
+	}
+
 	for s.conversation.IsActive() {
-		line, err := s.readConversationInput(ctx)
+		// Apply idle timeout per input read — if the user doesn't respond
+		// within the configured duration, exit conversation mode.
+		// A zero or negative timeout disables the idle timeout.
+		var inputCtx context.Context
+		var inputCancel context.CancelFunc
+		if idleTimeout > 0 {
+			inputCtx, inputCancel = context.WithTimeout(ctx, idleTimeout)
+		} else {
+			inputCtx, inputCancel = context.WithCancel(ctx)
+		}
+		line, err := s.readConversationInput(inputCtx)
+		inputCancel()
 
 		if err != nil {
+			// Check if the error was caused by the idle timeout
+			if inputCtx.Err() == context.DeadlineExceeded && ctx.Err() == nil {
+				if s.convUI != nil {
+					s.convUI.WriteIdleTimeout()
+				}
+				s.exitConversationMode()
+				return
+			}
 			if err == ErrEditorCanceled {
 				if s.convCancelArmed {
 					s.convCancelArmed = false
