@@ -64,6 +64,8 @@ type Shell struct {
 	convUI             *ConversationUI
 	convCancelArmed    bool
 	agentTimeoutCancel context.CancelFunc // Cancel per-request timeout when entering conversation
+	// conversationInputHook allows tests to stub editor input reads.
+	conversationInputHook func(context.Context) (string, error)
 
 	lastExitCode int
 	lastDuration time.Duration
@@ -527,7 +529,9 @@ func (s *Shell) dispatchCommand(ctx context.Context, line string) error {
 	case parser.CommandTypeEmpty:
 		s.updatePrompt()
 	case parser.CommandTypeAgent, parser.CommandTypeAgentPipe, parser.CommandTypeAgentInline:
-		s.handleAgentRequest(ctx, parsed)
+		if err := s.handleAgentRequest(ctx, parsed); err != nil {
+			return err
+		}
 	case parser.CommandTypeRegular:
 		return s.executeRegularCommand(ctx, line)
 	}
@@ -836,7 +840,7 @@ func (s *Shell) navigateHistory(dir int, currentLine string) string {
 	return entries[s.historyIndex].Command
 }
 
-func (s *Shell) handleAgentRequest(ctx context.Context, parsed parser.ParseResult) {
+func (s *Shell) handleAgentRequest(ctx context.Context, parsed parser.ParseResult) error {
 	// Show which mode was detected
 	var modeLabel string
 	switch parsed.Type {
@@ -857,7 +861,7 @@ func (s *Shell) handleAgentRequest(ctx context.Context, parsed parser.ParseResul
 		fmt.Fprintf(os.Stderr, "  See docs/config-reference.md for options.\n")
 		s.lastExitCode = 1
 		s.updatePrompt()
-		return
+		return nil
 	}
 
 	// Create a new context for the agent request that we can cancel independently.
@@ -880,28 +884,30 @@ func (s *Shell) handleAgentRequest(ctx context.Context, parsed parser.ParseResul
 		}
 	}()
 
-	// Apply agent timeout
+	// Pass selected context to agent handler
+	s.agentHandler.SetSelectedContext(s.selectedContext)
+
+	// Use unified streaming handler for all modes
+	return s.handleAgentRequestUnified(agentCtx, parsed)
+}
+
+func (s *Shell) agentRequestTimeout() time.Duration {
 	timeout := 30 * time.Second
 	if s.config.Agent.Timeout != "" {
 		if parsedDur, err := time.ParseDuration(s.config.Agent.Timeout); err == nil {
 			timeout = parsedDur
 		}
 	}
-	agentCtx, timeoutCancel := context.WithTimeout(agentCtx, timeout)
-	defer timeoutCancel()
-	s.agentTimeoutCancel = timeoutCancel
-
-	// Pass selected context to agent handler
-	s.agentHandler.SetSelectedContext(s.selectedContext)
-
-	// Use unified streaming handler for all modes
-	s.handleAgentRequestUnified(agentCtx, parsed)
+	return timeout
 }
 
 // handleAgentInlineStreaming uses ghost text for inline completions.
-func (s *Shell) handleAgentInlineStreaming(ctx context.Context, parsed parser.ParseResult, modelName string) {
+func (s *Shell) handleAgentInlineStreaming(ctx context.Context, parsed parser.ParseResult, modelName string) error {
+	requestCtx, timeoutCancel := context.WithTimeout(ctx, s.agentRequestTimeout())
+	defer timeoutCancel()
+
 	// Start streaming request
-	textCh, errCh := s.agentHandler.StreamRequest(ctx, parsed)
+	textCh, errCh := s.agentHandler.StreamRequest(requestCtx, parsed)
 
 	// Build initial text for editor
 	initialText := parsed.Command
@@ -924,29 +930,29 @@ func (s *Shell) handleAgentInlineStreaming(ctx context.Context, parsed parser.Pa
 	ed.SetStreamingModel(modelName)
 
 	// Run editor
-	result, err := ed.Run(ctx)
+	result, err := ed.Run(requestCtx)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "hash: editor error: %v\n", err)
 		s.lastExitCode = 1
 		s.updatePrompt()
-		return
+		return nil
 	}
 
 	if result.Canceled {
 		s.updatePrompt()
-		return
+		return nil
 	}
 
 	if result.EOF {
 		fmt.Println("exit")
-		os.Exit(0)
+		return errExit
 	}
 
 	// User accepted the command
 	command := strings.TrimSpace(result.Text)
 	if command == "" {
 		s.updatePrompt()
-		return
+		return nil
 	}
 
 	// Stop progress bar before executing (defer in caller will be a no-op)
@@ -963,6 +969,7 @@ func (s *Shell) handleAgentInlineStreaming(ctx context.Context, parsed parser.Pa
 	}
 	s.recordCommand(command, s.lastExitCode, s.lastDuration)
 	s.updatePrompt()
+	return nil
 }
 
 // executePipeCommand runs the pipe command and captures its output.
@@ -984,7 +991,7 @@ func (s *Shell) executePipeCommand(ctx context.Context, command string) (string,
 }
 
 // handleAgentRequestUnified handles all ?? modes with streaming UX.
-func (s *Shell) handleAgentRequestUnified(ctx context.Context, parsed parser.ParseResult) {
+func (s *Shell) handleAgentRequestUnified(ctx context.Context, parsed parser.ParseResult) error {
 	modelName := s.config.Agent.Model
 	if modelName == "" {
 		modelName = s.config.Agent.Command
@@ -999,7 +1006,7 @@ func (s *Shell) handleAgentRequestUnified(ctx context.Context, parsed parser.Par
 			fmt.Fprintf(os.Stderr, "hash: pipe command failed: %v\n", err)
 			s.lastExitCode = 1
 			s.updatePrompt()
-			return
+			return nil
 		}
 		// Update context with pipe output
 		if s.clipboard != nil {
@@ -1013,23 +1020,30 @@ func (s *Shell) handleAgentRequestUnified(ctx context.Context, parsed parser.Par
 
 	// For inline mode, use editor with ghost text
 	if parsed.Type == parser.CommandTypeAgentInline {
-		s.handleAgentInlineStreaming(ctx, parsed, modelName)
-		return
+		return s.handleAgentInlineStreaming(ctx, parsed, modelName)
 	}
 
 	// Full ?? and pipe modes: streaming with confirmation UI
 	s.handleAgentFullStreaming(ctx, parsed, modelName)
+	return nil
 }
 
 // handleAgentFullStreaming handles full ?? and pipe modes with streaming.
 //
 //nolint:gocyclo // streaming loop handles markers, conversation detection, and error recovery
 func (s *Shell) handleAgentFullStreaming(ctx context.Context, parsed parser.ParseResult, modelName string) {
+	requestCtx, timeoutCancel := context.WithTimeout(ctx, s.agentRequestTimeout())
+	s.agentTimeoutCancel = timeoutCancel
+	defer func() {
+		timeoutCancel()
+		s.agentTimeoutCancel = nil
+	}()
+
 	// Show thinking indicator (multi-stage: thinking -> receiving)
 	s.responseUI.ShowState(AgentStateThinking)
 
 	// Start streaming request
-	textCh, errCh := s.agentHandler.StreamRequest(ctx, parsed)
+	textCh, errCh := s.agentHandler.StreamRequest(requestCtx, parsed)
 
 	// Collect streamed response with markdown rendering
 	var response strings.Builder
@@ -1561,7 +1575,7 @@ func (s *Shell) runConversationLoop(ctx context.Context) {
 		} else {
 			inputCtx, inputCancel = context.WithCancel(ctx)
 		}
-		line, err := s.readConversationInput(inputCtx)
+		line, err := s.readConversationInputWithHook(inputCtx)
 		inputCancel()
 
 		if err != nil {
@@ -1609,6 +1623,13 @@ func (s *Shell) runConversationLoop(ctx context.Context) {
 		// Send reply to agent
 		s.sendConversationReply(ctx, input)
 	}
+}
+
+func (s *Shell) readConversationInputWithHook(ctx context.Context) (string, error) {
+	if s.conversationInputHook != nil {
+		return s.conversationInputHook(ctx)
+	}
+	return s.readConversationInput(ctx)
 }
 
 // readConversationInput reads a reply inside the conversation user box.
