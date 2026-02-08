@@ -52,6 +52,7 @@ type AgentOutputCoordinator struct {
 	accentColorFn  func() string   // Callback to get current accent color
 	streamTint     string          // Background tint for streaming (empty = no tint)
 	streamBorder   string          // Left border prefix for streaming (e.g., "║ ")
+	atLineStart    bool            // Whether next write should start with border prefix
 }
 
 // NewAgentOutputCoordinator creates a new agent output coordinator.
@@ -112,6 +113,7 @@ func (aoc *AgentOutputCoordinator) StartStreaming() {
 	defer aoc.mu.Unlock()
 	aoc.state = AgentOutputStateStreaming
 	aoc.streamBuffer.Reset()
+	aoc.atLineStart = true
 }
 
 // WriteStream writes streaming text, or buffers it if permission is active.
@@ -133,6 +135,15 @@ func (aoc *AgentOutputCoordinator) WriteStream(text string) {
 
 // writeWithTint writes text with background tint and optional left border.
 // Creates a visual "zone" by filling each line to the terminal edge.
+// Only emits the border prefix at the start of a new line, not mid-line.
+// The newline replacement itself emits border after each \n, so atLineStart
+// is only needed for the very first write after StartStreaming.
+//
+// Every border emission includes an explicit \r (carriage return) to ensure
+// the border starts at column 0. This is critical because:
+//   - ClearThinkingIndicator may leave cursor mid-line (after its own border)
+//   - In raw terminal mode (OPOST off), \n is just LF without CR
+//
 // Must be called with mu held.
 func (aoc *AgentOutputCoordinator) writeWithTint(text string) {
 	if aoc.streamTint == "" || text == "" {
@@ -140,16 +151,26 @@ func (aoc *AgentOutputCoordinator) writeWithTint(text string) {
 		return
 	}
 
-	// Start with tint and border
-	fmt.Fprint(aoc.out, aoc.streamTint+aoc.streamBorder)
+	// Emit border only at the very start of a streaming session.
+	// After any newline, the replacement below already emits tint+border.
+	// The \r ensures we start at column 0 even if a prior component
+	// (e.g. ClearThinkingIndicator) left the cursor mid-line.
+	if aoc.atLineStart {
+		fmt.Fprint(aoc.out, "\r"+aoc.streamTint+aoc.streamBorder)
+	} else {
+		// Mid-line continuation: just re-apply tint background
+		fmt.Fprint(aoc.out, aoc.streamTint)
+	}
+	aoc.atLineStart = false
 
 	// The markdown renderer adds \x1b[0m resets which wipe our background.
 	// We need to reapply tint after every reset.
 	tinted := strings.ReplaceAll(text, "\x1b[0m", "\x1b[0m"+aoc.streamTint)
 
 	// For newlines: fill to end of line with background (\x1b[K), then newline,
-	// then reapply tint and border for the visual frame
-	tinted = strings.ReplaceAll(tinted, "\n", "\x1b[K\n"+aoc.streamTint+aoc.streamBorder)
+	// then \r to guarantee column 0 (needed if OPOST is off in raw mode),
+	// then reapply tint and border for the visual frame.
+	tinted = strings.ReplaceAll(tinted, "\n", "\x1b[K\n\r"+aoc.streamTint+aoc.streamBorder)
 
 	fmt.Fprint(aoc.out, tinted)
 }
@@ -181,9 +202,9 @@ func (aoc *AgentOutputCoordinator) ExitPermission() {
 
 	if aoc.wasStreaming {
 		aoc.state = AgentOutputStateStreaming
-		// Flush buffered content
+		// Flush buffered content with tinting
 		if aoc.streamBuffer.Len() > 0 {
-			fmt.Fprint(aoc.out, aoc.streamBuffer.String())
+			aoc.writeWithTint(aoc.streamBuffer.String())
 			aoc.streamBuffer.Reset()
 		}
 	} else {

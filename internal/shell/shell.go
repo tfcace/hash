@@ -192,37 +192,24 @@ func New(cfg *config.Config) (*Shell, error) {
 			// Read single keypress
 			key := readSingleKey()
 
-			// Determine if allowed/denied based on key and clear prompt
-			switch key {
-			case 'y', 'Y':
-				trace.AgentHigh("tool_permission", map[string]any{
-					"command":  req.Command,
-					"tool":     req.ToolName,
-					"decision": "allow",
-					"key":      string(key),
-				})
-				agentOutput.ClearPermissionPrompt(true)
-				return true, false
-			case 'a', 'A':
-				trace.AgentHigh("tool_permission", map[string]any{
-					"command":  req.Command,
-					"tool":     req.ToolName,
-					"decision": "always",
-					"key":      string(key),
-				})
-				allowlistMgr.Allow(req.Command) //nolint:errcheck
-				agentOutput.ClearPermissionPrompt(true)
-				return true, true
-			default: // 'n', 'N', Esc, or anything else
-				trace.AgentHigh("tool_permission", map[string]any{
-					"command":  req.Command,
-					"tool":     req.ToolName,
-					"decision": "deny",
-					"key":      string(key),
-				})
-				agentOutput.ClearPermissionPrompt(false)
-				return false, false
+			allow, always = permissionDecisionForKey(key)
+			decision := "deny"
+			if allow {
+				decision = "allow"
 			}
+			if always {
+				decision = "always"
+				allowlistMgr.Allow(req.Command) //nolint:errcheck
+			}
+
+			trace.AgentHigh("tool_permission", map[string]any{
+				"command":  req.Command,
+				"tool":     req.ToolName,
+				"decision": decision,
+				"key":      string(key),
+			})
+			agentOutput.ClearPermissionPrompt(allow)
+			return allow, always
 		})
 	}
 
@@ -1894,6 +1881,18 @@ func errStr(err error) string {
 		return ""
 	}
 	return err.Error()
+}
+
+// permissionDecisionForKey maps permission prompt key presses to decisions.
+func permissionDecisionForKey(key byte) (allow, always bool) {
+	switch key {
+	case 'y', 'Y', '\r', '\n':
+		return true, false
+	case 'a', 'A':
+		return true, true
+	default:
+		return false, false
+	}
 }
 
 // readSingleKey reads a single keypress from stdin.

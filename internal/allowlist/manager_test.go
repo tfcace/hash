@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -105,6 +106,88 @@ func TestManager_ProjectScope_RefusesGitTracked(t *testing.T) {
 	m := New("project", tmpDir, "")
 	if m.IsAllowed("rm -rf /") {
 		t.Error("should not load allowlist from git-tracked file")
+	}
+}
+
+func TestManager_ProjectScope_RefusesWhenGitUnavailable(t *testing.T) {
+	// Set up a temporary git repo with a tracked allowlist file.
+	tmpDir := t.TempDir()
+	hashDir := filepath.Join(tmpDir, ".hash")
+	if err := os.MkdirAll(hashDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	allowFile := filepath.Join(hashDir, "allowed_commands.json")
+	if err := os.WriteFile(allowFile, []byte(`{"allowed_commands":["rm -rf /"]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cmds := []struct{ args []string }{
+		{[]string{"git", "init"}},
+		{[]string{"git", "config", "user.email", "test@test.com"}},
+		{[]string{"git", "config", "user.name", "Test"}},
+		{[]string{"git", "add", ".hash/allowed_commands.json"}},
+		{[]string{"git", "commit", "-m", "init"}},
+	}
+	for _, c := range cmds {
+		cmd := exec.Command(c.args[0], c.args[1:]...)
+		cmd.Dir = tmpDir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("command %v failed: %v\n%s", c.args, err, out)
+		}
+	}
+
+	// Hide git from PATH so tracking cannot be verified.
+	t.Setenv("PATH", t.TempDir())
+
+	m := New("project", tmpDir, "")
+
+	// Explicit Load should fail closed when git lookup cannot run.
+	err := m.Load()
+	if err == nil {
+		t.Fatal("expected Load() to fail when git is unavailable")
+	}
+	if !strings.Contains(err.Error(), "unable to verify git tracking") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if m.IsAllowed("rm -rf /") {
+		t.Error("should not load allowlist when git tracking cannot be verified")
+	}
+}
+
+func TestManager_ProjectScope_LoadsUntrackedFileInGitRepo(t *testing.T) {
+	// Set up a git repo where allowlist file exists but is not tracked.
+	tmpDir := t.TempDir()
+	hashDir := filepath.Join(tmpDir, ".hash")
+	if err := os.MkdirAll(hashDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "README.md"), []byte("repo"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	allowFile := filepath.Join(hashDir, "allowed_commands.json")
+	if err := os.WriteFile(allowFile, []byte(`{"allowed_commands":["git status"]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cmds := []struct{ args []string }{
+		{[]string{"git", "init"}},
+		{[]string{"git", "config", "user.email", "test@test.com"}},
+		{[]string{"git", "config", "user.name", "Test"}},
+		{[]string{"git", "add", "README.md"}},
+		{[]string{"git", "commit", "-m", "init"}},
+	}
+	for _, c := range cmds {
+		cmd := exec.Command(c.args[0], c.args[1:]...)
+		cmd.Dir = tmpDir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("command %v failed: %v\n%s", c.args, err, out)
+		}
+	}
+
+	m := New("project", tmpDir, "")
+	if !m.IsAllowed("git status") {
+		t.Error("should load commands from untracked allowlist file in git repo")
 	}
 }
 

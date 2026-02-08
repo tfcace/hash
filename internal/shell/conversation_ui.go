@@ -79,7 +79,7 @@ func (ui *ConversationUI) WriteTopBorder() {
 		return
 	}
 	line := ui.topBorderLine()
-	fmt.Fprintf(ui.out, "%s%s%s\x1b[K\x1b[0m\n", ui.tintBg, ui.borderFg, line)
+	fmt.Fprintf(ui.out, "\r%s%s%s\x1b[K\x1b[0m\r\n", ui.tintBg, ui.borderFg, line)
 }
 
 // WriteBottomBorder writes a decorative bottom border for the conversation zone.
@@ -88,7 +88,7 @@ func (ui *ConversationUI) WriteBottomBorder() {
 		return
 	}
 	line := ui.bottomBorderLine()
-	fmt.Fprintf(ui.out, "%s%s%s\x1b[K\x1b[0m\n", ui.tintBg, ui.borderFg, line)
+	fmt.Fprintf(ui.out, "\r%s%s%s\x1b[K\x1b[0m\r\n", ui.tintBg, ui.borderFg, line)
 }
 
 // InputPromptString returns the prompt string for readline (with ANSI codes).
