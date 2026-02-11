@@ -26,11 +26,24 @@ func (c *AliasCompleter) Name() string {
 }
 
 // Complete returns completions for aliases and functions.
-// Unlike ExecutableCompleter, this completes anywhere (not just command position)
-// because functions can be arguments to xargs, find -exec, etc.
+// Completes only in command position (first word or after a pipe),
+// mirroring executable completion so path arguments (e.g. `cd ...`) still
+// fall through to filesystem completion.
 func (c *AliasCompleter) Complete(ctx context.Context, line string, pos int) (Result, error) {
-	// Extract the word being completed
-	prefix := extractCommandWord(line, pos)
+	// Extract pipe context to handle commands after pipes.
+	pipeLine, pipePos := ExtractPipeContext(line, pos)
+
+	// Only complete if we're in command position (first word).
+	parts := strings.Fields(pipeLine[:pipePos])
+	isCommandPosition := len(parts) == 0 || (len(parts) == 1 && !strings.HasSuffix(pipeLine[:pipePos], " "))
+	if !isCommandPosition {
+		return Result{}, nil
+	}
+
+	prefix := ""
+	if len(parts) == 1 {
+		prefix = parts[0]
+	}
 
 	var items []Item
 	for _, name := range c.provider.Functions() {
@@ -44,25 +57,4 @@ func (c *AliasCompleter) Complete(ctx context.Context, line string, pos int) (Re
 	}
 
 	return Result{Items: items}, nil
-}
-
-// extractCommandWord extracts the command word at the cursor position.
-// Unlike extractWord in file.go, this also handles shell operators as word boundaries.
-func extractCommandWord(line string, pos int) string {
-	if pos > len(line) {
-		pos = len(line)
-	}
-
-	// Find start of word (go backwards until whitespace, operator, or start)
-	start := pos
-	for start > 0 && !isCommandWordBreak(line[start-1]) {
-		start--
-	}
-
-	return line[start:pos]
-}
-
-// isCommandWordBreak returns true if the byte is a command word boundary.
-func isCommandWordBreak(b byte) bool {
-	return b == ' ' || b == '\t' || b == '|' || b == '&' || b == ';' || b == '(' || b == ')'
 }

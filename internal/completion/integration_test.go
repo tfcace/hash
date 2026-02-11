@@ -202,3 +202,29 @@ func TestIntegration_GitBranchLikeCompletion(t *testing.T) {
 		t.Errorf("'feat' should match 2 feature branches, got %d", len(result2))
 	}
 }
+
+func TestIntegration_CDCompletionUsesFilesystem(t *testing.T) {
+	tmpDir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(tmpDir, "site"), 0o755); err != nil {
+		t.Fatalf("mkdir site: %v", err)
+	}
+
+	oldDir, _ := os.Getwd()
+	os.Chdir(tmpDir)
+	defer os.Chdir(oldDir)
+
+	router := NewRouter()
+	router.Register(NewAliasCompleter(&mockFunctionProvider{functions: []string{"site"}}), PriorityAlias)
+	router.Register(NewFileCompleter(), PriorityFilesystem)
+
+	result, err := router.Complete(context.Background(), "cd si", len("cd si"))
+	if err != nil {
+		t.Fatalf("Complete() error = %v", err)
+	}
+	if len(result.Items) != 1 {
+		t.Fatalf("expected 1 filesystem completion for cd argument, got %d: %+v", len(result.Items), result.Items)
+	}
+	if result.Items[0].Value != "site/" {
+		t.Fatalf("expected directory completion site/, got %q", result.Items[0].Value)
+	}
+}

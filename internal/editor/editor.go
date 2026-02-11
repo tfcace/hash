@@ -541,7 +541,13 @@ func (e *Editor) render() {
 		for i, item := range e.completionItems {
 			displayItems[i] = CompletionItem(item)
 		}
-		e.display.RenderCompletionMenu(displayItems, e.completionIndex, e.completionCol)
+		e.display.RenderCompletionMenu(
+			displayItems,
+			e.completionIndex,
+			e.completionCol,
+			e.state.Cursor.Pos.Row,
+			e.state.Cursor.Pos.Col,
+		)
 	}
 }
 
@@ -841,7 +847,11 @@ func (e *Editor) acceptCompletion(item Completion) {
 // dismissCompletion closes the completion menu.
 func (e *Editor) dismissCompletion() {
 	if e.completionActive {
-		e.display.ClearCompletionMenu(len(e.completionItems))
+		e.display.ClearCompletionMenu(
+			len(e.completionItems),
+			e.state.Cursor.Pos.Row,
+			e.state.Cursor.Pos.Col,
+		)
 	}
 	e.completionActive = false
 	e.completionItems = nil

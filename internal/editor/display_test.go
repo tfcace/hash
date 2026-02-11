@@ -109,7 +109,7 @@ func TestDisplay_RenderCompletionMenu(t *testing.T) {
 		{Text: "bar", Description: "Bar item"},
 	}
 
-	d.RenderCompletionMenu(items, 0, 5) // selected=0, startCol=5
+	d.RenderCompletionMenu(items, 0, 5, 0, 5) // selected=0, startCol=5
 
 	output := buf.String()
 	if !strings.Contains(output, "foo") {
@@ -133,7 +133,7 @@ func TestDisplay_RenderCompletionMenu_WithGutter(t *testing.T) {
 	// startCol=3 (e.g., after "ls " in buffer)
 	// With gutter (2) + prompt "$ " (2) = prefix of 4
 	// Menu should be positioned at column 3 + 4 = 7
-	d.RenderCompletionMenu(items, 0, 3)
+	d.RenderCompletionMenu(items, 0, 3, 0, 3)
 
 	output := buf.String()
 
@@ -143,12 +143,27 @@ func TestDisplay_RenderCompletionMenu_WithGutter(t *testing.T) {
 		t.Errorf("Menu should be positioned at column 7 (startCol 3 + prefix 4), got %q", output)
 	}
 
-	// Should use save/restore cursor to preserve cursor position
-	if !strings.Contains(output, "\x1b[s") {
-		t.Error("Menu should save cursor position at start")
+	// Should move back up one menu row and restore input cursor column.
+	if !strings.Contains(output, "\x1b[1A") {
+		t.Error("Menu should move back up after rendering")
 	}
-	if !strings.Contains(output, "\x1b[u") {
-		t.Error("Menu should restore cursor position at end")
+}
+
+func TestDisplay_RenderCompletionMenu_ShowsColoredRailForShortLists(t *testing.T) {
+	var buf bytes.Buffer
+	d := NewDisplay(&buf, 80, 24)
+	d.SetScrollbarColor("#06B6D4")
+
+	items := []CompletionItem{
+		{Text: "alpha", Description: "First"},
+		{Text: "beta", Description: "Second"},
+	}
+
+	d.RenderCompletionMenu(items, 0, 0, 0, 0)
+
+	output := buf.String()
+	if !strings.Contains(output, "▌") {
+		t.Fatalf("completion rail should render for short lists when color is configured, got %q", output)
 	}
 }
 

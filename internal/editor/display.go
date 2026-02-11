@@ -742,19 +742,15 @@ type CompletionItem struct {
 // RenderCompletionMenu draws the completion dropdown below the cursor.
 //
 //nolint:gocyclo // completion menu rendering requires layout and scroll calculations
-func (d *Display) RenderCompletionMenu(items []CompletionItem, selected, startCol int) {
+func (d *Display) RenderCompletionMenu(items []CompletionItem, selected, startCol, cursorRow, cursorCol int) {
 	if len(items) == 0 {
 		return
 	}
 
 	var sb strings.Builder
 
-	// Save cursor position before rendering menu - will restore at end
-	sb.WriteString("\x1b[s")
-
-	// Add prefix width (gutter + prompt on row 0) to startCol for proper positioning
-	// The menu appears below line 0, so use row 0's prefix width
-	prefixWidth := d.calcPrefixWidth(0)
+	// Add prefix width to startCol for proper positioning.
+	prefixWidth := d.calcPrefixWidth(cursorRow)
 	menuCol := startCol + prefixWidth
 
 	// Calculate max width for alignment
@@ -765,7 +761,7 @@ func (d *Display) RenderCompletionMenu(items []CompletionItem, selected, startCo
 		}
 	}
 
-	// Limit visible items (show max 6, scrollbar appears for 7+)
+	// Limit visible items (show max 6, scrolling needed for 7+)
 	maxVisible := 6
 	if len(items) < maxVisible {
 		maxVisible = len(items)
@@ -777,11 +773,13 @@ func (d *Display) RenderCompletionMenu(items []CompletionItem, selected, startCo
 		scrollOffset = selected - maxVisible + 1
 	}
 
-	// Calculate scrollbar thumb position and size (only if scrolling needed)
-	needsScrollbar := len(items) > maxVisible && d.scrollbarCode != ""
+	// Draw a colored rail whenever completion menu is visible.
+	// For long lists, render a proportional thumb on that rail.
+	needsScrollbar := d.scrollbarCode != ""
+	scrolling := len(items) > maxVisible
 	thumbSize := 1
 	thumbStart := 0
-	if needsScrollbar {
+	if needsScrollbar && scrolling {
 		// Thumb size proportional to visible/total ratio, minimum 1
 		thumbSize = maxVisible * maxVisible / len(items)
 		if thumbSize < 1 {
@@ -793,6 +791,8 @@ func (d *Display) RenderCompletionMenu(items []CompletionItem, selected, startCo
 		if scrollRange > 0 && thumbRange > 0 {
 			thumbStart = scrollOffset * thumbRange / scrollRange
 		}
+	} else if needsScrollbar {
+		thumbSize = maxVisible
 	}
 
 	// Render menu items
@@ -860,8 +860,14 @@ func (d *Display) RenderCompletionMenu(items []CompletionItem, selected, startCo
 		}
 	}
 
-	// Restore cursor position (saved at start of function)
-	sb.WriteString("\x1b[u")
+	// Return to the original input cursor position explicitly instead of relying
+	// on terminal-specific cursor save/restore behavior.
+	fmt.Fprintf(&sb, ansiCursorUp, maxVisible)
+	sb.WriteString("\r")
+	restoreCol := cursorCol + prefixWidth
+	if restoreCol > 0 {
+		fmt.Fprintf(&sb, ansiCursorForward, restoreCol)
+	}
 
 	d.out.Write([]byte(sb.String()))
 
@@ -870,15 +876,12 @@ func (d *Display) RenderCompletionMenu(items []CompletionItem, selected, startCo
 }
 
 // ClearCompletionMenu removes the completion menu from display.
-func (d *Display) ClearCompletionMenu(numItems int) {
+func (d *Display) ClearCompletionMenu(numItems, cursorRow, cursorCol int) {
 	if numItems == 0 {
 		return
 	}
 
 	var sb strings.Builder
-
-	// Save cursor position
-	sb.WriteString("\x1b[s")
 
 	// Move down and clear each menu line
 	maxVisible := 6
@@ -891,8 +894,14 @@ func (d *Display) ClearCompletionMenu(numItems int) {
 		sb.WriteString(ansiClearLine)
 	}
 
-	// Restore cursor position
-	sb.WriteString("\x1b[u")
+	// Move back to where the input cursor was before clearing.
+	fmt.Fprintf(&sb, ansiCursorUp, maxVisible)
+	sb.WriteString("\r")
+	prefixWidth := d.calcPrefixWidth(cursorRow)
+	restoreCol := cursorCol + prefixWidth
+	if restoreCol > 0 {
+		fmt.Fprintf(&sb, ansiCursorForward, restoreCol)
+	}
 
 	d.out.Write([]byte(sb.String()))
 
