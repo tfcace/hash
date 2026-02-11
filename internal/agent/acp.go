@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os/exec"
@@ -200,19 +201,19 @@ func (t *ACPTransport) connectLocked(ctx context.Context) error {
 	var err error
 	t.stdin, err = t.cmd.StdinPipe()
 	if err != nil {
-		return fmt.Errorf("stdin pipe: %w", err)
+		return errors.Join(ErrACPStartFailed, fmt.Errorf("stdin pipe: %w", err))
 	}
 
 	t.stdout, err = t.cmd.StdoutPipe()
 	if err != nil {
-		return fmt.Errorf("stdout pipe: %w", err)
+		return errors.Join(ErrACPStartFailed, fmt.Errorf("stdout pipe: %w", err))
 	}
 
 	// Discard stderr to avoid blocking
 	t.cmd.Stderr = nil
 
 	if err = t.cmd.Start(); err != nil {
-		return fmt.Errorf("start agent: %w", err)
+		return errors.Join(ErrACPStartFailed, fmt.Errorf("start agent: %w", err))
 	}
 
 	t.reader = bufio.NewReader(t.stdout)
@@ -305,7 +306,7 @@ func (t *ACPTransport) sendRequest(ctx context.Context, method string, params in
 		// Write failed - pipe is likely broken (e.g., agent exited after cancel).
 		// Reset connection so next Send() will reconnect via lazy connect.
 		t.resetConnection()
-		return nil, fmt.Errorf("write request: %w", err)
+		return nil, errors.Join(ErrACPConnectionClosed, fmt.Errorf("write request: %w", err))
 	}
 
 	// Wait for response with matching ID
@@ -318,7 +319,7 @@ func (t *ACPTransport) sendRequest(ctx context.Context, method string, params in
 			if !ok {
 				// Connection closed (readLoop exited) - reset for reconnect
 				t.resetConnection()
-				return nil, fmt.Errorf("connection closed")
+				return nil, fmt.Errorf("%w: connection closed", ErrACPConnectionClosed)
 			}
 
 			var msg struct {
@@ -647,6 +648,16 @@ func (t *ACPTransport) Close() error {
 // If exceeded, the request is considered stuck and canceled.
 const IdleTimeout = 30 * time.Second
 
+func idleTimeoutForContext(ctx context.Context) time.Duration {
+	if deadline, ok := ctx.Deadline(); ok {
+		remaining := time.Until(deadline)
+		if remaining > IdleTimeout {
+			return remaining
+		}
+	}
+	return IdleTimeout
+}
+
 // SendStreaming implements Transport for real-time text streaming.
 //
 //nolint:gocritic,gocyclo // unnamedResult + SSE streaming requires sequential event handling
@@ -726,8 +737,9 @@ func (t *ACPTransport) SendStreaming(ctx context.Context, req Request) (<-chan s
 			return
 		}
 
+		idleTimeout := idleTimeoutForContext(ctx)
 		// Create idle timer
-		idleTimer := time.NewTimer(IdleTimeout)
+		idleTimer := time.NewTimer(idleTimeout)
 		defer idleTimer.Stop()
 
 		// Stream response text as it arrives
@@ -741,13 +753,16 @@ func (t *ACPTransport) SendStreaming(ctx context.Context, req Request) (<-chan s
 			case <-idleTimer.C:
 				// No message received for IdleTimeout - agent may be stuck
 				t.sendCancel()
-				errCh <- fmt.Errorf("agent idle timeout (%v without response)", IdleTimeout)
+				// Force reconnect after idle timeout: the process may be hung.
+				t.resetConnection()
+				errCh <- errors.Join(ErrACPIdleTimeout, fmt.Errorf("agent idle timeout (%v without response)", idleTimeout))
 				return
 
 			case line, ok := <-t.messages:
 				if !ok {
 					// Connection closed (readLoop exited) - reset for reconnect
 					t.resetConnection()
+					errCh <- fmt.Errorf("%w: connection closed", ErrACPConnectionClosed)
 					return
 				}
 
@@ -758,7 +773,7 @@ func (t *ACPTransport) SendStreaming(ctx context.Context, req Request) (<-chan s
 					default:
 					}
 				}
-				idleTimer.Reset(IdleTimeout)
+				idleTimer.Reset(idleTimeout)
 
 				var msg struct {
 					JSONRPC string          `json:"jsonrpc"`
@@ -790,6 +805,10 @@ func (t *ACPTransport) SendStreaming(ctx context.Context, req Request) (<-chan s
 				if msg.Method == "session/update" {
 					var updateParams sessionUpdateParams
 					if err := json.Unmarshal(msg.Params, &updateParams); err != nil {
+						continue
+					}
+					// Ignore stale updates from previous sessions.
+					if updateParams.SessionID != sessionID {
 						continue
 					}
 

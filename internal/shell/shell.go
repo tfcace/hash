@@ -1330,14 +1330,32 @@ func (s *Shell) handleAgentStreamError(ctx context.Context, parsed parser.ParseR
 	s.responseUI.ClearLine() // Stop spinner and clear the line
 	s.responseUI.ShowError(streamErr.Error())
 
-	// If no response was received, this is a startup/connection failure
-	// (e.g., agent not in PATH). Just return to prompt - retry won't help.
+	// If no response was received, classify the failure before showing hints.
+	// Startup errors get install/PATH hints; transient errors get retry.
 	if responseLen == 0 {
-		s.responseUI.ShowAgentHint(
-			s.config.Agent.Transport,
-			s.config.Agent.Command,
-			s.config.Agent.URL,
-		)
+		if agent.IsStartupError(streamErr) {
+			s.responseUI.ShowAgentHint(
+				s.config.Agent.Transport,
+				s.config.Agent.Command,
+				s.config.Agent.URL,
+			)
+			s.lastExitCode = 1
+			return true
+		}
+
+		if agent.IsRetryableError(streamErr) {
+			s.agentOutput.EnterConfirming()
+			s.agentOutput.ShowHints(ConfirmTypeError)
+			action := s.responseUI.WaitForConfirmationByType(ConfirmTypeError)
+			s.agentOutput.ExitConfirming()
+			fmt.Println()
+			if action == ConfirmRun { // Retry
+				s.handleAgentFullStreaming(ctx, parsed, modelName)
+			}
+			s.lastExitCode = 1
+			return true
+		}
+
 		s.lastExitCode = 1
 		return true
 	}
