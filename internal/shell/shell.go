@@ -127,6 +127,9 @@ func New(cfg *config.Config) (*Shell, error) {
 	// Executable completer for command names from PATH
 	router.Register(completion.NewExecutableCompleter(), completion.PriorityExecutable)
 
+	// Context-aware completions for git/jj branch and revision args.
+	router.Register(completion.NewVCSCompleter(), completion.PriorityVCS)
+
 	if cfg.Completions.CobraEnabled {
 		router.Register(completion.NewCobraCompleter(), completion.PriorityToolNative)
 	}
