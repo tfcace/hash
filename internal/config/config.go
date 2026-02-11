@@ -29,6 +29,12 @@ type ShellConfig struct {
 	RCCommands      []string           `toml:"rc_commands"`      // Run on interactive shells
 	DisableBuiltins []string           `toml:"disable_builtins"` // e.g., ["cd"] to use zoxide
 	StartupFiles    StartupFilesConfig `toml:"startup_files"`
+	Hooks           HooksConfig        `toml:"hooks"`
+}
+
+// HooksConfig configures shell hooks.
+type HooksConfig struct {
+	Chpwd []string `toml:"chpwd"` // Commands to run when working directory changes
 }
 
 // StartupFilesConfig specifies which files to source at startup.

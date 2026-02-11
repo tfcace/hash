@@ -221,6 +221,43 @@ func TestLoadWithWarnings_WritesWarning(t *testing.T) {
 	}
 }
 
+func TestLoadConfig_HooksChpwd(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.toml")
+
+	content := []byte(`
+[shell.hooks]
+chpwd = ["zoxide add -- \"$PWD\"", "echo changed"]
+`)
+	if err := os.WriteFile(configPath, content, 0o644); err != nil { //nolint:gosec // G306: test file
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(tmpDir)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	if len(cfg.Shell.Hooks.Chpwd) != 2 {
+		t.Fatalf("expected 2 chpwd hooks, got %d", len(cfg.Shell.Hooks.Chpwd))
+	}
+	if cfg.Shell.Hooks.Chpwd[0] != `zoxide add -- "$PWD"` {
+		t.Errorf("Hooks.Chpwd[0] = %q, want %q", cfg.Shell.Hooks.Chpwd[0], `zoxide add -- "$PWD"`)
+	}
+	if cfg.Shell.Hooks.Chpwd[1] != "echo changed" {
+		t.Errorf("Hooks.Chpwd[1] = %q, want %q", cfg.Shell.Hooks.Chpwd[1], "echo changed")
+	}
+}
+
+func TestLoadConfig_HooksChpwd_Default(t *testing.T) {
+	cfg := Default()
+
+	// Default should have no chpwd hooks
+	if len(cfg.Shell.Hooks.Chpwd) != 0 {
+		t.Errorf("expected 0 default chpwd hooks, got %d", len(cfg.Shell.Hooks.Chpwd))
+	}
+}
+
 func TestLoadConfig_AgentConversationIdleTimeout(t *testing.T) {
 	tmpDir := t.TempDir()
 	configPath := filepath.Join(tmpDir, "config.toml")

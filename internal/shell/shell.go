@@ -81,6 +81,9 @@ type Shell struct {
 
 	// Context picker state
 	selectedContext *hashcontext.Collection // nil = use auto-detect defaults
+
+	// Directory change hook state
+	prevCwd string // Previous working directory for chpwd hook
 }
 
 // New creates a new Shell instance.
@@ -352,6 +355,9 @@ func New(cfg *config.Config) (*Shell, error) {
 		MaxPasteSize:   cfg.Input.ParseMaxPasteSize(),
 	}
 
+	// Capture initial working directory for chpwd hook
+	initialCwd, _ := os.Getwd()
+
 	shell := &Shell{
 		config:       cfg,
 		executor:     e,
@@ -372,6 +378,7 @@ func New(cfg *config.Config) (*Shell, error) {
 		conversation: NewConversationState(),
 		historyIndex: -1, // Start before history (current line)
 		osc:          osc,
+		prevCwd:      initialCwd,
 	}
 
 	// Set up history function for editor mode
@@ -465,6 +472,7 @@ func (s *Shell) Run(ctx context.Context) error {
 			return nil
 		}
 
+		s.runChpwdHook(ctx)
 		s.updatePrompt()
 	}
 }
@@ -875,7 +883,6 @@ func (s *Shell) handleAgentRequest(ctx context.Context, parsed parser.ParseResul
 		fmt.Fprintf(os.Stderr, "  command = \"claude\"\n")
 		fmt.Fprintf(os.Stderr, "  See docs/config-reference.md for options.\n")
 		s.lastExitCode = 1
-		s.updatePrompt()
 		return nil
 	}
 
@@ -949,12 +956,10 @@ func (s *Shell) handleAgentInlineStreaming(ctx context.Context, parsed parser.Pa
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "hash: editor error: %v\n", err)
 		s.lastExitCode = 1
-		s.updatePrompt()
 		return nil
 	}
 
 	if result.Canceled {
-		s.updatePrompt()
 		return nil
 	}
 
@@ -966,7 +971,6 @@ func (s *Shell) handleAgentInlineStreaming(ctx context.Context, parsed parser.Pa
 	// User accepted the command
 	command := strings.TrimSpace(result.Text)
 	if command == "" {
-		s.updatePrompt()
 		return nil
 	}
 
@@ -983,7 +987,6 @@ func (s *Shell) handleAgentInlineStreaming(ctx context.Context, parsed parser.Pa
 		s.lastDuration = execResult.Duration
 	}
 	s.recordCommand(command, s.lastExitCode, s.lastDuration)
-	s.updatePrompt()
 	return nil
 }
 
@@ -1020,7 +1023,6 @@ func (s *Shell) handleAgentRequestUnified(ctx context.Context, parsed parser.Par
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "hash: pipe command failed: %v\n", err)
 			s.lastExitCode = 1
-			s.updatePrompt()
 			return nil
 		}
 		// Update context with pipe output
@@ -1093,7 +1095,6 @@ collectLoop:
 			}
 			fmt.Fprintln(os.Stderr, "hash: request canceled")
 			s.lastExitCode = 1
-			s.updatePrompt()
 			return
 		case err, ok := <-errCh:
 			if !ok {
@@ -1150,6 +1151,7 @@ collectLoop:
 
 			if inConversation {
 				text = strings.ReplaceAll(text, agent.ConversationStartMarker, "")
+				text = strings.ReplaceAll(text, agent.AwaitingInputMarker, "")
 			}
 
 			response.WriteString(text)
@@ -1167,6 +1169,34 @@ collectLoop:
 			// Reset flush timer — if the renderer still has buffered content
 			// (incomplete line), it will be flushed after the delay
 			flushTimer.Reset(flushDelay)
+		}
+	}
+
+	// Flush marker buffer if stream closed before detection completed.
+	// This happens when the response is shorter than the marker length
+	// or the connection drops mid-marker.
+	if !markerDetected {
+		if buffered := markerBuffer.String(); buffered != "" {
+			if !streamingStarted {
+				s.agentOutput.StartStreaming()
+				s.responseUI.ShowState(AgentStateReceiving)
+				s.responseUI.ClearLine()
+			}
+			if agent.HasConversationStart(buffered) {
+				inConversation = true
+				buffered = agent.StripConversationStart(buffered)
+				s.setupConversationMode()
+			}
+			if buffered != "" {
+				response.WriteString(buffered)
+				lineCount += strings.Count(buffered, "\n")
+				rendered := renderer.Write(buffered)
+				if inConversation && s.convUI != nil {
+					s.convUI.WriteStreamTinted(rendered)
+				} else {
+					s.agentOutput.WriteStream(rendered)
+				}
+			}
 		}
 	}
 
@@ -1248,8 +1278,6 @@ collectLoop:
 	if s.handleAgentConfirmAction(ctx, action, confirmType, resp, responseText, lineCount) {
 		return
 	}
-
-	s.updatePrompt()
 }
 
 // handleAgentConfirmAction processes the user's confirmation choice.
@@ -1308,7 +1336,6 @@ func (s *Shell) handleAgentStreamError(ctx context.Context, parsed parser.ParseR
 			s.config.Agent.URL,
 		)
 		s.lastExitCode = 1
-		s.updatePrompt()
 		return true
 	}
 
@@ -1325,7 +1352,6 @@ func (s *Shell) handleAgentStreamError(ctx context.Context, parsed parser.ParseR
 	// Cancel: clear error + any partial response
 	// lineCount + error line + confirmation line + blank line
 	s.responseUI.ClearLines(lineCount + 3)
-	s.updatePrompt()
 	return true
 }
 
@@ -1344,12 +1370,10 @@ func (s *Shell) handleEditCommand(ctx context.Context, command string) {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "hash: editor error: %v\n", err)
 		s.lastExitCode = 1
-		s.updatePrompt()
 		return
 	}
 
 	if result.Canceled || result.EOF {
-		s.updatePrompt()
 		return
 	}
 
@@ -1366,7 +1390,6 @@ func (s *Shell) handleEditCommand(ctx context.Context, command string) {
 		}
 		s.recordCommand(editedCmd, s.lastExitCode, s.lastDuration)
 	}
-	s.updatePrompt()
 }
 
 func (s *Shell) updatePrompt() {
@@ -1714,7 +1737,6 @@ func (s *Shell) exitConversationMode() {
 
 	// Restore normal shell prompt
 	s.readline.SetPrompt(s.currentPromptLine())
-	s.updatePrompt()
 }
 
 // executeShellEscape runs a shell command within conversation mode.
@@ -1821,8 +1843,31 @@ collectLoop:
 			}
 
 			response.WriteString(text)
-			rendered := renderer.Write(text)
+			// Strip [AWAITING_INPUT] from rendered output to avoid visual
+			// artifacts. Keep it in response for ProcessAgentResponse detection.
+			renderText := strings.ReplaceAll(text, agent.AwaitingInputMarker, "")
+			rendered := renderer.Write(renderText)
 			s.convUI.WriteStreamTinted(rendered) // Stream with conversation tint
+		}
+	}
+
+	// Flush marker buffer if stream closed before detection completed
+	if !markerStripped {
+		if buffered := markerBuffer.String(); buffered != "" {
+			if !spinnerStopped {
+				spinnerCancel()
+				<-spinnerDone
+				s.convUI.ClearThinkingIndicator()
+				spinnerStopped = true
+			}
+			if agent.HasConversationStart(buffered) {
+				buffered = agent.StripConversationStart(buffered)
+			}
+			if buffered != "" {
+				response.WriteString(buffered)
+				rendered := renderer.Write(buffered)
+				s.convUI.WriteStreamTinted(rendered)
+			}
 		}
 	}
 
@@ -1844,12 +1889,8 @@ collectLoop:
 	_, expectsInput := agent.ProcessAgentResponse(responseText)
 
 	if expectsInput {
-		// Erase the [AWAITING_INPUT] marker from display
-		fmt.Print("\x1b[1A\x1b[2K") // Move up, clear line
-
-		// Continue conversation
+		// Continue conversation ([AWAITING_INPUT] stripped during rendering)
 		s.conversation.SetSubState(ConversationAwaitingInput)
-		// readline will use the prompt we already set
 	} else {
 		// Agent done, exit conversation mode
 		s.exitConversationMode()
@@ -1872,6 +1913,33 @@ func (s *Shell) runConversationSpinner(ctx context.Context, done chan struct{}) 
 		case <-ticker.C:
 			s.convUI.WriteThinkingIndicator(frames[frame%len(frames)], "Agent thinking...")
 			frame++
+		}
+	}
+}
+
+// runChpwdHook runs configured chpwd hook commands if the working directory changed.
+func (s *Shell) runChpwdHook(ctx context.Context) {
+	if s.config == nil || len(s.config.Shell.Hooks.Chpwd) == 0 {
+		return
+	}
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		return
+	}
+
+	// Resolve symlinks for comparison (macOS has /var -> /private/var)
+	cwdResolved, _ := filepath.EvalSymlinks(cwd)
+	prevResolved, _ := filepath.EvalSymlinks(s.prevCwd)
+	if cwdResolved == prevResolved {
+		return
+	}
+
+	s.prevCwd = cwd
+	for _, cmd := range s.config.Shell.Hooks.Chpwd {
+		_, err := s.executor.Execute(ctx, cmd, nil, os.Stderr)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "hash: chpwd hook failed: %v\n", err)
 		}
 	}
 }

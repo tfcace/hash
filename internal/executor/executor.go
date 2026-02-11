@@ -628,65 +628,144 @@ func (e *Executor) bashBuiltinHandler(ctx context.Context, args []string) ([]str
 
 	cmd := args[0]
 
+	// Strip "--" from cd args (handles "cd", "builtin cd", "command cd").
+	if filtered, ok := e.handleCdDoubleDash(cmd, args); ok {
+		return filtered, nil
+	}
+
 	switch cmd {
 	case "source", ".":
-		// Handle source with LangBash parsing
-		if len(args) < 2 {
-			hc := interp.HandlerCtx(ctx)
-			fmt.Fprintln(hc.Stderr, "source: need filename")
-			return []string{"false"}, nil // Return false to indicate error
-		}
-		trace.Emit("compat", "source_intercept", trace.LevelVerbose, map[string]any{
-			"path": args[1],
-		})
-		err := e.handleBashSource(ctx, args[1])
-		if err != nil {
-			return []string{"false"}, nil //nolint:nilerr // return "false" to shell, error handled internally
-		}
-		return []string{":"}, nil // Return no-op, we handled it
+		return e.handleSourceCall(ctx, args)
 
 	case "eval":
-		// Handle eval with LangBash parsing
-		if len(args) < 2 {
-			return []string{":"}, nil // eval with no args is a no-op
-		}
-		src := strings.Join(args[1:], " ")
-		trace.Emit("compat", "eval_intercept", trace.LevelVerbose, map[string]any{
-			"src_preview": truncateForTrace(src, 200),
-		})
-		err := e.handleBashEval(ctx, args[1:])
-		if err != nil {
-			return []string{"false"}, nil //nolint:nilerr // return "false" to shell, error handled internally
-		}
-		return []string{":"}, nil // Return no-op, we handled it
+		return e.handleEvalCall(ctx, args)
 
 	case "alias":
-		// Handle alias definitions that contain bash-specific syntax
-		// mvdan/sh's alias builtin parses values with POSIX mode, which fails
-		// on bash syntax like && or ||. We convert these to functions instead.
 		return e.handleBashAlias(ctx, args[1:])
 
 	case "unset":
-		// Track function unsets for completion
-		for i, arg := range args {
-			if arg == "-f" && i+1 < len(args) {
-				// Remove the function from tracking
-				for j := i + 1; j < len(args); j++ {
-					if !strings.HasPrefix(args[j], "-") {
-						e.functionsMu.Lock()
-						delete(e.functions, args[j])
-						e.functionsMu.Unlock()
-					}
-				}
-			}
-		}
-		// Let the default handler process the actual unset
+		e.trackUnsetFunctions(args)
 		return args, nil
 
 	default:
-		// Not source/eval/alias/unset, let Runner handle it normally
 		return args, nil
 	}
+}
+
+// handleCdDoubleDash strips "--" from cd arguments.
+// mvdan/sh's cd builtin doesn't support the end-of-options marker that bash/zsh
+// use. This is required for zoxide, which generates: \builtin cd -- "$@"
+// Returns the filtered args and true if the command was cd, false otherwise.
+func (e *Executor) handleCdDoubleDash(cmd string, args []string) ([]string, bool) {
+	// Handle "builtin cd" and "command cd" prefixes — resolve the actual command.
+	actualCmd := cmd
+	cmdOffset := 0
+	if (cmd == "builtin" || cmd == "command") && len(args) >= 2 {
+		actualCmd = args[1]
+		cmdOffset = 1
+	}
+
+	if actualCmd != "cd" {
+		return nil, false
+	}
+
+	filtered := make([]string, 0, len(args))
+	filtered = append(filtered, args[:cmdOffset+1]...)
+	for _, a := range args[cmdOffset+1:] {
+		if a != "--" {
+			filtered = append(filtered, a)
+		}
+	}
+	return filtered, true
+}
+
+// handleSourceCall handles source/. commands with LangBash parsing.
+func (e *Executor) handleSourceCall(ctx context.Context, args []string) ([]string, error) {
+	if len(args) < 2 {
+		hc := interp.HandlerCtx(ctx)
+		fmt.Fprintln(hc.Stderr, "source: need filename")
+		return []string{"false"}, nil
+	}
+	trace.Emit("compat", "source_intercept", trace.LevelVerbose, map[string]any{
+		"path": args[1],
+	})
+	if err := e.handleBashSource(ctx, args[1]); err != nil {
+		return []string{"false"}, nil //nolint:nilerr // return "false" to shell, error handled internally
+	}
+	return []string{":"}, nil
+}
+
+// handleEvalCall handles eval commands with LangBash parsing.
+func (e *Executor) handleEvalCall(ctx context.Context, args []string) ([]string, error) {
+	if len(args) < 2 {
+		return []string{":"}, nil // eval with no args is a no-op
+	}
+	trace.Emit("compat", "eval_intercept", trace.LevelVerbose, map[string]any{
+		"src_preview": truncateForTrace(strings.Join(args[1:], " "), 200),
+	})
+	if err := e.handleBashEval(ctx, args[1:]); err != nil {
+		return []string{"false"}, nil //nolint:nilerr // return "false" to shell, error handled internally
+	}
+	return []string{":"}, nil
+}
+
+// trackUnsetFunctions removes function names from the tracking map on unset -f.
+func (e *Executor) trackUnsetFunctions(args []string) {
+	for i, arg := range args {
+		if arg == "-f" && i+1 < len(args) {
+			for j := i + 1; j < len(args); j++ {
+				if !strings.HasPrefix(args[j], "-") {
+					e.functionsMu.Lock()
+					delete(e.functions, args[j])
+					e.functionsMu.Unlock()
+				}
+			}
+		}
+	}
+}
+
+// safeRunNode wraps runner.Run() with panic recovery, converting panics to errors.
+// This is needed because mvdan/sh can panic on unsupported syntax like [![:space:]].
+func (e *Executor) safeRunNode(ctx context.Context, node syntax.Node) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("interpreter panic: %v", r)
+		}
+	}()
+	return e.runner.Run(ctx, node)
+}
+
+const unsupportedPromptCommandTrim = `${PROMPT_COMMAND%"${PROMPT_COMMAND##*[![:space:]]}"}`
+const zoxideQueryStrictPattern = `result="$(\command zoxide query --exclude "$(__zoxide_pwd)" -- "$@")" &&`
+const zoxideQueryCompatPattern = "result=\"$(\\command zoxide query --exclude \"$(__zoxide_pwd)\" -- \"$@\" || \\builtin true)\"\n            result=\"${result%$'\\r'}\"\n            [[ -n \"${result}\" ]] &&"
+const zoxideInteractiveStrictPattern = `result="$(\command zoxide query --interactive -- "$@")" && __zoxide_cd "${result}"`
+const zoxideInteractiveCompatPattern = "result=\"$(\\command zoxide query --interactive -- \"$@\" || \\builtin true)\"\n    result=\"${result%$'\\r'}\"\n    [[ -n \"${result}\" ]] && __zoxide_cd \"${result}\""
+const zoxideQueryStrictLine = `result="$(\command zoxide query --exclude "$(__zoxide_pwd)" -- "$@")"`
+
+// sanitizeUnsupportedExpansions rewrites bash expansions that currently panic in
+// mvdan/sh. Keep transformations minimal and syntax-preserving.
+func sanitizeUnsupportedExpansions(src string) (sanitized string, changed bool) {
+	sanitized = src
+	if strings.Contains(sanitized, unsupportedPromptCommandTrim) {
+		sanitized = strings.ReplaceAll(sanitized, unsupportedPromptCommandTrim, `${PROMPT_COMMAND}`)
+		changed = true
+	}
+	if strings.Contains(sanitized, zoxideQueryStrictPattern) {
+		sanitized = strings.ReplaceAll(sanitized, zoxideQueryStrictPattern, zoxideQueryCompatPattern)
+		changed = true
+	} else if strings.Contains(sanitized, zoxideQueryStrictLine) {
+		sanitized = strings.ReplaceAll(
+			sanitized,
+			zoxideQueryStrictLine,
+			`result="$(\command zoxide query --exclude "$(__zoxide_pwd)" -- "$@" || \builtin true)"`+"\n            result=\"${result%$'\\r'}\"\n            [[ -n \"${result}\" ]]",
+		)
+		changed = true
+	}
+	if strings.Contains(sanitized, zoxideInteractiveStrictPattern) {
+		sanitized = strings.ReplaceAll(sanitized, zoxideInteractiveStrictPattern, zoxideInteractiveCompatPattern)
+		changed = true
+	}
+	return sanitized, changed
 }
 
 // handleBashSource reads a file and executes it with LangBash parsing.
@@ -712,9 +791,16 @@ func (e *Executor) handleBashSource(ctx context.Context, path string) error {
 		return err
 	}
 
+	src, sanitized := sanitizeUnsupportedExpansions(string(content))
+	if sanitized {
+		trace.Emit("compat", "source_sanitize", trace.LevelVerbose, map[string]any{
+			"path": path,
+		})
+	}
+
 	// Parse with LangBash - silently skip if it fails (likely zsh-specific syntax)
 	parser := syntax.NewParser(syntax.Variant(syntax.LangBash))
-	prog, err := parser.Parse(strings.NewReader(string(content)), path)
+	prog, err := parser.Parse(strings.NewReader(src), path)
 	if err != nil {
 		// Graceful degradation: skip unparseable files silently
 		trace.Emit("compat", "source_parse_skip", trace.LevelVerbose, map[string]any{
@@ -730,17 +816,35 @@ func (e *Executor) handleBashSource(ctx context.Context, path string) error {
 	trace.Emit("compat", "source_execute", trace.LevelVerbose, map[string]any{
 		"path": path,
 	})
-	// Run through the existing runner (preserves state)
-	return e.runner.Run(ctx, prog)
+	// Run through the existing runner with panic recovery
+	if err := e.safeRunNode(ctx, prog); err != nil {
+		// If the whole program panicked, try statement-by-statement
+		if strings.HasPrefix(err.Error(), "interpreter panic:") {
+			trace.Emit("compat", "source_panic_fallback", trace.LevelVerbose, map[string]any{
+				"path":  path,
+				"error": err.Error(),
+			})
+			return e.runStatementsWithRecovery(ctx, prog, path, hc.Stderr)
+		}
+		return err
+	}
+	return nil
 }
 
 // handleBashEval parses and executes args as bash code.
 func (e *Executor) handleBashEval(ctx context.Context, args []string) error {
+	hc := interp.HandlerCtx(ctx)
 	src := strings.Join(args, " ")
+	parsedSrc, sanitized := sanitizeUnsupportedExpansions(src)
+	if sanitized {
+		trace.Emit("compat", "eval_sanitize", trace.LevelVerbose, map[string]any{
+			"src_preview": truncateForTrace(src, 200),
+		})
+	}
 
 	// Parse with LangBash - silently skip if it fails (likely zsh-specific syntax)
 	parser := syntax.NewParser(syntax.Variant(syntax.LangBash))
-	prog, err := parser.Parse(strings.NewReader(src), "eval")
+	prog, err := parser.Parse(strings.NewReader(parsedSrc), "eval")
 	if err != nil {
 		// Graceful degradation: skip unparseable eval content silently
 		trace.Emit("compat", "eval_parse_skip", trace.LevelVerbose, map[string]any{
@@ -753,8 +857,43 @@ func (e *Executor) handleBashEval(ctx context.Context, args []string) error {
 	trace.Emit("compat", "eval_execute", trace.LevelVerbose, map[string]any{
 		"src_preview": truncateForTrace(src, 100),
 	})
-	// Run through the existing runner (preserves state)
-	return e.runner.Run(ctx, prog)
+	// Run through the existing runner with panic recovery
+	if err := e.safeRunNode(ctx, prog); err != nil {
+		// If the whole program panicked, try statement-by-statement
+		if strings.HasPrefix(err.Error(), "interpreter panic:") {
+			trace.Emit("compat", "eval_panic_fallback", trace.LevelVerbose, map[string]any{
+				"src_preview": truncateForTrace(src, 200),
+				"error":       err.Error(),
+			})
+			return e.runStatementsWithRecovery(ctx, prog, "eval", hc.Stderr)
+		}
+		return err
+	}
+	return nil
+}
+
+// runStatementsWithRecovery executes a program's statements one at a time,
+// skipping any that panic. This allows function definitions to survive even
+// when other statements (like zoxide's PROMPT_COMMAND manipulation) crash.
+func (e *Executor) runStatementsWithRecovery(ctx context.Context, prog *syntax.File, source string, stderr io.Writer) error {
+	var lastErr error
+	for i, stmt := range prog.Stmts {
+		// Wrap each statement in a File node for runner.Run()
+		single := &syntax.File{Stmts: []*syntax.Stmt{stmt}}
+		if err := e.safeRunNode(ctx, single); err != nil {
+			if strings.HasPrefix(err.Error(), "interpreter panic:") {
+				fmt.Fprintf(stderr, "hash: %s: skipping statement %d (unsupported syntax)\n", source, i+1)
+				trace.Emit("compat", "stmt_panic_skip", trace.LevelVerbose, map[string]any{
+					"source":    source,
+					"statement": i + 1,
+					"error":     err.Error(),
+				})
+				continue
+			}
+			lastErr = err
+		}
+	}
+	return lastErr
 }
 
 // handleBashAlias handles alias definitions by converting them to functions.
@@ -1019,7 +1158,7 @@ func (e *Executor) Execute(ctx context.Context, command string, stdout, stderr i
 	}
 
 	// Run with persistent runner - functions persist across executions
-	err = e.runner.Run(ctx, prog)
+	err = e.safeRunNode(ctx, prog)
 	e.updateEnvFromRunner(e.runner)
 	e.ensureShellEnv()
 	e.syncProcessEnv()
@@ -1126,7 +1265,7 @@ func (e *Executor) execHandler(next interp.ExecHandlerFunc) interp.ExecHandlerFu
 		cmd.Stdout = hc.Stdout
 		cmd.Stderr = hc.Stderr
 
-		return cmd.Run()
+		return normalizeExternalCommandError(cmd.Run())
 	}
 }
 
@@ -1236,7 +1375,7 @@ func (e *Executor) runWithPTY(ctx context.Context, cmd *exec.Cmd, hc interp.Hand
 		cmd.Stdin = hc.Stdin
 		cmd.Stdout = hc.Stdout
 		cmd.Stderr = hc.Stderr
-		return cmd.Run()
+		return normalizeExternalCommandError(cmd.Run())
 	}
 	defer ptmx.Close()
 
@@ -1384,7 +1523,7 @@ func (e *Executor) runWithPTY(ctx context.Context, cmd *exec.Cmd, hc interp.Hand
 	if cmdErr == nil && stdoutErr != nil {
 		return stdoutErr
 	}
-	return cmdErr
+	return normalizeExternalCommandError(cmdErr)
 }
 
 // runWithPTYRaw runs a command with a PTY that has ONLCR disabled.
@@ -1399,7 +1538,7 @@ func (e *Executor) runWithPTYRaw(ctx context.Context, cmd *exec.Cmd, hc interp.H
 		cmd.Stdin = hc.Stdin
 		cmd.Stdout = hc.Stdout
 		cmd.Stderr = hc.Stderr
-		return cmd.Run()
+		return normalizeExternalCommandError(cmd.Run())
 	}
 	defer ptmx.Close()
 
@@ -1409,7 +1548,7 @@ func (e *Executor) runWithPTYRaw(ctx context.Context, cmd *exec.Cmd, hc interp.H
 		cmd.Stdin = hc.Stdin
 		cmd.Stdout = hc.Stdout
 		cmd.Stderr = hc.Stderr
-		return cmd.Run()
+		return normalizeExternalCommandError(cmd.Run())
 	}
 
 	// Connect command to PTY slave and start it
@@ -1427,7 +1566,7 @@ func (e *Executor) runWithPTYRaw(ctx context.Context, cmd *exec.Cmd, hc interp.H
 		cmd.Stdin = hc.Stdin
 		cmd.Stdout = hc.Stdout
 		cmd.Stderr = hc.Stderr
-		return cmd.Run()
+		return normalizeExternalCommandError(cmd.Run())
 	}
 	pts.Close() // Close slave in parent after child has it
 
@@ -1519,7 +1658,7 @@ func (e *Executor) runWithPTYRaw(ctx context.Context, cmd *exec.Cmd, hc interp.H
 	if cmdErr == nil && stdoutErr != nil {
 		return stdoutErr
 	}
-	return cmdErr
+	return normalizeExternalCommandError(cmdErr)
 }
 
 // environToSlice converts expand.Environ to []string.
@@ -1636,6 +1775,23 @@ func (e *Executor) SyncRunnerDir() {
 func shellQuote(s string) string {
 	// Use single quotes and escape any single quotes within
 	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
+}
+
+func normalizeExternalCommandError(err error) error {
+	if err == nil {
+		return nil
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		code := exitErr.ExitCode()
+		if code < 0 || code > 255 {
+			code = 1
+		}
+		//nolint:gosec // G115: exitErr.ExitCode() is clamped to the uint8 range above.
+		// #nosec G115
+		return interp.ExitStatus(code)
+	}
+	return err
 }
 
 // exitCodeFromError extracts exit code from interpreter error.

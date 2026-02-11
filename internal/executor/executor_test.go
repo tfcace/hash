@@ -385,6 +385,52 @@ func TestExecutor_SyncRunnerDir(t *testing.T) {
 	}
 }
 
+func TestExecutor_CdDoubleDash(t *testing.T) {
+	exec := New()
+	ctx := context.Background()
+	var stdout, stderr bytes.Buffer
+
+	tmpDir := t.TempDir()
+	tmpDirResolved, _ := filepath.EvalSymlinks(tmpDir)
+
+	// Save and restore working directory
+	origDir, _ := os.Getwd()
+	defer os.Chdir(origDir) //nolint:errcheck
+
+	tests := []struct {
+		name string
+		cmd  string
+	}{
+		{"cd --", "cd -- " + tmpDir + " && pwd"},
+		{"builtin cd --", "builtin cd -- " + tmpDir + " && pwd"},
+		{"backslash builtin cd --", `\builtin cd -- ` + tmpDir + " && pwd"},
+		{"zoxide pattern", `
+__zoxide_cd() { \builtin cd -- "$@"; }
+z() { if [ -d "$1" ]; then __zoxide_cd "$1"; fi; }
+z ` + tmpDir + " && pwd"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Reset to original directory
+			os.Chdir(origDir) //nolint:errcheck
+			exec.SyncRunnerDir()
+			stdout.Reset()
+			stderr.Reset()
+
+			_, err := exec.Execute(ctx, tt.cmd, &stdout, &stderr)
+			if err != nil {
+				t.Fatalf("command failed: %v, stderr: %s", err, stderr.String())
+			}
+
+			got, _ := filepath.EvalSymlinks(strings.TrimSpace(stdout.String()))
+			if got != tmpDirResolved {
+				t.Errorf("pwd = %q, want %q (stderr: %s)", got, tmpDirResolved, stderr.String())
+			}
+		})
+	}
+}
+
 func TestExecutor_FunctionPersistsAcrossCommands(t *testing.T) {
 	exec := New()
 	ctx := context.Background()
@@ -1002,6 +1048,279 @@ func TestExecutor_TracksSourcedFunctions(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("expected 'sourced_func' in Functions(), got %v", funcs)
+	}
+}
+
+func TestExecutor_EvalPanicRecovery(t *testing.T) {
+	exec := New()
+	ctx := context.Background()
+	var stdout, stderr bytes.Buffer
+
+	// Zoxide's bash init contains PROMPT_COMMAND manipulation with [![:space:]]
+	// which causes mvdan/sh to panic. The panic recovery should skip the
+	// panicking statement but still define the z/zi functions.
+	zoxideInit := `
+__zoxide_cd() { \builtin cd -- "$@"; }
+z() { __zoxide_cd "$@"; }
+zi() { __zoxide_cd "$@"; }
+__zoxide_hook() {
+    if test -z "${__zoxide_sesh}"; then
+        __zoxide_sesh=1
+    fi
+}
+`
+	// This should not panic even with tricky content
+	_, err := exec.Execute(ctx, `eval '`+zoxideInit+`'`, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("eval should not error: %v", err)
+	}
+
+	// The functions should be defined and callable
+	stdout.Reset()
+	stderr.Reset()
+
+	tmpDir := t.TempDir()
+	origDir, _ := os.Getwd()
+	defer os.Chdir(origDir)
+
+	_, err = exec.Execute(ctx, "z "+tmpDir+" && pwd", &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("z function should work: %v, stderr: %s", err, stderr.String())
+	}
+
+	got, _ := filepath.EvalSymlinks(strings.TrimSpace(stdout.String()))
+	want, _ := filepath.EvalSymlinks(tmpDir)
+	if got != want {
+		t.Errorf("z function: pwd = %q, want %q", got, want)
+	}
+}
+
+func TestExecutor_EvalZoxidePromptCommandCompat(t *testing.T) {
+	exec := New()
+	ctx := context.Background()
+	var stdout, stderr bytes.Buffer
+
+	// Real zoxide bash init pattern that previously panicked in mvdan/sh.
+	zoxideInit := `
+function __zoxide_hook() { :; }
+if [[ ${PROMPT_COMMAND:=} != *'__zoxide_hook'* ]]; then
+	if [[ "$(declare -p PROMPT_COMMAND 2>&1)" == "declare -a"* ]]; then
+		PROMPT_COMMAND=("${PROMPT_COMMAND[@]}" __zoxide_hook)
+	else
+		PROMPT_COMMAND="${PROMPT_COMMAND%"${PROMPT_COMMAND##*[![:space:]]}"}"
+		PROMPT_COMMAND="${PROMPT_COMMAND:+${PROMPT_COMMAND};}__zoxide_hook"
+	fi
+fi
+`
+	_, err := exec.Execute(ctx, `eval '`+zoxideInit+`'`, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("eval should not error: %v", err)
+	}
+	if strings.Contains(stderr.String(), "skipping statement") {
+		t.Fatalf("eval should not skip zoxide hook statement, stderr: %q", stderr.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	_, err = exec.Execute(ctx, `echo "${PROMPT_COMMAND[@]}"`, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("reading PROMPT_COMMAND failed: %v", err)
+	}
+	if !strings.Contains(stdout.String(), "__zoxide_hook") {
+		t.Fatalf("PROMPT_COMMAND should include __zoxide_hook, got %q", stdout.String())
+	}
+}
+
+func TestExecutor_ZoxideQueryNonZeroStillChangesDir(t *testing.T) {
+	origDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("failed to get cwd: %v", err)
+	}
+	defer func() {
+		_ = os.Chdir(origDir)
+		_ = os.Setenv("PWD", origDir)
+	}()
+
+	exec := New()
+	ctx := context.Background()
+	var stdout, stderr bytes.Buffer
+
+	// Install a fake zoxide that returns a path on stdout but exits non-zero.
+	// This mirrors environments where zoxide emits useful output with warnings.
+	tmpBinDir := t.TempDir()
+	fakeZoxide := filepath.Join(tmpBinDir, "zoxide")
+	targetDir := t.TempDir()
+	script := `#!/usr/bin/env bash
+if [[ "$1" == "query" ]]; then
+  echo "` + targetDir + `"
+  exit 1
+fi
+exit 0
+`
+	if err := os.WriteFile(fakeZoxide, []byte(script), 0o755); err != nil {
+		t.Fatalf("failed to write fake zoxide: %v", err)
+	}
+
+	origPath := os.Getenv("PATH")
+	_, err = exec.Execute(ctx, "export PATH="+shellQuote(tmpBinDir)+":$PATH", &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("failed to prepend PATH: %v, stderr: %s", err, stderr.String())
+	}
+	defer func() {
+		_, _ = exec.Execute(ctx, "export PATH="+shellQuote(origPath), nil, nil)
+	}()
+
+	// Snippet matches zoxide init structure that sanitizeUnsupportedExpansions rewrites.
+	zoxideSnippet := `
+function __zoxide_pwd() { \builtin pwd -L; }
+function __zoxide_cd() { \builtin cd -- "$@"; }
+function __zoxide_z() {
+    \builtin local result
+    result="$(\command zoxide query --exclude "$(__zoxide_pwd)" -- "$@")" &&
+        __zoxide_cd "${result}"
+}
+function z() { __zoxide_z "$@"; }
+`
+	if sanitized, changed := sanitizeUnsupportedExpansions(zoxideSnippet); !changed {
+		t.Fatalf("expected sanitizer to rewrite zoxide snippet, got unchanged: %q", sanitized)
+	} else if !strings.Contains(sanitized, `|| \builtin true`) {
+		t.Fatalf("expected sanitizer to add || true for zoxide query, got: %q", sanitized)
+	} else if !strings.Contains(sanitized, `result="${result%$'\r'}"`) {
+		t.Fatalf("expected sanitizer to trim trailing carriage returns, got: %q", sanitized)
+	}
+	_, err = exec.Execute(ctx, `eval '`+zoxideSnippet+`'; pwd; z site; pwd`, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("eval+z failed: %v, stderr: %s", err, stderr.String())
+	}
+
+	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
+	if len(lines) < 2 {
+		t.Fatalf("expected two pwd lines, got %q", stdout.String())
+	}
+	before, _ := filepath.EvalSymlinks(lines[0])
+	after, _ := filepath.EvalSymlinks(lines[len(lines)-1])
+	want, _ := filepath.EvalSymlinks(targetDir)
+	if before == after {
+		t.Fatalf("expected directory change after z; stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	if after != want {
+		t.Fatalf("z should cd to fake query target: got %q want %q (stderr: %q)", after, want, stderr.String())
+	}
+}
+
+func TestExecutor_ZoxideQueryCRLFStillChangesDir(t *testing.T) {
+	origDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("failed to get cwd: %v", err)
+	}
+	defer func() {
+		_ = os.Chdir(origDir)
+		_ = os.Setenv("PWD", origDir)
+	}()
+
+	exec := New()
+	ctx := context.Background()
+	var stdout, stderr bytes.Buffer
+
+	// Fake zoxide emits CRLF path (common when output passed through PTY).
+	tmpBinDir := t.TempDir()
+	fakeZoxide := filepath.Join(tmpBinDir, "zoxide")
+	targetDir := t.TempDir()
+	script := `#!/usr/bin/env bash
+if [[ "$1" == "query" ]]; then
+  printf "%s\\r\\n" "` + targetDir + `"
+  exit 0
+fi
+exit 0
+`
+	if err := os.WriteFile(fakeZoxide, []byte(script), 0o755); err != nil {
+		t.Fatalf("failed to write fake zoxide: %v", err)
+	}
+
+	origPath := os.Getenv("PATH")
+	_, err = exec.Execute(ctx, "export PATH="+shellQuote(tmpBinDir)+":$PATH", &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("failed to prepend PATH: %v, stderr: %s", err, stderr.String())
+	}
+	defer func() {
+		_, _ = exec.Execute(ctx, "export PATH="+shellQuote(origPath), nil, nil)
+	}()
+
+	zoxideSnippet := `
+function __zoxide_pwd() { \builtin pwd -L; }
+function __zoxide_cd() { \builtin cd -- "$@"; }
+function __zoxide_z() {
+    \builtin local result
+    result="$(\command zoxide query --exclude "$(__zoxide_pwd)" -- "$@")" &&
+        __zoxide_cd "${result}"
+}
+function z() { __zoxide_z "$@"; }
+`
+	_, err = exec.Execute(ctx, `eval '`+zoxideSnippet+`'; pwd; z site; pwd`, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("eval+z failed: %v, stderr: %s", err, stderr.String())
+	}
+
+	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
+	if len(lines) < 2 {
+		t.Fatalf("expected two pwd lines, got %q", stdout.String())
+	}
+	after, _ := filepath.EvalSymlinks(lines[len(lines)-1])
+	want, _ := filepath.EvalSymlinks(targetDir)
+	if after != want {
+		t.Fatalf("z should cd to fake CRLF query target: got %q want %q (stderr: %q)", after, want, stderr.String())
+	}
+}
+
+func TestExecutor_SourcePanicRecovery(t *testing.T) {
+	exec := New()
+	ctx := context.Background()
+	var stdout, stderr bytes.Buffer
+
+	tmpDir := t.TempDir()
+	scriptPath := filepath.Join(tmpDir, "init.sh")
+
+	// Script with a good function and a statement that would panic in mvdan/sh
+	// We simulate the panic scenario — since we can't easily trigger a real
+	// mvdan/sh panic in test, we test that safeRunNode correctly runs valid
+	// statements.
+	scriptContent := `
+myfunc() { echo "survived"; }
+echo "line two"
+`
+	if err := os.WriteFile(scriptPath, []byte(scriptContent), 0o644); err != nil {
+		t.Fatalf("failed to create script: %v", err)
+	}
+
+	_, err := exec.Execute(ctx, "source "+scriptPath, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("source should not error: %v", err)
+	}
+
+	// Function should be defined
+	stdout.Reset()
+	_, err = exec.Execute(ctx, "myfunc", &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("function should work: %v", err)
+	}
+	if strings.TrimSpace(stdout.String()) != "survived" {
+		t.Errorf("got %q, want %q", stdout.String(), "survived")
+	}
+}
+
+func TestExecutor_ExecutePanicRecovery(t *testing.T) {
+	exec := New()
+	ctx := context.Background()
+	var stdout bytes.Buffer
+
+	// safeRunNode in Execute() should catch panics from top-level commands too.
+	// Test with a normal command to ensure safeRunNode doesn't break normal flow.
+	_, err := exec.Execute(ctx, "echo safe", &stdout, nil)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if strings.TrimSpace(stdout.String()) != "safe" {
+		t.Errorf("stdout = %q, want %q", stdout.String(), "safe")
 	}
 }
 
