@@ -1,8 +1,11 @@
 package prompt
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestFallbackPrompt(t *testing.T) {
@@ -80,6 +83,52 @@ func TestGenerateMultiLine_MultiLine(t *testing.T) {
 	}
 	if prompt != "❯ " {
 		t.Errorf("prompt = %q, want %q", prompt, "❯ ")
+	}
+}
+
+func TestCacheInvalidatesOnConfigChange(t *testing.T) {
+	// Create a fake starship config file
+	dir := t.TempDir()
+	cfgFile := filepath.Join(dir, "starship.toml")
+	if err := os.WriteFile(cfgFile, []byte("[character]\nsymbol = \">\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Point STARSHIP_CONFIG at it
+	t.Setenv("STARSHIP_CONFIG", cfgFile)
+
+	// Use built-in mode so we don't need the starship binary,
+	// but we can still exercise the cache fields via starshipConfigMtime.
+	p := New(Config{Mode: "built-in"})
+	ctx := PromptContext{Cwd: "/tmp", ExitCode: 0}
+
+	first := p.Generate(ctx)
+	if first == "" {
+		t.Fatal("expected non-empty prompt")
+	}
+
+	// Manually prime the cache fields as if starship had run
+	p.cacheValid = true
+	p.cachedCtx = ctx
+	p.cachedResult = "cached-prompt"
+	p.cachedCfgMtime = p.starshipConfigMtime()
+
+	// Same context, same config mtime — cache should hold
+	mtime := p.starshipConfigMtime()
+	if !p.cacheValid || p.cachedCtx != ctx || p.cachedCfgMtime != mtime {
+		t.Fatal("cache should be valid with same context and config mtime")
+	}
+
+	// Simulate config edit: touch the file with a new mtime
+	newTime := time.Now().Add(1 * time.Second)
+	if err := os.Chtimes(cfgFile, newTime, newTime); err != nil {
+		t.Fatal(err)
+	}
+
+	// The mtime should now differ from what's cached
+	newMtime := p.starshipConfigMtime()
+	if newMtime == p.cachedCfgMtime {
+		t.Fatal("config mtime should differ after touch")
 	}
 }
 

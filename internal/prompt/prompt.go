@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Config configures the prompt behavior.
@@ -33,9 +34,11 @@ type Prompt struct {
 
 	// Starship output cache: avoids re-spawning the subprocess when the
 	// prompt context (cwd, exit code, duration, jobs) hasn't changed.
-	cachedCtx    PromptContext
-	cachedResult string
-	cacheValid   bool
+	cachedCtx       PromptContext
+	cachedResult    string
+	cacheValid      bool
+	cachedCfgMtime  time.Time // mtime of starship config at cache time
+	starshipCfgPath string    // resolved once, empty = not yet resolved
 }
 
 // New creates a new Prompt generator.
@@ -92,11 +95,33 @@ func (p *Prompt) findStarship(explicit string) string {
 	return ""
 }
 
+// starshipConfigMtime returns the modification time of the starship config file.
+// Returns zero time if the file doesn't exist or can't be stat'd.
+func (p *Prompt) starshipConfigMtime() time.Time {
+	if p.starshipCfgPath == "" {
+		// Resolve once: $STARSHIP_CONFIG > ~/.config/starship.toml
+		if env := os.Getenv("STARSHIP_CONFIG"); env != "" {
+			p.starshipCfgPath = env
+		} else if home, err := os.UserHomeDir(); err == nil {
+			p.starshipCfgPath = filepath.Join(home, ".config", "starship.toml")
+		}
+	}
+	if p.starshipCfgPath == "" {
+		return time.Time{}
+	}
+	info, err := os.Stat(p.starshipCfgPath)
+	if err != nil {
+		return time.Time{}
+	}
+	return info.ModTime()
+}
+
 func (p *Prompt) starshipPrompt(ctx PromptContext) string {
-	// Return cached result if the context hasn't changed.
-	// The common case: successive commands in the same directory that both
-	// succeed produce identical prompts — no need to spawn a subprocess.
-	if p.cacheValid && p.cachedCtx == ctx {
+	// Return cached result if the context hasn't changed and the starship
+	// config file hasn't been modified. The os.Stat costs ~1μs, which is
+	// negligible compared to the 60-250ms subprocess it gates.
+	cfgMtime := p.starshipConfigMtime()
+	if p.cacheValid && p.cachedCtx == ctx && p.cachedCfgMtime == cfgMtime {
 		return p.cachedResult
 	}
 
@@ -121,6 +146,7 @@ func (p *Prompt) starshipPrompt(ctx PromptContext) string {
 	// Cache the result for next call
 	p.cachedCtx = ctx
 	p.cachedResult = prompt
+	p.cachedCfgMtime = cfgMtime
 	p.cacheValid = true
 
 	return prompt
