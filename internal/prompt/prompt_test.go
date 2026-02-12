@@ -127,7 +127,7 @@ func TestCacheInvalidatesOnConfigChange(t *testing.T) {
 
 	// The mtime should now differ from what's cached
 	newMtime := p.starshipConfigMtime()
-	if newMtime == p.cachedCfgMtime {
+	if newMtime.Equal(p.cachedCfgMtime) {
 		t.Fatal("config mtime should differ after touch")
 	}
 }

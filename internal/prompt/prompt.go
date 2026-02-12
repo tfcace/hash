@@ -121,7 +121,7 @@ func (p *Prompt) starshipPrompt(ctx PromptContext) string {
 	// config file hasn't been modified. The os.Stat costs ~1μs, which is
 	// negligible compared to the 60-250ms subprocess it gates.
 	cfgMtime := p.starshipConfigMtime()
-	if p.cacheValid && p.cachedCtx == ctx && p.cachedCfgMtime == cfgMtime {
+	if p.cacheValid && p.cachedCtx == ctx && p.cachedCfgMtime.Equal(cfgMtime) {
 		return p.cachedResult
 	}
 
