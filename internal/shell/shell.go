@@ -229,14 +229,52 @@ func New(cfg *config.Config) (*Shell, error) {
 
 	completerAdapter := readline.NewCompleterAdapter(router)
 
-	// Initialize history store (must happen before readline creation)
+	// Open all databases concurrently. Each database open involves disk I/O,
+	// directory creation, and schema migration — running them in parallel
+	// reduces startup latency from sum(db_times) to max(db_times).
+	dataDir := getDataDir()
+
+	type historyResult struct {
+		store *history.Store
+		err   error
+	}
+	type learningResult struct {
+		store *learning.FixStore
+		err   error
+	}
+	type predictionResult struct {
+		store *prediction.Store
+		err   error
+	}
+
+	historyCh := make(chan historyResult, 1)
+	learningCh := make(chan learningResult, 1)
+	predictionCh := make(chan predictionResult, 1)
+
+	go func() {
+		s, err := history.NewStore(filepath.Join(dataDir, "history.db"))
+		historyCh <- historyResult{s, err}
+	}()
+
+	go func() {
+		s, err := learning.NewFixStore(filepath.Join(dataDir, "learning.db"))
+		learningCh <- learningResult{s, err}
+	}()
+
+	if cfg.Prediction.Enabled {
+		go func() {
+			s, err := prediction.NewStore(filepath.Join(dataDir, "prediction.db"))
+			predictionCh <- predictionResult{s, err}
+		}()
+	}
+
+	// Collect database results
+	histRes := <-historyCh
 	var historyStore *history.Store
-	historyPath := filepath.Join(getDataDir(), "history.db")
-	var err error
-	historyStore, err = history.NewStore(historyPath)
-	if err != nil {
-		// Log warning but don't fail - history is optional
-		fmt.Fprintf(os.Stderr, "hash: warning: history unavailable: %v\n", err)
+	if histRes.err != nil {
+		fmt.Fprintf(os.Stderr, "hash: warning: history unavailable: %v\n", histRes.err)
+	} else {
+		historyStore = histRes.store
 	}
 
 	// Create input handler and Ctrl+R filter
@@ -259,6 +297,7 @@ func New(cfg *config.Config) (*Shell, error) {
 			return r, true
 		},
 	}
+	var err error
 	rl, err := readline.New(rlCfg)
 	if err != nil {
 		return nil, fmt.Errorf("readline: %w", err)
@@ -267,21 +306,20 @@ func New(cfg *config.Config) (*Shell, error) {
 	// Now set the readline instance in the input handler
 	inputHandler.SetReadline(rl)
 
-	// Initialize learning store
+	// Collect remaining database results (learning + prediction ran concurrently)
+	learnRes := <-learningCh
 	var learningStore *learning.FixStore
-	learningPath := filepath.Join(getDataDir(), "learning.db")
-	learningStore, err = learning.NewFixStore(learningPath)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "hash: warning: learning unavailable: %v\n", err)
+	if learnRes.err != nil {
+		fmt.Fprintf(os.Stderr, "hash: warning: learning unavailable: %v\n", learnRes.err)
+	} else {
+		learningStore = learnRes.store
 	}
 
-	// Initialize prediction store and predictor
 	var predictor *prediction.Predictor
 	if cfg.Prediction.Enabled {
-		predictionPath := filepath.Join(getDataDir(), "prediction.db")
-		predictionStore, err := prediction.NewStore(predictionPath)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "hash: warning: prediction unavailable: %v\n", err)
+		predRes := <-predictionCh
+		if predRes.err != nil {
+			fmt.Fprintf(os.Stderr, "hash: warning: prediction unavailable: %v\n", predRes.err)
 		} else {
 			predCfg := prediction.Config{
 				Enabled:             cfg.Prediction.Enabled,
@@ -290,7 +328,7 @@ func New(cfg *config.Config) (*Shell, error) {
 				PathMinCount:        cfg.Prediction.PathMinCount,
 				PathRecencyHours:    cfg.Prediction.PathRecencyHours,
 			}
-			predictor = prediction.NewPredictor(predictionStore, predCfg)
+			predictor = prediction.NewPredictor(predRes.store, predCfg)
 		}
 	}
 
@@ -1957,6 +1995,9 @@ func (s *Shell) runChpwdHook(ctx context.Context) {
 	}
 
 	s.prevCwd = cwd
+	if s.prompt != nil {
+		s.prompt.InvalidateCache() // Directory changed; starship output will differ
+	}
 	for _, cmd := range s.config.Shell.Hooks.Chpwd {
 		_, err := s.executor.Execute(ctx, cmd, nil, os.Stderr)
 		if err != nil {

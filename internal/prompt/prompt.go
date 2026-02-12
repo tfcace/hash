@@ -30,6 +30,12 @@ type PromptContext struct {
 type Prompt struct {
 	config       Config
 	starshipPath string
+
+	// Starship output cache: avoids re-spawning the subprocess when the
+	// prompt context (cwd, exit code, duration, jobs) hasn't changed.
+	cachedCtx    PromptContext
+	cachedResult string
+	cacheValid   bool
 }
 
 // New creates a new Prompt generator.
@@ -87,6 +93,13 @@ func (p *Prompt) findStarship(explicit string) string {
 }
 
 func (p *Prompt) starshipPrompt(ctx PromptContext) string {
+	// Return cached result if the context hasn't changed.
+	// The common case: successive commands in the same directory that both
+	// succeed produce identical prompts — no need to spawn a subprocess.
+	if p.cacheValid && p.cachedCtx == ctx {
+		return p.cachedResult
+	}
+
 	cmd := exec.Command(p.starshipPath, "prompt",
 		"--status", strconv.Itoa(ctx.ExitCode),
 		"--cmd-duration", strconv.FormatInt(ctx.DurationMs, 10),
@@ -105,7 +118,19 @@ func (p *Prompt) starshipPrompt(ctx PromptContext) string {
 	prompt = stripCursorPositioning(prompt)
 	prompt = stripClearSequences(prompt)
 
+	// Cache the result for next call
+	p.cachedCtx = ctx
+	p.cachedResult = prompt
+	p.cacheValid = true
+
 	return prompt
+}
+
+// InvalidateCache forces the next Generate call to re-run starship.
+// Use after events that change prompt state outside of PromptContext
+// (e.g., git branch change detected by chpwd hook).
+func (p *Prompt) InvalidateCache() {
+	p.cacheValid = false
 }
 
 // GenerateMultiLine returns the prompt split into prefix (printed before readline)
