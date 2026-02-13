@@ -155,6 +155,157 @@ func visibleWidth(s string) int {
 	return width
 }
 
+// wrapWidth returns a safe wrapping width for terminal calculations.
+func (d *Display) wrapWidth() int {
+	if d.width <= 0 {
+		return 1
+	}
+	return d.width
+}
+
+// visualRowsForChars returns how many terminal rows are consumed by chars columns.
+func (d *Display) visualRowsForChars(chars int) int {
+	if chars <= 0 {
+		return 1
+	}
+	return (chars-1)/d.wrapWidth() + 1
+}
+
+// wrappedCursorForChars maps a logical character offset to wrapped row/column.
+// Returned column is a CSI nC distance from start-of-line after \r.
+func (d *Display) wrappedCursorForChars(chars int) (rowOffset, col int) {
+	if chars <= 0 {
+		return 0, 0
+	}
+
+	width := d.wrapWidth()
+	rowOffset = chars / width
+	col = chars % width
+	if col == 0 {
+		rowOffset--
+		col = width
+	}
+	return rowOffset, col
+}
+
+// clampCursorToBuffer keeps cursor coordinates in bounds for layout math.
+func clampCursorToBuffer(buf *Buffer, cur *Cursor) (row, col int) {
+	lineCount := buf.LineCount()
+	if lineCount <= 0 {
+		return 0, 0
+	}
+
+	row = cur.Pos.Row
+	if row < 0 {
+		row = 0
+	} else if row >= lineCount {
+		row = lineCount - 1
+	}
+
+	lineLen := len(buf.Line(row))
+	col = cur.Pos.Col
+	if col < 0 {
+		col = 0
+	} else if col > lineLen {
+		col = lineLen
+	}
+
+	return row, col
+}
+
+// renderedGhostSuffixWidth returns the visible width added by ghost rendering.
+func renderedGhostSuffixWidth(ghostText string, streaming, fromAgent bool) int {
+	if ghostText == "" {
+		if streaming {
+			return visibleWidth(" Agent thinking...")
+		}
+		return 0
+	}
+
+	ghostFirstLine := ghostText
+	if newlineIdx := strings.Index(ghostText, "\n"); newlineIdx >= 0 {
+		ghostFirstLine = ghostText[:newlineIdx]
+	}
+
+	width := visibleWidth(ghostFirstLine)
+	if fromAgent {
+		if streaming {
+			width += visibleWidth("▌")
+		} else {
+			width += visibleWidth("   [enter]run  [tab]edit  [esc]")
+		}
+	}
+
+	return width
+}
+
+// layoutForStandardRender computes visual cursor/line positions for wrapped input.
+func (d *Display) layoutForStandardRender(buf *Buffer, cur *Cursor, cursorLineExtraWidth int) (totalRows, cursorVisualRow, cursorVisualCol int) {
+	lineCount := buf.LineCount()
+	if lineCount <= 0 {
+		return 1, 0, 0
+	}
+
+	cursorRow, cursorCol := clampCursorToBuffer(buf, cur)
+	totalRows = 0
+	cursorVisualRow = 0
+	cursorVisualCol = 0
+
+	for i := 0; i < lineCount; i++ {
+		prefixWidth := d.calcPrefixWidth(i)
+		lineWidth := prefixWidth + len(buf.Line(i))
+
+		if i == cursorRow {
+			cursorChars := prefixWidth + cursorCol
+			rowOffset, col := d.wrappedCursorForChars(cursorChars)
+			cursorVisualRow = totalRows + rowOffset
+			cursorVisualCol = col
+			lineWidth += cursorLineExtraWidth
+		}
+
+		totalRows += d.visualRowsForChars(lineWidth)
+	}
+
+	return totalRows, cursorVisualRow, cursorVisualCol
+}
+
+// layoutForFrameRender computes visual cursor/line positions for wrapped framed input.
+func (d *Display) layoutForFrameRender(buf *Buffer, cur *Cursor, frame *InputFrame) (totalRows, cursorVisualRow, cursorVisualCol int) {
+	lineCount := buf.LineCount()
+	if lineCount <= 0 {
+		return 1, 0, 0
+	}
+
+	cursorRow, cursorCol := clampCursorToBuffer(buf, cur)
+	totalRows = 0
+
+	if frame.TopLine != "" {
+		totalRows += d.visualRowsForChars(visibleWidth(frame.TopLine))
+	}
+
+	cursorVisualRow = totalRows
+	cursorVisualCol = 0
+
+	for i := 0; i < lineCount; i++ {
+		lineWidth := frame.PrefixWidth + len(buf.Line(i))
+
+		if i == cursorRow {
+			cursorChars := frame.PrefixWidth + cursorCol
+			rowOffset, col := d.wrappedCursorForChars(cursorChars)
+			cursorVisualRow = totalRows + rowOffset
+			cursorVisualCol = col
+		}
+
+		totalRows += d.visualRowsForChars(lineWidth)
+	}
+
+	if frame.BottomLine != "" {
+		totalRows += d.visualRowsForChars(visibleWidth(frame.BottomLine))
+	}
+
+	return totalRows, cursorVisualRow, cursorVisualCol
+}
+
 // Render draws the buffer content with cursor.
 func (d *Display) Render(buf *Buffer, cur *Cursor, hasSelection bool) {
 	if d.frame != nil {
@@ -218,30 +369,24 @@ func (d *Display) Render(buf *Buffer, cur *Cursor, hasSelection bool) {
 	// Clear everything below the buffer (including any old menu)
 	sb.WriteString(ansiClearToEnd)
 
-	d.lastLines = buf.LineCount()
-
-	// Position cursor
-	cursorRow := cur.Pos.Row
-	cursorCol := cur.Pos.Col
-
-	// Move to cursor position
-	if cursorRow < buf.LineCount()-1 {
-		fmt.Fprintf(&sb, ansiCursorUp, buf.LineCount()-1-cursorRow)
+	// Position cursor using wrapped visual layout rather than logical rows.
+	totalRows, cursorVisualRow, cursorVisualCol := d.layoutForStandardRender(buf, cur, 0)
+	linesBelowCursor := totalRows - 1 - cursorVisualRow
+	if linesBelowCursor > 0 {
+		fmt.Fprintf(&sb, ansiCursorUp, linesBelowCursor)
 	}
 
-	// Calculate prefix width for cursor positioning
-	prefixWidth := d.calcPrefixWidth(cursorRow)
-
 	sb.WriteString("\r")
-	if cursorCol+prefixWidth > 0 {
-		fmt.Fprintf(&sb, ansiCursorForward, cursorCol+prefixWidth)
+	if cursorVisualCol > 0 {
+		fmt.Fprintf(&sb, ansiCursorForward, cursorVisualCol)
 	}
 
 	// Show cursor
 	sb.WriteString(ansiShowCursor)
 
 	// Remember where we left the cursor for next render
-	d.lastCursorRow = cursorRow
+	d.lastCursorRow = cursorVisualRow
+	d.lastLines = totalRows
 
 	d.out.Write([]byte(sb.String()))
 }
@@ -279,7 +424,6 @@ func (d *Display) RenderWithGhost(buf *Buffer, cur *Cursor, hasSelection bool, g
 	}
 
 	cursorRow := cur.Pos.Row
-	cursorCol := cur.Pos.Col
 
 	for i := 0; i < buf.LineCount(); i++ {
 		if i > 0 {
@@ -349,26 +493,24 @@ func (d *Display) RenderWithGhost(buf *Buffer, cur *Cursor, hasSelection bool, g
 	// Clear everything below the buffer
 	sb.WriteString(ansiClearToEnd)
 
-	d.lastLines = buf.LineCount()
-
-	// Move to cursor position
-	if cursorRow < buf.LineCount()-1 {
-		fmt.Fprintf(&sb, ansiCursorUp, buf.LineCount()-1-cursorRow)
+	ghostWidth := renderedGhostSuffixWidth(ghostText, streaming, fromAgent)
+	totalRows, cursorVisualRow, cursorVisualCol := d.layoutForStandardRender(buf, cur, ghostWidth)
+	linesBelowCursor := totalRows - 1 - cursorVisualRow
+	if linesBelowCursor > 0 {
+		fmt.Fprintf(&sb, ansiCursorUp, linesBelowCursor)
 	}
 
-	// Calculate prefix width for cursor positioning
-	prefixWidth := d.calcPrefixWidth(cursorRow)
-
 	sb.WriteString("\r")
-	if cursorCol+prefixWidth > 0 {
-		fmt.Fprintf(&sb, ansiCursorForward, cursorCol+prefixWidth)
+	if cursorVisualCol > 0 {
+		fmt.Fprintf(&sb, ansiCursorForward, cursorVisualCol)
 	}
 
 	// Show cursor
 	sb.WriteString(ansiShowCursor)
 
 	// Remember where we left the cursor for next render
-	d.lastCursorRow = cursorRow
+	d.lastCursorRow = cursorVisualRow
+	d.lastLines = totalRows
 
 	d.out.Write([]byte(sb.String()))
 }
@@ -388,11 +530,9 @@ func (d *Display) renderWithFrame(buf *Buffer, cur *Cursor, hasSelection bool, g
 	}
 	sb.WriteString("\r")
 
-	topOffset := 0
 	if frame.TopLine != "" {
 		d.renderFrameLine(&sb, frame.TopLine, frame.LineBg)
 		sb.WriteString("\r\n")
-		topOffset = 1
 	}
 
 	cursorRow := cur.Pos.Row
@@ -465,31 +605,24 @@ func (d *Display) renderWithFrame(buf *Buffer, cur *Cursor, hasSelection bool, g
 		})
 	}
 
-	totalLines := topOffset + buf.LineCount()
-	if frame.BottomLine != "" {
-		totalLines++
-	}
-
-	// Move to cursor position
-	cursorLine := topOffset + cursorRow
-	linesBelowCursor := totalLines - 1 - cursorLine
+	totalRows, cursorVisualRow, cursorVisualCol := d.layoutForFrameRender(buf, cur, frame)
+	linesBelowCursor := totalRows - 1 - cursorVisualRow
 	if linesBelowCursor > 0 {
 		fmt.Fprintf(&sb, ansiCursorUp, linesBelowCursor)
 	}
 
 	// Position cursor within the line
 	sb.WriteString("\r")
-	prefixWidth := frame.PrefixWidth
-	if cursorCol+prefixWidth > 0 {
-		fmt.Fprintf(&sb, ansiCursorForward, cursorCol+prefixWidth)
+	if cursorVisualCol > 0 {
+		fmt.Fprintf(&sb, ansiCursorForward, cursorVisualCol)
 	}
 
 	// Show cursor
 	sb.WriteString(ansiShowCursor)
 
 	// Remember where we left the cursor for next render
-	d.lastCursorRow = cursorLine
-	d.lastLines = totalLines
+	d.lastCursorRow = cursorVisualRow
+	d.lastLines = totalRows
 
 	d.out.Write([]byte(sb.String()))
 }
@@ -751,7 +884,7 @@ func (d *Display) RenderCompletionMenu(items []CompletionItem, selected, startCo
 
 	// Add prefix width to startCol for proper positioning.
 	prefixWidth := d.calcPrefixWidth(cursorRow)
-	menuCol := startCol + prefixWidth
+	_, menuCol := d.wrappedCursorForChars(startCol + prefixWidth)
 
 	// Calculate max width for alignment
 	maxTextWidth := 0
@@ -864,7 +997,7 @@ func (d *Display) RenderCompletionMenu(items []CompletionItem, selected, startCo
 	// on terminal-specific cursor save/restore behavior.
 	fmt.Fprintf(&sb, ansiCursorUp, maxVisible)
 	sb.WriteString("\r")
-	restoreCol := cursorCol + prefixWidth
+	_, restoreCol := d.wrappedCursorForChars(cursorCol + prefixWidth)
 	if restoreCol > 0 {
 		fmt.Fprintf(&sb, ansiCursorForward, restoreCol)
 	}
@@ -898,7 +1031,7 @@ func (d *Display) ClearCompletionMenu(numItems, cursorRow, cursorCol int) {
 	fmt.Fprintf(&sb, ansiCursorUp, maxVisible)
 	sb.WriteString("\r")
 	prefixWidth := d.calcPrefixWidth(cursorRow)
-	restoreCol := cursorCol + prefixWidth
+	_, restoreCol := d.wrappedCursorForChars(cursorCol + prefixWidth)
 	if restoreCol > 0 {
 		fmt.Fprintf(&sb, ansiCursorForward, restoreCol)
 	}

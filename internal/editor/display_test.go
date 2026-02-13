@@ -234,3 +234,91 @@ func TestDisplay_RenderWithFrame_ClearsFromLineEnd(t *testing.T) {
 		t.Fatalf("render should clear-to-end with frame background active, got %q", output)
 	}
 }
+
+func TestDisplay_Render_LongWrappedLineTracksVisualCursorRow(t *testing.T) {
+	var out bytes.Buffer
+	d := NewDisplay(&out, 10, 24)
+	d.SetPrompt("$ ")
+
+	buf := NewBufferFromString("abcdefghijklmno")
+	cur := NewCursor()
+	cur.MoveTo(0, len("abcdefghijklmno"))
+
+	d.Render(buf, cur, false)
+	if d.lastCursorRow != 1 {
+		t.Fatalf("lastCursorRow = %d, want 1", d.lastCursorRow)
+	}
+
+	out.Reset()
+	d.Render(buf, cur, false)
+	output := out.String()
+	if !strings.Contains(output, "\x1b[1A") {
+		t.Fatalf("second render should move up one wrapped row, got %q", output)
+	}
+}
+
+func TestDisplay_Render_UsesVisualRowsForCursorReposition(t *testing.T) {
+	var out bytes.Buffer
+	d := NewDisplay(&out, 10, 24)
+
+	buf := NewBufferFromString("abcdefghijklmnopqrst\nz")
+	cur := NewCursor()
+	cur.MoveTo(0, 0)
+
+	d.Render(buf, cur, false)
+	output := out.String()
+
+	if !strings.Contains(output, "\x1b[3A") {
+		t.Fatalf("render should move up by wrapped visual rows (3A), got %q", output)
+	}
+}
+
+func TestDisplay_RenderWithFrame_LongWrappedLineTracksVisualCursorRow(t *testing.T) {
+	var out bytes.Buffer
+	d := NewDisplay(&out, 10, 24)
+	d.SetFrame(&InputFrame{
+		TopLine:     "TOP",
+		BottomLine:  "BOT",
+		Prefix:      "P ",
+		PrefixWidth: 2,
+	})
+
+	buf := NewBufferFromString("abcdefghijklmno")
+	cur := NewCursor()
+	cur.MoveTo(0, len("abcdefghijklmno"))
+
+	d.Render(buf, cur, false)
+	if d.lastCursorRow != 2 {
+		t.Fatalf("lastCursorRow = %d, want 2", d.lastCursorRow)
+	}
+
+	out.Reset()
+	d.Render(buf, cur, false)
+	output := out.String()
+	if !strings.Contains(output, "\x1b[2A") {
+		t.Fatalf("framed second render should move up two wrapped rows, got %q", output)
+	}
+}
+
+func TestDisplay_RenderCompletionMenu_WrapsLongColumns(t *testing.T) {
+	var out bytes.Buffer
+	d := NewDisplay(&out, 10, 24)
+	d.SetPrompt("$ ")
+
+	items := []CompletionItem{
+		{Text: "file.txt", Description: "A file"},
+	}
+
+	d.RenderCompletionMenu(items, 0, 15, 0, 17)
+	output := out.String()
+
+	// startCol=15 + prefix=2 => wrapped column 7
+	if !strings.Contains(output, "\x1b[7C") {
+		t.Fatalf("menu should wrap start column to 7, got %q", output)
+	}
+
+	// cursorCol=17 + prefix=2 => wrapped restore column 9
+	if !strings.Contains(output, "\x1b[9C") {
+		t.Fatalf("menu should restore wrapped cursor column 9, got %q", output)
+	}
+}
