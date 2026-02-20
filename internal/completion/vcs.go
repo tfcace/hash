@@ -18,15 +18,23 @@ const vcsQueryTimeout = 150 * time.Millisecond
 // It focuses on branch/revision-like arguments where filesystem completion is
 // usually not what users want (e.g. "git checkout <TAB>").
 type VCSCompleter struct {
-	listGitRefs func(context.Context) ([]string, error)
-	listJJRevs  func(context.Context) ([]string, error)
+	listGitRefs     func(context.Context) ([]string, error)
+	listJJRevs      func(context.Context) ([]string, error)
+	listGitModified func(context.Context) ([]string, error)
+	listGitStashes  func(context.Context) ([]string, error)
+	listGitRemotes  func(context.Context) ([]string, error)
+	listJJChangeIDs func(context.Context) ([]string, error)
 }
 
 // NewVCSCompleter creates a new VCS completer.
 func NewVCSCompleter() *VCSCompleter {
 	return &VCSCompleter{
-		listGitRefs: defaultListGitRefs,
-		listJJRevs:  defaultListJJRevs,
+		listGitRefs:     defaultListGitRefs,
+		listJJRevs:      defaultListJJRevs,
+		listGitModified: defaultListGitModified,
+		listGitStashes:  defaultListGitStashes,
+		listGitRemotes:  defaultListGitRemotes,
+		listJJChangeIDs: defaultListJJChangeIDs,
 	}
 }
 
@@ -61,23 +69,73 @@ func (c *VCSCompleter) completeGit(ctx context.Context, parts []string, trailing
 	}
 
 	subcommand := parts[1]
+	current, before := splitCurrentArg(parts[2:], trailingSpace)
+
 	switch subcommand {
-	case "checkout", "switch":
-		// branch/revision-style completion below
+	case "checkout", "switch", "log", "diff", "rebase", "cherry-pick", "revert", "merge":
+		if !shouldCompleteGitRef(subcommand, current, before) {
+			return Result{}
+		}
+		return lookupAndFilter(ctx, c.listGitRefs, current)
+
+	case "add":
+		if strings.HasPrefix(current, "-") {
+			return Result{}
+		}
+		return lookupAndFilter(ctx, c.listGitModified, current)
+
+	case "branch":
+		return c.completeGitBranch(ctx, current, before)
+
+	case "stash":
+		return c.completeGitStash(ctx, current, before)
+
+	case "remote":
+		return c.completeGitRemote(ctx, current, before)
+
 	default:
 		return Result{}
 	}
+}
 
-	current, before := splitCurrentArg(parts[2:], trailingSpace)
-	if !shouldCompleteGitRef(subcommand, current, before) {
+func (c *VCSCompleter) completeGitBranch(ctx context.Context, current string, before []string) Result {
+	if containsToken(before, "-d") || containsToken(before, "-D") {
+		return lookupAndFilter(ctx, c.listGitRefs, current)
+	}
+	return Result{}
+}
+
+func (c *VCSCompleter) completeGitStash(ctx context.Context, current string, before []string) Result {
+	if len(before) == 0 {
 		return Result{}
 	}
+	switch before[0] {
+	case "pop", "apply", "drop", "show":
+		return lookupAndFilter(ctx, c.listGitStashes, current)
+	default:
+		return Result{}
+	}
+}
 
-	refs, err := c.listGitRefs(ctx)
+func (c *VCSCompleter) completeGitRemote(ctx context.Context, current string, before []string) Result {
+	if len(before) == 0 {
+		return Result{}
+	}
+	switch before[0] {
+	case "remove", "rename", "show", "prune":
+		return lookupAndFilter(ctx, c.listGitRemotes, current)
+	default:
+		return Result{}
+	}
+}
+
+// lookupAndFilter calls a list function and prefix-filters the results.
+func lookupAndFilter(ctx context.Context, listFn func(context.Context) ([]string, error), prefix string) Result {
+	values, err := listFn(ctx)
 	if err != nil {
 		return Result{}
 	}
-	return prefixFilterItems(refs, current)
+	return prefixFilterItems(values, prefix)
 }
 
 func (c *VCSCompleter) completeJJ(ctx context.Context, parts []string, trailingSpace bool) Result {
@@ -86,15 +144,37 @@ func (c *VCSCompleter) completeJJ(ctx context.Context, parts []string, trailingS
 	}
 
 	subcommand := parts[1]
+	current, before := splitCurrentArg(parts[2:], trailingSpace)
+
 	switch subcommand {
 	case "edit", "new", "show":
-		// revision-style completion below
+		if !shouldCompleteJJRev(current, before) {
+			return Result{}
+		}
+		return lookupAndFilter(ctx, c.listJJRevs, current)
+
+	case "bookmark":
+		return c.completeJJBookmark(ctx, current, before)
+
+	case "describe", "abandon", "squash":
+		if !shouldCompleteJJRev(current, before) {
+			return Result{}
+		}
+		return lookupAndFilter(ctx, c.listJJChangeIDs, current)
+
 	default:
 		return Result{}
 	}
+}
 
-	current, before := splitCurrentArg(parts[2:], trailingSpace)
-	if !shouldCompleteJJRev(current, before) {
+func (c *VCSCompleter) completeJJBookmark(ctx context.Context, current string, before []string) Result {
+	if len(before) == 0 {
+		return Result{}
+	}
+	switch before[0] {
+	case "delete", "move", "rename":
+		// Complete with bookmark names (exclude special revisions)
+	default:
 		return Result{}
 	}
 
@@ -102,7 +182,13 @@ func (c *VCSCompleter) completeJJ(ctx context.Context, parts []string, trailingS
 	if err != nil {
 		return Result{}
 	}
-	return prefixFilterItems(revs, current)
+	var bookmarks []string
+	for _, r := range revs {
+		if !strings.HasPrefix(r, "@") {
+			bookmarks = append(bookmarks, r)
+		}
+	}
+	return prefixFilterItems(bookmarks, current)
 }
 
 func splitCurrentArg(args []string, trailingSpace bool) (current string, before []string) {
@@ -262,6 +348,100 @@ func defaultListJJRevs(ctx context.Context) ([]string, error) {
 	}
 
 	return revs, nil
+}
+
+func defaultListGitModified(ctx context.Context) ([]string, error) {
+	queryCtx, cancel := context.WithTimeout(ctx, vcsQueryTimeout)
+	defer cancel()
+
+	// Get modified and untracked files
+	modified, _ := runIsolatedCommand(queryCtx, "git", "diff", "--name-only")
+	staged, _ := runIsolatedCommand(queryCtx, "git", "diff", "--name-only", "--cached")
+	untracked, _ := runIsolatedCommand(queryCtx, "git", "ls-files", "--others", "--exclude-standard")
+
+	seen := make(map[string]bool)
+	var files []string
+	for _, list := range [][]string{modified, staged, untracked} {
+		for _, f := range list {
+			f = strings.TrimSpace(f)
+			if f != "" && !seen[f] {
+				seen[f] = true
+				files = append(files, f)
+			}
+		}
+	}
+	sort.Strings(files)
+	return files, nil
+}
+
+func defaultListGitStashes(ctx context.Context) ([]string, error) {
+	queryCtx, cancel := context.WithTimeout(ctx, vcsQueryTimeout)
+	defer cancel()
+
+	lines, err := runIsolatedCommand(queryCtx, "git", "stash", "list", "--format=%gd")
+	if err != nil {
+		return nil, err
+	}
+
+	var stashes []string
+	for _, line := range lines {
+		s := strings.TrimSpace(line)
+		if s != "" {
+			stashes = append(stashes, s)
+		}
+	}
+	return stashes, nil
+}
+
+func defaultListGitRemotes(ctx context.Context) ([]string, error) {
+	queryCtx, cancel := context.WithTimeout(ctx, vcsQueryTimeout)
+	defer cancel()
+
+	lines, err := runIsolatedCommand(queryCtx, "git", "remote")
+	if err != nil {
+		return nil, err
+	}
+
+	var remotes []string
+	for _, line := range lines {
+		r := strings.TrimSpace(line)
+		if r != "" {
+			remotes = append(remotes, r)
+		}
+	}
+	return remotes, nil
+}
+
+func defaultListJJChangeIDs(ctx context.Context) ([]string, error) {
+	queryCtx, cancel := context.WithTimeout(ctx, vcsQueryTimeout)
+	defer cancel()
+
+	lines, err := runIsolatedCommand(
+		queryCtx,
+		"jj",
+		"log",
+		"-T",
+		`change_id.short() ++ "\n"`,
+		"--color",
+		"never",
+		"--no-graph",
+		"-r",
+		"all()",
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	var ids []string
+	seen := make(map[string]bool)
+	for _, line := range lines {
+		id := strings.TrimSpace(line)
+		if id != "" && !seen[id] {
+			seen[id] = true
+			ids = append(ids, id)
+		}
+	}
+	return ids, nil
 }
 
 func runIsolatedCommand(ctx context.Context, command string, args ...string) ([]string, error) {

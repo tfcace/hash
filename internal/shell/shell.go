@@ -130,6 +130,9 @@ func New(cfg *config.Config) (*Shell, error) {
 	// Context-aware completions for git/jj branch and revision args.
 	router.Register(completion.NewVCSCompleter(), completion.PriorityVCS)
 
+	// Semantic completions for common commands (ssh, make, kill, npm, etc.)
+	router.Register(completion.NewSemanticCompleter(), completion.PrioritySemantic)
+
 	if cfg.Completions.CobraEnabled {
 		router.Register(completion.NewCobraCompleter(), completion.PriorityToolNative)
 	}
