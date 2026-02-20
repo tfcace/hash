@@ -1,6 +1,7 @@
 package editor
 
 import (
+	"io"
 	"strings"
 	"testing"
 )
@@ -407,6 +408,119 @@ func TestGhostText_FromAgent(t *testing.T) {
 	if g.FromAgent {
 		t.Error("FromAgent should be false after Clear")
 	}
+}
+
+// TestSuggestionFunc_SetsGhostText tests that SuggestionFunc sets ghost text on keystrokes.
+func TestSuggestionFunc_SetsGhostText(t *testing.T) {
+	cfg := Config{
+		SuggestionFunc: func(input string) string {
+			if strings.HasPrefix("git push origin main", input) {
+				return "git push origin main"
+			}
+			return ""
+		},
+	}
+	ed := New(cfg, nil, io.Discard)
+	ed.state.Buffer = NewBufferFromString("git pu")
+	ed.state.Cursor.MoveTo(0, 6)
+
+	ed.updateSuggestion()
+
+	if !ed.ghost.Active {
+		t.Fatal("ghost should be active")
+	}
+	if ed.ghost.Remaining() != "sh origin main" {
+		t.Errorf("ghost = %q, want %q", ed.ghost.Remaining(), "sh origin main")
+	}
+}
+
+// TestSuggestionFunc_NoMatchClearsGhost tests that no match clears ghost text.
+func TestSuggestionFunc_NoMatchClearsGhost(t *testing.T) {
+	cfg := Config{
+		SuggestionFunc: func(input string) string { return "" },
+	}
+	ed := New(cfg, nil, io.Discard)
+	ed.state.Buffer = NewBufferFromString("xyz")
+	ed.state.Cursor.MoveTo(0, 3)
+	ed.ghost.Set("old suggestion")
+	ed.ghost.FromAgent = false
+
+	ed.updateSuggestion()
+
+	if ed.ghost.Active {
+		t.Error("ghost should be cleared when no match")
+	}
+}
+
+// TestSuggestionFunc_SkipsShortInput tests that single char doesn't trigger suggestion.
+func TestSuggestionFunc_SkipsShortInput(t *testing.T) {
+	called := false
+	cfg := Config{
+		SuggestionFunc: func(input string) string {
+			called = true
+			return "something"
+		},
+	}
+	ed := New(cfg, nil, io.Discard)
+	ed.state.Buffer = NewBufferFromString("g")
+	ed.state.Cursor.MoveTo(0, 1)
+
+	ed.updateSuggestion()
+
+	if called {
+		t.Error("SuggestionFunc should not be called for single char input")
+	}
+}
+
+// TestSuggestionFunc_SkipsMidBufferCursor tests that cursor not at end skips suggestion.
+func TestSuggestionFunc_SkipsMidBufferCursor(t *testing.T) {
+	called := false
+	cfg := Config{
+		SuggestionFunc: func(input string) string {
+			called = true
+			return "something"
+		},
+	}
+	ed := New(cfg, nil, io.Discard)
+	ed.state.Buffer = NewBufferFromString("hello world")
+	ed.state.Cursor.MoveTo(0, 5) // middle of buffer
+
+	ed.updateSuggestion()
+
+	if called {
+		t.Error("SuggestionFunc should not be called when cursor is not at end")
+	}
+}
+
+// TestSuggestionFunc_SkipsAgentGhost tests that agent ghost text is not overwritten.
+func TestSuggestionFunc_SkipsAgentGhost(t *testing.T) {
+	cfg := Config{
+		SuggestionFunc: func(input string) string { return "git push" },
+	}
+	ed := New(cfg, nil, io.Discard)
+	ed.state.Buffer = NewBufferFromString("gi")
+	ed.state.Cursor.MoveTo(0, 2)
+	ed.ghost.Set("agent suggestion")
+	ed.ghost.FromAgent = true
+
+	ed.updateSuggestion()
+
+	if ed.ghost.Remaining() != "agent suggestion" {
+		t.Error("should not overwrite agent ghost text")
+	}
+}
+
+// TestSuggestionFunc_NilFunc tests that nil SuggestionFunc doesn't crash.
+func TestSuggestionFunc_NilFunc(t *testing.T) {
+	cfg := Config{
+		SuggestionFunc: nil,
+	}
+	ed := New(cfg, nil, io.Discard)
+	ed.state.Buffer = NewBufferFromString("hello")
+	ed.state.Cursor.MoveTo(0, 5)
+
+	// Should not panic
+	ed.updateSuggestion()
 }
 
 // TestBuffer_Content_LongBuffer tests content retrieval with many lines.

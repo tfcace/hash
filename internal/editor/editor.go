@@ -28,6 +28,7 @@ type Config struct {
 	HistoryFunc             func(dir int, currentLine string) string // -1=prev, +1=next; currentLine is for saving
 	CompleteFunc            func(line string, pos int) []Completion  // Tab completion
 	PrefetchFunc            func(line string, pos int)               // Background completion prefetch (on space)
+	SuggestionFunc          func(input string) string                // Inline suggestion from history (Fish-style)
 	OnInputReady            func()                                   // Called after editor chrome is rendered, before input loop
 	Gutter                  bool                                     // Show gutter indicator
 	Prompt                  string                                   // Prompt string to display before input
@@ -479,6 +480,11 @@ func (e *Editor) processModeResult(result ModeResult) (Result, bool) {
 	e.handleHistoryNavigation(result)
 	e.handleCompletionAndClipboard(result)
 
+	// Update inline suggestion after buffer changes
+	if result.Action == ActionInsert || result.Action == ActionDelete || result.Action == ActionPaste {
+		e.updateSuggestion()
+	}
+
 	return Result{}, false
 }
 
@@ -519,6 +525,48 @@ func (e *Editor) handleCompletionAndClipboard(result ModeResult) {
 	if result.PasteBefore {
 		e.handleAction(ActionPaste)
 		e.paste(true)
+	}
+}
+
+// updateSuggestion queries the SuggestionFunc and sets ghost text for inline suggestions.
+func (e *Editor) updateSuggestion() {
+	if e.config.SuggestionFunc == nil {
+		return
+	}
+
+	// Don't overwrite agent ghost text
+	if e.ghost.FromAgent {
+		return
+	}
+
+	content := e.state.Buffer.Content()
+
+	// Skip for short input (need at least 2 chars)
+	if len(content) < 2 {
+		e.ghost.Clear()
+		return
+	}
+
+	// Only suggest when cursor is at end of buffer
+	lastRow := e.state.Buffer.LineCount() - 1
+	lastCol := len(e.state.Buffer.Line(lastRow))
+	if e.state.Cursor.Pos.Row != lastRow || e.state.Cursor.Pos.Col != lastCol {
+		return
+	}
+
+	suggestion := e.config.SuggestionFunc(content)
+	if suggestion != "" && strings.HasPrefix(suggestion, content) {
+		suffix := suggestion[len(content):]
+		if suffix != "" {
+			e.ghost.Set(suffix)
+			e.ghost.FromAgent = false
+			return
+		}
+	}
+
+	// No match — clear non-agent ghost
+	if !e.ghost.FromAgent {
+		e.ghost.Clear()
 	}
 }
 

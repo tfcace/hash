@@ -254,6 +254,57 @@ func (s *Store) GetAgentInteractions(prompt string, limit int) ([]AgentInteracti
 	return interactions, rows.Err()
 }
 
+// SearchByPrefix returns the most recent successful commands matching a prefix.
+// The results are deduplicated (by command text) and ordered by most recent first.
+// Returns nil for empty prefix or if no matches are found.
+func (s *Store) SearchByPrefix(prefix string, limit int) ([]string, error) {
+	if prefix == "" {
+		return nil, nil
+	}
+
+	escaped := escapeGlob(prefix)
+	rows, err := s.db.Query(`
+		SELECT command, MAX(timestamp) as latest
+		FROM commands
+		WHERE command GLOB ? AND exit_code = 0
+		GROUP BY command
+		ORDER BY latest DESC
+		LIMIT ?
+	`, escaped+"*", limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var commands []string
+	for rows.Next() {
+		var cmd string
+		var ts interface{}
+		if err := rows.Scan(&cmd, &ts); err != nil {
+			return nil, err
+		}
+		commands = append(commands, cmd)
+	}
+	return commands, rows.Err()
+}
+
+// escapeGlob escapes special glob characters in a string for safe use in GLOB queries.
+func escapeGlob(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		switch r {
+		case '*', '?', '[', ']':
+			b.WriteByte('[')
+			b.WriteRune(r)
+			b.WriteByte(']')
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
 // Count returns the total number of commands in history.
 func (s *Store) Count() (int64, error) {
 	var count int64

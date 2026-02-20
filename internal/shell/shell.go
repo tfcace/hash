@@ -355,6 +355,7 @@ func New(cfg *config.Config) (*Shell, error) {
 		ScrollbarColor: colorPalette.Primary,
 		CompleteFunc:   makeEditorCompleteFunc(router),
 		PrefetchFunc:   makeEditorPrefetchFunc(router),
+		SuggestionFunc: makeEditorSuggestionFunc(historyStore, predictor),
 		MaxPasteSize:   cfg.Input.ParseMaxPasteSize(),
 	}
 
@@ -1497,6 +1498,22 @@ func makeEditorCompleteFunc(router *completion.Router) func(string, int) []edito
 func makeEditorPrefetchFunc(router *completion.Router) func(string, int) {
 	return func(line string, pos int) {
 		router.Prefetch(line, pos)
+	}
+}
+
+func makeEditorSuggestionFunc(store *history.Store, pred *prediction.Predictor) func(string) string {
+	return func(input string) string {
+		// Try history prefix search first
+		if store != nil {
+			matches, err := store.SearchByPrefix(input, 1)
+			if err == nil && len(matches) > 0 {
+				return matches[0]
+			}
+		}
+
+		_ = pred // predictor fallback reserved for future use
+
+		return ""
 	}
 }
 
