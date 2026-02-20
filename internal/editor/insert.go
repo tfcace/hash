@@ -20,6 +20,7 @@ func (m *InsertMode) Name() string {
 func (m *InsertMode) HandleKey(key Key, state *EditorState) ModeResult {
 	// Handle bracketed paste
 	if key.Special == KeyPaste {
+		m.deleteSelection(state)
 		m.insertPasteContent(state, key.PasteText)
 		return ModeResult{Action: ActionPaste}
 	}
@@ -49,6 +50,7 @@ func (m *InsertMode) HandleKey(key Key, state *EditorState) ModeResult {
 
 	// Printable character
 	if key.Rune != 0 && unicode.IsPrint(key.Rune) {
+		m.deleteSelection(state)
 		m.insertChar(state, key.Rune)
 		if key.Rune == ' ' {
 			return ModeResult{Action: ActionInsert, Prefetch: true}
@@ -63,67 +65,112 @@ func (m *InsertMode) HandleKey(key Key, state *EditorState) ModeResult {
 func (m *InsertMode) handleSpecialKey(key Key, state *EditorState) (ModeResult, bool) {
 	switch key.Special {
 	case KeyEscape:
+		state.Cursor.ClearSelection()
 		return ModeResult{NewMode: NewNormalMode(), Action: ActionModeChange}, true
 	case KeyEnter:
 		return ModeResult{Submit: true}, true
 	case KeyTab:
 		return ModeResult{Complete: true}, true
 	case KeyBackspace:
-		m.deleteBack(state)
+		if state.Cursor.HasSelection() {
+			m.deleteSelection(state)
+		} else {
+			m.deleteBack(state)
+		}
 		return ModeResult{Action: ActionDelete}, true
 	case KeyDelete:
-		m.deleteForward(state)
+		if state.Cursor.HasSelection() {
+			m.deleteSelection(state)
+		} else {
+			m.deleteForward(state)
+		}
 		return ModeResult{Action: ActionDelete}, true
-	case KeyLeft:
-		m.moveLeft(state)
-		return ModeResult{}, true
-	case KeyRight:
-		m.moveRight(state)
-		return ModeResult{}, true
-	case KeyUp:
-		if state.Cursor.Pos.Row == 0 {
-			return ModeResult{HistoryPrev: true}, true
-		}
-		m.moveUp(state)
-		return ModeResult{}, true
-	case KeyDown:
-		if state.Cursor.Pos.Row == state.Buffer.LineCount()-1 {
-			return ModeResult{HistoryNext: true}, true
-		}
-		m.moveDown(state)
-		return ModeResult{}, true
-	case KeyHome:
-		state.Cursor.Pos.Col = 0
-		return ModeResult{}, true
-	case KeyEnd:
-		state.Cursor.Pos.Col = len(state.Buffer.Line(state.Cursor.Pos.Row))
-		return ModeResult{}, true
+	case KeyLeft, KeyRight, KeyUp, KeyDown, KeyHome, KeyEnd:
+		return m.handleArrowKey(key, state)
 	}
 	return ModeResult{}, false
+}
+
+// handleArrowKey processes arrow and navigation keys with Shift selection support.
+func (m *InsertMode) handleArrowKey(key Key, state *EditorState) (ModeResult, bool) {
+	// Up/Down at buffer boundary trigger history navigation
+	if key.Special == KeyUp && state.Cursor.Pos.Row == 0 {
+		state.Cursor.ClearSelection()
+		return ModeResult{HistoryPrev: true}, true
+	}
+	if key.Special == KeyDown && state.Cursor.Pos.Row == state.Buffer.LineCount()-1 {
+		state.Cursor.ClearSelection()
+		return ModeResult{HistoryNext: true}, true
+	}
+
+	// Update selection state
+	m.updateSelectionForShift(key.Shift, state)
+
+	// Perform the movement
+	switch key.Special {
+	case KeyLeft:
+		m.moveLeft(state)
+	case KeyRight:
+		m.moveRight(state)
+	case KeyUp:
+		m.moveUp(state)
+	case KeyDown:
+		m.moveDown(state)
+	case KeyHome:
+		state.Cursor.Pos.Col = 0
+	case KeyEnd:
+		state.Cursor.Pos.Col = len(state.Buffer.Line(state.Cursor.Pos.Row))
+	}
+	return ModeResult{}, true
+}
+
+// updateSelectionForShift starts or clears selection based on the Shift modifier.
+func (m *InsertMode) updateSelectionForShift(shift bool, state *EditorState) {
+	if shift {
+		m.startOrExtendSelection(state)
+	} else {
+		state.Cursor.ClearSelection()
+	}
 }
 
 func (m *InsertMode) handleCtrl(key Key, state *EditorState) ModeResult {
 	switch key.Rune {
 	case 'a': // Ctrl+A: line start
+		state.Cursor.ClearSelection()
 		state.Cursor.Pos.Col = 0
 	case 'e': // Ctrl+E: line end
+		state.Cursor.ClearSelection()
 		state.Cursor.Pos.Col = len(state.Buffer.Line(state.Cursor.Pos.Row))
 	case 'b': // Ctrl+B: back one char (emacs)
+		state.Cursor.ClearSelection()
 		m.moveLeft(state)
 	case 'f': // Ctrl+F: forward one char (emacs)
+		state.Cursor.ClearSelection()
 		m.moveRight(state)
 	case 'p': // Ctrl+P: context picker
 		if state.AllowContextPicker {
 			return ModeResult{ContextPicker: true}
 		}
 	case 'w': // Ctrl+W: delete word back
-		m.deleteWordBack(state)
+		if state.Cursor.HasSelection() {
+			m.deleteSelection(state)
+		} else {
+			m.deleteWordBack(state)
+		}
 		return ModeResult{Action: ActionDelete}
 	case 'u': // Ctrl+U: delete to line start
-		m.deleteToLineStart(state)
+		if state.Cursor.HasSelection() {
+			m.deleteSelection(state)
+		} else {
+			m.deleteToLineStart(state)
+		}
 		return ModeResult{Action: ActionDelete}
 	case 'k': // Ctrl+K: delete to line end
-		m.deleteToLineEnd(state)
+		if state.Cursor.HasSelection() {
+			m.deleteSelection(state)
+		} else {
+			m.deleteToLineEnd(state)
+		}
 		return ModeResult{Action: ActionDelete}
 	case 'r': // Ctrl+R: history search
 		if state.AllowHistorySearch {
@@ -136,17 +183,47 @@ func (m *InsertMode) handleCtrl(key Key, state *EditorState) ModeResult {
 func (m *InsertMode) handleAlt(key Key, state *EditorState) ModeResult {
 	switch key.Special {
 	case KeyLeft: // Alt+Left: word back
+		if key.Shift {
+			m.startOrExtendSelection(state)
+		} else {
+			state.Cursor.ClearSelection()
+		}
 		m.moveWordBack(state)
 	case KeyRight: // Alt+Right: word forward
+		if key.Shift {
+			m.startOrExtendSelection(state)
+		} else {
+			state.Cursor.ClearSelection()
+		}
 		m.moveWordForward(state)
 	}
 	switch key.Rune {
 	case 'b': // Alt+B: word back
+		state.Cursor.ClearSelection()
 		m.moveWordBack(state)
 	case 'f': // Alt+F: word forward
+		state.Cursor.ClearSelection()
 		m.moveWordForward(state)
 	}
 	return ModeResult{}
+}
+
+// deleteSelection deletes the selected text and moves the cursor to the start of the selection.
+func (m *InsertMode) deleteSelection(state *EditorState) {
+	if !state.Cursor.HasSelection() {
+		return
+	}
+	start, end := state.Cursor.SelectionRange()
+	state.Buffer.Delete(start, end)
+	state.Cursor.MoveTo(start.Row, start.Col)
+	state.Cursor.ClearSelection()
+}
+
+// startOrExtendSelection begins a selection if none exists.
+func (m *InsertMode) startOrExtendSelection(state *EditorState) {
+	if !state.Cursor.HasSelection() {
+		state.Cursor.StartSelection()
+	}
 }
 
 func (m *InsertMode) insertChar(state *EditorState, r rune) {
