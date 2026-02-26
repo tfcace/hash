@@ -48,11 +48,14 @@ type Display struct {
 // InputFrame customizes how the input area is rendered.
 // PrefixWidth is the visible width of Prefix (ANSI excluded).
 type InputFrame struct {
-	TopLine     string // Rendered above input lines (no trailing newline)
-	BottomLine  string // Rendered below input lines (no trailing newline)
-	Prefix      string // Rendered before each input line
-	PrefixWidth int
-	LineBg      string // Optional ANSI background code for line padding
+	TopLine           string // Rendered above input lines (no trailing newline)
+	BottomLine        string // Rendered below input lines (no trailing newline)
+	BottomExtraLine   string // Optional line rendered below BottomLine
+	Prefix            string // Rendered before each input line
+	PrefixWidth       int
+	LineBg            string // Optional ANSI background code for line padding
+	BottomLineBg      string // Optional ANSI background override for BottomLine
+	BottomExtraLineBg string // Optional ANSI background override for BottomExtraLine
 }
 
 // NewDisplay creates a new display.
@@ -301,6 +304,9 @@ func (d *Display) layoutForFrameRender(buf *Buffer, cur *Cursor, frame *InputFra
 
 	if frame.BottomLine != "" {
 		totalRows += d.visualRowsForChars(visibleWidth(frame.BottomLine))
+	}
+	if frame.BottomExtraLine != "" {
+		totalRows += d.visualRowsForChars(visibleWidth(frame.BottomExtraLine))
 	}
 
 	return totalRows, cursorVisualRow, cursorVisualCol
@@ -585,16 +591,36 @@ func (d *Display) renderWithFrame(buf *Buffer, cur *Cursor, hasSelection bool, g
 		if buf.LineCount() > 0 {
 			sb.WriteString("\r\n")
 		}
-		d.renderFrameLine(&sb, frame.BottomLine, frame.LineBg)
+		bottomLineBg := frame.LineBg
+		if frame.BottomLineBg != "" {
+			bottomLineBg = frame.BottomLineBg
+		}
+		d.renderFrameLine(&sb, frame.BottomLine, bottomLineBg)
+	}
+	if frame.BottomExtraLine != "" {
+		if buf.LineCount() > 0 || frame.BottomLine != "" {
+			sb.WriteString("\r\n")
+		}
+		extraLineBg := frame.LineBg
+		if frame.BottomExtraLineBg != "" {
+			extraLineBg = frame.BottomExtraLineBg
+		}
+		d.renderFrameLine(&sb, frame.BottomExtraLine, extraLineBg)
 	}
 
 	// Clear everything below the buffer.
-	// Use frame background during clear so any same-line remainder stays tinted.
-	if frame.LineBg != "" {
-		sb.WriteString(frame.LineBg)
+	// Use the lowest visible frame row background when available.
+	clearBg := frame.LineBg
+	if frame.BottomExtraLineBg != "" {
+		clearBg = frame.BottomExtraLineBg
+	} else if frame.BottomLineBg != "" {
+		clearBg = frame.BottomLineBg
+	}
+	if clearBg != "" {
+		sb.WriteString(clearBg)
 	}
 	sb.WriteString(ansiClearToEnd)
-	if frame.LineBg != "" {
+	if clearBg != "" {
 		sb.WriteString(ansiReset)
 	}
 	if traceEnabled {
@@ -774,7 +800,20 @@ func (d *Display) finalizeWithFrame(buf *Buffer) {
 	}
 
 	if frame.BottomLine != "" {
-		d.renderFrameLine(&sb, frame.BottomLine, frame.LineBg)
+		bottomLineBg := frame.LineBg
+		if frame.BottomLineBg != "" {
+			bottomLineBg = frame.BottomLineBg
+		}
+		d.renderFrameLine(&sb, frame.BottomLine, bottomLineBg)
+		sb.WriteString("\r\n")
+		linesWritten++
+	}
+	if frame.BottomExtraLine != "" {
+		extraLineBg := frame.LineBg
+		if frame.BottomExtraLineBg != "" {
+			extraLineBg = frame.BottomExtraLineBg
+		}
+		d.renderFrameLine(&sb, frame.BottomExtraLine, extraLineBg)
 		sb.WriteString("\r\n")
 		linesWritten++
 	}

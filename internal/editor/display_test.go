@@ -235,6 +235,32 @@ func TestDisplay_RenderWithFrame_ClearsFromLineEnd(t *testing.T) {
 	}
 }
 
+func TestDisplay_RenderWithFrame_UsesBottomLineBgOverride(t *testing.T) {
+	var out bytes.Buffer
+	d := NewDisplay(&out, 20, 24)
+	d.SetFrame(&InputFrame{
+		TopLine:      "TOP",
+		BottomLine:   "BOT",
+		Prefix:       "P ",
+		PrefixWidth:  2,
+		LineBg:       "\x1b[48;2;1;2;3m",
+		BottomLineBg: "\x1b[48;2;7;8;9m",
+	})
+
+	buf := NewBufferFromString("hello")
+	cur := NewCursor()
+	cur.MoveTo(0, 5)
+
+	d.Render(buf, cur, false)
+	output := out.String()
+	if !strings.Contains(output, "\x1b[48;2;7;8;9m\x1b[K\x1b[0m") {
+		t.Fatalf("expected bottom line to use overridden background, got %q", output)
+	}
+	if !strings.Contains(output, "\x1b[48;2;7;8;9m\x1b[J\x1b[0m") {
+		t.Fatalf("expected clear-to-end to use overridden background, got %q", output)
+	}
+}
+
 func TestDisplay_Render_LongWrappedLineTracksVisualCursorRow(t *testing.T) {
 	var out bytes.Buffer
 	d := NewDisplay(&out, 10, 24)

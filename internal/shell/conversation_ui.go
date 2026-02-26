@@ -21,11 +21,13 @@ type ConversationUI struct {
 	out          io.Writer
 	accentColor  string
 	tintBg       string // Pre-computed background escape sequence
+	tintEdgeBg   string // Subtler tint for the active bottom seam row
 	border       string // Pre-computed border prefix (│ in accent color + space)
 	borderFg     string // Accent foreground color
 	userBorder   string // Dimmer border for user box
 	resetTint    string // Reset + re-apply tint background
 	tintActive   bool
+	atLineStart  bool // True when next streamed chunk should emit border prefix
 	userIndent   string
 	termWidth    int
 	userBoxWidth int
@@ -38,9 +40,11 @@ func NewConversationUI(out io.Writer, accentColor string) *ConversationUI {
 		out:         out,
 		accentColor: accentColor,
 		tintActive:  true,
+		atLineStart: true,
 		userIndent:  "  ",
 	}
 	ui.tintBg = ComputeTintBackground(accentColor)
+	ui.tintEdgeBg = computeTintBackground(accentColor, 0.04)
 	ui.resetTint = "\x1b[0m" + ui.tintBg
 
 	// Compute colored border: │ in accent color (single line)
@@ -66,7 +70,7 @@ func NewConversationUI(out io.Writer, accentColor string) *ConversationUI {
 // WriteTintedLine writes a line with background tint and border.
 func (ui *ConversationUI) WriteTintedLine(text string) {
 	if ui.tintActive {
-		fmt.Fprintf(ui.out, "%s%s%s\x1b[K\x1b[0m\n", ui.tintBg, ui.border, text)
+		fmt.Fprintf(ui.out, "\r%s%s%s\x1b[K\x1b[0m\n", ui.tintBg, ui.border, text)
 	} else {
 		fmt.Fprintln(ui.out, text)
 	}
@@ -75,20 +79,28 @@ func (ui *ConversationUI) WriteTintedLine(text string) {
 // WriteTopBorder writes a decorative top border for the conversation zone.
 // Includes hints integrated into the border.
 func (ui *ConversationUI) WriteTopBorder() {
+	ui.mu.Lock()
+	defer ui.mu.Unlock()
 	if !ui.tintActive {
 		return
 	}
 	line := ui.topBorderLine()
 	fmt.Fprintf(ui.out, "\r%s%s%s\x1b[K\x1b[0m\r\n", ui.tintBg, ui.borderFg, line)
+	ui.atLineStart = true
 }
 
 // WriteBottomBorder writes a decorative bottom border for the conversation zone.
 func (ui *ConversationUI) WriteBottomBorder() {
+	ui.mu.Lock()
+	defer ui.mu.Unlock()
+	line := ui.bottomBorderLine()
 	if !ui.tintActive {
+		fmt.Fprintf(ui.out, "\r%s\n", line)
+		ui.atLineStart = true
 		return
 	}
-	line := ui.bottomBorderLine()
 	fmt.Fprintf(ui.out, "\r%s%s%s\x1b[K\x1b[0m\r\n", ui.tintBg, ui.borderFg, line)
+	ui.atLineStart = true
 }
 
 // InputPromptString returns the prompt string for readline (with ANSI codes).
@@ -114,11 +126,13 @@ func (ui *ConversationUI) InputFrame() *editor.InputFrame {
 	prefix, prefixWidth := ui.userBoxPrefix()
 
 	frame := &editor.InputFrame{
-		TopLine:     ui.userBoxTopLine(),
-		BottomLine:  ui.userBoxBottomLine(),
-		Prefix:      prefix,
-		PrefixWidth: prefixWidth,
-		LineBg:      ui.tintBg,
+		TopLine:           ui.userBoxTopLine(),
+		BottomLine:        ui.userBoxBottomLine(),
+		BottomExtraLine:   ui.userBoxBlendLine(),
+		Prefix:            prefix,
+		PrefixWidth:       prefixWidth,
+		LineBg:            ui.tintBg,
+		BottomExtraLineBg: ui.tintEdgeBg,
 	}
 	if trace.Enabled("shell") {
 		trace.ShellHigh("conversation_input_frame", map[string]any{
@@ -168,11 +182,20 @@ func (ui *ConversationUI) FinishUserBox() {
 
 // ClearUserBox erases the user input box (top + input line) when canceling.
 func (ui *ConversationUI) ClearUserBox() {
-	// Move to top of box (up 2 from content line) and clear 3 lines
-	fmt.Fprint(ui.out, "\x1b[2K")        // Clear current line
-	fmt.Fprint(ui.out, "\x1b[1A\x1b[2K") // Up, clear (bottom border)
-	fmt.Fprint(ui.out, "\x1b[1A\x1b[2K") // Up, clear (top border)
-	fmt.Fprint(ui.out, "\x1b[0m")        // Reset
+	ui.mu.Lock()
+	defer ui.mu.Unlock()
+
+	// Cursor is on the input content line inside the frame.
+	// Move to the top frame line, clear top/content/bottom/blend, and restore at top.
+	// Restoring at top avoids leaving a stale cleared row between output and hint.
+	fmt.Fprint(ui.out, "\r\x1b[1A\x1b[s")
+	for i := 0; i < 4; i++ {
+		fmt.Fprint(ui.out, "\r\x1b[2K")
+		if i < 3 {
+			fmt.Fprint(ui.out, "\x1b[1B")
+		}
+	}
+	fmt.Fprint(ui.out, "\x1b[u\x1b[0m")
 }
 
 // WriteInputPrompt writes the ║ input prompt in accent color.
@@ -234,6 +257,7 @@ func (ui *ConversationUI) ClearThinkingIndicator() {
 	defer ui.mu.Unlock()
 	if ui.tintActive {
 		fmt.Fprintf(ui.out, "\r%s%s\x1b[K\x1b[0m", ui.tintBg, ui.border)
+		ui.atLineStart = false
 	} else {
 		fmt.Fprint(ui.out, "\r\x1b[K")
 	}
@@ -251,6 +275,9 @@ func (ui *ConversationUI) ClearTint() {
 func (ui *ConversationUI) SetTintActive(active bool) {
 	ui.mu.Lock()
 	defer ui.mu.Unlock()
+	if active && !ui.tintActive {
+		ui.atLineStart = true
+	}
 	ui.tintActive = active
 }
 
@@ -264,15 +291,22 @@ func (ui *ConversationUI) WriteStreamTinted(text string) {
 		return
 	}
 
-	// Start with tint and border
-	fmt.Fprint(ui.out, ui.tintBg+ui.border)
+	// Emit border only at the start of a new line. Mid-line chunks should
+	// continue without injecting another border marker.
+	if ui.atLineStart {
+		fmt.Fprint(ui.out, "\r"+ui.tintBg+ui.border)
+	} else {
+		fmt.Fprint(ui.out, ui.tintBg)
+	}
+	ui.atLineStart = false
 
 	// The markdown renderer adds \x1b[0m resets which wipe our background.
 	// We need to reapply tint after every reset.
 	tinted := strings.ReplaceAll(text, "\x1b[0m", "\x1b[0m"+ui.tintBg)
 
-	// For newlines: fill to end of line, then newline, then reapply tint and border
-	tinted = strings.ReplaceAll(tinted, "\n", "\x1b[K\n"+ui.tintBg+ui.border)
+	// For newlines: fill to end of line, then newline, then reapply tint and border.
+	// Use \r after \n to guarantee column 0 in raw mode.
+	tinted = strings.ReplaceAll(tinted, "\n", "\x1b[K\n\r"+ui.tintBg+ui.border)
 
 	fmt.Fprint(ui.out, tinted)
 }
@@ -490,4 +524,34 @@ func (ui *ConversationUI) userBoxBottomLine() string {
 		line,
 		ui.resetTint,
 	)
+}
+
+func (ui *ConversationUI) userBoxBlendLine() string {
+	edgeBorder := fmt.Sprintf("%s│\x1b[0m%s ", ui.borderFg, ui.tintEdgeBg)
+	return ui.tintEdgeBg + edgeBorder
+}
+
+func computeTintBackground(accentColor string, blend float64) string {
+	if blend < 0 {
+		blend = 0
+	}
+	if blend > 1 {
+		blend = 1
+	}
+
+	var r, g, b int
+	if len(accentColor) == 7 && accentColor[0] == '#' {
+		if _, err := fmt.Sscanf(accentColor[1:], "%02x%02x%02x", &r, &g, &b); err != nil {
+			r, g, b = 30, 30, 46
+		}
+	} else {
+		r, g, b = 30, 30, 46
+	}
+
+	bgR, bgG, bgB := 26, 26, 26
+	finalR := int(float64(bgR)*(1-blend) + float64(r)*blend)
+	finalG := int(float64(bgG)*(1-blend) + float64(g)*blend)
+	finalB := int(float64(bgB)*(1-blend) + float64(b)*blend)
+
+	return fmt.Sprintf("\x1b[48;2;%d;%d;%dm", finalR, finalG, finalB)
 }

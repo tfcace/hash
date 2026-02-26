@@ -2,6 +2,7 @@ package shell
 
 import (
 	"bytes"
+	"strings"
 	"testing"
 )
 
@@ -77,6 +78,19 @@ func TestConversationUI_ClearTint(t *testing.T) {
 	// (This is a state test - the UI remembers it's cleared)
 }
 
+func TestConversationUI_WriteBottomBorder_WhenTintDisabledStillRenders(t *testing.T) {
+	var buf bytes.Buffer
+	ui := NewConversationUI(&buf, "#7c3aed")
+	ui.ClearTint()
+
+	ui.WriteBottomBorder()
+	output := buf.String()
+
+	if !strings.Contains(output, "╰") {
+		t.Fatalf("expected bottom border glyph when tint is disabled, got %q", output)
+	}
+}
+
 func TestConversationUI_WriteStreamTinted(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -150,6 +164,23 @@ func TestConversationUI_WriteStreamTinted_NoTintWhenDisabled(t *testing.T) {
 	}
 }
 
+func TestConversationUI_WriteStreamTinted_ChunkedSingleLine_NoMidLineBorder(t *testing.T) {
+	var buf bytes.Buffer
+	ui := NewConversationUI(&buf, "#7c3aed")
+
+	ui.WriteStreamTinted("Hello")
+	ui.WriteStreamTinted(" world")
+
+	output := buf.String()
+
+	if got := strings.Count(output, "│"); got != 1 {
+		t.Fatalf("border marker count = %d, want 1; output=%q", got, output)
+	}
+	if !strings.Contains(output, "Hello") || !strings.Contains(output, " world") {
+		t.Fatalf("missing streamed text in output: %q", output)
+	}
+}
+
 func TestConversationUI_TopBorderLine_UsesFullWidth(t *testing.T) {
 	var buf bytes.Buffer
 	ui := NewConversationUI(&buf, "#7c3aed")
@@ -170,5 +201,52 @@ func TestConversationUI_ComputeUserBoxWidth_WideTerminal(t *testing.T) {
 	const want = 213
 	if got != want {
 		t.Fatalf("user box width = %d, want %d", got, want)
+	}
+}
+
+func TestConversationUI_ClearUserBox_ClearsFourLinesAndRestoresTopCursor(t *testing.T) {
+	var buf bytes.Buffer
+	ui := NewConversationUI(&buf, "#7c3aed")
+
+	ui.ClearUserBox()
+	output := buf.String()
+
+	if !strings.HasPrefix(output, "\r\x1b[1A\x1b[s") {
+		t.Fatalf("clear sequence should move to top and save cursor, got %q", output)
+	}
+	if got := strings.Count(output, "\x1b[2K"); got != 4 {
+		t.Fatalf("clear sequence should clear exactly four rows, got %d in %q", got, output)
+	}
+	if !strings.HasSuffix(output, "\x1b[u\x1b[0m") {
+		t.Fatalf("clear sequence should restore top cursor and reset style, got %q", output)
+	}
+}
+
+func TestConversationUI_UserBoxBottomLine_UsesSolidBoxBorder(t *testing.T) {
+	var buf bytes.Buffer
+	ui := NewConversationUI(&buf, "#7c3aed")
+
+	line := ui.userBoxBottomLine()
+	if !strings.Contains(line, "─") {
+		t.Fatalf("expected solid box border rune in user bottom line, got %q", line)
+	}
+	if strings.Contains(line, "┈") {
+		t.Fatalf("expected no textured seam in user bottom line, got %q", line)
+	}
+}
+
+func TestConversationUI_InputFrame_UsesSofterBottomLineBg(t *testing.T) {
+	var buf bytes.Buffer
+	ui := NewConversationUI(&buf, "#7c3aed")
+
+	frame := ui.InputFrame()
+	if frame.BottomExtraLineBg == "" {
+		t.Fatal("expected bottom extra line bg override to be set")
+	}
+	if frame.BottomExtraLineBg == frame.LineBg {
+		t.Fatalf("expected bottom extra line bg to differ from main line bg, both were %q", frame.LineBg)
+	}
+	if frame.BottomExtraLine == "" {
+		t.Fatal("expected bottom extra blend line to be set")
 	}
 }

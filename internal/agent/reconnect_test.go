@@ -63,25 +63,35 @@ func (p *mockPipe) IsBroken() bool {
 // the agent process may exit, breaking the pipe. Subsequent requests must
 // not fail with "broken pipe" - they should reconnect automatically.
 func TestACPTransport_ReconnectAfterBrokenPipe(t *testing.T) {
-	// This test documents the expected behavior.
-	// Currently, the transport does NOT recover from broken pipes,
-	// which is a bug that needs to be fixed.
-	t.Skip("This test documents expected behavior - currently fails due to bug")
+	// We can't fully integration-test reconnect here without a real ACP process,
+	// but we can assert the scenario no longer depends on caller retries.
+	transport := &ACPTransport{
+		config:   ACPConfig{Command: "test"},
+		messages: make(chan []byte, 1024),
+		done:     make(chan struct{}),
+	}
 
-	_ = NewACPTransport(ACPConfig{
-		Command: "echo", // dummy command
-		Args:    []string{},
-	})
+	// Simulate a connected state with a broken pipe and no session (typical
+	// state after sendCancel during Ctrl+C).
+	mockStdin := newMockPipe()
+	mockStdin.Break()
+	transport.stdin = mockStdin
+	transport.sessionID = ""
 
-	// Simulate the scenario:
-	// 1. First request succeeds
-	// 2. User cancels (context canceled)
-	// 3. Pipe breaks (agent exits)
-	// 4. Second request should reconnect, not fail with broken pipe
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
 
-	// We can't easily test this without the actual ACP process,
-	// but we can document the expected behavior and verify the
-	// reconnection logic is correct.
+	textCh, errCh := transport.SendStreaming(ctx, Request{Prompt: "test"})
+	for range textCh {
+	}
+	for range errCh {
+	}
+
+	transport.mu.Lock()
+	defer transport.mu.Unlock()
+	if transport.stdin != nil {
+		t.Fatal("expected broken connection to be reset for reconnect")
+	}
 }
 
 // TestACPTransport_WriteErrorResetsConnection verifies that write errors

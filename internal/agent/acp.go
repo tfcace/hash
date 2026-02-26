@@ -669,161 +669,202 @@ func (t *ACPTransport) SendStreaming(ctx context.Context, req Request) (<-chan s
 		defer close(textCh)
 		defer close(errCh)
 
-		t.mu.Lock()
-
-		// Lazy connect
-		if t.stdin == nil {
-			if err := t.connectLocked(ctx); err != nil {
-				t.mu.Unlock()
-				errCh <- err
+		const maxAttempts = 2 // Initial try + one transparent reconnect retry
+		for attempt := 0; attempt < maxAttempts; attempt++ {
+			receivedText, err := t.sendStreamingAttempt(ctx, req, textCh)
+			if err == nil {
 				return
 			}
-		}
 
-		// Check if we need a new session
-		needSession := t.sessionID == ""
-		t.mu.Unlock()
-
-		// Create session if needed (outside lock to avoid deadlock on timeout)
-		if needSession {
-			cwd := req.Context.Cwd
-			if cwd == "" {
-				cwd = "."
-			}
-			sessionID, err := t.newSession(ctx, cwd)
-			if err != nil {
-				errCh <- err
-				return
-			}
-			t.mu.Lock()
-			t.sessionID = sessionID
-			t.mu.Unlock()
-		}
-
-		t.mu.Lock()
-		sessionID := t.sessionID
-		t.mu.Unlock()
-
-		// Build prompt with context
-		promptText := buildPromptWithContext(req)
-
-		// Send prompt request
-		id := t.requestID.Add(1)
-		rpcReq := jsonRPCRequest{
-			JSONRPC: "2.0",
-			ID:      id,
-			Method:  "session/prompt",
-			Params: promptParams{
-				SessionID: sessionID,
-				Prompt: []promptPart{
-					{Type: "text", Text: promptText},
-				},
-			},
-		}
-
-		data, err := json.Marshal(rpcReq)
-		if err != nil {
-			errCh <- err
-			return
-		}
-
-		t.mu.Lock()
-		_, err = t.stdin.Write(append(data, '\n'))
-		t.mu.Unlock()
-		if err != nil {
-			// Write failed - reset connection so next request reconnects
-			t.resetConnection()
-			errCh <- err
-			return
-		}
-
-		idleTimeout := idleTimeoutForContext(ctx)
-		// Create idle timer
-		idleTimer := time.NewTimer(idleTimeout)
-		defer idleTimer.Stop()
-
-		// Stream response text as it arrives
-		for {
-			select {
-			case <-ctx.Done():
-				t.sendCancel()
+			// Respect cancellation immediately; do not convert into transport errors.
+			if ctx.Err() != nil {
 				errCh <- ctx.Err()
 				return
-
-			case <-idleTimer.C:
-				// No message received for IdleTimeout - agent may be stuck
-				t.sendCancel()
-				// Force reconnect after idle timeout: the process may be hung.
-				t.resetConnection()
-				errCh <- errors.Join(ErrACPIdleTimeout, fmt.Errorf("agent idle timeout (%v without response)", idleTimeout))
-				return
-
-			case line, ok := <-t.messages:
-				if !ok {
-					// Connection closed (readLoop exited) - reset for reconnect
-					t.resetConnection()
-					errCh <- fmt.Errorf("%w: connection closed", ErrACPConnectionClosed)
-					return
-				}
-
-				// Reset idle timer on any message
-				if !idleTimer.Stop() {
-					select {
-					case <-idleTimer.C:
-					default:
-					}
-				}
-				idleTimer.Reset(idleTimeout)
-
-				var msg struct {
-					JSONRPC string          `json:"jsonrpc"`
-					ID      *int64          `json:"id"`
-					Method  string          `json:"method"`
-					Params  json.RawMessage `json:"params"`
-					Result  json.RawMessage `json:"result"`
-					Error   *jsonRPCError   `json:"error"`
-				}
-				if err := json.Unmarshal(line, &msg); err != nil {
-					continue
-				}
-
-				// Check if this is an incoming request (has both ID and Method)
-				if msg.ID != nil && msg.Method != "" {
-					go t.handleIncomingRequest(*msg.ID, msg.Method, msg.Params)
-					continue
-				}
-
-				// Check if it's our response (end of prompt)
-				if msg.ID != nil && *msg.ID == id {
-					if msg.Error != nil {
-						errCh <- fmt.Errorf("rpc error %d: %s", msg.Error.Code, msg.Error.Message)
-					}
-					return
-				}
-
-				// Handle session/update notification - stream text chunks
-				if msg.Method == "session/update" {
-					var updateParams sessionUpdateParams
-					if err := json.Unmarshal(msg.Params, &updateParams); err != nil {
-						continue
-					}
-					// Ignore stale updates from previous sessions.
-					if updateParams.SessionID != sessionID {
-						continue
-					}
-
-					if updateParams.Update.SessionUpdate == "agent_message_chunk" &&
-						updateParams.Update.Content != nil &&
-						updateParams.Update.Content.Type == "text" {
-						// Send text chunk immediately
-						textCh <- updateParams.Update.Content.Text
-					}
-				}
 			}
+
+			// Retry once for connection-level failures before any output is emitted.
+			if attempt < maxAttempts-1 && !receivedText && IsRetryableError(err) {
+				t.resetConnection()
+				continue
+			}
+
+			errCh <- err
+			return
 		}
 	}()
 
 	return textCh, errCh
+}
+
+// sendStreamingAttempt performs one ACP streaming attempt.
+// Returns whether any text chunks were emitted before completion/failure.
+func (t *ACPTransport) sendStreamingAttempt(
+	ctx context.Context,
+	req Request,
+	textCh chan<- string,
+) (receivedText bool, err error) {
+	t.mu.Lock()
+
+	// Lazy connect
+	if t.stdin == nil {
+		if err := t.connectLocked(ctx); err != nil {
+			t.mu.Unlock()
+			return false, err
+		}
+	}
+
+	// Check if we need a new session
+	needSession := t.sessionID == ""
+	t.mu.Unlock()
+
+	// Create session if needed (outside lock to avoid deadlock on timeout)
+	if needSession {
+		cwd := req.Context.Cwd
+		if cwd == "" {
+			cwd = "."
+		}
+		sessionID, err := t.newSession(ctx, cwd)
+		if err != nil {
+			return false, err
+		}
+		t.mu.Lock()
+		t.sessionID = sessionID
+		t.mu.Unlock()
+	}
+
+	t.mu.Lock()
+	sessionID := t.sessionID
+	t.mu.Unlock()
+
+	// Build prompt with context
+	promptText := buildPromptWithContext(req)
+
+	// Send prompt request
+	id := t.requestID.Add(1)
+	rpcReq := jsonRPCRequest{
+		JSONRPC: "2.0",
+		ID:      id,
+		Method:  "session/prompt",
+		Params: promptParams{
+			SessionID: sessionID,
+			Prompt: []promptPart{
+				{Type: "text", Text: promptText},
+			},
+		},
+	}
+
+	data, err := json.Marshal(rpcReq)
+	if err != nil {
+		return false, err
+	}
+
+	t.mu.Lock()
+	_, err = t.stdin.Write(append(data, '\n'))
+	t.mu.Unlock()
+	if err != nil {
+		// Write failed - reset connection so retry can lazily reconnect.
+		t.resetConnection()
+		return false, errors.Join(ErrACPConnectionClosed, fmt.Errorf("write prompt: %w", err))
+	}
+
+	idleTimeout := idleTimeoutForContext(ctx)
+	var permissionRequestsInFlight atomic.Int32
+	// Create idle timer
+	idleTimer := time.NewTimer(idleTimeout)
+	defer idleTimer.Stop()
+
+	// Stream response text as it arrives
+	for {
+		select {
+		case <-ctx.Done():
+			t.sendCancel()
+			return receivedText, ctx.Err()
+
+		case <-idleTimer.C:
+			// Don't timeout while we're waiting on a local permission prompt.
+			// The agent is blocked on our response, so this is user think-time,
+			// not transport idleness.
+			if permissionRequestsInFlight.Load() > 0 {
+				idleTimer.Reset(idleTimeout)
+				continue
+			}
+
+			// No message received for IdleTimeout - agent may be stuck.
+			t.sendCancel()
+			// Force reconnect after idle timeout: the process may be hung.
+			t.resetConnection()
+			return receivedText, errors.Join(
+				ErrACPIdleTimeout,
+				fmt.Errorf("agent idle timeout (%v without response)", idleTimeout),
+			)
+
+		case line, ok := <-t.messages:
+			if !ok {
+				// Connection closed (readLoop exited) - reset for reconnect.
+				t.resetConnection()
+				return receivedText, fmt.Errorf("%w: connection closed", ErrACPConnectionClosed)
+			}
+
+			// Reset idle timer on any message.
+			if !idleTimer.Stop() {
+				select {
+				case <-idleTimer.C:
+				default:
+				}
+			}
+			idleTimer.Reset(idleTimeout)
+
+			var msg struct {
+				JSONRPC string          `json:"jsonrpc"`
+				ID      *int64          `json:"id"`
+				Method  string          `json:"method"`
+				Params  json.RawMessage `json:"params"`
+				Result  json.RawMessage `json:"result"`
+				Error   *jsonRPCError   `json:"error"`
+			}
+			if err := json.Unmarshal(line, &msg); err != nil {
+				continue
+			}
+
+			// Check if this is an incoming request (has both ID and Method).
+			if msg.ID != nil && msg.Method != "" {
+				permissionRequestsInFlight.Add(1)
+				go func(id int64, method string, params json.RawMessage) {
+					defer permissionRequestsInFlight.Add(-1)
+					t.handleIncomingRequest(id, method, params)
+				}(*msg.ID, msg.Method, msg.Params)
+				continue
+			}
+
+			// Check if it's our response (end of prompt).
+			if msg.ID != nil && *msg.ID == id {
+				if msg.Error != nil {
+					return receivedText, fmt.Errorf("rpc error %d: %s", msg.Error.Code, msg.Error.Message)
+				}
+				return receivedText, nil
+			}
+
+			// Handle session/update notification - stream text chunks.
+			if msg.Method == "session/update" {
+				var updateParams sessionUpdateParams
+				if err := json.Unmarshal(msg.Params, &updateParams); err != nil {
+					continue
+				}
+				// Ignore stale updates from previous sessions.
+				if updateParams.SessionID != sessionID {
+					continue
+				}
+
+				if updateParams.Update.SessionUpdate == "agent_message_chunk" &&
+					updateParams.Update.Content != nil &&
+					updateParams.Update.Content.Type == "text" {
+					// Send text chunk immediately.
+					textCh <- updateParams.Update.Content.Text
+					receivedText = true
+				}
+			}
+		}
+	}
 }
 
 // Compile-time check

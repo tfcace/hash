@@ -189,7 +189,8 @@ func looksLikeCommand(text string) bool {
 		"find ", "grep ", "ls ", "cat ", "echo ", "cd ", "mkdir ", "rm ",
 		"cp ", "mv ", "chmod ", "chown ", "docker ", "kubectl ", "git ",
 		"npm ", "yarn ", "go ", "python ", "pip ", "curl ", "wget ",
-		"sed ", "awk ", "sort ", "uniq ", "head ", "tail ", "tar ",
+		"python3 ",
+		"jq ", "sed ", "awk ", "sort ", "uniq ", "head ", "tail ", "tar ",
 		"sudo ", "./", "/",
 	}
 

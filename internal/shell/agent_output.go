@@ -202,6 +202,11 @@ func (aoc *AgentOutputCoordinator) ExitPermission() {
 
 	if aoc.wasStreaming {
 		aoc.state = AgentOutputStateStreaming
+		// Permission prompts always consume their own lines. Resume streaming
+		// from a clean line boundary so the next chunk starts with border + tint.
+		if aoc.streamTint != "" {
+			aoc.atLineStart = true
+		}
 		// Flush buffered content with tinting
 		if aoc.streamBuffer.Len() > 0 {
 			aoc.writeWithTint(aoc.streamBuffer.String())
@@ -234,6 +239,7 @@ const (
 	ansiBold      = "\x1b[1m"
 	ansiClearLine = "\x1b[2K"
 	ansiCursorUp  = "\x1b[1A"
+	permissionPad = "  "
 )
 
 // ComputeTintBackground derives a subtle background tint from an accent color.
@@ -300,10 +306,10 @@ func (aoc *AgentOutputCoordinator) RenderPermissionPrompt(command, toolName, acc
 	barStyle := accentCode + ansiBold
 	lines := []string{
 		"",
-		barStyle + "│" + ansiReset + " " + header,
-		barStyle + "│" + ansiReset + " " + accentCode + ansiBold + command + ansiReset,
-		barStyle + "│" + ansiReset,
-		barStyle + "│" + ansiReset + " [y]allow  [n]deny  [a]always allow",
+		barStyle + "│" + ansiReset + " " + permissionPad + header,
+		barStyle + "│" + ansiReset + " " + permissionPad + accentCode + ansiBold + command + ansiReset,
+		barStyle + "│" + ansiReset + " " + permissionPad,
+		barStyle + "│" + ansiReset + " " + permissionPad + "[y]allow  [n]deny  [a]always allow",
 	}
 
 	if aoc.streamTint != "" {
@@ -338,9 +344,9 @@ func (aoc *AgentOutputCoordinator) ClearPermissionPrompt(allowed bool) {
 	// Show feedback with the command (dim style to not distract from main output)
 	feedback := ""
 	if allowed {
-		feedback = fmt.Sprintf("\x1b[32m✓\x1b[0m \x1b[90m%s\x1b[0m", cmd)
+		feedback = fmt.Sprintf("%s\x1b[32m✓\x1b[0m \x1b[90m%s\x1b[0m", permissionPad, cmd)
 	} else {
-		feedback = fmt.Sprintf("\x1b[31m✗\x1b[0m \x1b[90m%s\x1b[0m", cmd)
+		feedback = fmt.Sprintf("%s\x1b[31m✗\x1b[0m \x1b[90m%s\x1b[0m", permissionPad, cmd)
 	}
 
 	if aoc.streamTint != "" {
@@ -353,6 +359,7 @@ func (aoc *AgentOutputCoordinator) ClearPermissionPrompt(allowed bool) {
 		aoc.out.Write([]byte(sb.String()))
 
 		// Feedback line (tinted)
+		aoc.atLineStart = true
 		aoc.writeWithTint(feedback + "\x1b[K")
 		fmt.Fprint(aoc.out, "\n")
 
@@ -376,9 +383,9 @@ func (aoc *AgentOutputCoordinator) ClearPermissionPrompt(allowed bool) {
 			sb.WriteString(ansiClearLine)
 		}
 		if allowed {
-			sb.WriteString(fmt.Sprintf("\x1b[32m✓\x1b[0m \x1b[90m%s\x1b[0m\n", cmd))
+			sb.WriteString(fmt.Sprintf("%s\x1b[32m✓\x1b[0m \x1b[90m%s\x1b[0m\n", permissionPad, cmd))
 		} else {
-			sb.WriteString(fmt.Sprintf("\x1b[31m✗\x1b[0m \x1b[90m%s\x1b[0m\n", cmd))
+			sb.WriteString(fmt.Sprintf("%s\x1b[31m✗\x1b[0m \x1b[90m%s\x1b[0m\n", permissionPad, cmd))
 		}
 		aoc.out.Write([]byte(sb.String()))
 	}

@@ -1,7 +1,9 @@
 package shell
 
 import (
+	"bytes"
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -88,5 +90,79 @@ func TestRunConversationLoop_ConfiguredIdleTimeoutTriggersExit(t *testing.T) {
 	}
 	if elapsed < 20*time.Millisecond || elapsed > 2*time.Second {
 		t.Fatalf("loop elapsed = %v, expected idle-timeout-driven exit", elapsed)
+	}
+}
+
+func TestRunConversationLoop_DoubleCtrlCShowsBottomBorder(t *testing.T) {
+	cfg := config.Default()
+
+	sh, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer sh.Close()
+
+	var out bytes.Buffer
+	sh.convUI = NewConversationUI(&out, "#7c3aed")
+	sh.conversation.Activate()
+	sh.conversation.SetSubState(ConversationAwaitingInput)
+
+	attempt := 0
+	sh.conversationInputHook = func(ctx context.Context) (string, error) {
+		attempt++
+		return "", ErrEditorCanceled
+	}
+
+	sh.runConversationLoop(context.Background())
+
+	if sh.conversation.IsActive() {
+		t.Fatal("conversation should be inactive after second Ctrl+C cancel")
+	}
+	if attempt < 2 {
+		t.Fatalf("expected two input attempts (arm + exit), got %d", attempt)
+	}
+
+	output := out.String()
+	if !strings.Contains(output, "Press Ctrl+C again to exit") {
+		t.Fatalf("expected cancel hint in output, got %q", output)
+	}
+	if !strings.Contains(output, "╰") {
+		t.Fatalf("expected bottom border in output, got %q", output)
+	}
+}
+
+func TestRunConversationLoop_ContextCanceledShowsBottomBorder(t *testing.T) {
+	cfg := config.Default()
+
+	sh, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer sh.Close()
+
+	var out bytes.Buffer
+	sh.convUI = NewConversationUI(&out, "#7c3aed")
+	sh.conversation.Activate()
+	sh.conversation.SetSubState(ConversationAwaitingInput)
+
+	sh.conversationInputHook = func(ctx context.Context) (string, error) {
+		<-ctx.Done()
+		return "", ctx.Err()
+	}
+
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	sh.runConversationLoop(canceledCtx)
+
+	if sh.conversation.IsActive() {
+		t.Fatal("conversation should be inactive after context cancellation")
+	}
+	output := out.String()
+	if !strings.Contains(output, "╰") {
+		t.Fatalf("expected bottom border in output after context cancel, got %q", output)
+	}
+	if got := strings.Count(output, "\x1b[2K"); got < 4 {
+		t.Fatalf("expected context-cancel path to clear user frame before exit, got %d clear ops in %q", got, output)
 	}
 }
