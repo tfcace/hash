@@ -5,8 +5,8 @@ import (
 	"strings"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/tfcace/hash/internal/clipboard"
 	"github.com/tfcace/hash/internal/prompt"
 	sysClipboard "golang.design/x/clipboard"
@@ -76,7 +76,7 @@ func (ui *SearchUI) Init() tea.Cmd {
 // Update implements tea.Model.
 func (ui *SearchUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		return ui.handleKey(msg)
 
 	case tea.WindowSizeMsg:
@@ -106,7 +106,7 @@ func (ui *SearchUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return ui, nil
 }
 
-func (ui *SearchUI) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (ui *SearchUI) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// Clear status message on any keypress
 	ui.statusMessage = ""
 
@@ -179,7 +179,7 @@ func (ui *SearchUI) adjustScroll() {
 }
 
 // View implements tea.Model.
-func (ui *SearchUI) View() string {
+func (ui *SearchUI) View() tea.View {
 	var b strings.Builder
 
 	// Styles
@@ -281,7 +281,7 @@ func (ui *SearchUI) View() string {
 	help := "  ↑/↓ navigate  enter select  ctrl+y copy cmd  ctrl+o copy output  esc cancel"
 	b.WriteString(dimStyle.Render(help))
 
-	return b.String()
+	return tea.NewView(b.String())
 }
 
 func (ui *SearchUI) formatResultLine(cmd Command, idx int, selected, normal, dim, errStyle lipgloss.Style) string {

@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 )
 
 // PickerUI provides an interactive context picker TUI.
@@ -27,7 +27,7 @@ func NewPickerUI(collection *Collection) *PickerUI {
 // Run starts the interactive picker and returns the serialized context.
 // Returns empty string if canceled.
 func (ui *PickerUI) Run() (string, error) {
-	p := tea.NewProgram(ui, tea.WithAltScreen())
+	p := tea.NewProgram(ui)
 	model, err := p.Run()
 	if err != nil {
 		return "", err
@@ -45,7 +45,7 @@ func (ui *PickerUI) Init() tea.Cmd {
 // Update implements tea.Model.
 func (ui *PickerUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		switch msg.String() {
 		case "ctrl+c", "esc":
 			// Cancel - deselect all and quit
@@ -61,7 +61,7 @@ func (ui *PickerUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "down", "j":
 			ui.picker.MoveDown()
 
-		case " ":
+		case "space":
 			ui.picker.ToggleCurrent()
 
 		case "a":
@@ -80,7 +80,7 @@ func (ui *PickerUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 // View implements tea.Model.
-func (ui *PickerUI) View() string {
+func (ui *PickerUI) View() tea.View {
 	var b strings.Builder
 
 	// Styles
@@ -177,5 +177,7 @@ func (ui *PickerUI) View() string {
 	// Footer
 	fmt.Fprintf(&b, "\n%s", dimStyle.Render("[Space: toggle] [a: all] [n: none] [Enter: confirm] [Esc: skip]"))
 
-	return b.String()
+	v := tea.NewView(b.String())
+	v.AltScreen = true
+	return v
 }

@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/lipgloss/v2"
 	"github.com/tfcace/hash/internal/clipboard"
 	"github.com/tfcace/hash/internal/config"
 	"github.com/tfcace/hash/internal/history"
