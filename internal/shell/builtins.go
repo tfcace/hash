@@ -32,7 +32,7 @@ func isBuiltinEnabled(cfg *config.Config, name string) bool {
 // isBuiltin returns true if the command is a shell builtin.
 func isBuiltin(cmd string) bool {
 	switch cmd {
-	case "cd", "exit", "quit", "history", "copy", "issue", "status", "tips":
+	case "cd", "exit", "quit", "history", "copy", "issue", "status", "tips", "setup-zoxide":
 		return true
 	// Source builtin with LangBash support
 	case "source", ".":
@@ -83,6 +83,8 @@ func (s *Shell) executeBuiltin(ctx context.Context, line string) (bool, error) {
 		return true, s.builtinStatus()
 	case "tips":
 		return true, s.builtinTips(args)
+	case "setup-zoxide":
+		return true, s.builtinSetupZoxide(ctx, args)
 	case "source", ".":
 		return true, s.builtinSource(ctx, args)
 	case "bindkey", "setopt", "unsetopt", "autoload", "compdef", "zstyle", "zmodload", "zle", "compinit", "promptinit":
