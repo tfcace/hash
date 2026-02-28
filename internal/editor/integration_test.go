@@ -304,6 +304,27 @@ func TestIntegration_CtrlW_DeleteWord(t *testing.T) {
 	}
 }
 
+func TestIntegration_CtrlW_DeletePathSegment(t *testing.T) {
+	// Ctrl+W on a path should delete one segment, not the whole path
+	input := []byte{
+		'c', 'm', 'd', '/', 'h', 'a', 's', 'h', '/', 'm', 'a', 'i', 'n', '.', 'g', 'o',
+		0x17,       // Ctrl+W (delete word back to /)
+		0x1b, '\r', // Submit
+	}
+
+	var output bytes.Buffer
+	ed := New(Config{Keybindings: "helix"}, bytes.NewReader(input), &output)
+
+	result, err := ed.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	if result.Text != "cmd/hash/" {
+		t.Errorf("Text = %q, want %q", result.Text, "cmd/hash/")
+	}
+}
+
 func TestIntegration_CtrlU_DeleteToStart(t *testing.T) {
 	// Type, Ctrl+U to delete to start
 	input := []byte{

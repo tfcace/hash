@@ -1036,6 +1036,8 @@ func (e *Editor) filteredCompletionItems() []Completion {
 
 // handleCompletionKey processes keys when completion menu is active.
 // Returns true if the key was handled, false to pass through.
+//
+//nolint:gocyclo // key dispatch switch is inherently branchy but straightforward
 func (e *Editor) handleCompletionKey(key Key) bool {
 	if len(e.completionItems) == 0 {
 		e.dismissCompletion()
@@ -1095,13 +1097,14 @@ func (e *Editor) handleCompletionKey(key Key) bool {
 		return true
 
 	case KeyBackspace:
-		if e.completionFilter != "" {
+		switch {
+		case e.completionFilter != "":
 			// Remove last character from filter
 			e.completionFilter = e.completionFilter[:len(e.completionFilter)-1]
 			e.completionIndex = 0
-		} else if len(e.completionDrillStack) > 0 {
+		case len(e.completionDrillStack) > 0:
 			e.drillUp()
-		} else {
+		default:
 			// No filter, no drill stack — dismiss
 			e.dismissCompletion()
 			return false

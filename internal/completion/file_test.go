@@ -268,8 +268,8 @@ func TestFileCompleter_DirectoryWithTrailingSlash(t *testing.T) {
 	completer := NewFileCompleter()
 	ctx := context.Background()
 
-	// Complete "cd mydir/" should list contents of mydir
-	result, err := completer.Complete(ctx, "cd mydir/", 9)
+	// Complete "ls mydir/" should list contents of mydir
+	result, err := completer.Complete(ctx, "ls mydir/", 9)
 	if err != nil {
 		t.Fatalf("Complete() error = %v", err)
 	}
@@ -279,6 +279,37 @@ func TestFileCompleter_DirectoryWithTrailingSlash(t *testing.T) {
 	}
 	if len(result.Items) > 0 && result.Items[0].Value != "inner.txt" {
 		t.Errorf("Value = %q, want %q", result.Items[0].Value, "inner.txt")
+	}
+}
+
+func TestFileCompleter_CdShowsOnlyDirectories(t *testing.T) {
+	tmpDir := t.TempDir()
+	os.Mkdir(filepath.Join(tmpDir, "subdir"), 0o755)
+	os.WriteFile(filepath.Join(tmpDir, "file.txt"), []byte{}, 0o644)
+
+	oldDir, _ := os.Getwd()
+	os.Chdir(tmpDir)
+	defer os.Chdir(oldDir)
+
+	completer := NewFileCompleter()
+	ctx := context.Background()
+
+	// "cd " should only show directories, not files
+	result, err := completer.Complete(ctx, "cd ", 3)
+	if err != nil {
+		t.Fatalf("Complete() error = %v", err)
+	}
+	if len(result.Items) != 1 {
+		t.Fatalf("Expected 1 directory, got %d: %v", len(result.Items), result.Items)
+	}
+	if result.Items[0].Value != "subdir/" {
+		t.Errorf("Value = %q, want %q", result.Items[0].Value, "subdir/")
+	}
+
+	// "ls " should show both files and directories
+	result2, _ := completer.Complete(ctx, "ls ", 3)
+	if len(result2.Items) != 2 {
+		t.Errorf("ls should show 2 items (dir + file), got %d", len(result2.Items))
 	}
 }
 

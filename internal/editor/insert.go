@@ -309,8 +309,8 @@ func (m *InsertMode) moveWordBack(state *EditorState) {
 	for col > 0 && (col > len(line) || line[col-1] == ' ') {
 		col--
 	}
-	// Skip word
-	for col > 0 && col <= len(line) && line[col-1] != ' ' {
+	// Skip word (treat / as word boundary for path editing)
+	for col > 0 && col <= len(line) && line[col-1] != ' ' && line[col-1] != '/' {
 		col--
 	}
 	state.Cursor.Pos.Col = col
@@ -320,12 +320,12 @@ func (m *InsertMode) moveWordForward(state *EditorState) {
 	line := state.Buffer.Line(state.Cursor.Pos.Row)
 	col := state.Cursor.Pos.Col
 
-	// Skip word
-	for col < len(line) && line[col] != ' ' {
+	// Skip word (treat / as word boundary for path editing)
+	for col < len(line) && line[col] != ' ' && line[col] != '/' {
 		col++
 	}
-	// Skip spaces
-	for col < len(line) && line[col] == ' ' {
+	// Skip delimiters (spaces and path separators)
+	for col < len(line) && (line[col] == ' ' || line[col] == '/') {
 		col++
 	}
 	state.Cursor.Pos.Col = col

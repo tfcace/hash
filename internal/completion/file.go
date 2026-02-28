@@ -78,6 +78,9 @@ func (c *FileCompleter) Complete(ctx context.Context, line string, pos int) (Res
 	wantsDotFiles := originalWord != "" && strings.HasPrefix(filepath.Base(originalWord), ".")
 	showHidden := c.showHidden || wantsDotFiles
 
+	// Check if the command only accepts directories (cd, pushd, popd, rmdir)
+	dirsOnly := isDirOnlyCommand(line, pos)
+
 	var items []Item
 	for _, entry := range entries {
 		name := entry.Name()
@@ -105,6 +108,11 @@ func (c *FileCompleter) Complete(ctx context.Context, line string, pos int) (Res
 			value += "/"
 		}
 
+		// Skip non-directories for directory-only commands
+		if dirsOnly && !isDir {
+			continue
+		}
+
 		items = append(items, Item{
 			Value:       value,
 			Display:     name,
@@ -117,6 +125,21 @@ func (c *FileCompleter) Complete(ctx context.Context, line string, pos int) (Res
 		Items:  items,
 		Prefix: getCompletionPrefix(originalWord, prefix),
 	}, nil
+}
+
+// isDirOnlyCommand checks if the command on the line only accepts directories.
+func isDirOnlyCommand(line string, pos int) bool {
+	// Use pipe context so "ls | cd <TAB>" correctly identifies cd
+	segment, segPos := ExtractPipeContext(line, pos)
+	parts := strings.Fields(segment[:segPos])
+	if len(parts) == 0 {
+		return false
+	}
+	switch parts[0] {
+	case "cd", "pushd", "popd", "rmdir":
+		return true
+	}
+	return false
 }
 
 // extractWord extracts the word at position from the line.

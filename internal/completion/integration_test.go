@@ -95,7 +95,7 @@ func TestIntegration_FuzzyDisabled(t *testing.T) {
 }
 
 func TestIntegration_DirectoryListingAfterCompletion(t *testing.T) {
-	// Simulates: user types "cd my", gets "mydir/", then presses TAB again
+	// Simulates: user types "ls my", gets "mydir/", then presses TAB again
 	// The second TAB should list contents of mydir/
 	tmpDir := t.TempDir()
 	myDir := filepath.Join(tmpDir, "mydir")
@@ -114,14 +114,14 @@ func TestIntegration_DirectoryListingAfterCompletion(t *testing.T) {
 	fileCompleter.SetFuzzyMode(true)
 	router.Register(fileCompleter, PriorityFilesystem)
 
-	// First completion: "cd my" -> should return "mydir/"
-	result1, _ := router.Complete(context.Background(), "cd my", 5)
+	// First completion: "ls my" -> should return "mydir/"
+	result1, _ := router.Complete(context.Background(), "ls my", 5)
 	if len(result1.Items) != 1 || result1.Items[0].Value != "mydir/" {
 		t.Fatalf("First completion should return mydir/, got: %v", result1.Items)
 	}
 
-	// Second completion: "cd mydir/" -> should list dir contents (unfiltered)
-	result2, _ := router.Complete(context.Background(), "cd mydir/", 9)
+	// Second completion: "ls mydir/" -> should list dir contents (unfiltered)
+	result2, _ := router.Complete(context.Background(), "ls mydir/", 9)
 	if len(result2.Items) != 2 {
 		t.Errorf("Second TAB should list 2 files in mydir/, got %d", len(result2.Items))
 	}
