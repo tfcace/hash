@@ -698,18 +698,18 @@ func (t *ACPTransport) SendStreaming(ctx context.Context, req Request) (<-chan s
 
 // sendStreamingAttempt performs one ACP streaming attempt.
 // Returns whether any text chunks were emitted before completion/failure.
-func (t *ACPTransport) sendStreamingAttempt(
+func (t *ACPTransport) sendStreamingAttempt( //nolint:gocyclo // streaming protocol handler with multiple message types
 	ctx context.Context,
 	req Request,
 	textCh chan<- string,
-) (receivedText bool, err error) {
+) (receivedText bool, retErr error) {
 	t.mu.Lock()
 
 	// Lazy connect
 	if t.stdin == nil {
-		if err := t.connectLocked(ctx); err != nil {
+		if connectErr := t.connectLocked(ctx); connectErr != nil {
 			t.mu.Unlock()
-			return false, err
+			return false, connectErr
 		}
 	}
 
@@ -723,12 +723,12 @@ func (t *ACPTransport) sendStreamingAttempt(
 		if cwd == "" {
 			cwd = "."
 		}
-		sessionID, err := t.newSession(ctx, cwd)
-		if err != nil {
-			return false, err
+		newSessionID, sessionErr := t.newSession(ctx, cwd)
+		if sessionErr != nil {
+			return false, sessionErr
 		}
 		t.mu.Lock()
-		t.sessionID = sessionID
+		t.sessionID = newSessionID
 		t.mu.Unlock()
 	}
 

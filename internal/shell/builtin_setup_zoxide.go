@@ -42,7 +42,7 @@ See: https://github.com/ajeetdsouza/zoxide`)
 		fmt.Println()
 		fmt.Println("Install it first:")
 		fmt.Println("  https://github.com/ajeetdsouza/zoxide#installation")
-		return nil
+		return nil //nolint:nilerr // intentional: not-installed is a user message, not an error
 	}
 
 	var changes []string
@@ -99,7 +99,7 @@ See: https://github.com/ajeetdsouza/zoxide`)
 
 // setupZoxideUpdateConfig updates config.toml with zoxide settings.
 // It modifies the config in-place and writes the file.
-func setupZoxideUpdateConfig(configDir string, cfg *config.Config) ([]string, error) {
+func setupZoxideUpdateConfig(configDir string, cfg *config.Config) ([]string, error) { //nolint:gocyclo // linear config assembly
 	configPath := filepath.Join(configDir, "config.toml")
 
 	needsCd := !cdBuiltinDisabled(cfg)
@@ -109,7 +109,7 @@ func setupZoxideUpdateConfig(configDir string, cfg *config.Config) ([]string, er
 		return nil, nil
 	}
 
-	if err := os.MkdirAll(configDir, 0o755); err != nil {
+	if err := os.MkdirAll(configDir, 0o750); err != nil {
 		return nil, err
 	}
 
@@ -134,17 +134,18 @@ func setupZoxideUpdateConfig(configDir string, cfg *config.Config) ([]string, er
 	}
 
 	var content string
-	if needsFullRewrite {
+	switch {
+	case needsFullRewrite:
 		// Existing TOML arrays need modification - full rewrite is the safe approach
 		data, marshalErr := toml.Marshal(cfg)
 		if marshalErr != nil {
 			return nil, marshalErr
 		}
 		content = string(data)
-	} else if strings.TrimSpace(existing) == "" {
+	case strings.TrimSpace(existing) == "":
 		// No config file - create minimal one
 		content = buildMinimalZoxideConfig(needsCd, needsHook)
-	} else {
+	default:
 		// Existing file - append new sections/keys
 		content = appendZoxideToConfig(existing, needsCd, needsHook)
 	}
@@ -227,16 +228,12 @@ func appendZoxideToConfig(existing string, disableCd, chpwdHook bool) string {
 
 	// If [shell] section didn't exist, append it
 	if disableCd && !cdInserted {
-		result = append(result, "")
-		result = append(result, "[shell]")
-		result = append(result, `disable_builtins = ["cd"]`)
+		result = append(result, "", "[shell]", `disable_builtins = ["cd"]`)
 	}
 
 	// If [shell.hooks] section didn't exist, append it
 	if chpwdHook && !hookInserted {
-		result = append(result, "")
-		result = append(result, "[shell.hooks]")
-		result = append(result, `chpwd = ['zoxide add -- "$PWD"']`)
+		result = append(result, "", "[shell.hooks]", `chpwd = ['zoxide add -- "$PWD"']`)
 	}
 
 	text := strings.Join(result, "\n")

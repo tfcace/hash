@@ -2,6 +2,7 @@ package completion
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -105,15 +106,16 @@ func (c *FileCompleter) Complete(ctx context.Context, line string, pos int) (Res
 		}
 
 		items = append(items, Item{
-			Value:   value,
-			Display: name,
-			Icon:    getFileIcon(entry),
+			Value:       value,
+			Display:     name,
+			Icon:        getFileIcon(entry),
+			Description: fileDescription(filepath.Join(dir, name), entry, isDir),
 		})
 	}
 
 	return Result{
 		Items:  items,
-		Prefix: getCompletionPrefix(word, prefix),
+		Prefix: getCompletionPrefix(originalWord, prefix),
 	}, nil
 }
 
@@ -166,6 +168,80 @@ func getCompletionPrefix(original, matched string) string {
 		return dir
 	}
 	return dir + "/"
+}
+
+// fileDescription returns a short description for a file entry (type + size).
+func fileDescription(path string, entry os.DirEntry, isDir bool) string {
+	if isDir {
+		entries, err := os.ReadDir(path)
+		if err != nil {
+			return "directory"
+		}
+		n := 0
+		for _, e := range entries {
+			if !strings.HasPrefix(e.Name(), ".") {
+				n++
+			}
+		}
+		if n == 1 {
+			return "1 item"
+		}
+		return fmt.Sprintf("%d items", n)
+	}
+
+	info, err := entry.Info()
+	if err != nil {
+		return fileTypeName(entry.Name())
+	}
+	return fileTypeName(entry.Name()) + "  " + formatSize(info.Size())
+}
+
+// fileTypeName returns a human-readable file type from the extension.
+func fileTypeName(name string) string {
+	ext := strings.ToLower(filepath.Ext(name))
+	switch ext {
+	case ".go":
+		return "go"
+	case ".py":
+		return "python"
+	case ".js":
+		return "javascript"
+	case ".ts":
+		return "typescript"
+	case ".md":
+		return "markdown"
+	case ".json":
+		return "json"
+	case ".yaml", ".yml":
+		return "yaml"
+	case ".sh", ".bash", ".zsh":
+		return "shell"
+	case ".txt":
+		return "text"
+	case ".toml":
+		return "toml"
+	case ".sum":
+		return "checksum"
+	case ".mod":
+		return "go module"
+	default:
+		if ext != "" {
+			return ext[1:] // strip dot
+		}
+		return "file"
+	}
+}
+
+// formatSize returns a human-readable file size.
+func formatSize(bytes int64) string {
+	switch {
+	case bytes < 1024:
+		return fmt.Sprintf("%d B", bytes)
+	case bytes < 1024*1024:
+		return fmt.Sprintf("%.1f KB", float64(bytes)/1024)
+	default:
+		return fmt.Sprintf("%.1f MB", float64(bytes)/(1024*1024))
+	}
 }
 
 // getFileIcon returns a Nerd Font icon for the file type.

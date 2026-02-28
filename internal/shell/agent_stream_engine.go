@@ -31,7 +31,7 @@ type agentStreamCollectionResult struct {
 // collectAgentStream handles streaming collection, conversation marker stripping,
 // optional partial-line flushes, and markdown rendering for both first-turn and
 // follow-up conversation requests.
-func (s *Shell) collectAgentStream(
+func (s *Shell) collectAgentStream( //nolint:gocyclo // streaming state machine with marker detection
 	ctx context.Context,
 	textCh <-chan string,
 	errCh <-chan error,

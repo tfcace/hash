@@ -22,6 +22,14 @@ type Completion struct {
 	Description string
 }
 
+// completionDrillState stores parent directory context for drill-down navigation.
+type completionDrillState struct {
+	prefix string // The directory prefix that was drilled into
+	filter string // The filter text that was active before drilling
+	index  int    // The selected index before drilling
+	col    int    // The completionCol value before drilling
+}
+
 // Config configures the editor.
 type Config struct {
 	Keybindings             string                                   // "helix", "emacs", "vim"
@@ -73,11 +81,13 @@ type Editor struct {
 	clipboardInit bool // Lazy clipboard initialization
 
 	// Completion state
-	completionActive bool
-	completionItems  []Completion
-	completionIndex  int    // Selected item in menu
-	completionPrefix string // Text being completed (for replacement)
-	completionCol    int    // Column where completion started
+	completionActive     bool
+	completionItems      []Completion
+	completionIndex      int                    // Selected item in menu
+	completionPrefix     string                 // Text being completed (for replacement)
+	completionCol        int                    // Column where completion started
+	completionFilter     string                 // Live filter text while menu is open
+	completionDrillStack []completionDrillState // Stack of parent dirs for backspace-up
 
 	// Ghost text state (inline suggestions)
 	ghost          *GhostText
@@ -584,18 +594,21 @@ func (e *Editor) render() {
 	e.display.RenderWithGhost(e.state.Buffer, e.state.Cursor, hasSelection, ghostText, ghostStreaming, ghostFromAgent, e.streamingModel)
 
 	// Render completion menu if active
-	if e.completionActive && len(e.completionItems) > 0 {
-		displayItems := make([]CompletionItem, len(e.completionItems))
-		for i, item := range e.completionItems {
-			displayItems[i] = CompletionItem(item)
+	if e.completionActive {
+		filtered := e.filteredCompletionItems()
+		if len(filtered) > 0 {
+			displayItems := make([]CompletionItem, len(filtered))
+			for i, item := range filtered {
+				displayItems[i] = CompletionItem(item)
+			}
+			e.display.RenderCompletionMenu(
+				displayItems,
+				e.completionIndex,
+				e.completionCol,
+				e.state.Cursor.Pos.Row,
+				e.state.Cursor.Pos.Col,
+			)
 		}
-		e.display.RenderCompletionMenu(
-			displayItems,
-			e.completionIndex,
-			e.completionCol,
-			e.state.Cursor.Pos.Row,
-			e.state.Cursor.Pos.Col,
-		)
 	}
 }
 
@@ -604,7 +617,15 @@ func (e *Editor) render() {
 func (e *Editor) handleGhostTextKey(key Key) bool {
 	switch key.Special {
 	case KeyTab:
-		// Tab accepts the full ghost text and stops streaming
+		if !e.ghost.FromAgent {
+			// For history predictions: Tab dismisses ghost and triggers completion instead.
+			// Use Right arrow to accept predictions (fish-style).
+			e.ghost.Clear()
+			e.ghostTextChan = nil
+			e.ghostErrChan = nil
+			return false // Fall through to completion/mode handler
+		}
+		// For agent suggestions: Tab accepts the full ghost text
 		text := e.ghost.AcceptAll()
 		trace.AgentHigh("ghost_accept", map[string]any{
 			"key":      "Tab",
@@ -826,15 +847,16 @@ func (e *Editor) triggerCompletion() {
 	e.completionCol = e.findWordStart()
 	e.completionPrefix = currentLine[e.completionCol:e.state.Cursor.Pos.Col]
 
-	if len(items) == 1 {
-		// Single match: insert inline immediately
+	if len(items) == 1 && !strings.HasSuffix(items[0].Text, "/") {
+		// Single non-directory match: insert inline immediately
 		e.acceptCompletion(items[0])
 		return
 	}
 
-	// Multiple matches: show menu
+	// Multiple matches or single directory: show menu
 	e.completionItems = items
 	e.completionIndex = 0
+	e.completionFilter = ""
 	e.completionActive = true
 }
 
@@ -892,11 +914,95 @@ func (e *Editor) acceptCompletion(item Completion) {
 	e.dismissCompletion()
 }
 
+// drillIntoDirectory replaces the current word with the directory path
+// and re-triggers completion to show its contents.
+func (e *Editor) drillIntoDirectory(item Completion) {
+	// Push current state onto drill stack
+	e.completionDrillStack = append(e.completionDrillStack, completionDrillState{
+		prefix: e.completionPrefix,
+		filter: e.completionFilter,
+		index:  e.completionIndex,
+		col:    e.completionCol,
+	})
+
+	// Replace the current word with the directory path
+	row := e.state.Cursor.Pos.Row
+	endCol := e.state.Cursor.Pos.Col
+	e.state.Buffer.Delete(Position{row, e.completionCol}, Position{row, endCol})
+	e.state.Buffer.Insert(row, e.completionCol, item.Text)
+	e.state.Cursor.Pos.Col = e.completionCol + len(item.Text)
+
+	// Reset filter
+	e.completionFilter = ""
+	e.completionIndex = 0
+
+	// Re-query completions for the new path
+	if e.config.CompleteFunc != nil {
+		line := e.state.Buffer.Content()
+		pos := e.cursorOffset()
+		items := e.config.CompleteFunc(line, pos)
+		if len(items) == 0 {
+			// Empty directory — accept as-is
+			e.completionDrillStack = e.completionDrillStack[:len(e.completionDrillStack)-1]
+			e.dismissCompletion()
+			return
+		}
+
+		e.completionItems = items
+		e.completionPrefix = item.Text
+		e.completionCol = e.findWordStart()
+
+		// Auto-drill single-child directories (with depth limit to prevent stack overflow)
+		if len(items) == 1 && strings.HasSuffix(items[0].Text, "/") && len(e.completionDrillStack) <= 20 {
+			e.drillIntoDirectory(items[0])
+			return
+		}
+	}
+}
+
+// drillUp pops the drill stack and restores the parent directory state.
+func (e *Editor) drillUp() {
+	if len(e.completionDrillStack) == 0 {
+		return
+	}
+
+	// Pop the last state
+	prev := e.completionDrillStack[len(e.completionDrillStack)-1]
+	e.completionDrillStack = e.completionDrillStack[:len(e.completionDrillStack)-1]
+
+	// Remove the drilled-into segment from the buffer.
+	// Delete from the parent's completionCol to the current cursor position,
+	// which removes everything that was inserted during the drill.
+	row := e.state.Cursor.Pos.Row
+	endCol := e.state.Cursor.Pos.Col
+	e.state.Buffer.Delete(Position{row, prev.col}, Position{row, endCol})
+	e.state.Cursor.Pos.Col = prev.col
+
+	// Restore completionCol from the stack
+	e.completionCol = prev.col
+
+	// Re-query completions for the parent
+	if e.config.CompleteFunc != nil {
+		line := e.state.Buffer.Content()
+		pos := e.cursorOffset()
+		items := e.config.CompleteFunc(line, pos)
+		e.completionItems = items
+	}
+
+	// Restore filter, index, and prefix
+	e.completionFilter = prev.filter
+	e.completionIndex = prev.index
+	if len(e.completionItems) > 0 && e.completionIndex >= len(e.completionItems) {
+		e.completionIndex = 0
+	}
+	e.completionPrefix = prev.prefix
+}
+
 // dismissCompletion closes the completion menu.
 func (e *Editor) dismissCompletion() {
 	if e.completionActive {
 		e.display.ClearCompletionMenu(
-			len(e.completionItems),
+			len(e.filteredCompletionItems()),
 			e.state.Cursor.Pos.Row,
 			e.state.Cursor.Pos.Col,
 		)
@@ -904,6 +1010,28 @@ func (e *Editor) dismissCompletion() {
 	e.completionActive = false
 	e.completionItems = nil
 	e.completionIndex = 0
+	e.completionFilter = ""
+	e.completionDrillStack = nil
+}
+
+// filterCompletionItems filters completion items by a case-insensitive prefix match.
+func filterCompletionItems(items []Completion, filter string) []Completion {
+	if filter == "" {
+		return items
+	}
+	filter = strings.ToLower(filter)
+	var result []Completion
+	for _, item := range items {
+		if strings.HasPrefix(strings.ToLower(item.Text), filter) {
+			result = append(result, item)
+		}
+	}
+	return result
+}
+
+// filteredCompletionItems returns the completion items filtered by the current filter text.
+func (e *Editor) filteredCompletionItems() []Completion {
+	return filterCompletionItems(e.completionItems, e.completionFilter)
 }
 
 // handleCompletionKey processes keys when completion menu is active.
@@ -914,37 +1042,84 @@ func (e *Editor) handleCompletionKey(key Key) bool {
 		return false
 	}
 
+	filtered := e.filteredCompletionItems()
+
 	switch key.Special {
 	case KeyDown:
-		e.completionIndex = (e.completionIndex + 1) % len(e.completionItems)
+		if len(filtered) > 0 {
+			e.completionIndex = (e.completionIndex + 1) % len(filtered)
+		}
 		return true
 
 	case KeyUp:
-		e.completionIndex--
-		if e.completionIndex < 0 {
-			e.completionIndex = len(e.completionItems) - 1
+		if len(filtered) > 0 {
+			e.completionIndex--
+			if e.completionIndex < 0 {
+				e.completionIndex = len(filtered) - 1
+			}
 		}
 		return true
 
 	case KeyTab:
-		// Tab moves down in completion menu
-		e.completionIndex = (e.completionIndex + 1) % len(e.completionItems)
+		// Tab cycles to next item (like Down)
+		if len(filtered) > 0 {
+			e.completionIndex = (e.completionIndex + 1) % len(filtered)
+		}
 		return true
 
 	case KeyEnter:
-		// Accept selected completion
-		e.acceptCompletion(e.completionItems[e.completionIndex])
+		// Enter accepts; directories drill-down, files close
+		if len(filtered) > 0 {
+			item := filtered[e.completionIndex]
+			if strings.HasSuffix(item.Text, "/") {
+				e.drillIntoDirectory(item)
+			} else {
+				e.acceptCompletion(item)
+			}
+		} else {
+			e.dismissCompletion()
+		}
+		return true
+
+	case KeyRight:
+		// Right arrow accepts and closes (even directories)
+		if len(filtered) > 0 {
+			e.acceptCompletion(filtered[e.completionIndex])
+		} else {
+			e.dismissCompletion()
+		}
 		return true
 
 	case KeyEscape:
-		// Dismiss menu
 		e.dismissCompletion()
 		return true
-	}
 
-	// Any other key dismisses completion and passes through
-	e.dismissCompletion()
-	return false
+	case KeyBackspace:
+		if e.completionFilter != "" {
+			// Remove last character from filter
+			e.completionFilter = e.completionFilter[:len(e.completionFilter)-1]
+			e.completionIndex = 0
+		} else if len(e.completionDrillStack) > 0 {
+			e.drillUp()
+		} else {
+			// No filter, no drill stack — dismiss
+			e.dismissCompletion()
+			return false
+		}
+		return true
+
+	default:
+		// Printable characters: add to filter
+		if key.Special == 0 && key.Rune >= 32 && !key.Ctrl && !key.Alt {
+			e.completionFilter += string(key.Rune)
+			e.completionIndex = 0
+			return true
+		}
+
+		// Non-printable: dismiss and pass through
+		e.dismissCompletion()
+		return false
+	}
 }
 
 // extractText extracts text between two positions.

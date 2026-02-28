@@ -1071,7 +1071,7 @@ func (s *Shell) handleAgentRequestUnified(ctx context.Context, parsed parser.Par
 }
 
 // handleAgentFullStreaming handles full ?? and pipe modes with streaming.
-func (s *Shell) handleAgentFullStreaming(ctx context.Context, parsed parser.ParseResult, modelName string) {
+func (s *Shell) handleAgentFullStreaming(ctx context.Context, parsed parser.ParseResult, modelName string) { //nolint:gocyclo // orchestration function with linear flow
 	requestCtx, timeoutCancel := context.WithTimeout(ctx, s.agentRequestTimeout())
 	s.agentTimeoutCancel = timeoutCancel
 	defer func() {
@@ -1559,7 +1559,7 @@ func (s *Shell) enterConversationMode(ctx context.Context, initialResponse strin
 }
 
 // runConversationLoop handles the conversation input loop.
-func (s *Shell) runConversationLoop(ctx context.Context) {
+func (s *Shell) runConversationLoop(ctx context.Context) { //nolint:gocyclo // interactive loop with error handling branches
 	// Cancel the per-request timeout — conversation mode is interactive and
 	// should not be killed by the initial 30s agent timeout. Each individual
 	// reply still has its own idle timeout via SendStreaming.
@@ -1722,7 +1722,7 @@ func (s *Shell) executeShellEscape(ctx context.Context, cmd string) {
 // sendConversationReply sends a follow-up message to the agent.
 func (s *Shell) sendConversationReply(ctx context.Context, reply string) {
 	s.conversation.SetSubState(ConversationStreaming)
-	prompt := s.buildConversationPrompt(reply)
+	conversationPrompt := s.buildConversationPrompt(reply)
 	s.appendConversationMessage("user", reply)
 	s.agentOutput.StartStreaming()
 	defer s.agentOutput.EndStreaming()
@@ -1730,7 +1730,7 @@ func (s *Shell) sendConversationReply(ctx context.Context, reply string) {
 	// Build request with reply as prompt
 	parsed := parser.ParseResult{
 		Type:        parser.CommandTypeAgent,
-		AgentPrompt: prompt,
+		AgentPrompt: conversationPrompt,
 	}
 
 	turnCtx, turnCancel := context.WithCancel(ctx)

@@ -46,7 +46,7 @@ func isBuiltin(cmd string) bool {
 }
 
 // executeBuiltin runs a builtin command. Returns (handled, error).
-func (s *Shell) executeBuiltin(ctx context.Context, line string) (bool, error) {
+func (s *Shell) executeBuiltin(ctx context.Context, line string) (bool, error) { //nolint:gocyclo // switch over builtin commands
 	parts := strings.Fields(line)
 	if len(parts) == 0 {
 		return false, nil
