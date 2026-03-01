@@ -366,7 +366,7 @@ func New(cfg *config.Config) (*Shell, error) {
 	editorCfg := editor.Config{
 		Keybindings:    cfg.Input.Keybindings,
 		Gutter:         cfg.Input.Gutter,
-		InputBgColor:   colorPalette.InputBg,
+		InputBgColor:   "",
 		ScrollbarColor: colorPalette.Primary,
 		CompleteFunc:   makeEditorCompleteFunc(router),
 		PrefetchFunc:   makeEditorPrefetchFunc(router),
@@ -1366,7 +1366,7 @@ func (s *Shell) refreshColorPalette() {
 	if newPalette.Primary != prompt.DefaultPalette().Primary {
 		s.colorPalette = newPalette
 		// Update editor config with new colors
-		s.editorCfg.InputBgColor = newPalette.InputBg
+		// InputBgColor intentionally left empty — no background highlight on submitted input
 		s.editorCfg.ScrollbarColor = newPalette.Primary
 	}
 }
