@@ -395,10 +395,23 @@ func (aoc *AgentOutputCoordinator) ClearPermissionPrompt(allowed bool) {
 	// Flush output to ensure clear sequences are sent immediately
 	aoc.flushLocked()
 
-	aoc.mu.Unlock()
+	// Resume streaming inline (instead of releasing lock and calling ExitPermission,
+	// which would create a TOCTOU race on permission state)
+	if aoc.wasStreaming {
+		aoc.state = AgentOutputStateStreaming
+		if aoc.streamTint != "" {
+			aoc.atLineStart = true
+		}
+		if aoc.streamBuffer.Len() > 0 {
+			aoc.writeWithTint(aoc.streamBuffer.String())
+			aoc.streamBuffer.Reset()
+		}
+	} else {
+		aoc.state = AgentOutputStateIdle
+	}
+	aoc.wasStreaming = false
 
-	// Resume streaming (this handles flushing buffered content)
-	aoc.ExitPermission()
+	aoc.mu.Unlock()
 }
 
 // flushLocked flushes the output if it supports syncing.

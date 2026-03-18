@@ -257,7 +257,7 @@ func TestCompletionIntegration_CompleteFuncSignature(t *testing.T) {
 	router.Register(fc, completion.PriorityFilesystem)
 
 	// The function should conform to the editor's expected signature
-	var fn func(string, int) []editor.Completion = makeEditorCompleteFunc(router)
+	fn := makeEditorCompleteFunc(router)
 
 	items := fn("ls ", 3)
 	if len(items) == 0 {

@@ -149,12 +149,20 @@ func extractWord(line string, pos int) string {
 	}
 
 	// Find start of word (go backwards until space or start)
-	start := pos
-	for start > 0 && line[start-1] != ' ' && line[start-1] != '\t' {
+	// Use rune-aware iteration to avoid splitting multi-byte UTF-8 characters
+	runes := []rune(line)
+	runePos := 0
+	byteCount := 0
+	for runePos < len(runes) && byteCount < pos {
+		byteCount += len(string(runes[runePos]))
+		runePos++
+	}
+	start := runePos
+	for start > 0 && runes[start-1] != ' ' && runes[start-1] != '\t' {
 		start--
 	}
 
-	return line[start:pos]
+	return string(runes[start:runePos])
 }
 
 // expandTilde expands ~ to home directory.

@@ -19,6 +19,14 @@ func NewPredictor(store *Store, config Config) *Predictor {
 	}
 }
 
+// Close closes the underlying store.
+func (p *Predictor) Close() error {
+	if p.store != nil {
+		return p.store.Close()
+	}
+	return nil
+}
+
 // PredictCommand predicts the next command based on the last command.
 func (p *Predictor) PredictCommand(lastCmd, cwd string) string {
 	if !p.config.Enabled || p.store == nil {

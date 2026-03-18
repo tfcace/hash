@@ -21,10 +21,8 @@ func main() {
 	args := os.Args[1:]
 
 	// Handle subcommands before flag parsing
-	for i, arg := range args {
-		if arg == "migrate" {
-			os.Exit(runMigrate(args[i+1:]))
-		}
+	if len(args) > 0 && args[0] == "migrate" {
+		os.Exit(runMigrate(args[1:]))
 	}
 
 	// Parse flags manually (order-independent)

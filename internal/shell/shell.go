@@ -1435,6 +1435,9 @@ func (s *Shell) Close() error {
 	if s.learning != nil {
 		_ = s.learning.Close()
 	}
+	if s.predictor != nil {
+		_ = s.predictor.Close()
+	}
 	return s.readline.Close()
 }
 

@@ -1601,7 +1601,7 @@ func (e *Executor) runWithPTYRaw(ctx context.Context, cmd *exec.Cmd, hc interp.H
 		}
 	}
 
-	startStdinCopy(stdinCopyConfig{
+	cancelable := startStdinCopy(stdinCopyConfig{
 		ptmx:      ptmx,
 		stdin:     hc.Stdin,
 		done:      done,
@@ -1644,7 +1644,9 @@ func (e *Executor) runWithPTYRaw(ctx context.Context, cmd *exec.Cmd, hc interp.H
 	}
 
 	close(done)
-	<-stdinDone
+	if cancelable {
+		<-stdinDone
+	}
 
 	if !stdoutFinished {
 		select {

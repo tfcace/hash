@@ -308,7 +308,7 @@ func escapeGlob(s string) string {
 // Count returns the total number of commands in history.
 func (s *Store) Count() (int64, error) {
 	var count int64
-	err := s.db.QueryRow("SELECT COUNT(*) FROM history").Scan(&count)
+	err := s.db.QueryRow("SELECT COUNT(*) FROM commands").Scan(&count)
 	return count, err
 }
 
