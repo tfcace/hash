@@ -182,6 +182,10 @@ func New(cfg *config.Config) (*Shell, error) {
 					"tool":     req.ToolName,
 					"decision": "allowlist",
 				})
+				// Snapshot file before agent writes (for potential revert)
+				if (req.ToolName == "Write" || req.ToolName == "Edit") && shellPtr != nil && shellPtr.actionLog != nil {
+					shellPtr.actionLog.SnapshotFile(req.Command) //nolint:errcheck
+				}
 				if shellPtr != nil && shellPtr.actionLog != nil {
 					shellPtr.actionLog.Add(req.ToolName, req.Command, true)
 				}
@@ -200,6 +204,10 @@ func New(cfg *config.Config) (*Shell, error) {
 
 			switch decision {
 			case PermissionAllow:
+				// Snapshot file before agent writes (for potential revert)
+				if (req.ToolName == "Write" || req.ToolName == "Edit") && shellPtr != nil && shellPtr.actionLog != nil {
+					shellPtr.actionLog.SnapshotFile(req.Command) //nolint:errcheck
+				}
 				if shellPtr != nil && shellPtr.actionLog != nil {
 					shellPtr.actionLog.Add(req.ToolName, req.Command, true)
 				}
@@ -221,6 +229,12 @@ func New(cfg *config.Config) (*Shell, error) {
 
 				agentOutput.ClearPermissionPrompt(allow)
 
+				// Snapshot file before agent writes (for potential revert)
+				if allow && (req.ToolName == "Write" || req.ToolName == "Edit") {
+					if shellPtr != nil && shellPtr.actionLog != nil {
+						shellPtr.actionLog.SnapshotFile(req.Command) //nolint:errcheck
+					}
+				}
 				if shellPtr != nil && shellPtr.actionLog != nil {
 					shellPtr.actionLog.Add(req.ToolName, req.Command, allow)
 				}
@@ -1125,7 +1139,10 @@ func (s *Shell) handleAgentFullStreaming(ctx context.Context, parsed parser.Pars
 			action := s.responseUI.WaitForConfirmation()
 			fmt.Println()
 			if action == ConfirmCancel {
-				fmt.Fprintln(os.Stderr, "hash: changes reverted")
+				n := s.actionLog.RevertEdits()
+				if n > 0 {
+					fmt.Fprintf(os.Stderr, "hash: reverted %d file(s)\n", n)
+				}
 			}
 		}
 		s.actionLog = nil

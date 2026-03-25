@@ -2,6 +2,8 @@ package shell
 
 import (
 	"bytes"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -83,5 +85,76 @@ func TestActionLog_RenderDenied(t *testing.T) {
 	output := buf.String()
 	if !strings.Contains(output, "\u2717") {
 		t.Errorf("denied action should show \u2717, got: %q", output)
+	}
+}
+
+func TestActionLog_SnapshotAndRevert(t *testing.T) {
+	tmpDir := t.TempDir()
+	filePath := filepath.Join(tmpDir, "test.go")
+
+	// Create original file
+	original := []byte("package main\n")
+	if err := os.WriteFile(filePath, original, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	al := NewActionLog(&buf)
+
+	// Snapshot before edit
+	if err := al.SnapshotFile(filePath); err != nil {
+		t.Fatalf("SnapshotFile() error = %v", err)
+	}
+
+	// Simulate edit
+	modified := []byte("package main\n\nfunc hello() {}\n")
+	if err := os.WriteFile(filePath, modified, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	al.Add("Write", filePath, true)
+
+	// Revert
+	reverted := al.RevertEdits()
+	if reverted != 1 {
+		t.Errorf("RevertEdits() = %d, want 1", reverted)
+	}
+
+	// Verify original content restored
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != string(original) {
+		t.Errorf("file content = %q, want %q", string(data), string(original))
+	}
+}
+
+func TestActionLog_SnapshotNewFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	filePath := filepath.Join(tmpDir, "new.go")
+
+	var buf bytes.Buffer
+	al := NewActionLog(&buf)
+
+	// Snapshot non-existent file
+	if err := al.SnapshotFile(filePath); err != nil {
+		t.Fatalf("SnapshotFile() error = %v", err)
+	}
+
+	// Create the file
+	if err := os.WriteFile(filePath, []byte("new content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	al.Add("Write", filePath, true)
+
+	// Revert should delete the file
+	reverted := al.RevertEdits()
+	if reverted != 1 {
+		t.Errorf("RevertEdits() = %d, want 1", reverted)
+	}
+
+	// File should not exist
+	if _, err := os.Stat(filePath); !os.IsNotExist(err) {
+		t.Errorf("file should not exist after revert, err = %v", err)
 	}
 }

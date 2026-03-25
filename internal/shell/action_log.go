@@ -69,6 +69,45 @@ func (al *ActionLog) Count() int {
 	return len(al.actions)
 }
 
+// SnapshotFile saves a copy of a file's content before editing.
+func (al *ActionLog) SnapshotFile(path string) error {
+	if al.snapshots == nil {
+		al.snapshots = make(map[string][]byte)
+	}
+	// Only snapshot the first time (original content)
+	if _, exists := al.snapshots[path]; exists {
+		return nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// File doesn't exist yet — snapshot as nil (revert = delete)
+			al.snapshots[path] = nil
+			return nil
+		}
+		return err
+	}
+	al.snapshots[path] = data
+	return nil
+}
+
+// RevertEdits restores all snapshotted files to their original content.
+// Returns the number of files reverted.
+func (al *ActionLog) RevertEdits() int {
+	count := 0
+	for path, content := range al.snapshots {
+		if content == nil {
+			os.Remove(path)
+			count++
+			continue
+		}
+		if err := os.WriteFile(path, content, 0o644); err == nil {
+			count++
+		}
+	}
+	return count
+}
+
 func (al *ActionLog) renderAction(entry ActionEntry) {
 	icon := "\x1b[32m\u2713\x1b[0m"
 	if !entry.Allowed {
