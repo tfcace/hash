@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sync"
 )
 
 // ActionEntry records a single tool action during an agentic turn.
@@ -15,6 +16,7 @@ type ActionEntry struct {
 
 // ActionLog tracks tool actions during an agentic turn and renders them.
 type ActionLog struct {
+	mu        sync.Mutex
 	out       io.Writer
 	actions   []ActionEntry
 	snapshots map[string][]byte // file path → original content before edit
@@ -27,6 +29,8 @@ func NewActionLog(out io.Writer) *ActionLog {
 
 // Add records an action and renders it immediately.
 func (al *ActionLog) Add(toolName, command string, allowed bool) {
+	al.mu.Lock()
+	defer al.mu.Unlock()
 	entry := ActionEntry{
 		ToolName: toolName,
 		Command:  command,
@@ -38,11 +42,17 @@ func (al *ActionLog) Add(toolName, command string, allowed bool) {
 
 // Summary returns all recorded actions.
 func (al *ActionLog) Summary() []ActionEntry {
-	return al.actions
+	al.mu.Lock()
+	defer al.mu.Unlock()
+	result := make([]ActionEntry, len(al.actions))
+	copy(result, al.actions)
+	return result
 }
 
 // HasEdits returns true if any write/edit actions were allowed.
 func (al *ActionLog) HasEdits() bool {
+	al.mu.Lock()
+	defer al.mu.Unlock()
 	for _, a := range al.actions {
 		if a.Allowed && isEditTool(a.ToolName) {
 			return true
@@ -53,6 +63,8 @@ func (al *ActionLog) HasEdits() bool {
 
 // EditedFiles returns the unique set of files that were written/edited.
 func (al *ActionLog) EditedFiles() []string {
+	al.mu.Lock()
+	defer al.mu.Unlock()
 	seen := make(map[string]bool)
 	var files []string
 	for _, a := range al.actions {
@@ -101,7 +113,7 @@ func (al *ActionLog) RevertEdits() int {
 			count++
 			continue
 		}
-		if err := os.WriteFile(path, content, 0o644); err == nil {
+		if err := os.WriteFile(path, content, 0o600); err == nil {
 			count++
 		}
 	}

@@ -55,7 +55,3 @@ func (c *StreamCollector) Response() Response {
 	}
 	return Response{Type: ResponseTypeExplanation, Explanation: text}
 }
-
-// AwaitingInputMarker signals the agent expects user input to continue.
-// Appears at the end of a response. Stripped from rendered output during streaming.
-const AwaitingInputMarker = "[AWAITING_INPUT]"

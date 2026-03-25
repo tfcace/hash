@@ -292,25 +292,3 @@ func TestLoadConfig_TrustTierDefault(t *testing.T) {
 		t.Errorf("Agent.Trust = %q, want %q", cfg.Agent.Trust, "suggest")
 	}
 }
-
-func TestLoadConfig_AgentConversationIdleTimeout(t *testing.T) {
-	tmpDir := t.TempDir()
-	configPath := filepath.Join(tmpDir, "config.toml")
-
-	content := []byte(`
-[agent]
-conversation_idle_timeout = "30m"
-`)
-	if err := os.WriteFile(configPath, content, 0o644); err != nil { //nolint:gosec // G306: test file
-		t.Fatal(err)
-	}
-
-	cfg, err := Load(tmpDir)
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
-	}
-
-	if cfg.Agent.ConversationIdleTimeout != "30m" {
-		t.Errorf("Agent.ConversationIdleTimeout = %q, want %q", cfg.Agent.ConversationIdleTimeout, "30m")
-	}
-}

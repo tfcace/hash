@@ -60,7 +60,7 @@ var destructiveSubcommands = map[string]bool{
 	"git push": true, "git reset": true, "git clean": true,
 	"git checkout -- .": true, "git restore .": true,
 	"jj abandon": true,
-	"docker rm": true, "docker rmi": true, "docker system prune": true,
+	"docker rm":  true, "docker rmi": true, "docker system prune": true,
 	"kubectl delete": true,
 }
 

@@ -5,16 +5,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/tfcace/hash/internal/agent"
 	"github.com/tfcace/hash/internal/markdown"
 )
 
 type agentStreamCollectionOptions struct {
-	onFirstChunk           func()
-	writeRendered          func(rendered string)
-	flushDelay             time.Duration
-	stripAwaitingForRender bool
-	trimLeadingNewline     bool
+	onFirstChunk       func()
+	writeRendered      func(rendered string)
+	flushDelay         time.Duration
+	trimLeadingNewline bool
 }
 
 type agentStreamCollectionResult struct {
@@ -108,9 +106,6 @@ collectLoop:
 			appendResponse(responseText)
 
 			renderText := trimLeadingSingleNewline(text, &trimLeadingRender)
-			if opts.stripAwaitingForRender {
-				renderText = strings.ReplaceAll(renderText, agent.AwaitingInputMarker, "")
-			}
 			writeRendered(renderer.Write(renderText))
 
 			if flushTimer != nil {

@@ -154,7 +154,7 @@ func (t *HTTPTransport) buildPrompt(req Request) string {
 	b.WriteString("You are a shell command assistant. ")
 	b.WriteString("When asked for a command, respond with ONLY the command, no explanation. ")
 	b.WriteString("When asked for an explanation, provide a clear explanation. ")
-	b.WriteString("For multi-turn conversations (questions, offering options): start with [CONVERSATION] on the first line, end with [AWAITING_INPUT] on the last line.\n\n")
+	b.WriteString("\n")
 
 	// Add context
 	if req.Context.Cwd != "" {

@@ -47,7 +47,7 @@ type AgentOutputCoordinator struct {
 	out            io.Writer
 	state          AgentOutputState
 	streamBuffer   strings.Builder // Buffers text when permission is active
-	wasStreaming    bool            // Track if we were streaming before permission
+	wasStreaming   bool            // Track if we were streaming before permission
 	pendingCommand string          // Command currently being prompted for permission
 	accentColorFn  func() string   // Callback to get current accent color
 }

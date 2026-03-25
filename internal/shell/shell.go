@@ -1099,8 +1099,7 @@ func (s *Shell) handleAgentFullStreaming(ctx context.Context, parsed parser.Pars
 		writeRendered: func(rendered string) {
 			s.agentOutput.WriteStream(rendered)
 		},
-		flushDelay:             50 * time.Millisecond,
-		stripAwaitingForRender: true,
+		flushDelay: 50 * time.Millisecond,
 	})
 
 	if streamResult.canceled {

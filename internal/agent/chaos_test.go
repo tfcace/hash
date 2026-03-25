@@ -118,20 +118,14 @@ func TestBuildPromptWithContext_EdgeCases(t *testing.T) {
 			name: "empty request",
 			req:  Request{},
 			checkFn: func(t *testing.T, result string) {
-				// Should contain the conversation instruction even for empty request
-				if !strings.Contains(result, "[AWAITING_INPUT]") {
-					t.Errorf("expected conversation instruction in result, got %q", result)
-				}
+				// Empty request produces empty prompt (no context, no prompt text)
+				// Just verify it doesn't panic
 			},
 		},
 		{
 			name: "prompt only",
 			req:  Request{Prompt: "test"},
 			checkFn: func(t *testing.T, result string) {
-				// Should contain both instruction and prompt
-				if !strings.Contains(result, "[AWAITING_INPUT]") {
-					t.Errorf("expected conversation instruction in result")
-				}
 				if !strings.Contains(result, "test") {
 					t.Errorf("expected 'test' in result, got %q", result)
 				}

@@ -206,6 +206,8 @@ func (t *ACPTransport) connectLocked(ctx context.Context) error {
 
 	t.stdout, err = t.cmd.StdoutPipe()
 	if err != nil {
+		t.stdin.Close()
+		t.stdin = nil
 		return errors.Join(ErrACPStartFailed, fmt.Errorf("stdout pipe: %w", err))
 	}
 
@@ -213,6 +215,9 @@ func (t *ACPTransport) connectLocked(ctx context.Context) error {
 	t.cmd.Stderr = nil
 
 	if err = t.cmd.Start(); err != nil {
+		t.stdin.Close()
+		t.stdin = nil
+		t.stdout = nil // stdout pipe is already invalidated when cmd fails to start
 		return errors.Join(ErrACPStartFailed, fmt.Errorf("start agent: %w", err))
 	}
 
@@ -543,14 +548,6 @@ func (t *ACPTransport) sendResponse(id int64, result interface{}, err *jsonRPCEr
 // buildPromptWithContext builds a prompt that includes context information.
 func buildPromptWithContext(req Request) string {
 	var b strings.Builder
-
-	// Add conversation marker instruction
-	b.WriteString(`For multi-turn conversations (questions, offering options, asking for clarification):
-- Start with [CONVERSATION] on the first line
-- End with [AWAITING_INPUT] on the last line
-Do NOT use these markers for complete answers, commands, or when the conversation naturally concludes.
-
-`)
 
 	ctx := req.Context
 

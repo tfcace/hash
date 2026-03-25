@@ -334,4 +334,3 @@ func TestAgentOutputCoordinator_ClearPermission_Denied(t *testing.T) {
 		t.Errorf("expected denied feedback with command, got: %q", output)
 	}
 }
-
