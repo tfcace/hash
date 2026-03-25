@@ -92,9 +92,9 @@ func TestActionLog_SnapshotAndRevert(t *testing.T) {
 	tmpDir := t.TempDir()
 	filePath := filepath.Join(tmpDir, "test.go")
 
-	// Create original file
+	// Create original file with executable permissions
 	original := []byte("package main\n")
-	if err := os.WriteFile(filePath, original, 0o644); err != nil {
+	if err := os.WriteFile(filePath, original, 0o755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -106,7 +106,7 @@ func TestActionLog_SnapshotAndRevert(t *testing.T) {
 		t.Fatalf("SnapshotFile() error = %v", err)
 	}
 
-	// Simulate edit
+	// Simulate edit (overwrites with different permissions)
 	modified := []byte("package main\n\nfunc hello() {}\n")
 	if err := os.WriteFile(filePath, modified, 0o644); err != nil {
 		t.Fatal(err)
@@ -126,6 +126,15 @@ func TestActionLog_SnapshotAndRevert(t *testing.T) {
 	}
 	if string(data) != string(original) {
 		t.Errorf("file content = %q, want %q", string(data), string(original))
+	}
+
+	// Verify original permissions restored
+	info, err := os.Stat(filePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o755 {
+		t.Errorf("file permissions = %o, want %o", perm, os.FileMode(0o755))
 	}
 }
 
