@@ -161,31 +161,6 @@ const (
 	permissionPad = "  "
 )
 
-// ComputeTintBackground derives a subtle background tint from an accent color.
-// accentColor should be a hex color like "#7c3aed".
-func ComputeTintBackground(accentColor string) string {
-	// Parse hex color
-	var r, g, b int
-	if len(accentColor) == 7 && accentColor[0] == '#' {
-		if _, err := fmt.Sscanf(accentColor[1:], "%02x%02x%02x", &r, &g, &b); err != nil {
-			r, g, b = 30, 30, 46 // Fallback on parse error
-		}
-	} else {
-		// Fallback to a subtle dark blue-gray
-		r, g, b = 30, 30, 46 // #1e1e2e
-	}
-
-	// Blend with dark background at ~15% opacity
-	// Assuming terminal background is ~#1a1a1a (26, 26, 26)
-	bgR, bgG, bgB := 26, 26, 26
-	blend := 0.15
-	finalR := int(float64(bgR)*(1-blend) + float64(r)*blend)
-	finalG := int(float64(bgG)*(1-blend) + float64(g)*blend)
-	finalB := int(float64(bgB)*(1-blend) + float64(b)*blend)
-
-	return fmt.Sprintf("\x1b[48;2;%d;%d;%dm", finalR, finalG, finalB)
-}
-
 // RenderPermissionPrompt displays the permission request UI.
 // Automatically enters permission state and pauses streaming.
 // toolName is optional -- if non-empty, it's shown as context (e.g., "Bash", "Write").

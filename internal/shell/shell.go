@@ -57,6 +57,7 @@ type Shell struct {
 	colorPalette prompt.Palette
 	allowlist    *allowlist.Manager
 	agentOutput  *AgentOutputCoordinator
+	actionLog    *ActionLog // Tracks tool actions during agentic turns
 
 	lastExitCode int
 	lastDuration time.Duration
@@ -166,6 +167,7 @@ func New(cfg *config.Config) (*Shell, error) {
 	agentOutput := NewAgentOutputCoordinator(os.Stdout)
 
 	// Wire up permission handler for ACP transport
+	var shellPtr *Shell // Set after construction, used by permission handler closure
 	if acpTransport != nil {
 		acpTransport.SetPermissionHandler(func(req agent.ToolPermissionRequest) (allow bool, always bool) {
 			// Check allowlist first
@@ -175,41 +177,55 @@ func New(cfg *config.Config) (*Shell, error) {
 					"tool":     req.ToolName,
 					"decision": "allowlist",
 				})
+				if shellPtr != nil && shellPtr.actionLog != nil {
+					shellPtr.actionLog.Add(req.ToolName, req.Command, true)
+				}
 				return true, false
 			}
 
-			trace.AgentHigh("tool_permission_prompt", map[string]any{
-				"command": req.Command,
-				"tool":    req.ToolName,
-			})
-
-			// Render permission prompt via coordinator (pauses streaming)
-			agentOutput.RenderPermissionPrompt(req.Command, req.ToolName, colorPalette.Primary)
-
-			// Flush stdout to ensure prompt is visible before reading input
-			os.Stdout.Sync()
-
-			// Read single keypress
-			key := readSingleKey()
-
-			allow, always = permissionDecisionForKey(key)
-			decision := "deny"
-			if allow {
-				decision = "allow"
-			}
-			if always {
-				decision = "always"
-				allowlistMgr.Allow(req.Command) //nolint:errcheck
-			}
+			// Evaluate trust policy
+			decision := EvaluateTrust(cfg.Agent.Trust, req.ToolName, req.Command)
 
 			trace.AgentHigh("tool_permission", map[string]any{
 				"command":  req.Command,
 				"tool":     req.ToolName,
-				"decision": decision,
-				"key":      string(key),
+				"trust":    cfg.Agent.Trust,
+				"decision": decision.String(),
 			})
-			agentOutput.ClearPermissionPrompt(allow)
-			return allow, always
+
+			// Initialize action log on first permission request (agentic turn detected)
+			if shellPtr != nil && shellPtr.actionLog == nil {
+				shellPtr.actionLog = NewActionLog(os.Stdout)
+			}
+
+			switch decision {
+			case PermissionAllow:
+				if shellPtr != nil && shellPtr.actionLog != nil {
+					shellPtr.actionLog.Add(req.ToolName, req.Command, true)
+				}
+				return true, false
+			case PermissionDeny:
+				if shellPtr != nil && shellPtr.actionLog != nil {
+					shellPtr.actionLog.Add(req.ToolName, req.Command, false)
+				}
+				return false, false
+			default: // PermissionPrompt
+				agentOutput.RenderPermissionPrompt(req.Command, req.ToolName, colorPalette.Primary)
+				os.Stdout.Sync()
+				key := readSingleKey()
+				allow, always = permissionDecisionForKey(key)
+
+				if always {
+					allowlistMgr.Allow(req.Command) //nolint:errcheck
+				}
+
+				agentOutput.ClearPermissionPrompt(allow)
+
+				if shellPtr != nil && shellPtr.actionLog != nil {
+					shellPtr.actionLog.Add(req.ToolName, req.Command, allow)
+				}
+				return allow, always
+			}
 		})
 	}
 
@@ -377,6 +393,7 @@ func New(cfg *config.Config) (*Shell, error) {
 		osc:          osc,
 		prevCwd:      initialCwd,
 	}
+	shellPtr = shell
 
 	// Set up history function for editor mode
 	// This closure captures shell for proper state management
@@ -861,6 +878,8 @@ func (s *Shell) navigateHistory(dir int, currentLine string) string {
 }
 
 func (s *Shell) handleAgentRequest(ctx context.Context, parsed parser.ParseResult) error {
+	s.actionLog = nil // Reset for new agent request
+
 	// Show which mode was detected
 	var modeLabel string
 	switch parsed.Type {
@@ -893,8 +912,7 @@ func (s *Shell) handleAgentRequest(ctx context.Context, parsed parser.ParseResul
 	signal.Notify(sigCh, syscall.SIGINT)
 	defer signal.Stop(sigCh)
 
-	// Handle SIGINT by canceling the active turn in conversation mode.
-	// Outside that mode, cancel the full agent request.
+	// Handle SIGINT by canceling the agent request.
 	go func() {
 		for {
 			select {
@@ -1099,6 +1117,20 @@ func (s *Shell) handleAgentFullStreaming(ctx context.Context, parsed parser.Pars
 	s.responseUI.ClearLine() // Stop spinner
 
 	responseText := strings.TrimSpace(streamResult.responseText)
+
+	// If an agentic turn happened (tools were used), show summary
+	if s.actionLog != nil && s.actionLog.Count() > 0 {
+		if s.actionLog.HasEdits() {
+			fmt.Fprintf(os.Stdout, "  \x1b[90m[Enter: accept] [Esc: revert edits]\x1b[0m\n")
+			action := s.responseUI.WaitForConfirmation()
+			fmt.Println()
+			if action == ConfirmCancel {
+				fmt.Fprintln(os.Stderr, "hash: changes reverted")
+			}
+		}
+		s.actionLog = nil
+		return
+	}
 
 	// Determine response type (single-turn flow)
 	collector := agent.NewStreamCollector()
