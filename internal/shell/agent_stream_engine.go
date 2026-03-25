@@ -24,6 +24,8 @@ type agentStreamCollectionResult struct {
 
 // collectAgentStream handles streaming collection, optional partial-line flushes,
 // and markdown rendering for agent requests.
+//
+//nolint:gocyclo // streaming state machine with select loop
 func (s *Shell) collectAgentStream(
 	ctx context.Context,
 	textCh <-chan string,

@@ -59,7 +59,7 @@ var destructiveCommands = map[string]bool{
 var destructiveSubcommands = map[string]bool{
 	"git push": true, "git reset": true, "git clean": true,
 	"jj abandon": true,
-	"docker rm": true, "docker rmi": true,
+	"docker rm":  true, "docker rmi": true,
 	"kubectl delete": true,
 }
 
@@ -81,19 +81,13 @@ var commandPrefixes = map[string]bool{
 	"time": true, "command": true,
 }
 
-// ClassifyCommand determines the risk level of a shell command.
-func ClassifyCommand(command string) CommandRisk {
-	cmd := strings.TrimSpace(command)
-	if cmd == "" {
-		return CommandRiskGeneral
-	}
-
-	// Strip command-wrapping prefixes (sudo, env, nice, nohup, time, command).
-	// env is special: it takes KEY=VALUE pairs before the actual command.
+// stripCommandPrefixes removes wrapping prefixes like sudo, env, nice, nohup, time, command.
+// env is special: it takes KEY=VALUE pairs before the actual command.
+func stripCommandPrefixes(cmd string) string {
 	for {
 		fields := strings.Fields(cmd)
 		if len(fields) == 0 {
-			return CommandRiskGeneral
+			return ""
 		}
 		first := strings.ToLower(fields[0])
 		if commandPrefixes[first] {
@@ -101,12 +95,11 @@ func ClassifyCommand(command string) CommandRisk {
 			continue
 		}
 		if first == "env" && len(fields) > 1 {
-			// Strip "env" and any KEY=VALUE args
 			cmd = strings.TrimSpace(strings.TrimPrefix(cmd, fields[0]))
 			for {
 				f := strings.Fields(cmd)
 				if len(f) == 0 {
-					return CommandRiskGeneral
+					return ""
 				}
 				if strings.Contains(f[0], "=") {
 					cmd = strings.TrimSpace(strings.TrimPrefix(cmd, f[0]))
@@ -117,6 +110,20 @@ func ClassifyCommand(command string) CommandRisk {
 			continue
 		}
 		break
+	}
+	return cmd
+}
+
+// ClassifyCommand determines the risk level of a shell command.
+func ClassifyCommand(command string) CommandRisk {
+	cmd := strings.TrimSpace(command)
+	if cmd == "" {
+		return CommandRiskGeneral
+	}
+
+	cmd = stripCommandPrefixes(cmd)
+	if cmd == "" {
+		return CommandRiskGeneral
 	}
 
 	// Check test patterns first (multi-word matches)
