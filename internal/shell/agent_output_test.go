@@ -3,7 +3,6 @@ package shell
 import (
 	"bytes"
 	"fmt"
-	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -336,32 +335,3 @@ func TestAgentOutputCoordinator_ClearPermission_Denied(t *testing.T) {
 	}
 }
 
-func TestAgentOutputCoordinator_ClearPermission_TintedResumesWithMargin(t *testing.T) {
-	var buf bytes.Buffer
-	aoc := NewAgentOutputCoordinator(&buf)
-	convUI := NewConversationUI(&buf, "#7c3aed")
-	aoc.SetStreamTint(convUI.TintBg())
-	aoc.SetStreamBorder(convUI.StreamBorder())
-
-	aoc.StartStreaming()
-	aoc.WriteStream("Question 2: Is it something typically found indoors?\n")
-	aoc.RenderPermissionPrompt("kubectl config get-contexts", "", "#00ff00")
-	aoc.WriteStream("I'll list your Kubernetes contexts for you.\nYou have two Kubernetes contexts:\n")
-	aoc.ClearPermissionPrompt(true)
-
-	output := stripANSIForTest(buf.String())
-	if !strings.Contains(output, "│   ✓ kubectl config get-contexts") {
-		t.Fatalf("expected indented feedback line with border, got: %q", output)
-	}
-	if !strings.Contains(output, "│ I'll list your Kubernetes contexts for you.") {
-		t.Fatalf("expected resumed assistant line to start with bordered margin, got: %q", output)
-	}
-}
-
-var ansiForTestRE = regexp.MustCompile(`\x1b\[[0-9;?]*[ -/]*[@-~]`)
-
-func stripANSIForTest(s string) string {
-	s = ansiForTestRE.ReplaceAllString(s, "")
-	s = strings.ReplaceAll(s, "\r", "")
-	return s
-}

@@ -10,47 +10,34 @@ import (
 )
 
 type agentStreamCollectionOptions struct {
-	initialConversation         bool
-	onFirstChunk                func()
-	onConversationStart         func()
-	writeRendered               func(inConversation bool, rendered string)
-	flushDelay                  time.Duration
-	stripAwaitingInConversation bool
-	stripAwaitingForRender      bool
-	trimLeadingNewline          bool
+	onFirstChunk           func()
+	writeRendered          func(rendered string)
+	flushDelay             time.Duration
+	stripAwaitingForRender bool
+	trimLeadingNewline     bool
 }
 
 type agentStreamCollectionResult struct {
-	responseText   string
-	lineCount      int
-	inConversation bool
-	streamErr      error
-	canceled       bool
+	responseText string
+	lineCount    int
+	streamErr    error
+	canceled     bool
 }
 
-// collectAgentStream handles streaming collection, conversation marker stripping,
-// optional partial-line flushes, and markdown rendering for both first-turn and
-// follow-up conversation requests.
-func (s *Shell) collectAgentStream( //nolint:gocyclo // streaming state machine with marker detection
+// collectAgentStream handles streaming collection, optional partial-line flushes,
+// and markdown rendering for agent requests.
+func (s *Shell) collectAgentStream(
 	ctx context.Context,
 	textCh <-chan string,
 	errCh <-chan error,
 	opts agentStreamCollectionOptions,
 ) agentStreamCollectionResult {
-	result := agentStreamCollectionResult{
-		inConversation: opts.initialConversation,
-	}
+	var result agentStreamCollectionResult
 
 	var response strings.Builder
 	renderer := markdown.NewStreamingRenderer()
 
-	var markerBuffer strings.Builder
-	markerDetected := false
-	const markerLen = len(agent.ConversationStartMarker)
-	markerPrefix := strings.TrimSpace(agent.ConversationStartMarker)
 	firstChunkSeen := false
-	var responseMarkerCarry string
-	var renderMarkerCarry string
 	trimLeadingResponse := opts.trimLeadingNewline
 	trimLeadingRender := opts.trimLeadingNewline
 
@@ -72,7 +59,7 @@ func (s *Shell) collectAgentStream( //nolint:gocyclo // streaming state machine 
 		if text == "" || opts.writeRendered == nil {
 			return
 		}
-		opts.writeRendered(result.inConversation, text)
+		opts.writeRendered(text)
 	}
 
 	appendResponse := func(text string) {
@@ -117,54 +104,10 @@ collectLoop:
 				}
 			}
 
-			if !markerDetected {
-				markerBuffer.WriteString(text)
-				buffered := markerBuffer.String()
-				trimmedBuffered := strings.TrimSpace(buffered)
+			responseText := trimLeadingSingleNewline(text, &trimLeadingResponse)
+			appendResponse(responseText)
 
-				// Wait for enough bytes to decide whether the stream starts with
-				// [CONVERSATION], since the marker may arrive split across chunks.
-				if len(trimmedBuffered) < markerLen && strings.HasPrefix(markerPrefix, trimmedBuffered) {
-					continue
-				}
-				markerDetected = true
-
-				if agent.HasConversationStart(buffered) {
-					if !result.inConversation && opts.onConversationStart != nil {
-						opts.onConversationStart()
-					}
-					result.inConversation = true
-					text = agent.StripConversationStart(buffered)
-				} else {
-					text = buffered
-				}
-			}
-
-			if result.inConversation {
-				stripAwaitingInConversationRender := opts.stripAwaitingForRender || result.inConversation
-				responseText := stripConversationMarkersChunk(
-					&responseMarkerCarry,
-					text,
-					opts.stripAwaitingInConversation,
-				)
-				responseText = trimLeadingSingleNewline(responseText, &trimLeadingResponse)
-				appendResponse(responseText)
-
-				renderText := stripConversationMarkersChunk(
-					&renderMarkerCarry,
-					text,
-					stripAwaitingInConversationRender,
-				)
-				renderText = trimLeadingSingleNewline(renderText, &trimLeadingRender)
-				writeRendered(renderer.Write(renderText))
-				if flushTimer != nil {
-					resetStreamFlushTimer(flushTimer, opts.flushDelay)
-				}
-				continue
-			}
-
-			appendResponse(text)
-			renderText := text
+			renderText := trimLeadingSingleNewline(text, &trimLeadingRender)
 			if opts.stripAwaitingForRender {
 				renderText = strings.ReplaceAll(renderText, agent.AwaitingInputMarker, "")
 			}
@@ -174,60 +117,6 @@ collectLoop:
 				resetStreamFlushTimer(flushTimer, opts.flushDelay)
 			}
 		}
-	}
-
-	// If the stream ended before marker detection resolved (short response),
-	// flush buffered content once with the same marker rules.
-	if !markerDetected {
-		if buffered := markerBuffer.String(); buffered != "" {
-			if agent.HasConversationStart(buffered) {
-				if !result.inConversation && opts.onConversationStart != nil {
-					opts.onConversationStart()
-				}
-				result.inConversation = true
-				buffered = agent.StripConversationStart(buffered)
-			}
-
-			if result.inConversation {
-				stripAwaitingInConversationRender := opts.stripAwaitingForRender || result.inConversation
-				responseText := stripConversationMarkersChunk(
-					&responseMarkerCarry,
-					buffered,
-					opts.stripAwaitingInConversation,
-				)
-				responseText = trimLeadingSingleNewline(responseText, &trimLeadingResponse)
-				appendResponse(responseText)
-
-				renderText := stripConversationMarkersChunk(
-					&renderMarkerCarry,
-					buffered,
-					stripAwaitingInConversationRender,
-				)
-				renderText = trimLeadingSingleNewline(renderText, &trimLeadingRender)
-				writeRendered(renderer.Write(renderText))
-				buffered = ""
-			}
-
-			if buffered != "" {
-				appendResponse(buffered)
-				renderText := buffered
-				if opts.stripAwaitingForRender {
-					renderText = strings.ReplaceAll(renderText, agent.AwaitingInputMarker, "")
-				}
-				writeRendered(renderer.Write(renderText))
-			}
-		}
-	}
-
-	if result.inConversation {
-		stripAwaitingInConversationRender := opts.stripAwaitingForRender || result.inConversation
-		responseTail := flushConversationMarkerCarry(&responseMarkerCarry, opts.stripAwaitingInConversation)
-		responseTail = trimLeadingSingleNewline(responseTail, &trimLeadingResponse)
-		appendResponse(responseTail)
-
-		renderTail := flushConversationMarkerCarry(&renderMarkerCarry, stripAwaitingInConversationRender)
-		renderTail = trimLeadingSingleNewline(renderTail, &trimLeadingRender)
-		writeRendered(renderer.Write(renderTail))
 	}
 
 	writeRendered(renderer.Flush())
@@ -243,70 +132,6 @@ func resetStreamFlushTimer(timer *time.Timer, delay time.Duration) {
 		}
 	}
 	timer.Reset(delay)
-}
-
-func stripConversationMarkersChunk(carry *string, chunk string, stripAwaiting bool) string {
-	combined := *carry + chunk
-	if combined == "" {
-		return ""
-	}
-
-	hold := longestConversationMarkerPrefixSuffix(combined, stripAwaiting)
-	emit := combined
-	if hold > 0 {
-		emit = combined[:len(combined)-hold]
-		*carry = combined[len(combined)-hold:]
-	} else {
-		*carry = ""
-	}
-
-	for _, marker := range conversationMarkers(stripAwaiting) {
-		emit = strings.ReplaceAll(emit, marker, "")
-	}
-	return emit
-}
-
-func flushConversationMarkerCarry(carry *string, stripAwaiting bool) string {
-	if *carry == "" {
-		return ""
-	}
-	emit := *carry
-	*carry = ""
-	for _, marker := range conversationMarkers(stripAwaiting) {
-		emit = strings.ReplaceAll(emit, marker, "")
-	}
-	return emit
-}
-
-func longestConversationMarkerPrefixSuffix(text string, stripAwaiting bool) int {
-	maxHold := 0
-	for _, marker := range conversationMarkers(stripAwaiting) {
-		// If the full marker is already complete at the end, don't hold any of it.
-		// Let the caller emit this chunk and strip the full marker immediately.
-		if strings.HasSuffix(text, marker) {
-			continue
-		}
-		maxPrefix := len(marker) - 1
-		if maxPrefix > len(text) {
-			maxPrefix = len(text)
-		}
-		for n := maxPrefix; n >= 1; n-- {
-			if strings.HasSuffix(text, marker[:n]) {
-				if n > maxHold {
-					maxHold = n
-				}
-				break
-			}
-		}
-	}
-	return maxHold
-}
-
-func conversationMarkers(stripAwaiting bool) []string {
-	if stripAwaiting {
-		return []string{agent.ConversationStartMarker, agent.AwaitingInputMarker}
-	}
-	return []string{agent.ConversationStartMarker}
 }
 
 func trimLeadingSingleNewline(text string, pending *bool) string {

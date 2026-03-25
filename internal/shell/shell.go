@@ -9,7 +9,6 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -39,11 +38,6 @@ type Mode struct {
 	Interactive bool // Interactive shell (has TTY)
 }
 
-type conversationMessage struct {
-	role    string
-	content string
-}
-
 // Shell is the main Hash shell instance.
 type Shell struct {
 	mode         Mode // Startup mode
@@ -63,17 +57,6 @@ type Shell struct {
 	colorPalette prompt.Palette
 	allowlist    *allowlist.Manager
 	agentOutput  *AgentOutputCoordinator
-
-	// Conversation mode state
-	conversation       *ConversationState
-	convUI             *ConversationUI
-	convCancelArmed    bool
-	convHistory        []conversationMessage
-	agentTimeoutCancel context.CancelFunc // Cancel per-request timeout when entering conversation
-	convTurnMu         sync.Mutex
-	convTurnCancel     context.CancelFunc // Cancel active conversation turn (thinking/streaming) only
-	// conversationInputHook allows tests to stub editor input reads.
-	conversationInputHook func(context.Context) (string, error)
 
 	lastExitCode int
 	lastDuration time.Duration
@@ -181,7 +164,6 @@ func New(cfg *config.Config) (*Shell, error) {
 	// Create agent output coordinator for serialized output during agent interactions
 	// Created early so permission handler can use it
 	agentOutput := NewAgentOutputCoordinator(os.Stdout)
-	conversationState := NewConversationState()
 
 	// Wire up permission handler for ACP transport
 	if acpTransport != nil {
@@ -201,17 +183,14 @@ func New(cfg *config.Config) (*Shell, error) {
 				"tool":    req.ToolName,
 			})
 
-			var key byte
-			withConversationPermission(conversationState, func() {
-				// Render permission prompt via coordinator (pauses streaming)
-				agentOutput.RenderPermissionPrompt(req.Command, req.ToolName, colorPalette.Primary)
+			// Render permission prompt via coordinator (pauses streaming)
+			agentOutput.RenderPermissionPrompt(req.Command, req.ToolName, colorPalette.Primary)
 
-				// Flush stdout to ensure prompt is visible before reading input
-				os.Stdout.Sync()
+			// Flush stdout to ensure prompt is visible before reading input
+			os.Stdout.Sync()
 
-				// Read single keypress
-				key = readSingleKey()
-			})
+			// Read single keypress
+			key := readSingleKey()
 
 			allow, always = permissionDecisionForKey(key)
 			decision := "deny"
@@ -394,7 +373,6 @@ func New(cfg *config.Config) (*Shell, error) {
 		colorPalette: colorPalette,
 		allowlist:    allowlistMgr,
 		agentOutput:  agentOutput,
-		conversation: conversationState,
 		historyIndex: -1, // Start before history (current line)
 		osc:          osc,
 		prevCwd:      initialCwd,
@@ -1071,13 +1049,9 @@ func (s *Shell) handleAgentRequestUnified(ctx context.Context, parsed parser.Par
 }
 
 // handleAgentFullStreaming handles full ?? and pipe modes with streaming.
-func (s *Shell) handleAgentFullStreaming(ctx context.Context, parsed parser.ParseResult, modelName string) { //nolint:gocyclo // orchestration function with linear flow
+func (s *Shell) handleAgentFullStreaming(ctx context.Context, parsed parser.ParseResult, modelName string) {
 	requestCtx, timeoutCancel := context.WithTimeout(ctx, s.agentRequestTimeout())
-	s.agentTimeoutCancel = timeoutCancel
-	defer func() {
-		timeoutCancel()
-		s.agentTimeoutCancel = nil
-	}()
+	defer timeoutCancel()
 
 	// Show thinking indicator (multi-stage: thinking -> receiving)
 	s.responseUI.ShowState(AgentStateThinking)
@@ -1090,26 +1064,15 @@ func (s *Shell) handleAgentFullStreaming(ctx context.Context, parsed parser.Pars
 			s.responseUI.ShowState(AgentStateReceiving)
 			s.responseUI.ClearLine()
 		},
-		onConversationStart: func() {
-			s.setupConversationMode()
-		},
-		writeRendered: func(inConversation bool, rendered string) {
-			if inConversation && s.convUI != nil {
-				s.convUI.WriteStreamTinted(rendered)
-				return
-			}
+		writeRendered: func(rendered string) {
 			s.agentOutput.WriteStream(rendered)
 		},
-		flushDelay:                  50 * time.Millisecond,
-		stripAwaitingInConversation: true,
-		stripAwaitingForRender:      true,
+		flushDelay:             50 * time.Millisecond,
+		stripAwaitingForRender: true,
 	})
 
 	if streamResult.canceled {
 		s.responseUI.ClearLine()
-		if streamResult.inConversation {
-			s.exitConversationMode()
-		}
 		fmt.Fprintln(os.Stderr, "hash: request canceled")
 		s.lastExitCode = 1
 		return
@@ -1118,9 +1081,6 @@ func (s *Shell) handleAgentFullStreaming(ctx context.Context, parsed parser.Pars
 	s.agentOutput.EndStreaming()
 
 	if streamResult.streamErr != nil {
-		if streamResult.inConversation {
-			s.exitConversationMode()
-		}
 		if s.handleAgentStreamError(
 			ctx,
 			parsed,
@@ -1134,38 +1094,11 @@ func (s *Shell) handleAgentFullStreaming(ctx context.Context, parsed parser.Pars
 	}
 
 	// Success path - add newline after response and clear spinner
-	if streamResult.inConversation {
-		fmt.Print("\x1b[K\x1b[0m\n") // Fill line, reset, newline
-	} else {
-		fmt.Println()
-	}
+	fmt.Println()
 	lineCount := streamResult.lineCount + 1
 	s.responseUI.ClearLine() // Stop spinner
 
 	responseText := strings.TrimSpace(streamResult.responseText)
-	_, expectsInput := agent.ProcessAgentResponse(responseText)
-
-	if expectsInput || streamResult.inConversation {
-		displayText, _ := agent.ProcessAgentResponse(responseText)
-		if streamResult.inConversation {
-			s.appendConversationMessage("assistant", displayText)
-		}
-
-		// Erase the [AWAITING_INPUT] marker from display if present
-		if strings.HasSuffix(strings.TrimSpace(responseText), agent.AwaitingInputMarker) {
-			fmt.Print("\x1b[1A\x1b[2K") // Move up, clear line
-		}
-
-		// If we already set up conversation mode during streaming, just run the loop
-		if streamResult.inConversation {
-			s.conversation.SetSubState(ConversationAwaitingInput)
-			s.runConversationLoop(ctx)
-		} else {
-			// Late detection - need to set up conversation mode now
-			s.enterConversationMode(ctx, displayText)
-		}
-		return
-	}
 
 	// Determine response type (single-turn flow)
 	collector := agent.NewStreamCollector()
@@ -1506,427 +1439,10 @@ func (s *Shell) Learning() *learning.FixStore {
 	return s.learning
 }
 
-// setupConversationMode initializes conversation UI for streaming.
-// Called when [CONVERSATION] marker is detected at the start of a response.
-// The content will be streamed directly with tinting - no re-rendering needed.
-func (s *Shell) setupConversationMode() {
-	accentColor := "#7c3aed" // Default purple
-	if s.colorPalette.Primary != "" {
-		accentColor = s.colorPalette.Primary
-	}
-	s.convUI = NewConversationUI(os.Stdout, accentColor)
-	s.agentOutput.SetStreamTint(s.convUI.TintBg())
-	s.agentOutput.SetStreamBorder(s.convUI.StreamBorder())
-	s.conversation.Activate()
-	s.conversation.SetSubState(ConversationStreaming)
-	s.convCancelArmed = false
-	s.resetConversationHistory()
-
-	// Write the top border to start the visual frame
-	s.convUI.WriteTopBorder()
-}
-
-// enterConversationMode enters multi-turn conversation with the agent.
-// Used for late detection (when [CONVERSATION] wasn't at the start).
-func (s *Shell) enterConversationMode(ctx context.Context, initialResponse string) {
-	// Create conversation UI with accent color
-	accentColor := "#7c3aed" // Default purple
-	if s.colorPalette.Primary != "" {
-		accentColor = s.colorPalette.Primary
-	}
-	s.convUI = NewConversationUI(os.Stdout, accentColor)
-	s.agentOutput.SetStreamTint(s.convUI.TintBg())
-	s.agentOutput.SetStreamBorder(s.convUI.StreamBorder())
-	s.conversation.Activate()
-	s.convCancelArmed = false
-	s.resetConversationHistory()
-	s.appendConversationMessage("assistant", initialResponse)
-
-	// Clear the un-framed response that was already streamed
-	// Count lines in the response to know how many to clear
-	lineCount := strings.Count(initialResponse, "\n") + 1
-	for i := 0; i < lineCount; i++ {
-		fmt.Print("\x1b[1A\x1b[2K") // Move up, clear line
-	}
-
-	// Now re-render the response within the conversation frame
-	s.convUI.WriteTopBorder()
-	// Re-render the initial response with framing
-	s.convUI.WriteStreamTinted(initialResponse)
-	fmt.Print("\x1b[K\x1b[0m\n") // Fill and newline
-
-	s.conversation.SetSubState(ConversationAwaitingInput)
-
-	// Conversation input loop
-	s.runConversationLoop(ctx)
-}
-
-// runConversationLoop handles the conversation input loop.
-func (s *Shell) runConversationLoop(ctx context.Context) { //nolint:gocyclo // interactive loop with error handling branches
-	// Cancel the per-request timeout — conversation mode is interactive and
-	// should not be killed by the initial 30s agent timeout. Each individual
-	// reply still has its own idle timeout via SendStreaming.
-	if s.agentTimeoutCancel != nil {
-		s.agentTimeoutCancel()
-		s.agentTimeoutCancel = nil
-	}
-
-	// Parse conversation idle timeout from config
-	idleTimeout := 10 * time.Minute // default
-	if s.config.Agent.ConversationIdleTimeout != "" {
-		if parsed, err := time.ParseDuration(s.config.Agent.ConversationIdleTimeout); err == nil {
-			idleTimeout = parsed
-		}
-	}
-
-	for s.conversation.IsActive() {
-		// Apply idle timeout per input read — if the user doesn't respond
-		// within the configured duration, exit conversation mode.
-		// A zero or negative timeout disables the idle timeout.
-		var inputCtx context.Context
-		var inputCancel context.CancelFunc
-		if idleTimeout > 0 {
-			inputCtx, inputCancel = context.WithTimeout(ctx, idleTimeout)
-		} else {
-			inputCtx, inputCancel = context.WithCancel(ctx)
-		}
-		line, err := s.readConversationInputWithHook(inputCtx)
-		inputCancel()
-
-		if err != nil {
-			// Check if the error was caused by the idle timeout
-			if inputCtx.Err() == context.DeadlineExceeded && ctx.Err() == nil {
-				if s.convUI != nil {
-					s.convUI.WriteIdleTimeout()
-				}
-				s.exitConversationMode()
-				return
-			}
-			if err == ErrEditorCanceled {
-				if s.convUI != nil {
-					// Clear the active user input box explicitly in conversation mode.
-					// This avoids residual box borders when terminal cursor accounting
-					// differs from editor-side clear logic.
-					s.convUI.ClearUserBox()
-				}
-				if s.convCancelArmed {
-					s.convCancelArmed = false
-					s.exitConversationMode()
-					return
-				}
-				s.convCancelArmed = true
-				if s.convUI != nil {
-					s.convUI.WriteCancelHint()
-				}
-				continue
-			}
-			if s.convUI != nil {
-				// Context cancellation (e.g. SIGINT routed via handleAgentInterrupt)
-				// does not trigger editor ClearOnCancel. Clear the active frame here
-				// so the close border renders at a consistent location.
-				s.convUI.ClearUserBox()
-			}
-			// Ctrl+D or other error - exit conversation mode
-			s.exitConversationMode()
-			return
-		}
-
-		s.convCancelArmed = false
-		input := strings.TrimSpace(line)
-
-		// Handle explicit exit commands (/done, /exit, /quit)
-		if s.conversation.IsExitCommand(input) {
-			s.exitConversationMode()
-			return
-		}
-
-		// Handle shell escape
-		if s.conversation.IsShellEscape(input) {
-			cmd := s.conversation.ExtractShellCommand(input)
-			s.executeShellEscape(ctx, cmd)
-			continue
-		}
-
-		// Send reply to agent
-		s.sendConversationReply(ctx, input)
-	}
-}
-
-func (s *Shell) readConversationInputWithHook(ctx context.Context) (string, error) {
-	if s.conversationInputHook != nil {
-		return s.conversationInputHook(ctx)
-	}
-	return s.readConversationInput(ctx)
-}
-
-// readConversationInput reads a reply inside the conversation user box.
-func (s *Shell) readConversationInput(ctx context.Context) (string, error) {
-	cfg := s.editorCfg
-	cfg.Gutter = false
-	cfg.Prompt = ""
-	cfg.HistoryFunc = nil
-	cfg.CompleteFunc = nil
-	cfg.PrefetchFunc = nil
-	cfg.OnInputReady = nil
-	cfg.DisableLineContinuation = true
-	cfg.PreventEmptySubmit = true
-	cfg.DisableHistorySearch = true
-	cfg.DisableContextPicker = true
-	cfg.ClearOnCancel = false
-	if s.convUI != nil {
-		cfg.InputFrame = s.convUI.InputFrame()
-	}
-
-	ed := editor.New(cfg, os.Stdin, os.Stdout)
-	result, err := ed.Run(ctx)
-	if err != nil {
-		return "", err
-	}
-	if result.EOF {
-		return "", ErrEditorEOF
-	}
-	if result.Canceled {
-		return "", ErrEditorCanceled
-	}
-	return result.Text, nil
-}
-
-// exitConversationMode exits conversation mode cleanly.
-func (s *Shell) exitConversationMode() {
-	s.conversation.Deactivate()
-	if s.convUI != nil {
-		s.convUI.WriteBottomBorder() // Close the visual frame
-		s.convUI.ClearTint()
-	}
-	s.agentOutput.ClearStreamStyle()
-	s.resetConversationHistory()
-	fmt.Println() // Clean line
-
-	// Restore normal shell prompt
-	s.readline.SetPrompt(s.currentPromptLine())
-}
-
-// executeShellEscape runs a shell command within conversation mode.
-func (s *Shell) executeShellEscape(ctx context.Context, cmd string) {
-	s.conversation.SetSubState(ConversationExecutingShell)
-
-	// Execute command
-	result, err := s.executor.Execute(ctx, cmd, os.Stdout, os.Stderr)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "hash: %v\n", err)
-	} else {
-		s.lastExitCode = result.ExitCode
-	}
-
-	// Return to awaiting input (readline will show prompt)
-	s.conversation.SetSubState(ConversationAwaitingInput)
-}
-
-// sendConversationReply sends a follow-up message to the agent.
-func (s *Shell) sendConversationReply(ctx context.Context, reply string) {
-	s.conversation.SetSubState(ConversationStreaming)
-	conversationPrompt := s.buildConversationPrompt(reply)
-	s.appendConversationMessage("user", reply)
-	s.agentOutput.StartStreaming()
-	defer s.agentOutput.EndStreaming()
-
-	// Build request with reply as prompt
-	parsed := parser.ParseResult{
-		Type:        parser.CommandTypeAgent,
-		AgentPrompt: conversationPrompt,
-	}
-
-	turnCtx, turnCancel := context.WithCancel(ctx)
-	s.setConversationTurnCancel(turnCancel)
-	defer func() {
-		s.clearConversationTurnCancel()
-		turnCancel()
-	}()
-
-	// Start conversation-mode spinner (tinted)
-	spinnerCtx, spinnerCancel := context.WithCancel(turnCtx)
-	defer spinnerCancel() // Ensure context is always released
-	spinnerDone := make(chan struct{})
-	go s.runConversationSpinner(spinnerCtx, spinnerDone)
-
-	spinnerStopped := false
-	stopSpinner := func() {
-		if spinnerStopped {
-			return
-		}
-		spinnerCancel()
-		<-spinnerDone
-		if s.convUI != nil {
-			s.convUI.ClearThinkingIndicator()
-		}
-		spinnerStopped = true
-	}
-
-	textCh, errCh := s.agentHandler.StreamRequest(turnCtx, parsed)
-	streamResult := s.collectAgentStream(turnCtx, textCh, errCh, agentStreamCollectionOptions{
-		initialConversation:         true,
-		onFirstChunk:                stopSpinner,
-		writeRendered:               func(_ bool, rendered string) { s.agentOutput.WriteStream(rendered) },
-		stripAwaitingInConversation: true,
-		stripAwaitingForRender:      true,
-		trimLeadingNewline:          true,
-	})
-
-	stopSpinner()
-
-	if streamResult.canceled {
-		s.conversation.SetSubState(ConversationAwaitingInput)
-		return
-	}
-	if streamResult.streamErr != nil {
-		s.responseUI.ShowError(streamResult.streamErr.Error())
-		s.conversation.SetSubState(ConversationAwaitingInput)
-		return
-	}
-
-	fmt.Print("\x1b[K\x1b[0m\n") // Fill line, reset tint, newline
-
-	responseText := strings.TrimSpace(streamResult.responseText)
-	displayText, _ := agent.ProcessAgentResponse(responseText)
-	s.appendConversationMessage("assistant", displayText)
-
-	// Keep conversation mode sticky for follow-up turns even when the model
-	// forgets to emit [AWAITING_INPUT] (common around tool-use responses).
-	// Users explicitly exit with /done or Ctrl+C as documented in the UI hints.
-	s.conversation.SetSubState(ConversationAwaitingInput)
-}
-
-// runConversationSpinner runs an animated spinner within the conversation zone.
-func (s *Shell) runConversationSpinner(ctx context.Context, done chan struct{}) {
-	defer close(done)
-
-	frames := []rune{'⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'}
-	ticker := time.NewTicker(80 * time.Millisecond)
-	defer ticker.Stop()
-
-	frame := 0
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			if s.agentOutput != nil && s.agentOutput.State() == AgentOutputStatePermission {
-				// Permission prompts own the screen while waiting for input.
-				// Pause spinner writes to avoid clobbering prompt lines.
-				continue
-			}
-
-			s.convUI.WriteThinkingIndicator(frames[frame%len(frames)], "Agent thinking...")
-			frame++
-		}
-	}
-}
-
-func (s *Shell) resetConversationHistory() {
-	s.convHistory = s.convHistory[:0]
-}
-
-func (s *Shell) appendConversationMessage(role, text string) {
-	text = strings.TrimSpace(text)
-	text = strings.ReplaceAll(text, agent.ConversationStartMarker, "")
-	text = strings.ReplaceAll(text, agent.AwaitingInputMarker, "")
-	text = strings.TrimSpace(text)
-	if text == "" {
-		return
-	}
-
-	s.convHistory = append(s.convHistory, conversationMessage{
-		role:    role,
-		content: text,
-	})
-
-	// Keep the rolling window bounded to avoid unbounded prompt growth.
-	const maxMessages = 24
-	const maxChars = 12000
-
-	if len(s.convHistory) > maxMessages {
-		s.convHistory = s.convHistory[len(s.convHistory)-maxMessages:]
-	}
-
-	total := 0
-	for _, msg := range s.convHistory {
-		total += len(msg.content)
-	}
-	for total > maxChars && len(s.convHistory) > 1 {
-		total -= len(s.convHistory[0].content)
-		s.convHistory = s.convHistory[1:]
-	}
-}
-
-func (s *Shell) buildConversationPrompt(userReply string) string {
-	userReply = strings.TrimSpace(userReply)
-	if len(s.convHistory) == 0 {
-		return userReply
-	}
-
-	var b strings.Builder
-	b.WriteString("Continue this ongoing terminal conversation.\n")
-	b.WriteString("Conversation so far:\n")
-	for _, msg := range s.convHistory {
-		role := "User"
-		if strings.EqualFold(msg.role, "assistant") {
-			role = "Assistant"
-		}
-		fmt.Fprintf(&b, "%s: %s\n", role, msg.content)
-	}
-	b.WriteString("\nLatest user message:\n")
-	b.WriteString(userReply)
-	b.WriteString("\n\nRespond naturally as the assistant. If you need another user reply, end with [AWAITING_INPUT].")
-	return b.String()
-}
-
-func (s *Shell) setConversationTurnCancel(cancel context.CancelFunc) {
-	s.convTurnMu.Lock()
-	defer s.convTurnMu.Unlock()
-	s.convTurnCancel = cancel
-}
-
-func (s *Shell) clearConversationTurnCancel() {
-	s.convTurnMu.Lock()
-	defer s.convTurnMu.Unlock()
-	s.convTurnCancel = nil
-}
-
-func (s *Shell) cancelConversationTurn() bool {
-	s.convTurnMu.Lock()
-	cancel := s.convTurnCancel
-	s.convTurnMu.Unlock()
-	if cancel == nil {
-		return false
-	}
-	cancel()
-	return true
-}
-
-// handleAgentInterrupt routes Ctrl+C depending on mode.
-// Returns true when the full agent request was canceled and the signal loop
-// should exit; returns false when only the active conversation turn was canceled.
-func (s *Shell) handleAgentInterrupt(cancelAgent context.CancelFunc) bool {
-	if s.conversation != nil &&
-		s.conversation.IsActive() {
-		subState := s.conversation.SubState()
-		if subState == ConversationStreaming && s.cancelConversationTurn() {
-			return false
-		}
-
-		// During conversation input, prefer context cancel over coordinator cancel.
-		// AgentOutputCoordinator.Cancel() clears the current line and can erase the
-		// just-rendered close border when interrupts race with frame teardown.
-		if subState == ConversationAwaitingInput {
-			cancelAgent()
-			return true
-		}
-	}
-
-	if s.agentOutput != nil {
-		s.agentOutput.Cancel()
-	}
-	cancelAgent()
+// handleAgentInterrupt handles Ctrl+C during agent streaming.
+func (s *Shell) handleAgentInterrupt(cancelFull context.CancelFunc) bool {
+	s.agentOutput.Cancel()
+	cancelFull()
 	return true
 }
 
@@ -1962,22 +1478,6 @@ func errStr(err error) string {
 		return ""
 	}
 	return err.Error()
-}
-
-func withConversationPermission(cs *ConversationState, fn func()) {
-	if cs == nil || !cs.IsActive() {
-		fn()
-		return
-	}
-
-	prev := cs.SubState()
-	cs.SetSubState(ConversationPermission)
-	defer func() {
-		if cs.IsActive() {
-			cs.SetSubState(prev)
-		}
-	}()
-	fn()
 }
 
 // permissionDecisionForKey maps permission prompt key presses to decisions.

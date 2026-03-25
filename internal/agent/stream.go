@@ -56,52 +56,6 @@ func (c *StreamCollector) Response() Response {
 	return Response{Type: ResponseTypeExplanation, Explanation: text}
 }
 
-// ConversationStartMarker signals the beginning of a multi-turn conversation.
-// Appears on the first line to enable conversation UI immediately.
-const ConversationStartMarker = "[CONVERSATION]"
-
 // AwaitingInputMarker signals the agent expects user input to continue.
-// Appears at the end of a response.
+// Appears at the end of a response. Stripped from rendered output during streaming.
 const AwaitingInputMarker = "[AWAITING_INPUT]"
-
-// ProcessAgentResponse strips conversation markers and determines state.
-// Returns the display text and whether the agent expects further input.
-func ProcessAgentResponse(text string) (display string, expectsInput bool) {
-	trimmed := strings.TrimSpace(text)
-
-	// Check for awaiting input marker at end
-	if strings.HasSuffix(trimmed, AwaitingInputMarker) {
-		trimmed = strings.TrimSuffix(trimmed, AwaitingInputMarker)
-		trimmed = strings.TrimSpace(trimmed)
-		expectsInput = true
-	}
-
-	// Check for conversation start marker at beginning
-	if strings.HasPrefix(trimmed, ConversationStartMarker) {
-		trimmed = strings.TrimPrefix(trimmed, ConversationStartMarker)
-		trimmed = strings.TrimSpace(trimmed)
-	}
-
-	return trimmed, expectsInput
-}
-
-// HasConversationStart checks if text starts with the conversation marker.
-// Used for early detection during streaming.
-// Allows leading whitespace (including newlines) before the marker.
-func HasConversationStart(text string) bool {
-	trimmed := strings.TrimSpace(text)
-	return strings.HasPrefix(trimmed, ConversationStartMarker)
-}
-
-// StripConversationStart removes the conversation start marker from text.
-// Also removes any leading/trailing whitespace around the marker.
-func StripConversationStart(text string) string {
-	trimmed := strings.TrimSpace(text)
-	if strings.HasPrefix(trimmed, ConversationStartMarker) {
-		// Remove marker and any following whitespace
-		result := strings.TrimPrefix(trimmed, ConversationStartMarker)
-		result = strings.TrimSpace(result)
-		return result
-	}
-	return text
-}

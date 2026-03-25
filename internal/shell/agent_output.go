@@ -47,12 +47,9 @@ type AgentOutputCoordinator struct {
 	out            io.Writer
 	state          AgentOutputState
 	streamBuffer   strings.Builder // Buffers text when permission is active
-	wasStreaming   bool            // Track if we were streaming before permission
+	wasStreaming    bool            // Track if we were streaming before permission
 	pendingCommand string          // Command currently being prompted for permission
 	accentColorFn  func() string   // Callback to get current accent color
-	streamTint     string          // Background tint for streaming (empty = no tint)
-	streamBorder   string          // Left border prefix for streaming (e.g., "║ ")
-	atLineStart    bool            // Whether next write should start with border prefix
 }
 
 // NewAgentOutputCoordinator creates a new agent output coordinator.
@@ -71,35 +68,6 @@ func (aoc *AgentOutputCoordinator) SetAccentColorFunc(fn func() string) {
 	aoc.accentColorFn = fn
 }
 
-// SetStreamTint sets the background tint for streamed text.
-// Pass an empty string to disable tinting.
-func (aoc *AgentOutputCoordinator) SetStreamTint(tint string) {
-	aoc.mu.Lock()
-	defer aoc.mu.Unlock()
-	aoc.streamTint = tint
-}
-
-// SetStreamBorder sets the left border prefix for streamed text.
-// This creates a visual frame for the conversation zone.
-func (aoc *AgentOutputCoordinator) SetStreamBorder(border string) {
-	aoc.mu.Lock()
-	defer aoc.mu.Unlock()
-	aoc.streamBorder = border
-}
-
-// ClearStreamStyle disables background tinting and border for streamed text.
-func (aoc *AgentOutputCoordinator) ClearStreamStyle() {
-	aoc.mu.Lock()
-	defer aoc.mu.Unlock()
-	aoc.streamTint = ""
-	aoc.streamBorder = ""
-}
-
-// ClearStreamTint disables background tinting for streamed text.
-func (aoc *AgentOutputCoordinator) ClearStreamTint() {
-	aoc.SetStreamTint("")
-}
-
 // State returns the current output state.
 func (aoc *AgentOutputCoordinator) State() AgentOutputState {
 	aoc.mu.Lock()
@@ -113,7 +81,6 @@ func (aoc *AgentOutputCoordinator) StartStreaming() {
 	defer aoc.mu.Unlock()
 	aoc.state = AgentOutputStateStreaming
 	aoc.streamBuffer.Reset()
-	aoc.atLineStart = true
 }
 
 // WriteStream writes streaming text, or buffers it if permission is active.
@@ -123,56 +90,13 @@ func (aoc *AgentOutputCoordinator) WriteStream(text string) {
 
 	switch aoc.state {
 	case AgentOutputStateStreaming:
-		// Write directly to output, with optional tinting
-		aoc.writeWithTint(text)
+		fmt.Fprint(aoc.out, text)
 	case AgentOutputStatePermission:
-		// Buffer for later (tint will be applied when flushed)
+		// Buffer for later
 		aoc.streamBuffer.WriteString(text)
 	default:
 		// Ignore writes in other states (shouldn't happen, but be safe)
 	}
-}
-
-// writeWithTint writes text with background tint and optional left border.
-// Creates a visual "zone" by filling each line to the terminal edge.
-// Only emits the border prefix at the start of a new line, not mid-line.
-// The newline replacement itself emits border after each \n, so atLineStart
-// is only needed for the very first write after StartStreaming.
-//
-// Every border emission includes an explicit \r (carriage return) to ensure
-// the border starts at column 0. This is critical because:
-//   - ClearThinkingIndicator may leave cursor mid-line (after its own border)
-//   - In raw terminal mode (OPOST off), \n is just LF without CR
-//
-// Must be called with mu held.
-func (aoc *AgentOutputCoordinator) writeWithTint(text string) {
-	if aoc.streamTint == "" || text == "" {
-		fmt.Fprint(aoc.out, text)
-		return
-	}
-
-	// Emit border only at the very start of a streaming session.
-	// After any newline, the replacement below already emits tint+border.
-	// The \r ensures we start at column 0 even if a prior component
-	// (e.g. ClearThinkingIndicator) left the cursor mid-line.
-	if aoc.atLineStart {
-		fmt.Fprint(aoc.out, "\r"+aoc.streamTint+aoc.streamBorder)
-	} else {
-		// Mid-line continuation: just re-apply tint background
-		fmt.Fprint(aoc.out, aoc.streamTint)
-	}
-	aoc.atLineStart = false
-
-	// The markdown renderer adds \x1b[0m resets which wipe our background.
-	// We need to reapply tint after every reset.
-	tinted := strings.ReplaceAll(text, "\x1b[0m", "\x1b[0m"+aoc.streamTint)
-
-	// For newlines: fill to end of line with background (\x1b[K), then newline,
-	// then \r to guarantee column 0 (needed if OPOST is off in raw mode),
-	// then reapply tint and border for the visual frame.
-	tinted = strings.ReplaceAll(tinted, "\n", "\x1b[K\n\r"+aoc.streamTint+aoc.streamBorder)
-
-	fmt.Fprint(aoc.out, tinted)
 }
 
 // EndStreaming transitions back to idle state.
@@ -202,14 +126,9 @@ func (aoc *AgentOutputCoordinator) ExitPermission() {
 
 	if aoc.wasStreaming {
 		aoc.state = AgentOutputStateStreaming
-		// Permission prompts always consume their own lines. Resume streaming
-		// from a clean line boundary so the next chunk starts with border + tint.
-		if aoc.streamTint != "" {
-			aoc.atLineStart = true
-		}
-		// Flush buffered content with tinting
+		// Flush buffered content
 		if aoc.streamBuffer.Len() > 0 {
-			aoc.writeWithTint(aoc.streamBuffer.String())
+			fmt.Fprint(aoc.out, aoc.streamBuffer.String())
 			aoc.streamBuffer.Reset()
 		}
 	} else {
@@ -269,7 +188,7 @@ func ComputeTintBackground(accentColor string) string {
 
 // RenderPermissionPrompt displays the permission request UI.
 // Automatically enters permission state and pauses streaming.
-// toolName is optional — if non-empty, it's shown as context (e.g., "Bash", "Write").
+// toolName is optional -- if non-empty, it's shown as context (e.g., "Bash", "Write").
 func (aoc *AgentOutputCoordinator) RenderPermissionPrompt(command, toolName, accentColor string) {
 	aoc.EnterPermission()
 
@@ -312,14 +231,6 @@ func (aoc *AgentOutputCoordinator) RenderPermissionPrompt(command, toolName, acc
 		barStyle + "│" + ansiReset + " " + permissionPad + "[y]allow  [n]deny  [a]always allow",
 	}
 
-	if aoc.streamTint != "" {
-		for _, line := range lines {
-			fmt.Fprint(aoc.out, "\r\n")
-			aoc.writeWithTint(line + "\x1b[K")
-		}
-		return
-	}
-
 	var sb strings.Builder
 	for _, line := range lines {
 		sb.WriteString("\r\n")
@@ -341,54 +252,21 @@ func (aoc *AgentOutputCoordinator) ClearPermissionPrompt(allowed bool) {
 		cmd = cmd[:57] + "..."
 	}
 
-	// Show feedback with the command (dim style to not distract from main output)
-	feedback := ""
-	if allowed {
-		feedback = fmt.Sprintf("%s\x1b[32m✓\x1b[0m \x1b[90m%s\x1b[0m", permissionPad, cmd)
-	} else {
-		feedback = fmt.Sprintf("%s\x1b[31m✗\x1b[0m \x1b[90m%s\x1b[0m", permissionPad, cmd)
-	}
-
-	if aoc.streamTint != "" {
-		// Move to top of prompt
-		var sb strings.Builder
-		sb.WriteString("\r")
-		for i := 0; i < 4; i++ {
-			sb.WriteString(ansiCursorUp)
-		}
-		aoc.out.Write([]byte(sb.String()))
-
-		// Feedback line (tinted)
-		aoc.atLineStart = true
-		aoc.writeWithTint(feedback + "\x1b[K")
-		fmt.Fprint(aoc.out, "\n")
-
-		// Fill remaining prompt lines with tinted blanks, then restore cursor
-		fmt.Fprint(aoc.out, "\x1b[s")
-		for i := 0; i < 4; i++ {
-			aoc.writeWithTint("\x1b[K")
-			if i < 3 {
-				fmt.Fprint(aoc.out, "\n")
-			}
-		}
-		fmt.Fprint(aoc.out, "\x1b[u")
-	} else {
-		// First clear the current line (line 5 - keybindings), then move up and clear the rest
-		var sb strings.Builder
+	// First clear the current line (line 5 - keybindings), then move up and clear the rest
+	var sb strings.Builder
+	sb.WriteString("\r")
+	sb.WriteString(ansiClearLine)
+	for i := 0; i < 4; i++ {
+		sb.WriteString(ansiCursorUp)
 		sb.WriteString("\r")
 		sb.WriteString(ansiClearLine)
-		for i := 0; i < 4; i++ {
-			sb.WriteString(ansiCursorUp)
-			sb.WriteString("\r")
-			sb.WriteString(ansiClearLine)
-		}
-		if allowed {
-			sb.WriteString(fmt.Sprintf("%s\x1b[32m✓\x1b[0m \x1b[90m%s\x1b[0m\n", permissionPad, cmd))
-		} else {
-			sb.WriteString(fmt.Sprintf("%s\x1b[31m✗\x1b[0m \x1b[90m%s\x1b[0m\n", permissionPad, cmd))
-		}
-		aoc.out.Write([]byte(sb.String()))
 	}
+	if allowed {
+		sb.WriteString(fmt.Sprintf("%s\x1b[32m✓\x1b[0m \x1b[90m%s\x1b[0m\n", permissionPad, cmd))
+	} else {
+		sb.WriteString(fmt.Sprintf("%s\x1b[31m✗\x1b[0m \x1b[90m%s\x1b[0m\n", permissionPad, cmd))
+	}
+	aoc.out.Write([]byte(sb.String()))
 
 	aoc.pendingCommand = "" // Clear for next prompt
 
@@ -399,11 +277,8 @@ func (aoc *AgentOutputCoordinator) ClearPermissionPrompt(allowed bool) {
 	// which would create a TOCTOU race on permission state)
 	if aoc.wasStreaming {
 		aoc.state = AgentOutputStateStreaming
-		if aoc.streamTint != "" {
-			aoc.atLineStart = true
-		}
 		if aoc.streamBuffer.Len() > 0 {
-			aoc.writeWithTint(aoc.streamBuffer.String())
+			fmt.Fprint(aoc.out, aoc.streamBuffer.String())
 			aoc.streamBuffer.Reset()
 		}
 	} else {
