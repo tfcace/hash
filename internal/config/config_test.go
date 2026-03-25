@@ -24,8 +24,8 @@ func TestLoadConfig_DefaultValues(t *testing.T) {
 	if cfg.Prompt.Mode != "starship" {
 		t.Errorf("Prompt.Mode = %q, want %q", cfg.Prompt.Mode, "starship")
 	}
-	if cfg.Agent.ConversationIdleTimeout != "10m" {
-		t.Errorf("Agent.ConversationIdleTimeout = %q, want %q", cfg.Agent.ConversationIdleTimeout, "10m")
+	if cfg.Agent.Trust != "suggest" {
+		t.Errorf("Agent.Trust = %q, want %q", cfg.Agent.Trust, "suggest")
 	}
 }
 
@@ -255,6 +255,41 @@ func TestLoadConfig_HooksChpwd_Default(t *testing.T) {
 	// Default should have no chpwd hooks
 	if len(cfg.Shell.Hooks.Chpwd) != 0 {
 		t.Errorf("expected 0 default chpwd hooks, got %d", len(cfg.Shell.Hooks.Chpwd))
+	}
+}
+
+func TestLoadConfig_TrustTier(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.toml")
+
+	content := []byte(`
+[agent]
+trust = "assist"
+`)
+	if err := os.WriteFile(configPath, content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(tmpDir)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	if cfg.Agent.Trust != "assist" {
+		t.Errorf("Agent.Trust = %q, want %q", cfg.Agent.Trust, "assist")
+	}
+}
+
+func TestLoadConfig_TrustTierDefault(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	cfg, err := Load(tmpDir)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	if cfg.Agent.Trust != "suggest" {
+		t.Errorf("Agent.Trust = %q, want %q", cfg.Agent.Trust, "suggest")
 	}
 }
 

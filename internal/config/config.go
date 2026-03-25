@@ -72,6 +72,7 @@ type PromptConfig struct {
 type AgentConfig struct {
 	Default                 string   `toml:"default"`
 	Timeout                 string   `toml:"timeout"`
+	Trust                   string   `toml:"trust"`                     // "suggest", "assist", or "auto"
 	Transport               string   `toml:"transport"`                 // "stdio" or "http"
 	Command                 string   `toml:"command"`                   // For stdio transport
 	Args                    []string `toml:"args"`                      // For stdio transport
@@ -141,11 +142,11 @@ func Default() *Config {
 			Mode: "starship",
 		},
 		Agent: AgentConfig{
-			Default:                 "claude-code-acp",
-			Command:                 "claude-code-acp",
-			Timeout:                 "120s",
-			AllowedCommandsScope:    "project",
-			ConversationIdleTimeout: "10m",
+			Default:              "claude-code-acp",
+			Command:              "claude-code-acp",
+			Timeout:              "120s",
+			Trust:                "suggest",
+			AllowedCommandsScope: "project",
 		},
 		History: HistoryConfig{
 			Enabled:    true,
