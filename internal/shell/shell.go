@@ -170,6 +170,11 @@ func New(cfg *config.Config) (*Shell, error) {
 	var shellPtr *Shell // Set after construction, used by permission handler closure
 	if acpTransport != nil {
 		acpTransport.SetPermissionHandler(func(req agent.ToolPermissionRequest) (allow bool, always bool) {
+			// Initialize action log on first permission request (agentic turn detected)
+			if shellPtr != nil && shellPtr.actionLog == nil {
+				shellPtr.actionLog = NewActionLog(os.Stdout)
+			}
+
 			// Check allowlist first
 			if allowlistMgr.IsAllowed(req.Command) {
 				trace.AgentHigh("tool_permission", map[string]any{
@@ -192,11 +197,6 @@ func New(cfg *config.Config) (*Shell, error) {
 				"trust":    cfg.Agent.Trust,
 				"decision": decision.String(),
 			})
-
-			// Initialize action log on first permission request (agentic turn detected)
-			if shellPtr != nil && shellPtr.actionLog == nil {
-				shellPtr.actionLog = NewActionLog(os.Stdout)
-			}
 
 			switch decision {
 			case PermissionAllow:

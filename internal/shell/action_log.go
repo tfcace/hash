@@ -3,6 +3,7 @@ package shell
 import (
 	"fmt"
 	"io"
+	"os"
 )
 
 // ActionEntry records a single tool action during an agentic turn.
@@ -14,8 +15,9 @@ type ActionEntry struct {
 
 // ActionLog tracks tool actions during an agentic turn and renders them.
 type ActionLog struct {
-	out     io.Writer
-	actions []ActionEntry
+	out       io.Writer
+	actions   []ActionEntry
+	snapshots map[string][]byte // file path → original content before edit
 }
 
 // NewActionLog creates a new action log that renders to the given writer.
