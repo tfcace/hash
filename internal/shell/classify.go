@@ -33,17 +33,17 @@ var readOnlyCommands = map[string]bool{
 	"cat": true, "head": true, "tail": true, "less": true, "more": true,
 	"ls": true, "tree": true, "wc": true, "file": true, "stat": true,
 	"diff": true, "which": true, "where": true, "type": true,
-	"pwd": true, "echo": true, "printf": true, "env": true, "printenv": true,
+	"pwd": true, "env": true, "printenv": true,
 	"whoami": true, "hostname": true, "uname": true, "date": true,
 	"du": true, "df": true, "free": true, "uptime": true, "id": true,
-	"sort": true, "uniq": true, "cut": true, "tr": true, "awk": true,
+	"sort": true, "uniq": true, "cut": true, "tr": true,
 	"sha256sum": true, "md5sum": true, "sha1sum": true,
 }
 
 // readOnlySubcommands are command+subcommand pairs that are read-only.
 var readOnlySubcommands = map[string]bool{
 	"git status": true, "git log": true, "git diff": true, "git show": true,
-	"git branch": true, "git tag": true, "git remote": true, "git stash list": true,
+	"git branch": true, "git tag": true, "git remote": true,
 	"jj log": true, "jj diff": true, "jj status": true, "jj show": true,
 	"docker ps": true, "docker images": true, "docker inspect": true,
 	"kubectl get": true, "kubectl describe": true, "kubectl logs": true,
@@ -58,9 +58,8 @@ var destructiveCommands = map[string]bool{
 // destructiveSubcommands are command+subcommand pairs that are destructive.
 var destructiveSubcommands = map[string]bool{
 	"git push": true, "git reset": true, "git clean": true,
-	"git checkout -- .": true, "git restore .": true,
 	"jj abandon": true,
-	"docker rm":  true, "docker rmi": true, "docker system prune": true,
+	"docker rm": true, "docker rmi": true,
 	"kubectl delete": true,
 }
 
@@ -76,11 +75,48 @@ var testPatterns = []string{
 	"mvn test", "gradle test",
 }
 
+// commandPrefixes are wrappers that don't change the nature of the command.
+var commandPrefixes = map[string]bool{
+	"sudo": true, "nice": true, "nohup": true,
+	"time": true, "command": true,
+}
+
 // ClassifyCommand determines the risk level of a shell command.
 func ClassifyCommand(command string) CommandRisk {
 	cmd := strings.TrimSpace(command)
 	if cmd == "" {
 		return CommandRiskGeneral
+	}
+
+	// Strip command-wrapping prefixes (sudo, env, nice, nohup, time, command).
+	// env is special: it takes KEY=VALUE pairs before the actual command.
+	for {
+		fields := strings.Fields(cmd)
+		if len(fields) == 0 {
+			return CommandRiskGeneral
+		}
+		first := strings.ToLower(fields[0])
+		if commandPrefixes[first] {
+			cmd = strings.TrimSpace(strings.TrimPrefix(cmd, fields[0]))
+			continue
+		}
+		if first == "env" {
+			// Strip "env" and any KEY=VALUE args
+			cmd = strings.TrimSpace(strings.TrimPrefix(cmd, fields[0]))
+			for {
+				f := strings.Fields(cmd)
+				if len(f) == 0 {
+					return CommandRiskGeneral
+				}
+				if strings.Contains(f[0], "=") {
+					cmd = strings.TrimSpace(strings.TrimPrefix(cmd, f[0]))
+				} else {
+					break
+				}
+			}
+			continue
+		}
+		break
 	}
 
 	// Check test patterns first (multi-word matches)

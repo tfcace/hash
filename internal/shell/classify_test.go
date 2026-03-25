@@ -20,7 +20,7 @@ func TestClassifyCommand(t *testing.T) {
 		{"diff a.go b.go", CommandRiskReadOnly},
 		{"which go", CommandRiskReadOnly},
 		{"pwd", CommandRiskReadOnly},
-		{"echo hello", CommandRiskReadOnly},
+		{"echo hello", CommandRiskGeneral},
 		{"env", CommandRiskReadOnly},
 		{"git status", CommandRiskReadOnly},
 		{"git log", CommandRiskReadOnly},
@@ -61,6 +61,15 @@ func TestClassifyCommand(t *testing.T) {
 		{"mv a.go b.go", CommandRiskGeneral},
 		{"cp a.go b.go", CommandRiskGeneral},
 		{"sed -i 's/foo/bar/g' file.go", CommandRiskGeneral},
+
+		// Sudo and prefix stripping
+		{"sudo rm -rf /", CommandRiskDestructive},
+		{"sudo cat file", CommandRiskReadOnly},
+		{"sudo go test ./...", CommandRiskTest},
+		{"env FOO=bar rm file", CommandRiskDestructive},
+		{"nice git push origin main", CommandRiskDestructive},
+		{"nohup ls -la", CommandRiskReadOnly},
+		{"sudo env VAR=1 kill 1234", CommandRiskDestructive},
 
 		// Edge cases
 		{"", CommandRiskGeneral},

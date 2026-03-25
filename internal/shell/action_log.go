@@ -78,11 +78,15 @@ func (al *ActionLog) EditedFiles() []string {
 
 // Count returns the total number of actions.
 func (al *ActionLog) Count() int {
+	al.mu.Lock()
+	defer al.mu.Unlock()
 	return len(al.actions)
 }
 
 // SnapshotFile saves a copy of a file's content before editing.
 func (al *ActionLog) SnapshotFile(path string) error {
+	al.mu.Lock()
+	defer al.mu.Unlock()
 	if al.snapshots == nil {
 		al.snapshots = make(map[string][]byte)
 	}
@@ -106,6 +110,8 @@ func (al *ActionLog) SnapshotFile(path string) error {
 // RevertEdits restores all snapshotted files to their original content.
 // Returns the number of files reverted.
 func (al *ActionLog) RevertEdits() int {
+	al.mu.Lock()
+	defer al.mu.Unlock()
 	count := 0
 	for path, content := range al.snapshots {
 		if content == nil {
