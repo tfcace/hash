@@ -89,18 +89,18 @@ func (al *ActionLog) Count() int {
 	return len(al.actions)
 }
 
-// SnapshotFile saves a copy of a file's content before editing.
+// SnapshotFile saves a copy of a file's content and permissions before editing.
 func (al *ActionLog) SnapshotFile(path string) error {
 	al.mu.Lock()
 	defer al.mu.Unlock()
 	if al.snapshots == nil {
-		al.snapshots = make(map[string][]byte)
+		al.snapshots = make(map[string]*fileSnapshot)
 	}
 	// Only snapshot the first time (original content)
 	if _, exists := al.snapshots[path]; exists {
 		return nil
 	}
-	data, err := os.ReadFile(path)
+	info, err := os.Stat(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			// File doesn't exist yet — snapshot as nil (revert = delete)
@@ -109,23 +109,27 @@ func (al *ActionLog) SnapshotFile(path string) error {
 		}
 		return err
 	}
-	al.snapshots[path] = data
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	al.snapshots[path] = &fileSnapshot{content: data, mode: info.Mode()}
 	return nil
 }
 
-// RevertEdits restores all snapshotted files to their original content.
+// RevertEdits restores all snapshotted files to their original content and permissions.
 // Returns the number of files reverted.
 func (al *ActionLog) RevertEdits() int {
 	al.mu.Lock()
 	defer al.mu.Unlock()
 	count := 0
-	for path, content := range al.snapshots {
-		if content == nil {
+	for path, snap := range al.snapshots {
+		if snap == nil {
 			os.Remove(path)
 			count++
 			continue
 		}
-		if err := os.WriteFile(path, content, 0o600); err == nil {
+		if err := os.WriteFile(path, snap.content, snap.mode); err == nil {
 			count++
 		}
 	}

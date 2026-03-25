@@ -114,6 +114,15 @@ collectLoop:
 		}
 	}
 
+	// Drain any pending error after text channel closed
+	select {
+	case err := <-errCh:
+		if err != nil {
+			result.streamErr = err
+		}
+	default:
+	}
+
 	writeRendered(renderer.Flush())
 	result.responseText = response.String()
 	return result

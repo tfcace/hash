@@ -948,7 +948,7 @@ func (s *Shell) handleAgentRequest(ctx context.Context, parsed parser.ParseResul
 }
 
 func (s *Shell) agentRequestTimeout() time.Duration {
-	timeout := 30 * time.Second
+	timeout := 120 * time.Second // Match config default
 	if s.config.Agent.Timeout != "" {
 		if parsedDur, err := time.ParseDuration(s.config.Agent.Timeout); err == nil {
 			timeout = parsedDur
