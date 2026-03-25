@@ -14,12 +14,18 @@ type ActionEntry struct {
 	Allowed  bool
 }
 
+// fileSnapshot holds a file's original content and permissions.
+type fileSnapshot struct {
+	content []byte
+	mode    os.FileMode
+}
+
 // ActionLog tracks tool actions during an agentic turn and renders them.
 type ActionLog struct {
 	mu        sync.Mutex
 	out       io.Writer
 	actions   []ActionEntry
-	snapshots map[string][]byte // file path → original content before edit
+	snapshots map[string]*fileSnapshot // file path → original content+mode before edit (nil = newly created)
 }
 
 // NewActionLog creates a new action log that renders to the given writer.

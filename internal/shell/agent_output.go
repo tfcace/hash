@@ -325,7 +325,9 @@ func (aoc *AgentOutputCoordinator) Cancel() {
 	if wasPermission {
 		// Clear all 5 lines of the permission prompt
 		var sb strings.Builder
-		for i := 0; i < 5; i++ {
+		sb.WriteString("\r")
+		sb.WriteString(ansiClearLine) // Clear current line first
+		for i := 0; i < 4; i++ {    // Then move up 4 times (not 5)
 			sb.WriteString(ansiCursorUp)
 			sb.WriteString("\r")
 			sb.WriteString(ansiClearLine)
