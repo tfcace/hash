@@ -100,7 +100,7 @@ func ClassifyCommand(command string) CommandRisk {
 			cmd = strings.TrimSpace(strings.TrimPrefix(cmd, fields[0]))
 			continue
 		}
-		if first == "env" {
+		if first == "env" && len(fields) > 1 {
 			// Strip "env" and any KEY=VALUE args
 			cmd = strings.TrimSpace(strings.TrimPrefix(cmd, fields[0]))
 			for {
