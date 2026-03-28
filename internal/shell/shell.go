@@ -806,6 +806,10 @@ func (s *Shell) runHistoryPicker() string {
 	picker := history.NewSearchUI(s.history, s.colorPalette)
 	picker.SetClipboard(s.clipboard)
 	selected, err := picker.Run()
+	// Drain any terminal responses (DECRPM) that bubbletea's shutdown
+	// queries left in stdin. Without this, responses like ESC[?2027;1$y
+	// leak into the next editor session as typed characters.
+	drainStdinBriefly()
 	if err != nil {
 		return ""
 	}
@@ -842,6 +846,7 @@ func (s *Shell) runContextPicker() {
 	// Run the picker UI
 	picker := hashcontext.NewPickerUI(collection)
 	_, err := picker.Run()
+	drainStdinBriefly() // Drain DECRPM responses from bubbletea shutdown
 	if err != nil {
 		// Picker canceled or errored, keep existing selection
 		return
@@ -1567,6 +1572,16 @@ func readSingleKey() byte {
 	}
 
 	return char
+}
+
+// drainStdinBriefly waits briefly for terminal responses to arrive, then drains stdin.
+// Used after bubbletea programs exit — bubbletea sends DECRQM queries during shutdown,
+// and the terminal's DECRPM responses may still be in flight.
+func drainStdinBriefly() {
+	fd := int(os.Stdin.Fd())
+	// Wait up to 5ms for any DECRPM responses to arrive
+	time.Sleep(5 * time.Millisecond)
+	drainStdin(fd)
 }
 
 // drainStdin discards any bytes already buffered in stdin.

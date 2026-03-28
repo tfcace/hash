@@ -281,7 +281,13 @@ func (ui *SearchUI) View() tea.View {
 	help := "  ↑/↓ navigate  enter select  ctrl+y copy cmd  ctrl+o copy output  esc cancel"
 	b.WriteString(dimStyle.Render(help))
 
-	return tea.NewView(b.String())
+	v := tea.NewView(b.String())
+	// Disable bracketed paste to prevent DECRQM queries on shutdown.
+	// Bubbletea queries modes 2026/2027 at exit; the terminal responses
+	// arrive on stdin after bubbletea's input reader closes, leaking
+	// characters like [?2027;1$y into the next editor session.
+	v.DisableBracketedPasteMode = true
+	return v
 }
 
 func (ui *SearchUI) formatResultLine(cmd Command, idx int, selected, normal, dim, errStyle lipgloss.Style) string {
