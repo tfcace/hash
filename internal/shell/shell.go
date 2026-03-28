@@ -169,12 +169,22 @@ func New(cfg *config.Config) (*Shell, error) {
 	// Wire up permission handler for ACP transport
 	var shellPtr *Shell // Set after construction, used by permission handler closure
 	if acpTransport != nil {
-		acpTransport.SetPermissionHandler(func(req agent.ToolPermissionRequest) (allow bool, always bool) {
-			// Initialize action log on first permission request (agentic turn detected)
-			if shellPtr != nil && shellPtr.actionLog == nil {
+		// logPermission initializes the action log if needed and records the tool action.
+		// Snapshots files before writes for potential revert.
+		logPermission := func(req agent.ToolPermissionRequest, allowed bool) {
+			if shellPtr == nil {
+				return
+			}
+			if shellPtr.actionLog == nil {
 				shellPtr.actionLog = NewActionLog(os.Stdout)
 			}
+			if allowed && (req.ToolName == "Write" || req.ToolName == "Edit") {
+				shellPtr.actionLog.SnapshotFile(req.Command) //nolint:errcheck
+			}
+			shellPtr.actionLog.Add(req.ToolName, req.Command, allowed)
+		}
 
+		acpTransport.SetPermissionHandler(func(req agent.ToolPermissionRequest) (allow bool, always bool) {
 			// Check allowlist first
 			if allowlistMgr.IsAllowed(req.Command) {
 				trace.AgentHigh("tool_permission", map[string]any{
@@ -182,13 +192,7 @@ func New(cfg *config.Config) (*Shell, error) {
 					"tool":     req.ToolName,
 					"decision": "allowlist",
 				})
-				// Snapshot file before agent writes (for potential revert)
-				if (req.ToolName == "Write" || req.ToolName == "Edit") && shellPtr != nil && shellPtr.actionLog != nil {
-					shellPtr.actionLog.SnapshotFile(req.Command) //nolint:errcheck
-				}
-				if shellPtr != nil && shellPtr.actionLog != nil {
-					shellPtr.actionLog.Add(req.ToolName, req.Command, true)
-				}
+				logPermission(req, true)
 				return true, false
 			}
 
@@ -204,18 +208,11 @@ func New(cfg *config.Config) (*Shell, error) {
 
 			switch decision {
 			case PermissionAllow:
-				// Snapshot file before agent writes (for potential revert)
-				if (req.ToolName == "Write" || req.ToolName == "Edit") && shellPtr != nil && shellPtr.actionLog != nil {
-					shellPtr.actionLog.SnapshotFile(req.Command) //nolint:errcheck
-				}
-				if shellPtr != nil && shellPtr.actionLog != nil {
-					shellPtr.actionLog.Add(req.ToolName, req.Command, true)
-				}
+				logPermission(req, true)
 				return true, false
 			case PermissionDeny:
-				if shellPtr != nil && shellPtr.actionLog != nil {
-					shellPtr.actionLog.Add(req.ToolName, req.Command, false)
-				}
+				// In suggest/deny mode, don't create action log — let agent
+				// fall back to suggesting commands without visual noise.
 				return false, false
 			default: // PermissionPrompt
 				agentOutput.RenderPermissionPrompt(req.Command, req.ToolName, colorPalette.Primary)
@@ -228,16 +225,7 @@ func New(cfg *config.Config) (*Shell, error) {
 				}
 
 				agentOutput.ClearPermissionPrompt(allow)
-
-				// Snapshot file before agent writes (for potential revert)
-				if allow && (req.ToolName == "Write" || req.ToolName == "Edit") {
-					if shellPtr != nil && shellPtr.actionLog != nil {
-						shellPtr.actionLog.SnapshotFile(req.Command) //nolint:errcheck
-					}
-				}
-				if shellPtr != nil && shellPtr.actionLog != nil {
-					shellPtr.actionLog.Add(req.ToolName, req.Command, allow)
-				}
+				logPermission(req, allow)
 				return allow, always
 			}
 		})
