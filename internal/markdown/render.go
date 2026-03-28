@@ -48,9 +48,7 @@ func Render(text string) string {
 			if !inCodeBlock {
 				inCodeBlock = true
 				codeBlockLang = strings.TrimPrefix(line, "```")
-				if codeBlockLang != "" {
-					result = append(result, dim+gray+"─── "+codeBlockLang+" ───"+reset)
-				}
+				_ = codeBlockLang // language tag available but not displayed
 				continue
 			} else {
 				inCodeBlock = false
@@ -59,8 +57,8 @@ func Render(text string) string {
 		}
 
 		if inCodeBlock {
-			// Code block content - dim cyan
-			result = append(result, dim+cyan+"  "+line+reset)
+			// Code block content - gray with indent
+			result = append(result, gray+"  "+line+reset)
 			continue
 		}
 
@@ -134,7 +132,7 @@ func renderInline(text string) string {
 	// Process inline code (before italic to preserve backticks)
 	result = codePattern.ReplaceAllStringFunc(result, func(match string) string {
 		inner := strings.Trim(match, "`")
-		return dim + cyan + inner + reset
+		return cyan + inner + reset
 	})
 
 	// Process strikethrough

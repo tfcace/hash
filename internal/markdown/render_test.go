@@ -61,11 +61,12 @@ func TestRender_CodeBlock(t *testing.T) {
 	input := "```go\nfunc main() {}\n```"
 	result := Render(input)
 
-	if !strings.Contains(result, "go") {
-		t.Error("Language should be shown")
-	}
 	if !strings.Contains(result, "func main()") {
 		t.Error("Code content should be preserved")
+	}
+	// Code blocks are indented with gray styling
+	if !strings.Contains(result, gray) {
+		t.Error("Code block should use gray styling")
 	}
 }
 

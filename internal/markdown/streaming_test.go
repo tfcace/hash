@@ -35,7 +35,7 @@ func TestStreamingRenderer_InlineCode(t *testing.T) {
 
 	result := r.Write("use `fmt.Println` here\n")
 
-	if !strings.Contains(result, dim+cyan) {
+	if !strings.Contains(result, cyan) {
 		t.Error("expected code formatting")
 	}
 	if !strings.Contains(result, "fmt.Println") {
@@ -107,13 +107,13 @@ func TestStreamingRenderer_CodeBlock(t *testing.T) {
 
 	output := result.String()
 
-	// Should have language header
-	if !strings.Contains(output, "go") {
-		t.Error("expected language in output")
-	}
-	// Code should be styled
-	if !strings.Contains(output, dim+cyan) {
+	// Code should be styled with gray
+	if !strings.Contains(output, gray) {
 		t.Error("expected code styling")
+	}
+	// Code content preserved
+	if !strings.Contains(output, "func main()") {
+		t.Error("expected code content")
 	}
 }
 

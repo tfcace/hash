@@ -76,8 +76,8 @@ func (r *StreamingRenderer) processLine(line string) string {
 	if strings.HasPrefix(content, "```") {
 		result = r.handleCodeBlockMarker(content)
 	} else if r.inCodeBlock {
-		// 2. Inside code block - no parsing, just style
-		result = dim + cyan + "  " + content + reset
+		// 2. Inside code block - just indent, no dim (dim causes visual artifacts)
+		result = gray + "  " + content + reset
 	} else if header := r.tryHeader(content); header != "" {
 		// 3. Headers
 		result = header
@@ -98,14 +98,11 @@ func (r *StreamingRenderer) processLine(line string) string {
 // handleCodeBlockMarker toggles code block state and returns styled output.
 func (r *StreamingRenderer) handleCodeBlockMarker(line string) string {
 	if !r.inCodeBlock {
-		// Opening marker
+		// Opening marker — absorb silently (no header line)
 		r.inCodeBlock = true
 		r.codeBlockLang = strings.TrimPrefix(line, "```")
 		r.codeBlockLang = strings.TrimSpace(r.codeBlockLang)
-		if r.codeBlockLang != "" {
-			return dim + gray + "─── " + r.codeBlockLang + " ───" + reset
-		}
-		return "" // No output for bare ```
+		return ""
 	}
 	// Closing marker
 	r.inCodeBlock = false
@@ -178,7 +175,7 @@ func (r *StreamingRenderer) processInline(text string) string {
 				r.inCode = false
 			} else {
 				// Start inline code
-				result.WriteString(dim + cyan)
+				result.WriteString(cyan)
 				r.inCode = true
 			}
 			i++
