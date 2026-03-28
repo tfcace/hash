@@ -549,6 +549,8 @@ func (t *ACPTransport) sendResponse(id int64, result interface{}, err *jsonRPCEr
 func buildPromptWithContext(req Request) string {
 	var b strings.Builder
 
+	b.WriteString("Be concise. Don't repeat information. No preamble.\n\n")
+
 	ctx := req.Context
 
 	// Build context section
