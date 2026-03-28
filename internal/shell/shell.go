@@ -1030,13 +1030,9 @@ func (s *Shell) executePipeCommand(ctx context.Context, command string) (string,
 	var outputBuf strings.Builder
 
 	// Execute with output captured but not displayed
-	result, err := s.executor.Execute(ctx, command, &outputBuf, os.Stderr)
+	_, err := s.executor.Execute(ctx, command, &outputBuf, os.Stderr)
 	if err != nil {
 		return "", err
-	}
-
-	if result.ExitCode != 0 {
-		return outputBuf.String(), fmt.Errorf("command exited with code %d", result.ExitCode)
 	}
 
 	return outputBuf.String(), nil

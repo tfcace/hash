@@ -165,7 +165,11 @@ func (h *AgentHandler) buildRequest(parsed parser.ParseResult) (agent.Request, e
 	case parser.CommandTypeAgent:
 		prompt = parsed.AgentPrompt
 	case parser.CommandTypeAgentPipe:
-		prompt = fmt.Sprintf("Given the output of '%s', %s", parsed.Command, parsed.AgentPrompt)
+		if h.clipboardBuf != nil && h.clipboardBuf.LastOutput() == "" {
+			prompt = fmt.Sprintf("The command '%s' produced no output (empty). %s", parsed.Command, parsed.AgentPrompt)
+		} else {
+			prompt = fmt.Sprintf("Given the output of '%s', %s", parsed.Command, parsed.AgentPrompt)
+		}
 	case parser.CommandTypeAgentInline:
 		prompt = fmt.Sprintf(`Complete this shell command argument.
 
