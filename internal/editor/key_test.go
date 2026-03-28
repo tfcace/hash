@@ -128,3 +128,27 @@ func TestParseKey_CtrlTab_CSIu(t *testing.T) {
 		t.Error("Ctrl = false, want true")
 	}
 }
+
+func TestParseKey_DECRPM_Discarded(t *testing.T) {
+	// DECRPM response: ESC [ ? 2027 ; 1 $ y — should be silently discarded
+	key := ParseKey([]byte{0x1b, '[', '?', '2', '0', '2', '7', ';', '1', '$', 'y'})
+	if key.Special != KeyNone || key.Rune != 0 {
+		t.Errorf("DECRPM should be discarded (zero Key), got Special=%v Rune=%q", key.Special, key.Rune)
+	}
+}
+
+func TestParseKey_DECRPM_Mode2026_Discarded(t *testing.T) {
+	// DECRPM response for mode 2026: ESC [ ? 2026 ; 2 $ y
+	key := ParseKey([]byte{0x1b, '[', '?', '2', '0', '2', '6', ';', '2', '$', 'y'})
+	if key.Special != KeyNone || key.Rune != 0 {
+		t.Errorf("DECRPM should be discarded, got Special=%v Rune=%q", key.Special, key.Rune)
+	}
+}
+
+func TestParseKey_DA_Discarded(t *testing.T) {
+	// Device Attributes response: ESC [ ? 62 ; 4 c
+	key := ParseKey([]byte{0x1b, '[', '?', '6', '2', ';', '4', 'c'})
+	if key.Special != KeyNone || key.Rune != 0 {
+		t.Errorf("DA response should be discarded, got Special=%v Rune=%q", key.Special, key.Rune)
+	}
+}

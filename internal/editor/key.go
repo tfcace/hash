@@ -94,6 +94,13 @@ func parseEscapeSequence(b []byte) Key {
 		return Key{Special: KeyEscape}
 	}
 
+	// Terminal responses (private mode reports, device attributes, etc.)
+	// These are CSI sequences starting with '?' — silently discard them.
+	// Examples: DECRPM \x1b[?2027;1$y, DA \x1b[?62;4c
+	if len(b) >= 3 && b[2] == '?' {
+		return Key{} // No-op: discard terminal response
+	}
+
 	// Simple arrow keys: ESC [ A/B/C/D
 	if len(b) == 3 {
 		if key, ok := parseSimpleCSI(b[2]); ok {
