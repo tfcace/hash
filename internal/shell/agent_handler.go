@@ -34,6 +34,7 @@ func (h *AgentHandler) SetSelectedContext(ctx *hashcontext.Collection) {
 	h.selectedContext = ctx
 }
 
+
 // HandleRequest processes a parsed agent request and returns the response.
 func (h *AgentHandler) HandleRequest(ctx context.Context, parsed parser.ParseResult) (agent.Response, error) {
 	if h.client == nil {

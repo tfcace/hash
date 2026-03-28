@@ -57,8 +57,6 @@ type Shell struct {
 	colorPalette prompt.Palette
 	allowlist    *allowlist.Manager
 	agentOutput  *AgentOutputCoordinator
-	actionLog    *ActionLog // Tracks tool actions during agentic turns
-
 	lastExitCode int
 	lastDuration time.Duration
 	lastCommand  string // Last executed command
@@ -167,23 +165,7 @@ func New(cfg *config.Config) (*Shell, error) {
 	agentOutput := NewAgentOutputCoordinator(os.Stdout)
 
 	// Wire up permission handler for ACP transport
-	var shellPtr *Shell // Set after construction, used by permission handler closure
 	if acpTransport != nil {
-		// logPermission initializes the action log if needed and records the tool action.
-		// Snapshots files before writes for potential revert.
-		logPermission := func(req agent.ToolPermissionRequest, allowed bool) {
-			if shellPtr == nil {
-				return
-			}
-			if shellPtr.actionLog == nil {
-				shellPtr.actionLog = NewActionLog(os.Stdout)
-			}
-			if allowed && (req.ToolName == "Write" || req.ToolName == "Edit") {
-				shellPtr.actionLog.SnapshotFile(req.Command) //nolint:errcheck
-			}
-			shellPtr.actionLog.Add(req.ToolName, req.Command, allowed)
-		}
-
 		acpTransport.SetPermissionHandler(func(req agent.ToolPermissionRequest) (allow bool, always bool) {
 			// Check allowlist first
 			if allowlistMgr.IsAllowed(req.Command) {
@@ -192,42 +174,32 @@ func New(cfg *config.Config) (*Shell, error) {
 					"tool":     req.ToolName,
 					"decision": "allowlist",
 				})
-				logPermission(req, true)
 				return true, false
 			}
 
-			// Evaluate trust policy
-			decision := EvaluateTrust(cfg.Agent.Trust, req.ToolName, req.Command)
+			trace.AgentHigh("tool_permission_prompt", map[string]any{
+				"command": req.Command,
+				"tool":    req.ToolName,
+			})
+
+			// Prompt user for every tool call — same model as Claude Code
+			agentOutput.RenderPermissionPrompt(req.Command, req.ToolName, colorPalette.Primary)
+			os.Stdout.Sync()
+			key := readSingleKey()
+			allow, always = permissionDecisionForKey(key)
+
+			if always {
+				allowlistMgr.Allow(req.Command) //nolint:errcheck
+			}
 
 			trace.AgentHigh("tool_permission", map[string]any{
 				"command":  req.Command,
 				"tool":     req.ToolName,
-				"trust":    cfg.Agent.Trust,
-				"decision": decision.String(),
+				"decision": map[bool]string{true: "allow", false: "deny"}[allow],
 			})
 
-			switch decision {
-			case PermissionAllow:
-				logPermission(req, true)
-				return true, false
-			case PermissionDeny:
-				// In suggest/deny mode, don't create action log — let agent
-				// fall back to suggesting commands without visual noise.
-				return false, false
-			default: // PermissionPrompt
-				agentOutput.RenderPermissionPrompt(req.Command, req.ToolName, colorPalette.Primary)
-				os.Stdout.Sync()
-				key := readSingleKey()
-				allow, always = permissionDecisionForKey(key)
-
-				if always {
-					allowlistMgr.Allow(req.Command) //nolint:errcheck
-				}
-
-				agentOutput.ClearPermissionPrompt(allow)
-				logPermission(req, allow)
-				return allow, always
-			}
+			agentOutput.ClearPermissionPrompt(allow)
+			return allow, always
 		})
 	}
 
@@ -395,8 +367,6 @@ func New(cfg *config.Config) (*Shell, error) {
 		osc:          osc,
 		prevCwd:      initialCwd,
 	}
-	shellPtr = shell
-
 	// Set up history function for editor mode
 	// This closure captures shell for proper state management
 	if historyStore != nil {
@@ -885,7 +855,6 @@ func (s *Shell) navigateHistory(dir int, currentLine string) string {
 }
 
 func (s *Shell) handleAgentRequest(ctx context.Context, parsed parser.ParseResult) error {
-	s.actionLog = nil // Reset for new agent request
 
 	// Show which mode was detected
 	var modeLabel string
@@ -1115,27 +1084,9 @@ func (s *Shell) handleAgentFullStreaming(ctx context.Context, parsed parser.Pars
 
 	// Success path - add newline after response and clear spinner
 	fmt.Println()
-	lineCount := streamResult.lineCount + 1
-	s.responseUI.ClearLine() // Stop spinner
-
+	s.responseUI.ClearLine()
 	responseText := strings.TrimSpace(streamResult.responseText)
-
-	// If an agentic turn happened (tools were used), show summary
-	if s.actionLog != nil && s.actionLog.Count() > 0 {
-		if s.actionLog.HasEdits() {
-			fmt.Fprintf(os.Stdout, "  \x1b[90m[Enter: accept] [Esc: revert edits]\x1b[0m\n")
-			action := s.responseUI.WaitForConfirmation()
-			fmt.Println()
-			if action == ConfirmCancel {
-				n := s.actionLog.RevertEdits()
-				if n > 0 {
-					fmt.Fprintf(os.Stderr, "hash: reverted %d file(s)\n", n)
-				}
-			}
-		}
-		s.actionLog = nil
-		return
-	}
+	lineCount := streamResult.lineCount + 1
 
 	// Determine response type (single-turn flow)
 	collector := agent.NewStreamCollector()

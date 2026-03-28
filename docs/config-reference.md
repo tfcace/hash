@@ -380,21 +380,6 @@ timeout = "1m"
 timeout = "2m30s"
 ```
 
-### agent.trust
-
-Controls how much autonomy the agent has during `??` requests.
-
-| Value | Behavior |
-|-------|----------|
-| `"suggest"` | Default. Agent can only suggest commands — all tool use denied. Same as classic `??` behavior. |
-| `"assist"` | Agent can read files and run tests freely. Prompts for commands and edits. Destructive actions denied. |
-| `"auto"` | Agent can read, test, and run commands freely. Prompts for file edits and destructive actions. |
-
-```toml
-[agent]
-trust = "assist"
-```
-
 ### agent.allowed_commands_scope
 
 **Type:** `"project"` | `"global"` | `"session"`
@@ -1310,7 +1295,6 @@ mode = "starship"
 [agent]
 default = "claude"
 timeout = "30s"
-trust = "suggest"
 
 [agent.claude]
 transport = "stdio"
