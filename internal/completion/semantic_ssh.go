@@ -110,15 +110,20 @@ func (h *SSHHandler) parseKnownHosts(path string) []string {
 		}
 		// First field is comma-separated hostnames
 		for _, host := range strings.Split(fields[0], ",") {
-			host = strings.TrimPrefix(host, "[")
-			host = strings.TrimSuffix(host, "]")
+			// Handle bracketed [addr]:port (IPv6 with explicit port)
+			if strings.HasPrefix(host, "[") {
+				if end := strings.Index(host, "]"); end >= 0 {
+					host = host[1:end]
+				}
+			} else {
+				// Remove port suffix for non-bracketed entries
+				if idx := strings.LastIndex(host, ":"); idx > 0 {
+					host = host[:idx]
+				}
+			}
 			// Skip hashed entries
 			if strings.HasPrefix(host, "|") {
 				continue
-			}
-			// Remove port suffix
-			if idx := strings.LastIndex(host, ":"); idx > 0 {
-				host = host[:idx]
 			}
 			hosts = append(hosts, host)
 		}

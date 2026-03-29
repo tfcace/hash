@@ -89,6 +89,29 @@ func TestSSHHandler_KnownHosts(t *testing.T) {
 	}
 }
 
+func TestSSHHandler_KnownHostsIPv6(t *testing.T) {
+	h := &SSHHandler{
+		readFile: func(path string) ([]string, error) {
+			return []string{
+				"[2001:db8::1]:2222 ssh-ed25519 AAAA...",
+				"[::1]:22 ssh-rsa AAAA...",
+				"plain.example.com ssh-rsa AAAA...",
+			}, nil
+		},
+	}
+
+	hosts := h.parseKnownHosts("testpath")
+	expected := []string{"2001:db8::1", "::1", "plain.example.com"}
+	if len(hosts) != len(expected) {
+		t.Fatalf("expected %d hosts, got %d: %v", len(expected), len(hosts), hosts)
+	}
+	for i, want := range expected {
+		if hosts[i] != want {
+			t.Errorf("hosts[%d] = %q, want %q", i, hosts[i], want)
+		}
+	}
+}
+
 func TestSSHHandler_EmptyConfig(t *testing.T) {
 	h := &SSHHandler{
 		readFile: func(path string) ([]string, error) {
