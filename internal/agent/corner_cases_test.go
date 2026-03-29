@@ -208,27 +208,42 @@ func TestACPTransport_RapidCancelAndResend(t *testing.T) {
 		transport.stdin != nil, transport.sessionID)
 }
 
-// TestACPTransport_ConnectLockedPartialFailure tests cleanup when
-// connection setup partially fails.
+// TestACPTransport_ConnectLockedPartialFailure verifies that after a failed
+// connection attempt, the transport state is clean enough to allow retry.
+// Regression test for 9965393 (clean up partial state in connectLocked on failure).
 func TestACPTransport_ConnectLockedPartialFailure(t *testing.T) {
-	// This is hard to test without mocking exec.Command.
-	// Document the potential issue:
-	t.Log(`
-POTENTIAL BUG: Partial connection cleanup
+	// Use a non-existent command so cmd.Start() fails
+	transport := NewACPTransport(ACPConfig{
+		Command: "/nonexistent/binary/that/cannot/start",
+	})
 
-In connectLocked():
-1. StdinPipe() succeeds -> stdin is set
-2. StdoutPipe() fails -> returns error
-3. stdin is NOT cleaned up
+	ctx := context.Background()
+	err := transport.Connect(ctx)
+	if err == nil {
+		transport.Close()
+		t.Fatal("expected Connect to fail with nonexistent binary")
+	}
 
-However, the error path doesn't set stdin back to nil,
-so the next Connect() call would see stdin != nil and
-return early thinking it's already connected.
+	// After failed connect, stdin must be nil so the next Connect()
+	// does NOT short-circuit with "already connected"
+	transport.mu.Lock()
+	stdinAfter := transport.stdin
+	stdoutAfter := transport.stdout
+	transport.mu.Unlock()
 
-Actually checking the code... the error returns before
-stdin is assigned to t.stdin, so this might be okay.
-Need to verify the exact assignment order.
-	`)
+	if stdinAfter != nil {
+		t.Error("stdin should be nil after failed Connect (partial state not cleaned up)")
+	}
+	if stdoutAfter != nil {
+		t.Error("stdout should be nil after failed Connect (partial state not cleaned up)")
+	}
+
+	// A second Connect attempt should also try (not return nil early)
+	err2 := transport.Connect(ctx)
+	if err2 == nil {
+		transport.Close()
+		t.Fatal("expected second Connect to also fail with nonexistent binary")
+	}
 }
 
 // TestClient_AskWithClosedTransport tests Client.Ask behavior when

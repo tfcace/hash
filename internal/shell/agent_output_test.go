@@ -293,6 +293,89 @@ func TestAgentOutputCoordinator_CancelDuringPermission(t *testing.T) {
 	}
 }
 
+func TestAgentOutputCoordinator_CancelDuringPermission_Clears5Lines(t *testing.T) {
+	var buf bytes.Buffer
+	aoc := NewAgentOutputCoordinator(&buf)
+
+	aoc.StartStreaming()
+	aoc.RenderPermissionPrompt("rm -rf /tmp", "", "")
+
+	// Record where we are before cancel
+	beforeCancel := buf.Len()
+	aoc.Cancel()
+
+	cancelOutput := buf.String()[beforeCancel:]
+
+	// The permission prompt has 5 lines (blank + header + command + spacer + keybindings).
+	// Cancel should: clear current line (1), then cursor-up+clear 4 more times = 5 lines total.
+	cursorUpCount := strings.Count(cancelOutput, "\033[1A")
+	if cursorUpCount != 4 {
+		t.Errorf("expected exactly 4 cursor-up sequences (clear 5 lines total), got %d in: %q",
+			cursorUpCount, cancelOutput)
+	}
+
+	// Should clear each line
+	clearLineCount := strings.Count(cancelOutput, "\033[2K")
+	if clearLineCount != 5 {
+		t.Errorf("expected 5 clear-line sequences, got %d in: %q", clearLineCount, cancelOutput)
+	}
+}
+
+func TestAgentOutputCoordinator_CancelDuringStreaming_ClearsOneLine(t *testing.T) {
+	var buf bytes.Buffer
+	aoc := NewAgentOutputCoordinator(&buf)
+
+	aoc.StartStreaming()
+	aoc.WriteStream("partial")
+
+	beforeCancel := buf.Len()
+	aoc.Cancel()
+
+	cancelOutput := buf.String()[beforeCancel:]
+
+	// When not in permission state, Cancel should just clear current line
+	if !strings.Contains(cancelOutput, "\x1b[K") {
+		t.Errorf("expected clear-to-end-of-line in cancel output, got: %q", cancelOutput)
+	}
+	// Should NOT have cursor-up sequences
+	if strings.Contains(cancelOutput, "\033[1A") {
+		t.Errorf("should not have cursor-up sequences when canceling outside permission, got: %q", cancelOutput)
+	}
+}
+
+func TestAgentOutputCoordinator_ClearPermissionPrompt_MatchesCancel_LineCount(t *testing.T) {
+	// Both ClearPermissionPrompt and Cancel should clear exactly 5 lines
+	// when in permission state. This is a regression test for the off-by-one fix.
+	var clearBuf, cancelBuf bytes.Buffer
+
+	// Test ClearPermissionPrompt
+	aoc1 := NewAgentOutputCoordinator(&clearBuf)
+	aoc1.StartStreaming()
+	aoc1.RenderPermissionPrompt("test", "", "")
+	beforeClear := clearBuf.Len()
+	aoc1.ClearPermissionPrompt(true)
+	clearOutput := clearBuf.String()[beforeClear:]
+	clearUpCount := strings.Count(clearOutput, "\033[1A")
+
+	// Test Cancel
+	aoc2 := NewAgentOutputCoordinator(&cancelBuf)
+	aoc2.StartStreaming()
+	aoc2.RenderPermissionPrompt("test", "", "")
+	beforeCancel := cancelBuf.Len()
+	aoc2.Cancel()
+	cancelOutput := cancelBuf.String()[beforeCancel:]
+	cancelUpCount := strings.Count(cancelOutput, "\033[1A")
+
+	// Both should use 4 cursor-ups (clear current line first, then up 4 more)
+	if clearUpCount != cancelUpCount {
+		t.Errorf("ClearPermissionPrompt and Cancel should clear same number of lines: clear=%d, cancel=%d",
+			clearUpCount, cancelUpCount)
+	}
+	if clearUpCount != 4 {
+		t.Errorf("expected 4 cursor-ups, got %d", clearUpCount)
+	}
+}
+
 func TestAgentOutputCoordinator_PermissionWithoutStreaming(t *testing.T) {
 	var buf bytes.Buffer
 	aoc := NewAgentOutputCoordinator(&buf)

@@ -152,3 +152,59 @@ func TestParseKey_DA_Discarded(t *testing.T) {
 		t.Errorf("DA response should be discarded, got Special=%v Rune=%q", key.Special, key.Rune)
 	}
 }
+
+// TestParseKey_AllCSIQuestionMark_Discarded verifies that all CSI ? sequences
+// (terminal responses like DECRPM, DA, XTVERSION, etc.) are silently discarded.
+// This is a regression test for ghosting artifacts in Ctrl+R search.
+func TestParseKey_AllCSIQuestionMark_Discarded(t *testing.T) {
+	tests := []struct {
+		name string
+		seq  []byte
+	}{
+		{"DECRPM mode 2027 set", []byte{0x1b, '[', '?', '2', '0', '2', '7', ';', '1', '$', 'y'}},
+		{"DECRPM mode 2027 reset", []byte{0x1b, '[', '?', '2', '0', '2', '7', ';', '2', '$', 'y'}},
+		{"DECRPM mode 2026 set", []byte{0x1b, '[', '?', '2', '0', '2', '6', ';', '1', '$', 'y'}},
+		{"DECRPM mode 2026 reset", []byte{0x1b, '[', '?', '2', '0', '2', '6', ';', '2', '$', 'y'}},
+		{"DECRPM mode 1 set", []byte{0x1b, '[', '?', '1', ';', '1', '$', 'y'}},
+		{"DA primary", []byte{0x1b, '[', '?', '6', '2', ';', '4', 'c'}},
+		{"DA secondary", []byte{0x1b, '[', '?', '1', ';', '0', 'c'}},
+		{"XTVERSION-like", []byte{0x1b, '[', '?', '6', '5', 'n'}},
+		{"minimal CSI ?", []byte{0x1b, '[', '?', 'x'}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			key := ParseKey(tt.seq)
+			if key != (Key{}) {
+				t.Errorf("CSI ? sequence %q should be discarded (zero Key), got %+v", tt.seq, key)
+			}
+		})
+	}
+}
+
+// TestParseKey_CSIQuestionMark_DoesNotAffectNormalKeys verifies that the
+// DECRPM discard logic doesn't accidentally eat normal CSI sequences.
+func TestParseKey_CSIQuestionMark_DoesNotAffectNormalKeys(t *testing.T) {
+	normalTests := []struct {
+		name    string
+		seq     []byte
+		special KeyCode
+	}{
+		{"arrow up", []byte{0x1b, '[', 'A'}, KeyUp},
+		{"arrow down", []byte{0x1b, '[', 'B'}, KeyDown},
+		{"arrow right", []byte{0x1b, '[', 'C'}, KeyRight},
+		{"arrow left", []byte{0x1b, '[', 'D'}, KeyLeft},
+		{"home", []byte{0x1b, '[', 'H'}, KeyHome},
+		{"end", []byte{0x1b, '[', 'F'}, KeyEnd},
+		{"delete", []byte{0x1b, '[', '3', '~'}, KeyDelete},
+	}
+
+	for _, tt := range normalTests {
+		t.Run(tt.name, func(t *testing.T) {
+			key := ParseKey(tt.seq)
+			if key.Special != tt.special {
+				t.Errorf("normal CSI %q: got Special=%v, want %v", tt.seq, key.Special, tt.special)
+			}
+		})
+	}
+}

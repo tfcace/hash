@@ -107,6 +107,34 @@ func TestParseAgentResponse_EdgeCases(t *testing.T) {
 	}
 }
 
+// TestBuildPromptWithContext_ContainsConciseness verifies the conciseness
+// instruction is present in every built prompt. Regression test for 9a8ece4.
+func TestBuildPromptWithContext_ContainsConciseness(t *testing.T) {
+	tests := []struct {
+		name string
+		req  Request
+	}{
+		{"empty request", Request{}},
+		{"prompt only", Request{Prompt: "test"}},
+		{"with context", Request{
+			Prompt:  "find files",
+			Context: Context{Cwd: "/home/user", GitBranch: "main"},
+		}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := buildPromptWithContext(tt.req)
+			if !strings.Contains(result, "Be concise") {
+				t.Errorf("prompt should contain 'Be concise' instruction, got: %q", result)
+			}
+			if !strings.Contains(result, "No preamble") {
+				t.Errorf("prompt should contain 'No preamble' instruction, got: %q", result)
+			}
+		})
+	}
+}
+
 // TestBuildPromptWithContext_EdgeCases tests edge cases for prompt building.
 func TestBuildPromptWithContext_EdgeCases(t *testing.T) {
 	tests := []struct {
