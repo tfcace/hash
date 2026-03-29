@@ -188,22 +188,29 @@ func (m *InsertMode) handleAlt(key Key, state *EditorState) ModeResult {
 		} else {
 			state.Cursor.ClearSelection()
 		}
-		m.moveWordBack(state)
+		m.moveTokenBack(state)
 	case KeyRight: // Alt+Right: word forward
 		if key.Shift {
 			m.startOrExtendSelection(state)
 		} else {
 			state.Cursor.ClearSelection()
 		}
-		m.moveWordForward(state)
+		m.moveTokenForward(state)
+	case KeyBackspace: // Alt+Backspace: delete whole token
+		if state.Cursor.HasSelection() {
+			m.deleteSelection(state)
+		} else {
+			m.deleteTokenBack(state)
+		}
+		return ModeResult{Action: ActionDelete}
 	}
 	switch key.Rune {
 	case 'b': // Alt+B: word back
 		state.Cursor.ClearSelection()
-		m.moveWordBack(state)
+		m.moveTokenBack(state)
 	case 'f': // Alt+F: word forward
 		state.Cursor.ClearSelection()
-		m.moveWordForward(state)
+		m.moveTokenForward(state)
 	}
 	return ModeResult{}
 }
@@ -329,6 +336,40 @@ func (m *InsertMode) moveWordForward(state *EditorState) {
 		col++
 	}
 	state.Cursor.Pos.Col = col
+}
+
+func (m *InsertMode) moveTokenBack(state *EditorState) {
+	line := state.Buffer.Line(state.Cursor.Pos.Row)
+	col := state.Cursor.Pos.Col
+
+	for col > 0 && (col > len(line) || line[col-1] == ' ') {
+		col--
+	}
+	for col > 0 && col <= len(line) && line[col-1] != ' ' {
+		col--
+	}
+	state.Cursor.Pos.Col = col
+}
+
+func (m *InsertMode) moveTokenForward(state *EditorState) {
+	line := state.Buffer.Line(state.Cursor.Pos.Row)
+	col := state.Cursor.Pos.Col
+
+	for col < len(line) && line[col] != ' ' {
+		col++
+	}
+	for col < len(line) && line[col] == ' ' {
+		col++
+	}
+	state.Cursor.Pos.Col = col
+}
+
+func (m *InsertMode) deleteTokenBack(state *EditorState) {
+	startCol := state.Cursor.Pos.Col
+	m.moveTokenBack(state)
+	endCol := state.Cursor.Pos.Col
+	row := state.Cursor.Pos.Row
+	state.Buffer.Delete(Position{row, endCol}, Position{row, startCol})
 }
 
 func (m *InsertMode) deleteWordBack(state *EditorState) {

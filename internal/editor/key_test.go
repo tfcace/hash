@@ -63,6 +63,16 @@ func TestParseKey_Backspace(t *testing.T) {
 	}
 }
 
+func TestParseKey_AltBackspace(t *testing.T) {
+	key := ParseKey([]byte{0x1b, 0x7f})
+	if key.Special != KeyBackspace {
+		t.Errorf("Special = %v, want KeyBackspace", key.Special)
+	}
+	if !key.Alt {
+		t.Error("Alt = false, want true")
+	}
+}
+
 func TestParseKey_ShiftEnter_CSIu(t *testing.T) {
 	// Shift+Enter in CSI u encoding: ESC [ 13 ; 2 u
 	key := ParseKey([]byte{0x1b, '[', '1', '3', ';', '2', 'u'})

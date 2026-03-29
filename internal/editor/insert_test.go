@@ -363,6 +363,65 @@ func TestInsertMode_ShiftAltLeft_SelectsWordBack(t *testing.T) {
 	}
 }
 
+func TestInsertMode_AltLeft_PathSkipsSlash(t *testing.T) {
+	state := NewEditorState()
+	state.Buffer = NewBufferFromString("cd /tmp/my/file")
+	state.Cursor.MoveTo(0, len("cd /tmp/my/file"))
+
+	mode := NewInsertMode()
+	mode.HandleKey(Key{Special: KeyLeft, Alt: true}, state)
+
+	if state.Cursor.Pos.Col != 3 {
+		t.Fatalf("Cursor col = %d, want 3", state.Cursor.Pos.Col)
+	}
+}
+
+func TestInsertMode_AltRight_PathSkipsSlash(t *testing.T) {
+	state := NewEditorState()
+	state.Buffer = NewBufferFromString("cd /tmp/my/file")
+	state.Cursor.MoveTo(0, 3)
+
+	mode := NewInsertMode()
+	mode.HandleKey(Key{Special: KeyRight, Alt: true}, state)
+
+	if state.Cursor.Pos.Col != len("cd /tmp/my/file") {
+		t.Fatalf("Cursor col = %d, want %d", state.Cursor.Pos.Col, len("cd /tmp/my/file"))
+	}
+}
+
+func TestInsertMode_ShiftAltLeft_SelectsPathAsSingleWord(t *testing.T) {
+	state := NewEditorState()
+	state.Buffer = NewBufferFromString("cd /tmp/my/file")
+	state.Cursor.MoveTo(0, len("cd /tmp/my/file"))
+
+	mode := NewInsertMode()
+	mode.HandleKey(Key{Special: KeyLeft, Shift: true, Alt: true}, state)
+
+	if !state.Cursor.HasSelection() {
+		t.Fatal("Shift+Alt+Left should start selection")
+	}
+	start, end := state.Cursor.SelectionRange()
+	if start.Col != 3 || end.Col != len("cd /tmp/my/file") {
+		t.Fatalf("SelectionRange = (%d,%d), want (3,%d)", start.Col, end.Col, len("cd /tmp/my/file"))
+	}
+}
+
+func TestInsertMode_AltBackspace_DeletesWholePathToken(t *testing.T) {
+	state := NewEditorState()
+	state.Buffer = NewBufferFromString("cd /tmp/my/file")
+	state.Cursor.MoveTo(0, len("cd /tmp/my/file"))
+
+	mode := NewInsertMode()
+	result := mode.HandleKey(Key{Special: KeyBackspace, Alt: true}, state)
+
+	if result.Action != ActionDelete {
+		t.Fatalf("Action = %v, want %v", result.Action, ActionDelete)
+	}
+	if state.Buffer.Content() != "cd " {
+		t.Fatalf("Content = %q, want %q", state.Buffer.Content(), "cd ")
+	}
+}
+
 func TestInsertMode_PlainArrow_ClearsSelection(t *testing.T) {
 	state := NewEditorState()
 	state.Buffer = NewBufferFromString("hello")

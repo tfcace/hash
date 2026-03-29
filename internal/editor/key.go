@@ -86,6 +86,9 @@ func parseEscapeSequence(b []byte) Key {
 
 	// Alt+char: ESC followed by char
 	if len(b) == 2 && b[1] != '[' {
+		if b[1] == 0x7f || b[1] == 0x08 {
+			return Key{Special: KeyBackspace, Alt: true}
+		}
 		return Key{Rune: rune(b[1]), Alt: true}
 	}
 
