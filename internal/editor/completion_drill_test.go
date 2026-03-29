@@ -601,21 +601,13 @@ func TestHandleCompletionKeyTabCycles(t *testing.T) {
 	}
 }
 
-// TestHandleCompletionKeyEnterDirectory verifies that Enter on a directory drills into it.
+// TestHandleCompletionKeyEnterDirectory verifies that Enter on a directory accepts it.
 func TestHandleCompletionKeyEnterDirectory(t *testing.T) {
-	completeFunc := func(line string, pos int) []Completion {
-		return []Completion{
-			{Text: "internal/editor/", Description: "directory"},
-			{Text: "internal/parser/", Description: "directory"},
-		}
-	}
-
 	e := newTestEditorForCompletion([]Completion{
 		{Text: "internal/", Description: "directory"},
 		{Text: "cmd/", Description: "directory"},
 		{Text: "go.mod", Description: "file"},
 	})
-	e.config.CompleteFunc = completeFunc
 	e.state.Buffer = NewBufferFromString("ls int")
 	e.state.Cursor.MoveTo(0, 6)
 	e.completionCol = 3
@@ -627,11 +619,8 @@ func TestHandleCompletionKeyEnterDirectory(t *testing.T) {
 		t.Fatal("expected Enter to be handled")
 	}
 
-	if !e.completionActive {
-		t.Error("expected completion to remain active after drilling into directory")
-	}
-	if len(e.completionDrillStack) == 0 {
-		t.Error("expected non-empty drill stack after drilling")
+	if e.completionActive {
+		t.Error("expected completion to be dismissed after Enter on directory")
 	}
 	if got := e.state.Buffer.Content(); got != "ls internal/" {
 		t.Errorf("buffer = %q, want %q", got, "ls internal/")

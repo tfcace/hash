@@ -68,10 +68,26 @@ func (c *FileCompleter) Complete(ctx context.Context, line string, pos int) (Res
 		prefix = ""
 	}
 
-	// Read directory
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return Result{}, nil //nolint:nilerr // graceful degradation: return empty on unreadable dir
+	// Read directory (in a goroutine so context cancellation is respected)
+	type readDirResult struct {
+		entries []os.DirEntry
+		err     error
+	}
+	ch := make(chan readDirResult, 1)
+	go func() {
+		entries, err := os.ReadDir(dir)
+		ch <- readDirResult{entries, err}
+	}()
+
+	var entries []os.DirEntry
+	select {
+	case <-ctx.Done():
+		return Result{}, nil
+	case res := <-ch:
+		if res.err != nil {
+			return Result{}, nil //nolint:nilerr // graceful degradation: return empty on unreadable dir
+		}
+		entries = res.entries
 	}
 
 	// Show hidden files if user is explicitly typing a dot prefix

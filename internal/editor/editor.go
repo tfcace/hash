@@ -1080,14 +1080,9 @@ func (e *Editor) handleCompletionKey(key Key) bool {
 		return true
 
 	case KeyEnter:
-		// Enter accepts; directories drill-down, files close
+		// Enter always accepts the selected item and closes the menu
 		if len(filtered) > 0 {
-			item := filtered[e.completionIndex]
-			if strings.HasSuffix(item.Text, "/") {
-				e.drillIntoDirectory(item)
-			} else {
-				e.acceptCompletion(item)
-			}
+			e.acceptCompletion(filtered[e.completionIndex])
 		} else {
 			e.dismissCompletion()
 		}

@@ -262,8 +262,8 @@ func TestIntegration_DrillUp(t *testing.T) {
 }
 
 // TestIntegration_HandleCompletionKeyRoundTrip tests the full interaction
-// flow using handleCompletionKey: trigger, drill via Enter on directory,
-// drill-up via Backspace, cycle via Tab, and accept via Enter on file.
+// flow using handleCompletionKey: trigger, cycle via Tab, accept directory
+// via Enter, re-trigger, and accept file via Enter.
 func TestIntegration_HandleCompletionKeyRoundTrip(t *testing.T) {
 	tmpDir := createIntegrationTestDir(t)
 
@@ -288,59 +288,7 @@ func TestIntegration_HandleCompletionKeyRoundTrip(t *testing.T) {
 		t.Fatal("expected initial items")
 	}
 
-	// Step 2: Navigate to "src/" with Tab (cycle until we find it)
-	srcIdx := -1
-	for i, item := range e.filteredCompletionItems() {
-		if item.Text == "src/" {
-			srcIdx = i
-			break
-		}
-	}
-	if srcIdx == -1 {
-		t.Fatalf("src/ not found in items: %v", completionTextList(e.filteredCompletionItems()))
-	}
-
-	// Cycle to src/ using Tab keys
-	for e.completionIndex != srcIdx {
-		e.handleCompletionKey(Key{Special: KeyTab})
-	}
-
-	// Step 3: Press Enter to drill into src/ (auto-drills to src/main/)
-	handled := e.handleCompletionKey(Key{Special: KeyEnter})
-	if !handled {
-		t.Fatal("expected Enter to be handled")
-	}
-	if !e.completionActive {
-		t.Fatal("expected completion still active after drilling into directory")
-	}
-
-	// After auto-drill through src/ -> main/, we should see files
-	if got := e.state.Buffer.Content(); got != "ls src/main/" {
-		t.Errorf("buffer after Enter = %q, want %q", got, "ls src/main/")
-	}
-
-	// Step 4: Drill up via Backspace
-	handled = e.handleCompletionKey(Key{Special: KeyBackspace})
-	if !handled {
-		t.Fatal("expected Backspace to be handled (drill-up)")
-	}
-	if !e.completionActive {
-		t.Fatal("expected completion still active after drill-up")
-	}
-
-	// Step 5: Drill all the way up to root
-	for len(e.completionDrillStack) > 0 {
-		e.handleCompletionKey(Key{Special: KeyBackspace})
-	}
-
-	// Should be back at root with original items
-	rootItems := e.filteredCompletionItems()
-	if len(rootItems) == 0 {
-		t.Fatal("expected root items after drill-up")
-	}
-
-	// Step 6: Navigate to a file and accept with Enter
-	// Find go.mod
+	// Step 2: Navigate to a file with Tab (cycle until we find go.mod)
 	goModIdx := -1
 	for i, item := range e.filteredCompletionItems() {
 		if item.Text == "go.mod" {
@@ -352,19 +300,53 @@ func TestIntegration_HandleCompletionKeyRoundTrip(t *testing.T) {
 		t.Fatalf("go.mod not found in items: %v", completionTextList(e.filteredCompletionItems()))
 	}
 
-	// Navigate to go.mod
-	e.completionIndex = goModIdx
-	handled = e.handleCompletionKey(Key{Special: KeyEnter})
-	if !handled {
-		t.Fatal("expected Enter to be handled for file accept")
+	// Cycle to go.mod using Tab keys
+	for e.completionIndex != goModIdx {
+		e.handleCompletionKey(Key{Special: KeyTab})
 	}
 
-	// Completion should be dismissed, buffer should have the file
+	// Step 3: Press Enter to accept go.mod
+	handled := e.handleCompletionKey(Key{Special: KeyEnter})
+	if !handled {
+		t.Fatal("expected Enter to be handled")
+	}
 	if e.completionActive {
 		t.Error("expected completion dismissed after accepting file")
 	}
 	if got := e.state.Buffer.Content(); got != "ls go.mod" {
 		t.Errorf("buffer after accept = %q, want %q", got, "ls go.mod")
+	}
+
+	// Step 4: Start new completion for a directory — Enter accepts it as-is
+	e.state.Buffer = NewBufferFromString("cd ")
+	e.state.Cursor.MoveTo(0, 3)
+	e.triggerCompletion()
+	if !e.completionActive {
+		t.Fatal("expected completion active for directory test")
+	}
+
+	// Find src/
+	srcIdx := -1
+	for i, item := range e.filteredCompletionItems() {
+		if item.Text == "src/" {
+			srcIdx = i
+			break
+		}
+	}
+	if srcIdx == -1 {
+		t.Fatalf("src/ not found in items: %v", completionTextList(e.filteredCompletionItems()))
+	}
+
+	e.completionIndex = srcIdx
+	handled = e.handleCompletionKey(Key{Special: KeyEnter})
+	if !handled {
+		t.Fatal("expected Enter to be handled for directory accept")
+	}
+	if e.completionActive {
+		t.Error("expected completion dismissed after Enter on directory")
+	}
+	if got := e.state.Buffer.Content(); got != "cd src/" {
+		t.Errorf("buffer after directory accept = %q, want %q", got, "cd src/")
 	}
 }
 
