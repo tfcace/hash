@@ -171,7 +171,7 @@ func TestAgentHandler_BuildRequest_InvalidType(t *testing.T) {
 	handler := NewAgentHandler(client)
 
 	parsed := parser.ParseResult{
-		Type:    parser.CommandTypeShell,
+		Type:    parser.CommandTypeRegular,
 		Command: "ls -la",
 	}
 
