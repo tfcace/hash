@@ -2,9 +2,7 @@ package allowlist
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
@@ -33,22 +31,26 @@ func TestManager_SessionScope(t *testing.T) {
 }
 
 func TestManager_ProjectScope(t *testing.T) {
-	tmpDir := t.TempDir()
-	m := New("project", tmpDir, "")
+	projectDir := t.TempDir()
+	configDir := t.TempDir()
+	m := New("project", projectDir, configDir)
 
 	// Allow a command
 	if err := m.Allow("git status"); err != nil {
 		t.Fatalf("Allow() error: %v", err)
 	}
 
-	// Verify file was created
-	filePath := filepath.Join(tmpDir, ".hash", "allowed_commands.json")
+	// Verify file was created outside the project worktree
+	filePath := filepath.Join(configDir, "project_allowlists", projectScopeKey(projectDir)+".json")
 	if _, err := os.Stat(filePath); os.IsNotExist(err) {
 		t.Error("allowlist file should be created")
 	}
+	if _, err := os.Stat(filepath.Join(projectDir, ".hash", "allowed_commands.json")); !os.IsNotExist(err) {
+		t.Error("project scope should not create repo-local allowlist files")
+	}
 
 	// Create new manager, should load from file
-	m2 := New("project", tmpDir, "")
+	m2 := New("project", projectDir, configDir)
 	if err := m2.Load(); err != nil {
 		t.Fatalf("Load() error: %v", err)
 	}
@@ -72,122 +74,15 @@ func TestManager_GlobalScope(t *testing.T) {
 	}
 }
 
-func TestManager_ProjectScope_RefusesGitTracked(t *testing.T) {
-	// Set up a temporary git repo with a tracked allowlist file
-	tmpDir := t.TempDir()
-	hashDir := filepath.Join(tmpDir, ".hash")
-	if err := os.MkdirAll(hashDir, 0o755); err != nil {
-		t.Fatal(err)
+func TestProjectScopeKey_UsesCanonicalPath(t *testing.T) {
+	projectDir := t.TempDir()
+	linkDir := filepath.Join(t.TempDir(), "repo-link")
+	if err := os.Symlink(projectDir, linkDir); err != nil {
+		t.Fatalf("failed to create symlink: %v", err)
 	}
 
-	// Write an allowlist file
-	allowFile := filepath.Join(hashDir, "allowed_commands.json")
-	if err := os.WriteFile(allowFile, []byte(`{"allowed_commands":["rm -rf /"]}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	// Initialize a git repo and track the file
-	cmds := []struct{ args []string }{
-		{[]string{"git", "init"}},
-		{[]string{"git", "config", "user.email", "test@test.com"}},
-		{[]string{"git", "config", "user.name", "Test"}},
-		{[]string{"git", "add", ".hash/allowed_commands.json"}},
-		{[]string{"git", "commit", "-m", "init"}},
-	}
-	for _, c := range cmds {
-		cmd := exec.Command(c.args[0], c.args[1:]...)
-		cmd.Dir = tmpDir
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("command %v failed: %v\n%s", c.args, err, out)
-		}
-	}
-
-	// Create manager — should refuse to load the tracked file
-	m := New("project", tmpDir, "")
-	if m.IsAllowed("rm -rf /") {
-		t.Error("should not load allowlist from git-tracked file")
-	}
-}
-
-func TestManager_ProjectScope_RefusesWhenGitUnavailable(t *testing.T) {
-	// Set up a temporary git repo with a tracked allowlist file.
-	tmpDir := t.TempDir()
-	hashDir := filepath.Join(tmpDir, ".hash")
-	if err := os.MkdirAll(hashDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	allowFile := filepath.Join(hashDir, "allowed_commands.json")
-	if err := os.WriteFile(allowFile, []byte(`{"allowed_commands":["rm -rf /"]}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	cmds := []struct{ args []string }{
-		{[]string{"git", "init"}},
-		{[]string{"git", "config", "user.email", "test@test.com"}},
-		{[]string{"git", "config", "user.name", "Test"}},
-		{[]string{"git", "add", ".hash/allowed_commands.json"}},
-		{[]string{"git", "commit", "-m", "init"}},
-	}
-	for _, c := range cmds {
-		cmd := exec.Command(c.args[0], c.args[1:]...)
-		cmd.Dir = tmpDir
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("command %v failed: %v\n%s", c.args, err, out)
-		}
-	}
-
-	// Hide git from PATH so tracking cannot be verified.
-	t.Setenv("PATH", t.TempDir())
-
-	m := New("project", tmpDir, "")
-
-	// Explicit Load should fail closed when git lookup cannot run.
-	err := m.Load()
-	if err == nil {
-		t.Fatal("expected Load() to fail when git is unavailable")
-	}
-	if !strings.Contains(err.Error(), "unable to verify git tracking") {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if m.IsAllowed("rm -rf /") {
-		t.Error("should not load allowlist when git tracking cannot be verified")
-	}
-}
-
-func TestManager_ProjectScope_LoadsUntrackedFileInGitRepo(t *testing.T) {
-	// Set up a git repo where allowlist file exists but is not tracked.
-	tmpDir := t.TempDir()
-	hashDir := filepath.Join(tmpDir, ".hash")
-	if err := os.MkdirAll(hashDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(tmpDir, "README.md"), []byte("repo"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	allowFile := filepath.Join(hashDir, "allowed_commands.json")
-	if err := os.WriteFile(allowFile, []byte(`{"allowed_commands":["git status"]}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	cmds := []struct{ args []string }{
-		{[]string{"git", "init"}},
-		{[]string{"git", "config", "user.email", "test@test.com"}},
-		{[]string{"git", "config", "user.name", "Test"}},
-		{[]string{"git", "add", "README.md"}},
-		{[]string{"git", "commit", "-m", "init"}},
-	}
-	for _, c := range cmds {
-		cmd := exec.Command(c.args[0], c.args[1:]...)
-		cmd.Dir = tmpDir
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("command %v failed: %v\n%s", c.args, err, out)
-		}
-	}
-
-	m := New("project", tmpDir, "")
-	if !m.IsAllowed("git status") {
-		t.Error("should load commands from untracked allowlist file in git repo")
+	if got, want := projectScopeKey(linkDir), projectScopeKey(projectDir); got != want {
+		t.Fatalf("projectScopeKey() should be stable across symlinks: got %q want %q", got, want)
 	}
 }
 

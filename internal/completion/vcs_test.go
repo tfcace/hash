@@ -68,6 +68,9 @@ func TestVCSCompleter_JJEdit(t *testing.T) {
 	c.listJJRevs = func(ctx context.Context) ([]string, error) {
 		return []string{"@", "@-", "main", "tools"}, nil
 	}
+	c.listJJChangeIDs = func(ctx context.Context) ([]string, error) {
+		return []string{"konsqmsq", "pnkqxpql"}, nil
+	}
 
 	result, err := c.Complete(context.Background(), "jj edit to", len("jj edit to"))
 	if err != nil {
@@ -78,6 +81,27 @@ func TestVCSCompleter_JJEdit(t *testing.T) {
 	}
 	if result.Items[0].Value != "tools" {
 		t.Fatalf("expected tools, got %q", result.Items[0].Value)
+	}
+}
+
+func TestVCSCompleter_JJEdit_IncludesChangeIDs(t *testing.T) {
+	c := NewVCSCompleter()
+	c.listJJRevs = func(ctx context.Context) ([]string, error) {
+		return []string{"@", "@-", "tools"}, nil
+	}
+	c.listJJChangeIDs = func(ctx context.Context) ([]string, error) {
+		return []string{"konsqmsq", "pnkqxpql"}, nil
+	}
+
+	result, err := c.Complete(context.Background(), "jj edit ko", len("jj edit ko"))
+	if err != nil {
+		t.Fatalf("Complete() error = %v", err)
+	}
+	if len(result.Items) != 1 {
+		t.Fatalf("expected 1 item, got %d: %+v", len(result.Items), result.Items)
+	}
+	if result.Items[0].Value != "konsqmsq" {
+		t.Fatalf("expected change ID completion, got %q", result.Items[0].Value)
 	}
 }
 

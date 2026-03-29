@@ -387,7 +387,7 @@ timeout = "2m30s"
 
 Where to store commands that are "always allowed" when the agent requests permission to run them.
 
-- **project**: Per-directory in `.hash/allowed_commands.json`. Commands approved in one project don't affect others.
+- **project**: Per-directory under `~/.config/hash/project_allowlists/`. Commands approved in one project don't affect others, without writing approval files into the repo.
 - **global**: In `~/.config/hash/allowed_commands.json`. Shared across all projects.
 - **session**: In memory only, cleared when shell exits.
 

@@ -151,7 +151,7 @@ func (c *VCSCompleter) completeJJ(ctx context.Context, parts []string, trailingS
 		if !shouldCompleteJJRev(current, before) {
 			return Result{}
 		}
-		return lookupAndFilter(ctx, c.listJJRevs, current)
+		return c.completeJJRevision(ctx, current)
 
 	case "bookmark":
 		return c.completeJJBookmark(ctx, current, before)
@@ -165,6 +165,33 @@ func (c *VCSCompleter) completeJJ(ctx context.Context, parts []string, trailingS
 	default:
 		return Result{}
 	}
+}
+
+func (c *VCSCompleter) completeJJRevision(ctx context.Context, current string) Result {
+	seen := make(map[string]bool)
+	var values []string
+
+	if revs, err := c.listJJRevs(ctx); err == nil {
+		for _, rev := range revs {
+			if rev == "" || seen[rev] {
+				continue
+			}
+			seen[rev] = true
+			values = append(values, rev)
+		}
+	}
+
+	if ids, err := c.listJJChangeIDs(ctx); err == nil {
+		for _, id := range ids {
+			if id == "" || seen[id] {
+				continue
+			}
+			seen[id] = true
+			values = append(values, id)
+		}
+	}
+
+	return prefixFilterItems(values, current)
 }
 
 func (c *VCSCompleter) completeJJBookmark(ctx context.Context, current string, before []string) Result {

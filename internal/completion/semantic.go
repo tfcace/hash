@@ -29,11 +29,13 @@ func NewSemanticCompleter() *SemanticCompleter {
 	// Register built-in handlers
 	handlers := []CommandHandler{
 		NewSSHHandler(),
-		NewKillHandler(),
+		NewKillHandler("kill"),
+		NewKillHandler("killall"),
 		NewMakeHandler(),
 		NewManHandler(),
 		NewNPMHandler(),
-		NewPipHandler(),
+		NewPipHandler("pip"),
+		NewPipHandler("pip3"),
 		NewBrewHandler(),
 	}
 	for _, h := range handlers {

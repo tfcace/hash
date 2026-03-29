@@ -179,6 +179,7 @@ keybindings = "vim"
 	// But should also return usable defaults
 	if cfg == nil {
 		t.Fatal("Load() should return defaults even on parse error")
+		return
 	}
 
 	// Check that defaults are applied
@@ -254,4 +255,3 @@ func TestLoadConfig_HooksChpwd_Default(t *testing.T) {
 		t.Errorf("expected 0 default chpwd hooks, got %d", len(cfg.Shell.Hooks.Chpwd))
 	}
 }
-

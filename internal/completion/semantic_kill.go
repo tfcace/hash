@@ -7,6 +7,7 @@ import (
 
 // KillHandler provides completions for kill and killall commands.
 type KillHandler struct {
+	command       string
 	listProcesses func(ctx context.Context) ([]processInfo, error)
 }
 
@@ -16,13 +17,16 @@ type processInfo struct {
 }
 
 // NewKillHandler creates a kill/killall completion handler.
-func NewKillHandler() *KillHandler {
-	return &KillHandler{listProcesses: defaultListProcesses}
+func NewKillHandler(command string) *KillHandler {
+	return &KillHandler{command: command, listProcesses: defaultListProcesses}
 }
 
 // Commands returns the commands this handler supports.
 func (h *KillHandler) Commands() []string {
-	return []string{"kill", "killall"}
+	if h.command == "" {
+		return []string{"kill"}
+	}
+	return []string{h.command}
 }
 
 // Complete returns process completions.
@@ -36,44 +40,26 @@ func (h *KillHandler) Complete(ctx context.Context, args []string, current strin
 		return Result{}
 	}
 
-	// Determine which command we're completing for
-	isKillall := false
-	for _, arg := range args {
-		// This is a heuristic; the handler doesn't directly receive the command name.
-		// The semantic completer maps by command name, so we check context differently.
-		_ = arg
-	}
-	// Since we register for both "kill" and "killall", we need to determine
-	// which command. We can tell by checking whether any of the registered
-	// names match. We use a simple approach: if the first process info has
-	// a non-numeric name and matches current, we're in killall mode.
-	// Actually, the handler is shared. We provide PIDs with descriptions for kill,
-	// and names for killall. Since we can't distinguish here, we provide both.
-	// The filter will handle it.
-
-	// For kill: show PIDs with process names as descriptions
-	// For killall: show process names
-	// Since we can't tell which command from args alone, provide both
-	_ = isKillall
-
 	var items []Item
 	seen := make(map[string]bool)
 	for _, p := range processes {
-		// Add PID completion (for kill)
+		if h.command == "killall" {
+			if !seen[p.Name] && strings.HasPrefix(p.Name, current) {
+				seen[p.Name] = true
+				items = append(items, Item{
+					Value:   p.Name,
+					Display: p.Name,
+				})
+			}
+			continue
+		}
+
 		if !seen[p.PID] && strings.HasPrefix(p.PID, current) {
 			seen[p.PID] = true
 			items = append(items, Item{
 				Value:       p.PID,
 				Display:     p.PID,
 				Description: p.Name,
-			})
-		}
-		// Add process name (for killall)
-		if !seen[p.Name] && strings.HasPrefix(p.Name, current) {
-			seen[p.Name] = true
-			items = append(items, Item{
-				Value:   p.Name,
-				Display: p.Name,
 			})
 		}
 	}

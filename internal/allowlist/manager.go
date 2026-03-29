@@ -1,11 +1,10 @@
 package allowlist
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
-	"errors"
-	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sync"
 )
@@ -80,22 +79,6 @@ func (m *Manager) Load() error {
 		return err
 	}
 
-	// For project scope, refuse to load if the file is tracked by version
-	// control. A malicious repository could ship a pre-populated allowlist
-	// to auto-approve dangerous commands without user interaction.
-	//
-	// If tracking cannot be verified (e.g., git unavailable in PATH), fail
-	// closed and refuse to load.
-	if m.scope == "project" {
-		tracked, trackErr := isTrackedByGit(path)
-		if trackErr != nil {
-			return fmt.Errorf("allowlist: refusing to load %s: unable to verify git tracking: %w", path, trackErr)
-		}
-		if tracked {
-			return fmt.Errorf("allowlist: refusing to load %s: file is tracked by git (potential supply-chain risk)", path)
-		}
-	}
-
 	var f fileFormat
 	if err := json.Unmarshal(data, &f); err != nil {
 		return err
@@ -108,51 +91,6 @@ func (m *Manager) Load() error {
 	}
 
 	return nil
-}
-
-// isTrackedByGit returns whether the path is tracked by git.
-// Returns (false, nil) if the directory is not in a git repository.
-func isTrackedByGit(path string) (bool, error) {
-	repoRoot, inRepo := findGitRoot(filepath.Dir(path))
-	if !inRepo {
-		return false, nil
-	}
-
-	relPath, err := filepath.Rel(repoRoot, path)
-	if err != nil {
-		return false, fmt.Errorf("relative path to git root: %w", err)
-	}
-
-	cmd := exec.Command("git", "ls-files", "--error-unmatch", "--", filepath.ToSlash(relPath))
-	cmd.Dir = repoRoot
-	if err := cmd.Run(); err != nil {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
-			// Valid git invocation, but file is not tracked.
-			return false, nil
-		}
-		return false, fmt.Errorf("git ls-files: %w", err)
-	}
-
-	return true, nil
-}
-
-// findGitRoot walks parent directories and returns the first directory that
-// contains a .git entry (directory or file).
-func findGitRoot(startDir string) (string, bool) {
-	dir := startDir
-	for {
-		gitPath := filepath.Join(dir, ".git")
-		if _, err := os.Stat(gitPath); err == nil {
-			return dir, true
-		}
-
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			return "", false
-		}
-		dir = parent
-	}
 }
 
 // Save writes the allowlist to disk.
@@ -191,10 +129,10 @@ func (m *Manager) Save() error {
 func (m *Manager) filePath() string {
 	switch m.scope {
 	case "project":
-		if m.projectDir == "" {
+		if m.projectDir == "" || m.globalDir == "" {
 			return ""
 		}
-		return filepath.Join(m.projectDir, ".hash", "allowed_commands.json")
+		return filepath.Join(m.globalDir, "project_allowlists", projectScopeKey(m.projectDir)+".json")
 	case "global":
 		if m.globalDir == "" {
 			return ""
@@ -203,4 +141,16 @@ func (m *Manager) filePath() string {
 	default:
 		return ""
 	}
+}
+
+func projectScopeKey(projectDir string) string {
+	canonical := filepath.Clean(projectDir)
+	if resolved, err := filepath.EvalSymlinks(canonical); err == nil {
+		canonical = resolved
+	}
+	if abs, err := filepath.Abs(canonical); err == nil {
+		canonical = abs
+	}
+	sum := sha256.Sum256([]byte(canonical))
+	return hex.EncodeToString(sum[:])
 }

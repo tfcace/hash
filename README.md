@@ -74,7 +74,7 @@ Configure where "always allowed" commands are stored:
 allowed_commands_scope = "project"  # or "global" or "session"
 ```
 
-- **project** — Per-directory in `.hash/allowed_commands.json`
+- **project** — Per-directory under `~/.config/hash/project_allowlists/`
 - **global** — Shared across all projects in `~/.config/hash/allowed_commands.json`
 - **session** — In memory only, cleared when shell exits
 

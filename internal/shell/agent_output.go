@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"unicode"
 )
 
 // AgentOutputState represents the current mode of the agent output coordinator.
@@ -170,8 +171,11 @@ func (aoc *AgentOutputCoordinator) RenderPermissionPrompt(command, toolName, acc
 	aoc.mu.Lock()
 	defer aoc.mu.Unlock()
 
+	safeCommand := sanitizeTerminalText(command)
+	safeToolName := sanitizeTerminalText(toolName)
+
 	// Store command for feedback when cleared
-	aoc.pendingCommand = command
+	aoc.pendingCommand = safeCommand
 
 	// Use callback for accent color if available, otherwise use passed-in color
 	color := accentColor
@@ -192,8 +196,8 @@ func (aoc *AgentOutputCoordinator) RenderPermissionPrompt(command, toolName, acc
 
 	// Build the header line with optional tool name context
 	header := ansiBold + "Agent wants to run:" + ansiReset
-	if toolName != "" {
-		header = ansiBold + "Agent wants to run " + ansiReset + "\x1b[90m(" + toolName + ")\x1b[0m" + ansiReset + ":"
+	if safeToolName != "" {
+		header = ansiBold + "Agent wants to run " + ansiReset + "\x1b[90m(" + safeToolName + ")\x1b[0m" + ansiReset + ":"
 	}
 
 	// Render the prompt box with colored bar
@@ -201,7 +205,7 @@ func (aoc *AgentOutputCoordinator) RenderPermissionPrompt(command, toolName, acc
 	lines := []string{
 		"",
 		barStyle + "│" + ansiReset + " " + permissionPad + header,
-		barStyle + "│" + ansiReset + " " + permissionPad + accentCode + ansiBold + command + ansiReset,
+		barStyle + "│" + ansiReset + " " + permissionPad + accentCode + ansiBold + safeCommand + ansiReset,
 		barStyle + "│" + ansiReset + " " + permissionPad,
 		barStyle + "│" + ansiReset + " " + permissionPad + "[y]allow  [n]deny  [a]always allow",
 	}
@@ -214,6 +218,34 @@ func (aoc *AgentOutputCoordinator) RenderPermissionPrompt(command, toolName, acc
 	}
 
 	aoc.out.Write([]byte(sb.String()))
+}
+
+func sanitizeTerminalText(text string) string {
+	if text == "" {
+		return ""
+	}
+
+	var b strings.Builder
+	for _, r := range text {
+		switch r {
+		case '\n':
+			b.WriteString(`\n`)
+		case '\r':
+			b.WriteString(`\r`)
+		case '\t':
+			b.WriteString(`\t`)
+		case 0x1b:
+			b.WriteString(`\x1b`)
+		default:
+			if unicode.IsControl(r) {
+				fmt.Fprintf(&b, "\\u%04X", r)
+				continue
+			}
+			b.WriteRune(r)
+		}
+	}
+
+	return b.String()
 }
 
 // ClearPermissionPrompt removes the permission prompt and resumes streaming.

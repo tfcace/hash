@@ -312,10 +312,16 @@ func (e *Editor) startKeyReader() (keyCh chan Key, errCh chan error, done chan s
 	done = make(chan struct{})
 
 	go func() {
+		defer close(keyCh)
+		defer close(errCh)
+
 		for {
 			key, err := e.input.ReadKeyInterruptible(done)
 			if err != nil {
 				if err == context.Canceled {
+					return
+				}
+				if err == io.EOF {
 					return
 				}
 				select {
@@ -347,12 +353,16 @@ func (e *Editor) runEventLoop(ctx context.Context, sigCh <-chan os.Signal, keyCh
 			e.handleGhostTextUpdate(text, ok)
 		case err, ok := <-e.ghostErrChan:
 			e.handleGhostTextError(err, ok)
-		case err := <-keyErrCh:
-			if err == io.EOF {
-				return Result{Text: e.state.Buffer.Content(), Canceled: true}, nil
+		case err, ok := <-keyErrCh:
+			if !ok {
+				keyErrCh = nil
+				continue
 			}
 			return Result{}, err
-		case key := <-keyCh:
+		case key, ok := <-keyCh:
+			if !ok {
+				return Result{Text: e.state.Buffer.Content(), Canceled: true}, nil
+			}
 			if result, done := e.handleKeyEvent(key); done {
 				return result, nil
 			}

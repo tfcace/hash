@@ -3,6 +3,7 @@ package shell
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -10,12 +11,19 @@ import (
 
 	"github.com/pelletier/go-toml/v2"
 	"github.com/tfcace/hash/internal/config"
+	"github.com/tfcace/hash/internal/executor"
 )
 
 const (
 	zoxideInitLine  = `eval "$(zoxide init bash)"`
+	zoxideAliasLine = `alias cd="z"`
 	zoxideChpwdHook = `zoxide add -- "$PWD"`
 )
+
+type zoxideHashrcChanges struct {
+	AddedInit  bool
+	AddedAlias bool
+}
 
 // builtinSetupZoxide sets up zoxide integration with Hash.
 // It disables the built-in cd, adds zoxide init to ~/.hashrc,
@@ -27,8 +35,9 @@ func (s *Shell) builtinSetupZoxide(ctx context.Context, args []string) error {
 Set up zoxide integration with Hash.
 
 This command:
-  - Disables the built-in cd command
   - Adds zoxide init to ~/.hashrc
+  - Adds 'alias cd="z"' to ~/.hashrc
+  - Disables the built-in cd command
   - Configures chpwd hook for directory tracking
 
 Requires zoxide to be installed.
@@ -47,27 +56,34 @@ See: https://github.com/ajeetdsouza/zoxide`)
 
 	var changes []string
 
-	// 1. Update config.toml (disable cd builtin, add chpwd hook)
-	configDir := getConfigDir()
-	configChanges, err := setupZoxideUpdateConfig(configDir, s.config)
-	if err != nil {
-		return fmt.Errorf("config update failed: %w", err)
-	}
-	changes = append(changes, configChanges...)
+	cfgCopy := cloneConfigForZoxide(s.config)
 
-	// 2. Update ~/.hashrc (add zoxide init)
+	// 1. Update ~/.hashrc first so failures don't leave cd disabled without a replacement.
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return fmt.Errorf("failed to get home directory: %w", err)
 	}
 	hashrcPath := filepath.Join(home, ".hashrc")
-	hashrcChanged, err := setupZoxideUpdateHashrc(hashrcPath)
+	hashrcChanges, err := setupZoxideUpdateHashrc(hashrcPath)
 	if err != nil {
 		return fmt.Errorf("hashrc update failed: %w", err)
 	}
-	if hashrcChanged {
+	if hashrcChanges.AddedInit {
 		changes = append(changes, "Added zoxide init to ~/.hashrc")
 	}
+	if hashrcChanges.AddedAlias {
+		changes = append(changes, `Added 'alias cd="z"' to ~/.hashrc`)
+	}
+
+	// 2. Update config.toml (disable cd builtin, add chpwd hook)
+	configDir := getConfigDir()
+	configChanges, err := setupZoxideUpdateConfig(configDir, cfgCopy)
+	if err != nil {
+		return fmt.Errorf("config update failed: %w", err)
+	}
+	changes = append(changes, configChanges...)
+
+	s.config = cfgCopy
 
 	// 3. Report results
 	if len(changes) == 0 {
@@ -80,7 +96,7 @@ See: https://github.com/ajeetdsouza/zoxide`)
 
 		// Try to activate in the current session
 		if s.executor != nil {
-			_, evalErr := s.executor.Execute(ctx, zoxideInitLine, nil, os.Stderr)
+			evalErr := activateZoxideInSession(ctx, s.executor, hashrcChanges)
 			if evalErr == nil {
 				fmt.Println()
 				fmt.Println("zoxide is active in this session.")
@@ -90,9 +106,6 @@ See: https://github.com/ajeetdsouza/zoxide`)
 			}
 		}
 	}
-
-	fmt.Println()
-	fmt.Println("Tip: add 'alias cd=z' to your ~/.hashrc to use cd as zoxide.")
 
 	return nil
 }
@@ -184,6 +197,20 @@ func zoxideChpwdHookExists(cfg *config.Config) bool {
 	return false
 }
 
+func cloneConfigForZoxide(cfg *config.Config) *config.Config {
+	if cfg == nil {
+		return config.Default()
+	}
+
+	clone := *cfg
+	clone.Shell = cfg.Shell
+	clone.Shell.DisableBuiltins = append([]string(nil), cfg.Shell.DisableBuiltins...)
+	clone.Shell.Hooks = cfg.Shell.Hooks
+	clone.Shell.Hooks.Chpwd = append([]string(nil), cfg.Shell.Hooks.Chpwd...)
+
+	return &clone
+}
+
 // buildMinimalZoxideConfig creates a minimal config.toml with only zoxide settings.
 func buildMinimalZoxideConfig(disableCd, chpwdHook bool) string {
 	var buf strings.Builder
@@ -243,32 +270,68 @@ func appendZoxideToConfig(existing string, disableCd, chpwdHook bool) string {
 	return text
 }
 
-// setupZoxideUpdateHashrc adds zoxide init to the hashrc file.
-// Returns true if the file was modified.
-func setupZoxideUpdateHashrc(hashrcPath string) (bool, error) {
+func activateZoxideInSession(ctx context.Context, runner interface {
+	Execute(context.Context, string, io.Writer, io.Writer) (*executor.Result, error)
+}, changes zoxideHashrcChanges) error {
+	if changes.AddedInit {
+		if _, err := runner.Execute(ctx, zoxideInitLine, nil, os.Stderr); err != nil {
+			return err
+		}
+	}
+	if changes.AddedAlias {
+		if _, err := runner.Execute(ctx, zoxideAliasLine, nil, os.Stderr); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func hasHashrcCdAlias(content string) bool {
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "alias cd=") || strings.HasPrefix(trimmed, "alias cd =") {
+			return true
+		}
+	}
+	return false
+}
+
+// setupZoxideUpdateHashrc adds zoxide init and alias to the hashrc file.
+func setupZoxideUpdateHashrc(hashrcPath string) (zoxideHashrcChanges, error) {
 	raw, err := os.ReadFile(hashrcPath)
 	if err != nil && !os.IsNotExist(err) {
-		return false, err
+		return zoxideHashrcChanges{}, err
 	}
 
-	// Already configured
-	if strings.Contains(string(raw), "zoxide init") {
-		return false, nil
+	content := string(raw)
+	changes := zoxideHashrcChanges{
+		AddedInit:  !strings.Contains(content, "zoxide init"),
+		AddedAlias: !hasHashrcCdAlias(content),
+	}
+	if !changes.AddedInit && !changes.AddedAlias {
+		return changes, nil
 	}
 
 	var buf strings.Builder
 	if len(raw) > 0 {
 		buf.Write(raw)
-		if !strings.HasSuffix(string(raw), "\n") {
+		if !strings.HasSuffix(content, "\n") {
 			buf.WriteString("\n")
 		}
-		buf.WriteString("\n")
 	}
-	buf.WriteString("# zoxide - smarter cd command\n")
-	buf.WriteString(zoxideInitLine + "\n")
+	if changes.AddedInit {
+		if len(raw) > 0 {
+			buf.WriteString("\n")
+		}
+		buf.WriteString("# zoxide - smarter cd command\n")
+		buf.WriteString(zoxideInitLine + "\n")
+	}
+	if changes.AddedAlias {
+		buf.WriteString(zoxideAliasLine + "\n")
+	}
 
 	if err := os.WriteFile(hashrcPath, []byte(buf.String()), 0o644); err != nil { //nolint:gosec // G306: user shell config
-		return false, err
+		return zoxideHashrcChanges{}, err
 	}
-	return true, nil
+	return changes, nil
 }

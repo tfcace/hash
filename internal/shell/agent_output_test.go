@@ -209,6 +209,31 @@ func TestAgentOutputCoordinator_RenderPermissionWithoutToolName(t *testing.T) {
 	}
 }
 
+func TestAgentOutputCoordinator_RenderPermission_SanitizesControlChars(t *testing.T) {
+	var buf bytes.Buffer
+	aoc := NewAgentOutputCoordinator(&buf)
+
+	command := "danger\\n" + "literal\n" + "\x1b[31mowned"
+	aoc.RenderPermissionPrompt(command, "Read\nWrite", "#00ff00")
+
+	output := buf.String()
+	if strings.Contains(output, "literal\n\x1b[31mowned") {
+		t.Fatalf("raw command control characters leaked into prompt: %q", output)
+	}
+	if strings.Contains(output, "(Read\nWrite)") {
+		t.Fatalf("raw tool name newline leaked into prompt: %q", output)
+	}
+	if !strings.Contains(output, `literal\n\x1b[31mowned`) {
+		t.Fatalf("sanitized command missing from prompt: %q", output)
+	}
+	if !strings.Contains(output, `(Read\nWrite)`) {
+		t.Fatalf("sanitized tool name missing from prompt: %q", output)
+	}
+	if strings.Contains(output, "\x1b[31mowned") {
+		t.Fatalf("prompt should not contain the command's raw ANSI sequence: %q", output)
+	}
+}
+
 func TestAgentOutputCoordinator_ClearPermission(t *testing.T) {
 	var buf bytes.Buffer
 	aoc := NewAgentOutputCoordinator(&buf)

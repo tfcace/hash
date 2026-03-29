@@ -7,6 +7,7 @@ import (
 
 func TestPipHandler_Uninstall(t *testing.T) {
 	h := &PipHandler{
+		command: "pip3",
 		runCommand: func(ctx context.Context, name string, args ...string) ([]string, error) {
 			return []string{
 				"requests==2.28.0",
@@ -31,6 +32,7 @@ func TestPipHandler_Uninstall(t *testing.T) {
 
 func TestPipHandler_PrefixFilter(t *testing.T) {
 	h := &PipHandler{
+		command: "pip3",
 		runCommand: func(ctx context.Context, name string, args ...string) ([]string, error) {
 			return []string{
 				"requests==2.28.0",
@@ -47,6 +49,7 @@ func TestPipHandler_PrefixFilter(t *testing.T) {
 
 func TestPipHandler_OnlyUninstall(t *testing.T) {
 	h := &PipHandler{
+		command: "pip3",
 		runCommand: func(ctx context.Context, name string, args ...string) ([]string, error) {
 			t.Fatal("should not query for non-uninstall")
 			return nil, nil
@@ -61,6 +64,7 @@ func TestPipHandler_OnlyUninstall(t *testing.T) {
 
 func TestPipHandler_EmptyArgs(t *testing.T) {
 	h := &PipHandler{
+		command: "pip3",
 		runCommand: func(ctx context.Context, name string, args ...string) ([]string, error) {
 			t.Fatal("should not query for empty args")
 			return nil, nil
@@ -70,5 +74,24 @@ func TestPipHandler_EmptyArgs(t *testing.T) {
 	result := h.Complete(context.Background(), nil, "")
 	if len(result.Items) != 0 {
 		t.Fatalf("expected 0 items, got %d", len(result.Items))
+	}
+}
+
+func TestPipHandler_UsesConfiguredCommand(t *testing.T) {
+	var gotName string
+	h := &PipHandler{
+		command: "pip",
+		runCommand: func(ctx context.Context, name string, args ...string) ([]string, error) {
+			gotName = name
+			return []string{"requests==2.28.0"}, nil
+		},
+	}
+
+	result := h.Complete(context.Background(), []string{"uninstall"}, "")
+	if len(result.Items) != 1 {
+		t.Fatalf("expected 1 item, got %d", len(result.Items))
+	}
+	if gotName != "pip" {
+		t.Fatalf("expected pip command, got %q", gotName)
 	}
 }

@@ -35,8 +35,14 @@ func NewCommandSuggestor(historyStore *history.Store) *CommandSuggestor {
 
 // getPackageManager returns the detected package manager, detecting lazily on first call.
 func (s *CommandSuggestor) getPackageManager() string {
+	if s.packageManager != "" {
+		return s.packageManager
+	}
+
 	s.pmOnce.Do(func() {
-		s.packageManager = detectPackageManager()
+		if s.packageManager == "" {
+			s.packageManager = detectPackageManager()
+		}
 	})
 	return s.packageManager
 }

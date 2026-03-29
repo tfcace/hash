@@ -1,6 +1,7 @@
 package shell
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -180,12 +181,12 @@ func TestSetupZoxideUpdateHashrc(t *testing.T) {
 		dir := t.TempDir()
 		hashrcPath := filepath.Join(dir, ".hashrc")
 
-		changed, err := setupZoxideUpdateHashrc(hashrcPath)
+		changes, err := setupZoxideUpdateHashrc(hashrcPath)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if !changed {
-			t.Error("should report changed")
+		if !changes.AddedInit || !changes.AddedAlias {
+			t.Fatalf("expected init and alias to be added, got %+v", changes)
 		}
 
 		content, err := os.ReadFile(hashrcPath)
@@ -194,6 +195,9 @@ func TestSetupZoxideUpdateHashrc(t *testing.T) {
 		}
 		if !strings.Contains(string(content), zoxideInitLine) {
 			t.Error("hashrc should contain zoxide init line")
+		}
+		if !strings.Contains(string(content), zoxideAliasLine) {
+			t.Error("hashrc should contain cd alias")
 		}
 		if !strings.Contains(string(content), "# zoxide") {
 			t.Error("hashrc should contain comment")
@@ -209,12 +213,12 @@ func TestSetupZoxideUpdateHashrc(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		changed, err := setupZoxideUpdateHashrc(hashrcPath)
+		changes, err := setupZoxideUpdateHashrc(hashrcPath)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if !changed {
-			t.Error("should report changed")
+		if !changes.AddedInit || !changes.AddedAlias {
+			t.Fatalf("expected init and alias to be added, got %+v", changes)
 		}
 
 		content, err := os.ReadFile(hashrcPath)
@@ -229,9 +233,30 @@ func TestSetupZoxideUpdateHashrc(t *testing.T) {
 		if !strings.Contains(string(content), zoxideInitLine) {
 			t.Error("should contain zoxide init line")
 		}
+		if !strings.Contains(string(content), zoxideAliasLine) {
+			t.Error("should contain cd alias")
+		}
 	})
 
 	t.Run("idempotent - already has zoxide", func(t *testing.T) {
+		dir := t.TempDir()
+		hashrcPath := filepath.Join(dir, ".hashrc")
+
+		existing := "# zoxide\n" + zoxideInitLine + "\n" + zoxideAliasLine + "\n"
+		if err := os.WriteFile(hashrcPath, []byte(existing), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		changes, err := setupZoxideUpdateHashrc(hashrcPath)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if changes.AddedInit || changes.AddedAlias {
+			t.Errorf("should not report changed when already configured: %+v", changes)
+		}
+	})
+
+	t.Run("adds alias when init already exists", func(t *testing.T) {
 		dir := t.TempDir()
 		hashrcPath := filepath.Join(dir, ".hashrc")
 
@@ -240,12 +265,20 @@ func TestSetupZoxideUpdateHashrc(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		changed, err := setupZoxideUpdateHashrc(hashrcPath)
+		changes, err := setupZoxideUpdateHashrc(hashrcPath)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if changed {
-			t.Error("should not report changed when already configured")
+		if changes.AddedInit || !changes.AddedAlias {
+			t.Fatalf("expected only alias to be added, got %+v", changes)
+		}
+
+		content, err := os.ReadFile(hashrcPath)
+		if err != nil {
+			t.Fatalf("failed to read hashrc: %v", err)
+		}
+		if !strings.Contains(string(content), zoxideAliasLine) {
+			t.Error("should add alias when init already exists")
 		}
 	})
 }
@@ -335,4 +368,39 @@ func TestSetupZoxideUpdateConfig(t *testing.T) {
 			t.Errorf("expected no changes, got %d: %v", len(changes), changes)
 		}
 	})
+}
+
+func TestBuiltinSetupZoxide_DoesNotDisableCdWhenHashrcUpdateFails(t *testing.T) {
+	binDir := t.TempDir()
+	zoxidePath := filepath.Join(binDir, "zoxide")
+	if err := os.WriteFile(zoxidePath, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("failed to write fake zoxide: %v", err)
+	}
+
+	badHome := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(badHome, []byte("x"), 0o644); err != nil {
+		t.Fatalf("failed to create invalid home path: %v", err)
+	}
+
+	configHome := t.TempDir()
+	t.Setenv("PATH", binDir)
+	t.Setenv("HOME", badHome)
+	t.Setenv("XDG_CONFIG_HOME", configHome)
+
+	s := &Shell{config: config.Default()}
+	err := s.builtinSetupZoxide(context.Background(), nil)
+	if err == nil {
+		t.Fatal("expected setup-zoxide to fail when ~/.hashrc cannot be written")
+	}
+
+	if cdBuiltinDisabled(s.config) {
+		t.Error("live shell config should not disable cd on failure")
+	}
+	if zoxideChpwdHookExists(s.config) {
+		t.Error("live shell config should not add chpwd hook on failure")
+	}
+
+	if _, statErr := os.Stat(filepath.Join(configHome, "hash", "config.toml")); !os.IsNotExist(statErr) {
+		t.Error("config.toml should not be written when hashrc update fails")
+	}
 }
