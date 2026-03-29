@@ -19,6 +19,9 @@ type CobraCompleter struct {
 	cacheTTL   time.Duration
 	prefetched map[string]bool // tracks prefetch attempts (including failures)
 	prefetchMu sync.RWMutex
+
+	lookPathCache   map[string]string // command name → resolved path
+	lookPathCacheMu sync.RWMutex
 }
 
 type cachedResult struct {
@@ -29,15 +32,37 @@ type cachedResult struct {
 // NewCobraCompleter creates a new Cobra completer.
 func NewCobraCompleter() *CobraCompleter {
 	return &CobraCompleter{
-		cache:      make(map[string]cachedResult),
-		cacheTTL:   5 * time.Minute,
-		prefetched: make(map[string]bool),
+		cache:         make(map[string]cachedResult),
+		cacheTTL:      5 * time.Minute,
+		prefetched:    make(map[string]bool),
+		lookPathCache: make(map[string]string),
 	}
 }
 
 // Name returns the completer name.
 func (c *CobraCompleter) Name() string {
 	return "cobra"
+}
+
+// lookPath returns the resolved path for a command, using a cache to avoid
+// repeated PATH scans on every TAB press.
+func (c *CobraCompleter) lookPath(name string) (string, error) {
+	c.lookPathCacheMu.RLock()
+	if p, ok := c.lookPathCache[name]; ok {
+		c.lookPathCacheMu.RUnlock()
+		return p, nil
+	}
+	c.lookPathCacheMu.RUnlock()
+
+	p, err := exec.LookPath(name)
+	if err != nil {
+		return "", err
+	}
+
+	c.lookPathCacheMu.Lock()
+	c.lookPathCache[name] = p
+	c.lookPathCacheMu.Unlock()
+	return p, nil
 }
 
 // Complete returns completions from cache only.
@@ -54,8 +79,8 @@ func (c *CobraCompleter) Complete(ctx context.Context, line string, pos int) (Re
 
 	cmdName := parts[0]
 
-	// Check if command exists
-	cmdPath, err := exec.LookPath(cmdName)
+	// Check if command exists (cached to avoid PATH scan on every TAB)
+	cmdPath, err := c.lookPath(cmdName)
 	if err != nil {
 		return Result{}, nil
 	}
@@ -92,8 +117,8 @@ func (c *CobraCompleter) Prefetch(line string, pos int) {
 
 	cmdName := parts[0]
 
-	// Check if command exists
-	cmdPath, err := exec.LookPath(cmdName)
+	// Check if command exists (cached to avoid PATH scan on every TAB)
+	cmdPath, err := c.lookPath(cmdName)
 	if err != nil {
 		return
 	}
@@ -218,4 +243,8 @@ func (c *CobraCompleter) ClearCache() {
 	c.prefetchMu.Lock()
 	c.prefetched = make(map[string]bool)
 	c.prefetchMu.Unlock()
+
+	c.lookPathCacheMu.Lock()
+	c.lookPathCache = make(map[string]string)
+	c.lookPathCacheMu.Unlock()
 }

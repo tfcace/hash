@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -168,27 +169,35 @@ func (c *VCSCompleter) completeJJ(ctx context.Context, parts []string, trailingS
 }
 
 func (c *VCSCompleter) completeJJRevision(ctx context.Context, current string) Result {
+	// Run both jj queries in parallel
+	var revs, ids []string
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		revs, _ = c.listJJRevs(ctx)
+	}()
+	go func() {
+		defer wg.Done()
+		ids, _ = c.listJJChangeIDs(ctx)
+	}()
+	wg.Wait()
+
 	seen := make(map[string]bool)
 	var values []string
-
-	if revs, err := c.listJJRevs(ctx); err == nil {
-		for _, rev := range revs {
-			if rev == "" || seen[rev] {
-				continue
-			}
-			seen[rev] = true
-			values = append(values, rev)
+	for _, rev := range revs {
+		if rev == "" || seen[rev] {
+			continue
 		}
+		seen[rev] = true
+		values = append(values, rev)
 	}
-
-	if ids, err := c.listJJChangeIDs(ctx); err == nil {
-		for _, id := range ids {
-			if id == "" || seen[id] {
-				continue
-			}
-			seen[id] = true
-			values = append(values, id)
+	for _, id := range ids {
+		if id == "" || seen[id] {
+			continue
 		}
+		seen[id] = true
+		values = append(values, id)
 	}
 
 	return prefixFilterItems(values, current)
@@ -381,15 +390,32 @@ func defaultListGitModified(ctx context.Context) ([]string, error) {
 	queryCtx, cancel := context.WithTimeout(ctx, vcsQueryTimeout)
 	defer cancel()
 
-	// Get modified and untracked files
-	modified, _ := runIsolatedCommand(queryCtx, "git", "diff", "--name-only")
-	staged, _ := runIsolatedCommand(queryCtx, "git", "diff", "--name-only", "--cached")
-	untracked, _ := runIsolatedCommand(queryCtx, "git", "ls-files", "--others", "--exclude-standard")
+	// Run all three git queries in parallel so they share the timeout fairly
+	type result struct {
+		lines []string
+	}
+	var wg sync.WaitGroup
+	results := make([]result, 3)
+
+	cmds := [3][]string{
+		{"git", "diff", "--name-only"},
+		{"git", "diff", "--name-only", "--cached"},
+		{"git", "ls-files", "--others", "--exclude-standard"},
+	}
+	for i, args := range cmds {
+		wg.Add(1)
+		go func(idx int, cmdArgs []string) {
+			defer wg.Done()
+			lines, _ := runIsolatedCommand(queryCtx, cmdArgs[0], cmdArgs[1:]...)
+			results[idx] = result{lines: lines}
+		}(i, args)
+	}
+	wg.Wait()
 
 	seen := make(map[string]bool)
 	var files []string
-	for _, list := range [][]string{modified, staged, untracked} {
-		for _, f := range list {
+	for _, r := range results {
+		for _, f := range r.lines {
 			f = strings.TrimSpace(f)
 			if f != "" && !seen[f] {
 				seen[f] = true

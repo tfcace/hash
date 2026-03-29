@@ -4,6 +4,7 @@ import (
 	"context"
 	"sort"
 	"strings"
+	"unicode/utf8"
 )
 
 // Router dispatches completion requests to registered completers.
@@ -90,7 +91,7 @@ func extractCompletionQuery(line string, pos int) string {
 	runePos := 0
 	byteCount := 0
 	for runePos < len(runes) && byteCount < pos {
-		byteCount += len(string(runes[runePos]))
+		byteCount += utf8.RuneLen(runes[runePos])
 		runePos++
 	}
 	start := runePos

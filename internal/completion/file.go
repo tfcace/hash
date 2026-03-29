@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode/utf8"
 )
 
 // FileCompleter completes filesystem paths.
@@ -154,7 +155,7 @@ func extractWord(line string, pos int) string {
 	runePos := 0
 	byteCount := 0
 	for runePos < len(runes) && byteCount < pos {
-		byteCount += len(string(runes[runePos]))
+		byteCount += utf8.RuneLen(runes[runePos])
 		runePos++
 	}
 	start := runePos
@@ -204,20 +205,7 @@ func getCompletionPrefix(original, matched string) string {
 // fileDescription returns a short description for a file entry (type + size).
 func fileDescription(path string, entry os.DirEntry, isDir bool) string {
 	if isDir {
-		entries, err := os.ReadDir(path)
-		if err != nil {
-			return "directory"
-		}
-		n := 0
-		for _, e := range entries {
-			if !strings.HasPrefix(e.Name(), ".") {
-				n++
-			}
-		}
-		if n == 1 {
-			return "1 item"
-		}
-		return fmt.Sprintf("%d items", n)
+		return "directory"
 	}
 
 	info, err := entry.Info()

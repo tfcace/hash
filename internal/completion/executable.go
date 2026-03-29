@@ -126,13 +126,17 @@ func (c *ExecutableCompleter) getExecutables() []string {
 				continue
 			}
 
+			// Skip non-regular files (but allow symlinks — they need Info())
+			typ := entry.Type()
+			if typ&^(os.ModeSymlink) != 0 {
+				continue
+			}
+
 			// Check if executable
 			info, err := entry.Info()
 			if err != nil {
 				continue
 			}
-
-			// On Unix, check executable bit
 			if info.Mode()&0o111 != 0 {
 				seen[name] = true
 				executables = append(executables, name)

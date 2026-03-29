@@ -106,11 +106,11 @@ func TestCompletionIntegration_BasicTabFromEmpty(t *testing.T) {
 		}
 	}
 
-	// Verify directory descriptions mention item count
+	// Verify directory descriptions say "directory"
 	for _, item := range items {
 		if strings.HasSuffix(item.Text, "/") {
-			if !strings.Contains(item.Description, "item") {
-				t.Errorf("directory item %q description = %q, expected it to mention 'item'", item.Text, item.Description)
+			if item.Description != "directory" {
+				t.Errorf("directory item %q description = %q, expected %q", item.Text, item.Description, "directory")
 			}
 		}
 	}
