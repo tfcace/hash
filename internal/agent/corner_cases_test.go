@@ -11,7 +11,7 @@ import (
 // the next SendStreaming() can reconnect.
 func TestACPTransport_ConnectionClosedResetsState(t *testing.T) {
 	transport := &ACPTransport{
-		config:   ACPConfig{Command: "test"},
+		config:   ACPConfig{Command: "/nonexistent/acp-agent"},
 		messages: make(chan []byte, 1024),
 		done:     make(chan struct{}),
 	}
@@ -113,7 +113,7 @@ func TestACPTransport_DoubleClose(t *testing.T) {
 // is already canceled before SendStreaming is called.
 func TestACPTransport_ContextAlreadyCanceled(t *testing.T) {
 	transport := &ACPTransport{
-		config:   ACPConfig{Command: "test"},
+		config:   ACPConfig{Command: "/nonexistent/acp-agent"},
 		messages: make(chan []byte, 1024),
 		done:     make(chan struct{}),
 	}
@@ -171,7 +171,7 @@ the next request may also hang or fail.
 // don't corrupt state.
 func TestACPTransport_RapidCancelAndResend(t *testing.T) {
 	transport := &ACPTransport{
-		config:   ACPConfig{Command: "test"},
+		config:   ACPConfig{Command: "/nonexistent/acp-agent"},
 		messages: make(chan []byte, 1024),
 		done:     make(chan struct{}),
 	}
