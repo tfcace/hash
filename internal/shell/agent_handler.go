@@ -12,11 +12,19 @@ import (
 	"github.com/tfcace/hash/internal/trace"
 )
 
+// LastError holds context from the most recent failed command.
+type LastError struct {
+	Command  string
+	Stderr   string
+	ExitCode int
+}
+
 // AgentHandler handles agent requests.
 type AgentHandler struct {
 	client          *agent.Client
 	clipboardBuf    *clipboard.Buffer
 	selectedContext *hashcontext.Collection
+	lastError       *LastError
 }
 
 // NewAgentHandler creates a new agent handler.
@@ -32,6 +40,11 @@ func (h *AgentHandler) SetClipboard(buf *clipboard.Buffer) {
 // SetSelectedContext sets the user-selected context.
 func (h *AgentHandler) SetSelectedContext(ctx *hashcontext.Collection) {
 	h.selectedContext = ctx
+}
+
+// SetLastError records the last failed command for agent context.
+func (h *AgentHandler) SetLastError(le *LastError) {
+	h.lastError = le
 }
 
 // HandleRequest processes a parsed agent request and returns the response.
@@ -159,11 +172,22 @@ func (h *AgentHandler) buildRequest(parsed parser.ParseResult) (agent.Request, e
 		agentCtx = ctxBuilder.Build()
 	}
 
+	// Populate last error context if available
+	if h.lastError != nil {
+		agentCtx.LastError = fmt.Sprintf("Command '%s' failed (exit %d):\n%s",
+			h.lastError.Command, h.lastError.ExitCode, h.lastError.Stderr)
+	}
+
 	// Build the prompt based on parse type
 	var prompt string
 	switch parsed.Type {
 	case parser.CommandTypeAgent:
 		prompt = parsed.AgentPrompt
+		// Bare ?? after a failed command: auto-inject error context
+		if prompt == "" && h.lastError != nil {
+			prompt = fmt.Sprintf("Explain this error and suggest a fix:\n$ %s\n%s\nExit code: %d",
+				h.lastError.Command, h.lastError.Stderr, h.lastError.ExitCode)
+		}
 	case parser.CommandTypeAgentPipe:
 		if h.clipboardBuf != nil && h.clipboardBuf.LastOutput() == "" {
 			prompt = fmt.Sprintf("The command '%s' produced no output (empty). %s", parsed.Command, parsed.AgentPrompt)

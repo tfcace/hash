@@ -906,6 +906,17 @@ func (s *Shell) handleAgentRequest(ctx context.Context, parsed parser.ParseResul
 	// Pass selected context to agent handler
 	s.agentHandler.SetSelectedContext(s.selectedContext)
 
+	// Pass last error context so bare ?? can explain failures
+	if s.lastExitCode != 0 && s.lastCommand != "" {
+		s.agentHandler.SetLastError(&LastError{
+			Command:  s.lastCommand,
+			Stderr:   s.lastStderr,
+			ExitCode: s.lastExitCode,
+		})
+	} else {
+		s.agentHandler.SetLastError(nil)
+	}
+
 	// Use unified streaming handler for all modes
 	return s.handleAgentRequestUnified(agentCtx, parsed)
 }
