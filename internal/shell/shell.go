@@ -1268,15 +1268,24 @@ func (s *Shell) printPromptPrefix() {
 		DurationMs: s.lastDuration.Milliseconds(),
 	}
 
-	// Use GenerateMultiLine to properly handle Starship's multi-line prompts.
-	// chzyer/readline doesn't support multi-line prompts, so we print the
-	// prefix (info bar) ourselves and only give readline the prompt character.
-	prefix, promptLine := s.prompt.GenerateMultiLine(ctx)
-	if prefix != "" {
-		fmt.Print(prefix)
+	// Try precomputed prompt first (avoids starship subprocess).
+	var full string
+	if cached, ok := s.prompt.TryPrecomputed(ctx); ok {
+		full = cached
+	} else {
+		full = s.prompt.Generate(ctx)
 	}
-	s.readline.SetPrompt(promptLine)
-	// Note: For editor mode, the editor renders the prompt itself
+
+	// Split multi-line: prefix → stdout, prompt char → readline.
+	if lastNL := strings.LastIndex(full, "\n"); lastNL >= 0 {
+		fmt.Print(full[:lastNL+1])
+		s.readline.SetPrompt(full[lastNL+1:])
+	} else {
+		s.readline.SetPrompt(full)
+	}
+
+	// Precompute the next prompt while the user types.
+	s.prompt.StartPrecompute(cwd)
 }
 
 // initPromptAndPalette generates the first prompt and extracts the color palette
@@ -1329,6 +1338,9 @@ func (s *Shell) initPromptAndPalette() {
 		s.colorPalette = newPalette
 		s.editorCfg.ScrollbarColor = newPalette.Primary
 	}
+
+	// Precompute the next prompt while the user types their first command.
+	s.prompt.StartPrecompute(cwd)
 }
 
 func trimSpace(s string) string {
