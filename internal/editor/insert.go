@@ -368,12 +368,7 @@ func (m *InsertMode) moveWordForward(state *EditorState) {
 }
 
 func isWordGap(ch byte) bool {
-	switch ch {
-	case ' ', '/', ':':
-		return true
-	default:
-		return false
-	}
+	return ch == ' '
 }
 
 func (m *InsertMode) deleteToLineStart(state *EditorState) {

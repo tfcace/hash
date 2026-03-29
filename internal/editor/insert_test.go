@@ -371,8 +371,8 @@ func TestInsertMode_AltLeft_PathSkipsSlash(t *testing.T) {
 	mode := NewInsertMode()
 	mode.HandleKey(Key{Special: KeyLeft, Alt: true}, state)
 
-	if state.Cursor.Pos.Col != 11 {
-		t.Fatalf("Cursor col = %d, want 11", state.Cursor.Pos.Col)
+	if state.Cursor.Pos.Col != len("cd ") {
+		t.Fatalf("Cursor col = %d, want %d", state.Cursor.Pos.Col, len("cd "))
 	}
 }
 
@@ -401,8 +401,8 @@ func TestInsertMode_ShiftAltLeft_SelectsPathAsSingleWord(t *testing.T) {
 		t.Fatal("Shift+Alt+Left should start selection")
 	}
 	start, end := state.Cursor.SelectionRange()
-	if start.Col != 11 || end.Col != len("cd /tmp/my/file") {
-		t.Fatalf("SelectionRange = (%d,%d), want (11,%d)", start.Col, end.Col, len("cd /tmp/my/file"))
+	if start.Col != len("cd ") || end.Col != len("cd /tmp/my/file") {
+		t.Fatalf("SelectionRange = (%d,%d), want (%d,%d)", start.Col, end.Col, len("cd "), len("cd /tmp/my/file"))
 	}
 }
 
@@ -414,8 +414,8 @@ func TestInsertMode_AltLeft_ServiceSegment(t *testing.T) {
 	mode := NewInsertMode()
 	mode.HandleKey(Key{Special: KeyLeft, Alt: true}, state)
 
-	if state.Cursor.Pos.Col != len("kubectl -n crr port-forward svc/") {
-		t.Fatalf("Cursor col = %d, want %d", state.Cursor.Pos.Col, len("kubectl -n crr port-forward svc/"))
+	if state.Cursor.Pos.Col != len("kubectl -n crr port-forward ") {
+		t.Fatalf("Cursor col = %d, want %d", state.Cursor.Pos.Col, len("kubectl -n crr port-forward "))
 	}
 }
 
@@ -427,8 +427,8 @@ func TestInsertMode_AltLeft_PortMappingSegment(t *testing.T) {
 	mode := NewInsertMode()
 	mode.HandleKey(Key{Special: KeyLeft, Alt: true}, state)
 
-	if state.Cursor.Pos.Col != len("kubectl -n crr port-forward svc/x 80:") {
-		t.Fatalf("Cursor col = %d, want %d", state.Cursor.Pos.Col, len("kubectl -n crr port-forward svc/x 80:"))
+	if state.Cursor.Pos.Col != len("kubectl -n crr port-forward svc/x ") {
+		t.Fatalf("Cursor col = %d, want %d", state.Cursor.Pos.Col, len("kubectl -n crr port-forward svc/x "))
 	}
 }
 

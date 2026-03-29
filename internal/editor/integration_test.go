@@ -320,8 +320,8 @@ func TestIntegration_CtrlW_DeletePathSegment(t *testing.T) {
 		t.Fatalf("Run() error = %v", err)
 	}
 
-	if result.Text != "cmd/hash/" {
-		t.Errorf("Text = %q, want %q", result.Text, "cmd/hash/")
+	if result.Text != "" {
+		t.Errorf("Text = %q, want %q", result.Text, "")
 	}
 }
 
