@@ -41,8 +41,8 @@ type Prompt struct {
 	config       Config
 	starshipPath string
 
-	mu           sync.Mutex
-	precomputed  *precomputeResult
+	mu          sync.Mutex
+	precomputed *precomputeResult
 }
 
 // New creates a new Prompt generator.
