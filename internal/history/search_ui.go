@@ -118,7 +118,7 @@ func (ui *SearchUI) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "enter":
 		return ui, tea.Quit
 
-	case "up", "ctrl+p":
+	case "up", "ctrl+p", "shift+tab":
 		if ui.selected > 0 {
 			ui.selected--
 			ui.adjustScroll()
@@ -130,22 +130,6 @@ func (ui *SearchUI) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			ui.adjustScroll()
 		}
 
-	case "shift+tab":
-		if ui.selected > 0 {
-			ui.selected--
-			ui.adjustScroll()
-		}
-
-	case "backspace":
-		if ui.query != "" {
-			ui.query = ui.query[:len(ui.query)-1]
-			ui.selected = 0
-			ui.scrollOffset = 0
-			ui.debounceID++
-			cmd := ui.debounceSearch(ui.debounceID)
-			return ui, cmd
-		}
-
 	case "ctrl+y":
 		cmd := ui.copyCommand()
 		return ui, cmd
@@ -155,17 +139,37 @@ func (ui *SearchUI) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return ui, cmd
 
 	default:
-		if len(msg.String()) == 1 && msg.String()[0] >= 32 {
-			ui.query += msg.String()
-			ui.selected = 0
-			ui.scrollOffset = 0
-			ui.debounceID++
-			cmd := ui.debounceSearch(ui.debounceID)
-			return ui, cmd
-		}
+		cmd := ui.handleQueryEdit(msg)
+		return ui, cmd
 	}
 
 	return ui, nil
+}
+
+func (ui *SearchUI) handleQueryEdit(msg tea.KeyPressMsg) tea.Cmd {
+	switch msg.String() {
+	case "backspace":
+		if ui.query != "" {
+			ui.query = ui.query[:len(ui.query)-1]
+			return ui.resetAndSearch()
+		}
+	case "space":
+		ui.query += " "
+		return ui.resetAndSearch()
+	default:
+		if len(msg.String()) == 1 && msg.String()[0] >= 32 {
+			ui.query += msg.String()
+			return ui.resetAndSearch()
+		}
+	}
+	return nil
+}
+
+func (ui *SearchUI) resetAndSearch() tea.Cmd {
+	ui.selected = 0
+	ui.scrollOffset = 0
+	ui.debounceID++
+	return ui.debounceSearch(ui.debounceID)
 }
 
 func (ui *SearchUI) adjustScroll() {
