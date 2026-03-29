@@ -271,7 +271,15 @@ func (e *Editor) Run(ctx context.Context) (Result, error) {
 
 	// Start keyboard reader goroutine
 	keyCh, keyErrCh, done := e.startKeyReader()
-	defer close(done)
+	defer func() {
+		close(done)
+		// Wait for the goroutine to fully exit so it stops reading stdin.
+		// Without this, the goroutine may still be polling stdin when
+		// bubbletea starts (e.g., for Ctrl+R history picker), causing a
+		// race where two readers split terminal responses (DECRPM).
+		for range keyCh {
+		}
+	}()
 
 	return e.runEventLoop(ctx, sigCh, keyCh, keyErrCh)
 }

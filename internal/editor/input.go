@@ -216,6 +216,13 @@ func (r *InputReader) ReadKeyInterruptible(done <-chan struct{}) (Key, error) {
 			}
 			// No data, loop back to check done channel
 		}
+		// Re-check done after poll to avoid reading stdin when the
+		// editor is shutting down (e.g., for Ctrl+R → bubbletea handoff).
+		select {
+		case <-done:
+			return Key{}, context.Canceled
+		default:
+		}
 	}
 
 	// Read first byte
