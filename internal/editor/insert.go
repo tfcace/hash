@@ -188,14 +188,14 @@ func (m *InsertMode) handleAlt(key Key, state *EditorState) ModeResult {
 		} else {
 			state.Cursor.ClearSelection()
 		}
-		m.moveTokenBack(state)
+		m.moveWordBack(state)
 	case KeyRight: // Alt+Right: word forward
 		if key.Shift {
 			m.startOrExtendSelection(state)
 		} else {
 			state.Cursor.ClearSelection()
 		}
-		m.moveTokenForward(state)
+		m.moveWordForward(state)
 	case KeyBackspace: // Alt+Backspace: delete whole token
 		if state.Cursor.HasSelection() {
 			m.deleteSelection(state)
@@ -207,10 +207,10 @@ func (m *InsertMode) handleAlt(key Key, state *EditorState) ModeResult {
 	switch key.Rune {
 	case 'b': // Alt+B: word back
 		state.Cursor.ClearSelection()
-		m.moveTokenBack(state)
+		m.moveWordBack(state)
 	case 'f': // Alt+F: word forward
 		state.Cursor.ClearSelection()
-		m.moveTokenForward(state)
+		m.moveWordForward(state)
 	}
 	return ModeResult{}
 }
@@ -312,12 +312,12 @@ func (m *InsertMode) moveWordBack(state *EditorState) {
 	line := state.Buffer.Line(state.Cursor.Pos.Row)
 	col := state.Cursor.Pos.Col
 
-	// Skip spaces
-	for col > 0 && (col > len(line) || line[col-1] == ' ') {
+	// Skip gaps between segments/tokens.
+	for col > 0 && (col > len(line) || isWordGap(line[col-1])) {
 		col--
 	}
-	// Skip word (treat / as word boundary for path editing)
-	for col > 0 && col <= len(line) && line[col-1] != ' ' && line[col-1] != '/' {
+	// Skip the previous segment.
+	for col > 0 && col <= len(line) && !isWordGap(line[col-1]) {
 		col--
 	}
 	state.Cursor.Pos.Col = col
@@ -336,19 +336,6 @@ func (m *InsertMode) moveTokenBack(state *EditorState) {
 	state.Cursor.Pos.Col = col
 }
 
-func (m *InsertMode) moveTokenForward(state *EditorState) {
-	line := state.Buffer.Line(state.Cursor.Pos.Row)
-	col := state.Cursor.Pos.Col
-
-	for col < len(line) && line[col] != ' ' {
-		col++
-	}
-	for col < len(line) && line[col] == ' ' {
-		col++
-	}
-	state.Cursor.Pos.Col = col
-}
-
 func (m *InsertMode) deleteTokenBack(state *EditorState) {
 	startCol := state.Cursor.Pos.Col
 	m.moveTokenBack(state)
@@ -363,6 +350,30 @@ func (m *InsertMode) deleteWordBack(state *EditorState) {
 	endCol := state.Cursor.Pos.Col
 	row := state.Cursor.Pos.Row
 	state.Buffer.Delete(Position{row, endCol}, Position{row, startCol})
+}
+
+func (m *InsertMode) moveWordForward(state *EditorState) {
+	line := state.Buffer.Line(state.Cursor.Pos.Row)
+	col := state.Cursor.Pos.Col
+
+	// Skip the current segment if we're inside one.
+	for col < len(line) && !isWordGap(line[col]) {
+		col++
+	}
+	// Skip separators/spaces so we land on the next segment start.
+	for col < len(line) && isWordGap(line[col]) {
+		col++
+	}
+	state.Cursor.Pos.Col = col
+}
+
+func isWordGap(ch byte) bool {
+	switch ch {
+	case ' ', '/', ':':
+		return true
+	default:
+		return false
+	}
 }
 
 func (m *InsertMode) deleteToLineStart(state *EditorState) {
