@@ -66,7 +66,7 @@ func TestACPTransport_ReconnectAfterBrokenPipe(t *testing.T) {
 	// We can't fully integration-test reconnect here without a real ACP process,
 	// but we can assert the scenario no longer depends on caller retries.
 	transport := &ACPTransport{
-		config:   ACPConfig{Command: "test"},
+		config:   ACPConfig{Command: "/nonexistent/acp-agent"},
 		messages: make(chan []byte, 1024),
 		done:     make(chan struct{}),
 	}
@@ -102,7 +102,7 @@ func TestACPTransport_WriteErrorResetsConnection(t *testing.T) {
 	// the next SendStreaming() call will trigger a reconnect via lazy connect.
 
 	transport := &ACPTransport{
-		config:   ACPConfig{Command: "test"},
+		config:   ACPConfig{Command: "/nonexistent/acp-agent"},
 		messages: make(chan []byte, 1024),
 		done:     make(chan struct{}),
 	}

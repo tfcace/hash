@@ -93,7 +93,7 @@ func TestACPTransport_SendAfterClose(t *testing.T) {
 // TestACPTransport_DoubleClose tests that calling Close twice is safe.
 func TestACPTransport_DoubleClose(t *testing.T) {
 	transport := NewACPTransport(ACPConfig{
-		Command: "echo",
+		Command: "/nonexistent/acp-agent",
 		Args:    []string{},
 	})
 
