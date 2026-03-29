@@ -254,4 +254,3 @@ func TestLoadConfig_HooksChpwd_Default(t *testing.T) {
 		t.Errorf("expected 0 default chpwd hooks, got %d", len(cfg.Shell.Hooks.Chpwd))
 	}
 }
-
