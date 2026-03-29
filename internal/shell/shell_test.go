@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/tfcace/hash/internal/agent"
 	"github.com/tfcace/hash/internal/config"
 	"github.com/tfcace/hash/internal/executor"
 )
@@ -173,4 +174,22 @@ func TestShell_ModeMarkers(t *testing.T) {
 	if !sh.mode.Interactive {
 		t.Error("expected Interactive mode to be true")
 	}
+}
+
+func TestConfirmationTypeForAgentResponse(t *testing.T) {
+	t.Run("command requires confirmation", func(t *testing.T) {
+		confirmType, ok := confirmationTypeForAgentResponse(agent.Response{Type: agent.ResponseTypeCommand})
+		if !ok {
+			t.Fatal("expected command response to require confirmation")
+		}
+		if confirmType != ConfirmTypeCommand {
+			t.Fatalf("confirmType = %v, want %v", confirmType, ConfirmTypeCommand)
+		}
+	})
+
+	t.Run("explanation skips confirmation", func(t *testing.T) {
+		if _, ok := confirmationTypeForAgentResponse(agent.Response{Type: agent.ResponseTypeExplanation}); ok {
+			t.Fatal("expected explanation response to skip confirmation")
+		}
+	})
 }

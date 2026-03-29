@@ -1093,12 +1093,10 @@ func (s *Shell) handleAgentFullStreaming(ctx context.Context, parsed parser.Pars
 	collector.Append(responseText)
 	resp := collector.Response()
 
-	// Show confirmation based on response type
-	var confirmType ConfirmationType
-	if resp.Type == agent.ResponseTypeCommand {
-		confirmType = ConfirmTypeCommand
-	} else {
-		confirmType = ConfirmTypeExplanation
+	confirmType, needsConfirmation := confirmationTypeForAgentResponse(resp)
+	if !needsConfirmation {
+		s.responseUI.StopProgress()
+		return
 	}
 
 	s.agentOutput.EnterConfirming()
@@ -1112,6 +1110,17 @@ func (s *Shell) handleAgentFullStreaming(ctx context.Context, parsed parser.Pars
 
 	if s.handleAgentConfirmAction(ctx, action, confirmType, resp, responseText, lineCount) {
 		return
+	}
+}
+
+func confirmationTypeForAgentResponse(resp agent.Response) (ConfirmationType, bool) {
+	switch resp.Type {
+	case agent.ResponseTypeCommand:
+		return ConfirmTypeCommand, true
+	case agent.ResponseTypeError:
+		return ConfirmTypeError, true
+	default:
+		return 0, false
 	}
 }
 

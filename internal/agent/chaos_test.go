@@ -14,32 +14,32 @@ func TestLooksLikeCommand_EdgeCases(t *testing.T) {
 		expected bool
 	}{
 		// Empty and whitespace
-		{"empty string", "", true},            // short, so considered command
-		{"single space", " ", true},           // short
-		{"multiple spaces", "     ", true},    // short
-		{"tab", "\t", true},                   // short
-		{"newline only", "\n", false},         // has newline
-		{"carriage return", "\r", true},       // short, no \n
-		{"mixed whitespace", " \t \t ", true}, // short
+		{"empty string", "", false},
+		{"single space", " ", false},
+		{"multiple spaces", "     ", false},
+		{"tab", "\t", false},
+		{"newline only", "\n", false}, // has newline
+		{"carriage return", "\r", false},
+		{"mixed whitespace", " \t \t ", false},
 
 		// Very long inputs
-		{"long command-like", strings.Repeat("a", 79), true}, // under 80
-		{"exactly 80 chars", strings.Repeat("a", 80), false}, // at threshold
-		{"over 80 chars", strings.Repeat("a", 100), false},   // over threshold
+		{"long command-like", strings.Repeat("a", 79), false},
+		{"exactly 80 chars", strings.Repeat("a", 80), false},
+		{"over 80 chars", strings.Repeat("a", 100), false},
 
 		// Unicode edge cases
-		{"emoji only", "🚀", true},                       // short
-		{"emoji command", "echo 🎉", true},               // starts with echo
-		{"japanese text", "これはテストです", true},             // short
-		{"arabic text", "مرحبا", true},                  // short, RTL
-		{"chinese short", "这是一个很长的解释关于如何使用命令行工具", true}, // 60 bytes, under 80
+		{"emoji only", "🚀", false},
+		{"emoji command", "echo 🎉", true}, // starts with echo
+		{"japanese text", "これはテストです", false},
+		{"arabic text", "مرحبا", false},
+		{"chinese short", "这是一个很长的解释关于如何使用命令行工具", false},
 
 		// Special characters
-		{"null byte", "\x00", true},             // short
-		{"control chars", "\x01\x02\x03", true}, // short
-		{"backslash", "\\", true},               // short
-		{"quotes", `""`, true},                  // short
-		{"backticks", "``", true},               // short
+		{"null byte", "\x00", false},
+		{"control chars", "\x01\x02\x03", false},
+		{"backslash", "\\", false},
+		{"quotes", `""`, false},
+		{"backticks", "``", false},
 
 		// Command-like patterns
 		{"path command", "/usr/bin/python", true},
@@ -79,7 +79,7 @@ func TestParseAgentResponse_EdgeCases(t *testing.T) {
 		{"leading spaces", "  ls -la", ResponseTypeCommand},
 		{"trailing spaces", "ls -la  ", ResponseTypeCommand},
 		{"leading newlines", "\n\nls -la", ResponseTypeCommand},
-		{"only whitespace", "   \t   ", ResponseTypeCommand}, // becomes empty, then short
+		{"only whitespace", "   \t   ", ResponseTypeError},
 
 		// Large inputs
 		{"1KB string", strings.Repeat("x", 1024), ResponseTypeExplanation},
@@ -87,13 +87,14 @@ func TestParseAgentResponse_EdgeCases(t *testing.T) {
 
 		// Unicode
 		{"unicode command", "echo '日本語'", ResponseTypeCommand},
-		{"unicode explanation", "日本語の説明です。これは長い文章です。", ResponseTypeCommand}, // under 80 bytes
+		{"unicode explanation", "日本語の説明です。これは長い文章です。", ResponseTypeExplanation},
 		{"mixed unicode", "ls -la # 列出文件", ResponseTypeCommand},
 
 		// Special command formats
 		{"sudo command", "sudo rm -rf /tmp/*", ResponseTypeCommand},
-		{"env var prefix", "FOO=bar command", ResponseTypeCommand}, // short
-		{"subshell", "$(pwd)/script.sh", ResponseTypeCommand},      // starts with / after eval
+		{"env var prefix", "FOO=bar command", ResponseTypeCommand},
+		{"subshell", "$(pwd)/script.sh", ResponseTypeCommand},
+		{"plain answer", "**servicer-111-222-333 at 7d5h**", ResponseTypeExplanation},
 	}
 
 	for _, tt := range tests {

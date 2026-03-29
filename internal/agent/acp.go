@@ -384,6 +384,12 @@ func (t *ACPTransport) newSession(ctx context.Context, cwd string) (string, erro
 
 func parseAgentResponse(text string) Response {
 	text = strings.TrimSpace(text)
+	if text == "" {
+		return Response{
+			Type:  ResponseTypeError,
+			Error: "empty response",
+		}
+	}
 
 	// Simple heuristic: if it looks like a command, return as command
 	if looksLikeCommand(text) {

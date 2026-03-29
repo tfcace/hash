@@ -179,6 +179,11 @@ func (t *HTTPTransport) buildPrompt(req Request) string {
 //
 //nolint:gocyclo // heuristic pattern matching requires multiple checks
 func looksLikeCommand(text string) bool {
+	text = unwrapMarkdownInline(strings.TrimSpace(text))
+	if text == "" {
+		return false
+	}
+
 	// Multi-line text is likely an explanation
 	if strings.Contains(text, "\n") {
 		return false
@@ -188,10 +193,11 @@ func looksLikeCommand(text string) bool {
 	prefixes := []string{
 		"find ", "grep ", "ls ", "cat ", "echo ", "cd ", "mkdir ", "rm ",
 		"cp ", "mv ", "chmod ", "chown ", "docker ", "kubectl ", "git ",
-		"npm ", "yarn ", "go ", "python ", "pip ", "curl ", "wget ",
-		"python3 ",
+		"npm ", "yarn ", "pnpm ", "bun ", "go ", "python ", "python3 ",
+		"pip ", "pip3 ", "curl ", "wget ",
 		"jq ", "sed ", "awk ", "sort ", "uniq ", "head ", "tail ", "tar ",
-		"sudo ", "./", "/",
+		"sudo ", "make ", "jj ", "hash ", "brew ", "helm ", "cargo ",
+		"rustup ", "terraform ", "source ", "export ", "./", "../", "~/", "/",
 	}
 
 	lower := strings.ToLower(text)
@@ -201,30 +207,98 @@ func looksLikeCommand(text string) bool {
 		}
 	}
 
-	// Explanatory text patterns - if it has these, it's not a command
-	if strings.Contains(text, ". ") || // Multiple sentences
-		strings.HasPrefix(text, "The ") ||
-		strings.HasPrefix(text, "This ") ||
-		strings.HasPrefix(text, "To ") ||
-		strings.HasPrefix(text, "You ") ||
-		strings.HasPrefix(text, "I ") ||
-		strings.HasPrefix(text, "I'") || // Contractions like "I'll", "I'm", "I've"
-		strings.HasPrefix(text, "Here") ||
-		strings.HasPrefix(text, "Let") ||
-		strings.HasPrefix(text, "Looking") ||
-		strings.Contains(text, " is ") ||
-		strings.Contains(text, " are ") ||
-		strings.Contains(text, " will ") ||
-		strings.Contains(text, " can ") {
+	// Shell syntax strongly indicates executable text.
+	if strings.Contains(text, " | ") ||
+		strings.Contains(text, " > ") ||
+		strings.Contains(text, " < ") ||
+		strings.Contains(text, "&&") ||
+		strings.Contains(text, "||") ||
+		strings.Contains(text, ";") ||
+		strings.HasSuffix(text, "&") ||
+		strings.HasPrefix(text, "$(") {
+		return true
+	}
+
+	fields := strings.Fields(text)
+	if len(fields) == 0 {
 		return false
 	}
 
-	// Short single-line text without explanatory patterns might be a command
-	if len(text) < 80 {
+	// Leading env assignments are command-like when followed by a command.
+	if len(fields) > 1 && isEnvAssignment(fields[0]) {
+		return true
+	}
+
+	// Explanatory text patterns - if it has these, it's not a command
+	if strings.Contains(text, ". ") || // Multiple sentences
+		strings.HasPrefix(lower, "the ") ||
+		strings.HasPrefix(lower, "this ") ||
+		strings.HasPrefix(lower, "to ") ||
+		strings.HasPrefix(lower, "you ") ||
+		strings.HasPrefix(lower, "i ") ||
+		strings.HasPrefix(lower, "i'") || // Contractions like "I'll", "I'm", "I've"
+		strings.HasPrefix(lower, "here") ||
+		strings.HasPrefix(lower, "let") ||
+		strings.HasPrefix(lower, "looking") ||
+		strings.Contains(lower, " is ") ||
+		strings.Contains(lower, " are ") ||
+		strings.Contains(lower, " will ") ||
+		strings.Contains(lower, " can ") ||
+		strings.Contains(lower, " should ") {
+		return false
+	}
+
+	// Flag-based suggestions like "foo --bar baz" still look command-like.
+	if len(fields) > 1 && strings.HasPrefix(fields[1], "-") {
 		return true
 	}
 
 	return false
+}
+
+func unwrapMarkdownInline(text string) string {
+	wrappers := [][2]string{
+		{"**", "**"},
+		{"__", "__"},
+		{"`", "`"},
+		{"*", "*"},
+		{"_", "_"},
+	}
+
+	for {
+		changed := false
+		for _, wrapper := range wrappers {
+			prefix, suffix := wrapper[0], wrapper[1]
+			if len(text) < len(prefix)+len(suffix) ||
+				!strings.HasPrefix(text, prefix) ||
+				!strings.HasSuffix(text, suffix) {
+				continue
+			}
+			text = strings.TrimSpace(text[len(prefix) : len(text)-len(suffix)])
+			changed = true
+			break
+		}
+		if !changed {
+			return text
+		}
+	}
+}
+
+func isEnvAssignment(field string) bool {
+	name, _, ok := strings.Cut(field, "=")
+	if !ok || name == "" {
+		return false
+	}
+
+	for i, r := range name {
+		switch {
+		case r == '_' || (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z'):
+		case i > 0 && r >= '0' && r <= '9':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // Close closes the HTTP client (no-op for HTTP).
