@@ -1,7 +1,10 @@
 package agent
 
 import (
+	"bufio"
+	"io"
 	"testing"
+	"time"
 )
 
 func TestACPTransport_New(t *testing.T) {
@@ -92,5 +95,76 @@ func TestACPConfig_ParsedCommand(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestACPTransport_ReadLoopClosesOnlyOriginalChannels(t *testing.T) {
+	transport := NewACPTransport(ACPConfig{Command: "test"})
+
+	pr, pw := io.Pipe()
+	reader := bufio.NewReader(pr)
+	originalMessages := make(chan []byte, 1)
+	originalDone := make(chan struct{})
+	replacementMessages := make(chan []byte, 1)
+	replacementDone := make(chan struct{})
+
+	transport.reader = reader
+	transport.messages = replacementMessages
+	transport.done = replacementDone
+
+	go transport.readLoop(reader, originalMessages, originalDone)
+
+	// Simulate connection reset while the old read loop is still running.
+	transport.reader = nil
+	transport.messages = replacementMessages
+	transport.done = replacementDone
+
+	if _, err := pw.Write([]byte("{\"jsonrpc\":\"2.0\"}\n")); err != nil {
+		t.Fatalf("write pipe: %v", err)
+	}
+	if err := pw.Close(); err != nil {
+		t.Fatalf("close pipe: %v", err)
+	}
+
+	select {
+	case <-originalDone:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for original read loop to exit")
+	}
+
+	select {
+	case msg, ok := <-originalMessages:
+		if !ok {
+			t.Fatal("original messages channel closed before delivering buffered message")
+		}
+		if string(msg) != "{\"jsonrpc\":\"2.0\"}\n" {
+			t.Fatalf("unexpected message %q", string(msg))
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for original message")
+	}
+
+	select {
+	case _, ok := <-originalMessages:
+		if ok {
+			t.Fatal("expected original messages channel to be closed after draining")
+		}
+	default:
+		t.Fatal("expected original messages channel to be closed")
+	}
+
+	select {
+	case <-replacementDone:
+		t.Fatal("replacement done channel should stay open")
+	default:
+	}
+
+	select {
+	case _, ok := <-replacementMessages:
+		if !ok {
+			t.Fatal("replacement messages channel should stay open")
+		}
+		t.Fatal("replacement messages channel should remain unused")
+	default:
 	}
 }

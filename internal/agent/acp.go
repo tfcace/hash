@@ -224,7 +224,7 @@ func (t *ACPTransport) connectLocked(ctx context.Context) error {
 	t.reader = bufio.NewReader(t.stdout)
 
 	// Start reading messages in background
-	go t.readLoop()
+	go t.readLoop(t.reader, t.messages, t.done)
 
 	// Release the lock before initialize — it calls sendRequest which may
 	// call sendCancel or resetConnection, both of which acquire mu.
@@ -240,17 +240,21 @@ func (t *ACPTransport) connectLocked(ctx context.Context) error {
 	return nil
 }
 
-func (t *ACPTransport) readLoop() {
-	defer close(t.done)
-	defer close(t.messages)
+func (t *ACPTransport) readLoop(reader *bufio.Reader, messages chan []byte, done chan struct{}) {
+	defer close(done)
+	defer close(messages)
+
+	if reader == nil {
+		return
+	}
 
 	for {
-		line, err := t.reader.ReadBytes('\n')
+		line, err := reader.ReadBytes('\n')
 		if err != nil {
 			return
 		}
 		// Send to channel; backpressure avoids dropping responses.
-		t.messages <- line
+		messages <- line
 	}
 }
 
