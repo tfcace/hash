@@ -537,6 +537,7 @@ func (s *Shell) dispatchCommand(ctx context.Context, line string) error {
 	case parser.CommandTypeEmpty:
 		s.updatePrompt()
 	case parser.CommandTypeAgent, parser.CommandTypeAgentPipe, parser.CommandTypeAgentInline:
+		s.recordCommand(line, 0, 0)
 		if err := s.handleAgentRequest(ctx, parsed); err != nil {
 			return err
 		}
@@ -561,6 +562,7 @@ func (s *Shell) executeRegularCommand(ctx context.Context, line string) error {
 	}
 	if handled {
 		s.lastExitCode = 0
+		s.recordCommand(line, 0, 0)
 		s.updatePrompt()
 		return nil
 	}
