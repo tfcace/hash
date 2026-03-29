@@ -323,21 +323,6 @@ func (m *InsertMode) moveWordBack(state *EditorState) {
 	state.Cursor.Pos.Col = col
 }
 
-func (m *InsertMode) moveWordForward(state *EditorState) {
-	line := state.Buffer.Line(state.Cursor.Pos.Row)
-	col := state.Cursor.Pos.Col
-
-	// Skip word (treat / as word boundary for path editing)
-	for col < len(line) && line[col] != ' ' && line[col] != '/' {
-		col++
-	}
-	// Skip delimiters (spaces and path separators)
-	for col < len(line) && (line[col] == ' ' || line[col] == '/') {
-		col++
-	}
-	state.Cursor.Pos.Col = col
-}
-
 func (m *InsertMode) moveTokenBack(state *EditorState) {
 	line := state.Buffer.Line(state.Cursor.Pos.Row)
 	col := state.Cursor.Pos.Col
