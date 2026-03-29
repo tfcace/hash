@@ -147,6 +147,23 @@ func (p *Prompt) fallbackPrompt(ctx PromptContext) string {
 	return p.builtinPrompt(ctx)
 }
 
+// ResolveStarship forces the lazy starship binary lookup.
+// Call before concurrent Generate/GenerateForPalette to avoid races.
+func (p *Prompt) ResolveStarship() {
+	if p.config.Mode == "starship" && p.starshipPath == "" {
+		p.starshipPath = p.findStarship(p.config.StarshipPath)
+	}
+}
+
+// GenerateForPalette runs starship with the given exit code and returns raw output
+// suitable for palette extraction. Returns "" if starship is not available.
+func (p *Prompt) GenerateForPalette(exitCode int) string {
+	if p.starshipPath == "" {
+		return ""
+	}
+	return runStarship(p.starshipPath, exitCode)
+}
+
 // RightPrompt returns the right-side prompt (if supported).
 // Note: Right prompts are not currently used with chzyer/readline
 // because it doesn't support them properly.
