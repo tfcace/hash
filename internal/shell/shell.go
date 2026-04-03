@@ -58,6 +58,7 @@ type Shell struct {
 	colorPalette prompt.Palette
 	allowlist    *allowlist.Manager
 	agentOutput  *AgentOutputCoordinator
+	readKey      func() byte
 	lastExitCode int
 	lastDuration time.Duration
 	lastCommand  string // Last executed command
@@ -162,45 +163,6 @@ func New(cfg *config.Config) (*Shell, error) {
 	// Create agent output coordinator for serialized output during agent interactions
 	// Created early so permission handler can use it
 	agentOutput := NewAgentOutputCoordinator(os.Stdout)
-
-	// Wire up permission handler for ACP transport
-	if acpTransport != nil {
-		acpTransport.SetPermissionHandler(func(req agent.ToolPermissionRequest) (allow bool, always bool) {
-			// Check allowlist first
-			if allowlistMgr.IsAllowed(req.Command) {
-				trace.AgentHigh("tool_permission", map[string]any{
-					"command":  req.Command,
-					"tool":     req.ToolName,
-					"decision": "allowlist",
-				})
-				return true, false
-			}
-
-			trace.AgentHigh("tool_permission_prompt", map[string]any{
-				"command": req.Command,
-				"tool":    req.ToolName,
-			})
-
-			// Prompt user for every tool call — same model as Claude Code
-			agentOutput.RenderPermissionPrompt(req.Command, req.ToolName, colorPalette.Primary)
-			os.Stdout.Sync()
-			key := readSingleKey()
-			allow, always = permissionDecisionForKey(key)
-
-			if always {
-				allowlistMgr.Allow(req.Command) //nolint:errcheck
-			}
-
-			trace.AgentHigh("tool_permission", map[string]any{
-				"command":  req.Command,
-				"tool":     req.ToolName,
-				"decision": map[bool]string{true: "allow", false: "deny"}[allow],
-			})
-
-			agentOutput.ClearPermissionPrompt(allow)
-			return allow, always
-		})
-	}
 
 	if transport != nil {
 		agentClient = agent.NewClient(transport)
@@ -362,9 +324,14 @@ func New(cfg *config.Config) (*Shell, error) {
 		colorPalette: colorPalette,
 		allowlist:    allowlistMgr,
 		agentOutput:  agentOutput,
+		readKey:      readSingleKey,
 		historyIndex: -1, // Start before history (current line)
 		osc:          osc,
 		prevCwd:      initialCwd,
+	}
+
+	if acpTransport != nil {
+		acpTransport.SetPermissionHandler(shell.handleToolPermission)
 	}
 	// Set up history function for editor mode
 	// This closure captures shell for proper state management
@@ -556,12 +523,14 @@ func (s *Shell) executeRegularCommand(ctx context.Context, line string) error {
 	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "hash: %v\n", err)
-		s.lastExitCode = 1
+		s.setLastCommandFailure(line, err, 1)
+		s.recordCommand(line, s.lastExitCode, s.lastDuration)
 		s.updatePrompt()
 		return nil
 	}
 	if handled {
 		s.lastExitCode = 0
+		s.lastDuration = 0
 		s.recordCommand(line, 0, 0)
 		s.updatePrompt()
 		return nil
@@ -1267,6 +1236,9 @@ func (s *Shell) handleEditCommand(ctx context.Context, command string) {
 }
 
 func (s *Shell) updatePrompt() {
+	if s.prompt == nil || s.readline == nil {
+		return
+	}
 	s.printPromptPrefix()
 }
 
@@ -1525,6 +1497,76 @@ func (s *Shell) runChpwdHook(ctx context.Context) {
 	}
 }
 
+func (s *Shell) handleToolPermission(req agent.ToolPermissionRequest) (allow, always bool) {
+	s.refreshProjectAllowlist()
+	if s.allowlist != nil && s.allowlist.IsAllowed(req.Command) {
+		trace.AgentHigh("tool_permission", map[string]any{
+			"command":  req.Command,
+			"tool":     req.ToolName,
+			"decision": "allowlist",
+		})
+		return true, false
+	}
+
+	trace.AgentHigh("tool_permission_prompt", map[string]any{
+		"command": req.Command,
+		"tool":    req.ToolName,
+	})
+
+	// Stop the spinner so it doesn't overwrite the permission prompt.
+	s.responseUI.StopSpinner()
+
+	if s.agentOutput != nil {
+		s.agentOutput.RenderPermissionPrompt(req.Command, req.ToolName, s.colorPalette.Primary)
+		os.Stdout.Sync()
+	}
+
+	readKey := s.readKey
+	if readKey == nil {
+		readKey = readSingleKey
+	}
+	key := readKey()
+	allow, always = permissionDecisionForKey(key)
+
+	if always && s.allowlist != nil {
+		s.refreshProjectAllowlist()
+		_ = s.allowlist.Allow(req.Command)
+	}
+
+	trace.AgentHigh("tool_permission", map[string]any{
+		"command":  req.Command,
+		"tool":     req.ToolName,
+		"decision": map[bool]string{true: "allow", false: "deny"}[allow],
+	})
+
+	if s.agentOutput != nil {
+		s.agentOutput.ClearPermissionPrompt(allow)
+	}
+
+	return allow, always
+}
+
+func (s *Shell) refreshProjectAllowlist() {
+	if s.allowlist == nil {
+		return
+	}
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		return
+	}
+
+	_ = s.allowlist.SetProjectDir(cwd)
+}
+
+func (s *Shell) setLastCommandFailure(command string, err error, exitCode int) {
+	s.lastExitCode = exitCode
+	s.lastDuration = 0
+	s.lastCommand = command
+	s.lastStderr = err.Error()
+	s.lastCwd, _ = os.Getwd()
+}
+
 func errStr(err error) string {
 	if err == nil {
 		return ""
@@ -1533,9 +1575,11 @@ func errStr(err error) string {
 }
 
 // permissionDecisionForKey maps permission prompt key presses to decisions.
+// Only explicit y/a are accepted — Enter/newline are ignored to prevent stale
+// keystrokes from the command submission auto-approving tool requests.
 func permissionDecisionForKey(key byte) (allow, always bool) {
 	switch key {
-	case 'y', 'Y', '\r', '\n':
+	case 'y', 'Y':
 		return true, false
 	case 'a', 'A':
 		return true, true
@@ -1543,6 +1587,8 @@ func permissionDecisionForKey(key byte) (allow, always bool) {
 		return false, false
 	}
 }
+
+const permissionPromptInputSettleDelay = 10 * time.Millisecond
 
 // readSingleKey reads a single keypress from stdin.
 // Returns the key byte (handles escape sequences for special keys).
@@ -1556,25 +1602,48 @@ func readSingleKey() byte {
 	}
 	defer term.Restore(fd, oldState)
 
-	// Drain any stale input (e.g., lingering newline from Enter that
-	// submitted the original command) so it doesn't auto-answer the prompt.
-	drainStdin(fd)
+	return readSingleKeyWithHooks(fd, os.Stdin.Read, drainStdin, time.Sleep)
+}
+
+func readSingleKeyWithHooks(
+	fd int,
+	read func([]byte) (int, error),
+	drain func(int),
+	sleep func(time.Duration),
+) byte {
+	// Drain any buffered input first, then briefly wait for the Enter key that
+	// submitted the command to arrive before draining once more. Without the
+	// settle window, that trailing newline can be mistaken for an immediate
+	// "allow" response to the permission prompt.
+	drain(fd)
+	if sleep != nil {
+		sleep(permissionPromptInputSettleDelay)
+	}
+	drain(fd)
 
 	// Read into a larger buffer so that multi-byte escape sequences
 	// (e.g., arrow keys: \x1b[A) are consumed in one read rather than
 	// leaving trailing bytes in stdin for subsequent reads.
 	buf := make([]byte, 16)
-	n, err := os.Stdin.Read(buf)
-	if err != nil || n < 1 {
-		return 'n'
-	}
 
-	char := buf[0] //nolint:gosec // n >= 1 guarantees buf[0] is valid
-	if char == 0x1b {
-		return 0x1b // Return ESC (sequence bytes already consumed)
+	// Skip any stale CR/LF bytes that may have leaked through the drain
+	// (e.g., from the command-submission Enter or terminal mode transitions).
+	// This is a defense-in-depth measure — permissionDecisionForKey also
+	// rejects these, but discarding them here avoids a spurious "deny".
+	for {
+		n, err := read(buf)
+		if err != nil || n < 1 {
+			return 'n'
+		}
+		char := buf[0] //nolint:gosec // n >= 1 guarantees buf[0] is valid
+		if char != '\r' && char != '\n' {
+			if char == 0x1b {
+				return 0x1b // Return ESC (sequence bytes already consumed)
+			}
+			return char
+		}
+		// Discard stale newline, read again
 	}
-
-	return char
 }
 
 // drainStdinBriefly waits briefly for terminal responses to arrive, then drains stdin.

@@ -39,6 +39,31 @@ func New(scope, projectDir, globalDir string) *Manager {
 	return m
 }
 
+// SetProjectDir switches the manager to a new project scope and reloads the
+// persisted allowlist for that directory. Non-project scopes are unaffected.
+func (m *Manager) SetProjectDir(projectDir string) error {
+	if m == nil || m.scope != "project" {
+		return nil
+	}
+
+	newPath := projectAllowlistFilePath(projectDir, m.globalDir)
+
+	m.mu.RLock()
+	oldPath := projectAllowlistFilePath(m.projectDir, m.globalDir)
+	m.mu.RUnlock()
+
+	if newPath == oldPath {
+		return nil
+	}
+
+	m.mu.Lock()
+	m.projectDir = projectDir
+	m.commands = make(map[string]bool)
+	m.mu.Unlock()
+
+	return m.Load()
+}
+
 // IsAllowed checks if a command is in the allowlist.
 func (m *Manager) IsAllowed(command string) bool {
 	m.mu.RLock()
@@ -129,10 +154,7 @@ func (m *Manager) Save() error {
 func (m *Manager) filePath() string {
 	switch m.scope {
 	case "project":
-		if m.projectDir == "" || m.globalDir == "" {
-			return ""
-		}
-		return filepath.Join(m.globalDir, "project_allowlists", projectScopeKey(m.projectDir)+".json")
+		return projectAllowlistFilePath(m.projectDir, m.globalDir)
 	case "global":
 		if m.globalDir == "" {
 			return ""
@@ -141,6 +163,13 @@ func (m *Manager) filePath() string {
 	default:
 		return ""
 	}
+}
+
+func projectAllowlistFilePath(projectDir, globalDir string) string {
+	if projectDir == "" || globalDir == "" {
+		return ""
+	}
+	return filepath.Join(globalDir, "project_allowlists", projectScopeKey(projectDir)+".json")
 }
 
 func projectScopeKey(projectDir string) string {

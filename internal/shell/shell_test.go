@@ -2,6 +2,7 @@ package shell
 
 import (
 	"context"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -9,8 +10,10 @@ import (
 	"testing"
 
 	"github.com/tfcace/hash/internal/agent"
+	"github.com/tfcace/hash/internal/allowlist"
 	"github.com/tfcace/hash/internal/config"
 	"github.com/tfcace/hash/internal/executor"
+	"github.com/tfcace/hash/internal/prompt"
 )
 
 func TestNewShell(t *testing.T) {
@@ -173,6 +176,94 @@ func TestShell_ModeMarkers(t *testing.T) {
 	}
 	if !sh.mode.Interactive {
 		t.Error("expected Interactive mode to be true")
+	}
+}
+
+func TestShell_HandleToolPermission_RefreshesProjectAllowlist(t *testing.T) {
+	origDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("failed to get cwd: %v", err)
+	}
+	defer os.Chdir(origDir) //nolint:errcheck
+
+	projectA := t.TempDir()
+	projectB := t.TempDir()
+	configDir := t.TempDir()
+
+	allowA := allowlist.New("project", projectA, configDir)
+	if err := allowA.Allow("git status"); err != nil {
+		t.Fatalf("Allow(projectA): %v", err)
+	}
+
+	allowB := allowlist.New("project", projectB, configDir)
+	if err := allowB.Allow("npm test"); err != nil {
+		t.Fatalf("Allow(projectB): %v", err)
+	}
+
+	sh := &Shell{
+		allowlist:    allowlist.New("project", projectA, configDir),
+		agentOutput:  NewAgentOutputCoordinator(io.Discard),
+		responseUI:   NewResponseUI(io.Discard),
+		colorPalette: prompt.DefaultPalette(),
+		readKey: func() byte {
+			return 'n'
+		},
+	}
+
+	if err := os.Chdir(projectB); err != nil {
+		t.Fatalf("chdir(projectB): %v", err)
+	}
+
+	allow, always := sh.handleToolPermission(agent.ToolPermissionRequest{Command: "git status", ToolName: "Bash"})
+	if allow || always {
+		t.Fatalf("projectA approval should not be reused in projectB, got allow=%v always=%v", allow, always)
+	}
+
+	allow, always = sh.handleToolPermission(agent.ToolPermissionRequest{Command: "npm test", ToolName: "Bash"})
+	if !allow || always {
+		t.Fatalf("projectB allowlist should be loaded after chdir, got allow=%v always=%v", allow, always)
+	}
+}
+
+func TestShell_ExecuteRegularCommand_BuiltinFailureUpdatesLastError(t *testing.T) {
+	origDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("failed to get cwd: %v", err)
+	}
+	defer os.Chdir(origDir) //nolint:errcheck
+
+	storeDir := t.TempDir()
+	if err := os.Chdir(storeDir); err != nil {
+		t.Fatalf("chdir(storeDir): %v", err)
+	}
+
+	sh := &Shell{
+		config:       config.Default(),
+		executor:     executor.New(),
+		lastCommand:  "echo ok",
+		lastStderr:   "old stderr",
+		lastExitCode: 7,
+	}
+
+	missingDir := filepath.Join(storeDir, "missing")
+	command := "cd " + missingDir
+	if err := sh.executeRegularCommand(context.Background(), command); err != nil {
+		t.Fatalf("executeRegularCommand(): %v", err)
+	}
+
+	if sh.lastExitCode != 1 {
+		t.Fatalf("lastExitCode = %d, want 1", sh.lastExitCode)
+	}
+	if sh.lastCommand != command {
+		t.Fatalf("lastCommand = %q, want %q", sh.lastCommand, command)
+	}
+	if !strings.Contains(sh.lastStderr, "no such file or directory") {
+		t.Fatalf("lastStderr = %q, want builtin failure message", sh.lastStderr)
+	}
+	lastCwdResolved, _ := filepath.EvalSymlinks(sh.lastCwd)
+	storeDirResolved, _ := filepath.EvalSymlinks(storeDir)
+	if lastCwdResolved != storeDirResolved {
+		t.Fatalf("lastCwd = %q, want %q", sh.lastCwd, storeDir)
 	}
 }
 

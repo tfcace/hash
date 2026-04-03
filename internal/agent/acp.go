@@ -63,7 +63,8 @@ type ACPTransport struct {
 	done     chan struct{}
 
 	// Permission handler callback
-	permissionHandler func(req ToolPermissionRequest) (allow bool, always bool)
+	permissionHandler  func(req ToolPermissionRequest) (allow bool, always bool)
+	permissionPromptMu sync.Mutex
 }
 
 // JSON-RPC 2.0 message types
@@ -478,7 +479,9 @@ func (t *ACPTransport) handleRequestPermission(id int64, params json.RawMessage)
 			OptionID: resolveOptionID(p.Options, "reject_once", "reject"),
 		}
 	} else {
+		t.permissionPromptMu.Lock()
 		allow, always := handler(req)
+		t.permissionPromptMu.Unlock()
 		if allow {
 			if always {
 				outcome = permissionOutcome{

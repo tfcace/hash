@@ -105,3 +105,46 @@ func TestManager_ExactMatch(t *testing.T) {
 		t.Error("prefix should not match")
 	}
 }
+
+func TestManager_SetProjectDirReloadsCommands(t *testing.T) {
+	projectA := t.TempDir()
+	projectB := t.TempDir()
+	configDir := t.TempDir()
+
+	mA := New("project", projectA, configDir)
+	if err := mA.Allow("git status"); err != nil {
+		t.Fatalf("Allow(projectA): %v", err)
+	}
+
+	mB := New("project", projectB, configDir)
+	if err := mB.Allow("npm test"); err != nil {
+		t.Fatalf("Allow(projectB): %v", err)
+	}
+
+	m := New("project", projectA, configDir)
+	if !m.IsAllowed("git status") {
+		t.Fatal("expected projectA allowlist to be loaded")
+	}
+
+	if err := m.SetProjectDir(projectB); err != nil {
+		t.Fatalf("SetProjectDir(projectB): %v", err)
+	}
+
+	if m.IsAllowed("git status") {
+		t.Fatal("projectA commands should not remain allowed after switching projects")
+	}
+	if !m.IsAllowed("npm test") {
+		t.Fatal("expected projectB allowlist to be loaded after switching projects")
+	}
+
+	if err := m.SetProjectDir(projectA); err != nil {
+		t.Fatalf("SetProjectDir(projectA): %v", err)
+	}
+
+	if !m.IsAllowed("git status") {
+		t.Fatal("expected projectA allowlist to reload when switching back")
+	}
+	if m.IsAllowed("npm test") {
+		t.Fatal("projectB commands should not remain allowed after switching back")
+	}
+}

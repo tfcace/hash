@@ -6,9 +6,18 @@ import (
 	"io"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
+
+type discardWriteCloser struct {
+	io.Writer
+}
+
+func (d discardWriteCloser) Close() error {
+	return nil
+}
 
 func TestACPTransport_HandleRequestPermission_Allow(t *testing.T) {
 	// Create pipes for mock communication
@@ -418,6 +427,54 @@ func TestACPTransport_HandleRequestPermission_ExtractsToolName(t *testing.T) {
 
 	agentWrite.Close()
 	clientWrite.Close()
+}
+
+func TestACPTransport_HandleRequestPermission_SerializesPrompts(t *testing.T) {
+	transport := &ACPTransport{
+		stdin: discardWriteCloser{Writer: io.Discard},
+	}
+
+	var inFlight atomic.Int32
+	var maxInFlight atomic.Int32
+
+	transport.SetPermissionHandler(func(req ToolPermissionRequest) (bool, bool) {
+		current := inFlight.Add(1)
+		for {
+			observed := maxInFlight.Load()
+			if current <= observed || maxInFlight.CompareAndSwap(observed, current) {
+				break
+			}
+		}
+		time.Sleep(40 * time.Millisecond)
+		inFlight.Add(-1)
+		return true, false
+	})
+
+	params1 := json.RawMessage(`{"sessionId":"test-session","toolCall":{"toolCallId":"1","title":"git status","rawInput":{}}}`)
+	params2 := json.RawMessage(`{"sessionId":"test-session","toolCall":{"toolCallId":"2","title":"npm test","rawInput":{}}}`)
+
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		<-start
+		transport.handleRequestPermission(1, params1)
+	}()
+
+	go func() {
+		defer wg.Done()
+		<-start
+		transport.handleRequestPermission(2, params2)
+	}()
+
+	close(start)
+	wg.Wait()
+
+	if got := maxInFlight.Load(); got != 1 {
+		t.Fatalf("permission handler ran concurrently: max in-flight = %d, want 1", got)
+	}
 }
 
 func TestExtractToolName(t *testing.T) {
