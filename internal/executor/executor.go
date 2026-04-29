@@ -1228,7 +1228,7 @@ func detectPipelineContext(hc interp.HandlerContext) pipelineContext {
 
 // needsPTY returns true if the command should run with a PTY.
 func (pc pipelineContext) needsPTY() bool {
-	return pc.stdinIsTerm && pc.hcStdinIsTerm
+	return pc.stdinIsTerm && pc.hcStdinIsTerm && !pc.hcStdoutIsPipe
 }
 
 // execHandler spawns external commands with PTY when needed.

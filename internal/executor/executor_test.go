@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"context"
 	"os"
+	osexec "os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/creack/pty"
 )
 
 func TestExecute_SimpleCommand(t *testing.T) {
@@ -180,6 +183,42 @@ func TestExecute_PipeChain(t *testing.T) {
 	got := strings.TrimSpace(stdout.String())
 	if got != "3" {
 		t.Errorf("stdout = %q, want %q", got, "3")
+	}
+}
+
+func TestExecute_PipeUpstreamDoesNotUsePTY(t *testing.T) {
+	if _, err := osexec.LookPath("sh"); err != nil {
+		t.Skip("sh not found")
+	}
+
+	ptmx, pts, err := pty.Open()
+	if err != nil {
+		t.Skipf("pty unavailable: %v", err)
+	}
+	defer ptmx.Close()
+	defer pts.Close()
+
+	origStdin := os.Stdin
+	os.Stdin = pts
+	defer func() { os.Stdin = origStdin }()
+
+	exec := New()
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	var stdout bytes.Buffer
+	result, err := exec.Execute(ctx, `sh -c 'if [ -t 1 ]; then sleep 2; else printf ok; fi' | cat`, &stdout, nil)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if result.ExitCode != 0 {
+		t.Fatalf("ExitCode = %d, want 0", result.ExitCode)
+	}
+	if got := stdout.String(); got != "ok" {
+		t.Fatalf("stdout = %q, want %q", got, "ok")
+	}
+	if result.UsedPTY {
+		t.Fatal("upstream pipeline command should not use a PTY")
 	}
 }
 
