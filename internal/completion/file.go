@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"unicode/utf8"
 )
 
 // FileCompleter completes filesystem paths.
@@ -43,7 +42,7 @@ func (c *FileCompleter) SetShowHidden(show bool) {
 //nolint:gocyclo // file completion handles multiple path formats and edge cases
 func (c *FileCompleter) Complete(ctx context.Context, line string, pos int) (Result, error) {
 	// Extract the word being completed
-	word := extractWord(line, pos)
+	word := shellUnescapeWord(shellWordAt(line, pos))
 	originalWord := word // Save for hidden file detection
 	if word == "" {
 		word = "."
@@ -138,9 +137,14 @@ func (c *FileCompleter) Complete(ctx context.Context, line string, pos int) (Res
 		})
 	}
 
+	rawPrefix := getCompletionPrefix(originalWord, prefix)
+	for i := range items {
+		items[i].Value = EscapeShellWord(items[i].Value)
+	}
+
 	return Result{
 		Items:  items,
-		Prefix: getCompletionPrefix(originalWord, prefix),
+		Prefix: EscapeShellWord(rawPrefix),
 	}, nil
 }
 
@@ -157,29 +161,6 @@ func isDirOnlyCommand(line string, pos int) bool {
 		return true
 	}
 	return false
-}
-
-// extractWord extracts the word at position from the line.
-func extractWord(line string, pos int) string {
-	if pos > len(line) {
-		pos = len(line)
-	}
-
-	// Find start of word (go backwards until space or start)
-	// Use rune-aware iteration to avoid splitting multi-byte UTF-8 characters
-	runes := []rune(line)
-	runePos := 0
-	byteCount := 0
-	for runePos < len(runes) && byteCount < pos {
-		byteCount += utf8.RuneLen(runes[runePos])
-		runePos++
-	}
-	start := runePos
-	for start > 0 && runes[start-1] != ' ' && runes[start-1] != '\t' {
-		start--
-	}
-
-	return string(runes[start:runePos])
 }
 
 // expandTilde expands ~ to home directory.

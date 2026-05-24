@@ -4,7 +4,6 @@ import (
 	"context"
 	"sort"
 	"strings"
-	"unicode/utf8"
 )
 
 // Router dispatches completion requests to registered completers.
@@ -81,25 +80,7 @@ func (r *Router) Complete(ctx context.Context, line string, pos int) (Result, er
 
 // extractCompletionQuery extracts the word being completed.
 func extractCompletionQuery(line string, pos int) string {
-	if pos > len(line) {
-		pos = len(line)
-	}
-
-	// Find start of word (go backwards until space or start)
-	// Use rune-aware iteration to avoid splitting multi-byte UTF-8 characters
-	runes := []rune(line)
-	runePos := 0
-	byteCount := 0
-	for runePos < len(runes) && byteCount < pos {
-		byteCount += utf8.RuneLen(runes[runePos])
-		runePos++
-	}
-	start := runePos
-	for start > 0 && runes[start-1] != ' ' && runes[start-1] != '\t' {
-		start--
-	}
-
-	return string(runes[start:runePos])
+	return shellUnescapeWord(shellWordAt(line, pos))
 }
 
 // ExtractPipeContext extracts the command context after the last pipe.

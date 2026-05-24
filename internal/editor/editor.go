@@ -10,6 +10,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/tfcace/hash/internal/trace"
 	"golang.design/x/clipboard"
@@ -907,11 +908,39 @@ func (e *Editor) cursorOffset() int {
 // findWordStart returns the column where the current word starts.
 func (e *Editor) findWordStart() int {
 	line := e.state.Buffer.Line(e.state.Cursor.Pos.Row)
-	col := e.state.Cursor.Pos.Col
-	for col > 0 && col <= len(line) && line[col-1] != ' ' && line[col-1] != '\t' {
-		col--
+	pos := e.state.Cursor.Pos.Col
+	if pos > len(line) {
+		pos = len(line)
 	}
-	return col
+
+	start := 0
+	inSingle := false
+	inDouble := false
+	escaped := false
+
+	for i := 0; i < pos; {
+		r, size := utf8.DecodeRuneInString(line[i:pos])
+		if r == utf8.RuneError && size == 0 {
+			break
+		}
+
+		switch {
+		case escaped:
+			escaped = false
+		case r == '\\' && !inSingle:
+			escaped = true
+		case r == '\'' && !inDouble:
+			inSingle = !inSingle
+		case r == '"' && !inSingle:
+			inDouble = !inDouble
+		case (r == ' ' || r == '\t') && !inSingle && !inDouble:
+			start = i + size
+		}
+
+		i += size
+	}
+
+	return start
 }
 
 // acceptCompletion replaces the current word with the selected completion.

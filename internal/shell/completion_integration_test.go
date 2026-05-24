@@ -272,6 +272,88 @@ func TestCompletionIntegration_CompleteFuncSignature(t *testing.T) {
 	}
 }
 
+func TestCompletionIntegration_EscapesFilesystemCompletions(t *testing.T) {
+	tmpDir := t.TempDir()
+	files := []string{
+		"My File.txt",
+		"quote's.txt",
+		`double"quote.txt`,
+		`back\slash.txt`,
+		"semi;colon.txt",
+		"price$1.txt",
+	}
+	for _, name := range files {
+		if err := os.WriteFile(filepath.Join(tmpDir, name), []byte{}, 0o644); err != nil {
+			t.Fatalf("WriteFile(%q): %v", name, err)
+		}
+	}
+
+	origDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(origDir)
+
+	router := completion.NewRouter()
+	router.Register(completion.NewFileCompleter(), completion.PriorityFilesystem)
+	completeFunc := makeEditorCompleteFunc(router)
+
+	items := completeFunc("ls ", 3)
+	got := map[string]bool{}
+	for _, item := range items {
+		got[item.Text] = true
+	}
+
+	expected := []string{
+		`My\ File.txt`,
+		`quote\'s.txt`,
+		`double\"quote.txt`,
+		`back\\slash.txt`,
+		`semi\;colon.txt`,
+		`price\$1.txt`,
+	}
+	for _, want := range expected {
+		if !got[want] {
+			t.Errorf("expected escaped completion %q, got %v", want, completionTexts(items))
+		}
+	}
+}
+
+func TestCompletionIntegration_CompletesInsideEscapedDirectory(t *testing.T) {
+	tmpDir := t.TempDir()
+	dir := filepath.Join(tmpDir, "My Dir")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "Child File.txt"), []byte{}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	origDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(origDir)
+
+	router := completion.NewRouter()
+	router.Register(completion.NewFileCompleter(), completion.PriorityFilesystem)
+	completeFunc := makeEditorCompleteFunc(router)
+
+	items := completeFunc(`ls My\ Dir/`, len(`ls My\ Dir/`))
+	if len(items) != 1 {
+		t.Fatalf("expected 1 item, got %d: %v", len(items), completionTexts(items))
+	}
+	if items[0].Text != `My\ Dir/Child\ File.txt` {
+		t.Fatalf("Text = %q, want %q", items[0].Text, `My\ Dir/Child\ File.txt`)
+	}
+}
+
 func completionTexts(items []editor.Completion) []string {
 	texts := make([]string, len(items))
 	for i, item := range items {

@@ -292,6 +292,30 @@ func TestEditor_AcceptCompletion(t *testing.T) {
 	}
 }
 
+func TestEditor_FindWordStartShellAware(t *testing.T) {
+	tests := []struct {
+		name string
+		line string
+		want int
+	}{
+		{name: "plain", line: "cp file", want: 3},
+		{name: "escaped space", line: `cp My\ File.txt`, want: 3},
+		{name: "single quoted space", line: `cp 'My File.txt`, want: 3},
+		{name: "double quoted space", line: `cp "My File.txt`, want: 3},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ed := New(Config{}, strings.NewReader(""), &strings.Builder{})
+			ed.state.Buffer = NewBufferFromString(tt.line)
+			ed.state.Cursor.MoveTo(0, len(tt.line))
+			if got := ed.findWordStart(); got != tt.want {
+				t.Fatalf("findWordStart() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestEditor_CompletionNavigation(t *testing.T) {
 	cfg := Config{}
 	ed := New(cfg, strings.NewReader(""), io.Discard)

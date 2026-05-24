@@ -201,6 +201,72 @@ func TestIntegration_DrillDownThenAcceptFile(t *testing.T) {
 	}
 }
 
+func TestIntegration_AcceptFileWithSpacesEscapesPath(t *testing.T) {
+	tmpDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmpDir, "My File.txt"), []byte{}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	origDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(origDir)
+
+	e := newTestEditorWithRealCompletion(t, "ls My", 5)
+	e.triggerCompletion()
+
+	if got := e.state.Buffer.Content(); got != `ls My\ File.txt` {
+		t.Fatalf("buffer after single completion = %q, want %q", got, `ls My\ File.txt`)
+	}
+	if e.completionActive {
+		t.Fatal("single file completion should be accepted immediately")
+	}
+}
+
+func TestIntegration_DrillIntoDirectoryWithSpaces(t *testing.T) {
+	tmpDir := t.TempDir()
+	dir := filepath.Join(tmpDir, "My Dir")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "Child File.txt"), []byte{}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	origDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(origDir)
+
+	e := newTestEditorWithRealCompletion(t, "ls My", 5)
+	e.triggerCompletion()
+	if !e.completionActive {
+		t.Fatal("expected directory completion menu to be active")
+	}
+
+	dirItem, _ := findCompletionItem(t, e.completionItems, `My\ Dir/`)
+	e.drillIntoDirectory(dirItem)
+
+	if got := e.state.Buffer.Content(); got != `ls My\ Dir/` {
+		t.Fatalf("buffer after drill = %q, want %q", got, `ls My\ Dir/`)
+	}
+
+	childItem, _ := findCompletionItem(t, e.completionItems, `My\ Dir/Child\ File.txt`)
+	e.acceptCompletion(childItem)
+
+	if got := e.state.Buffer.Content(); got != `ls My\ Dir/Child\ File.txt` {
+		t.Fatalf("buffer after accepting child = %q, want %q", got, `ls My\ Dir/Child\ File.txt`)
+	}
+}
+
 // TestIntegration_DrillUp verifies that drilling up from src/main/ restores
 // the parent directory state and re-queries items.
 func TestIntegration_DrillUp(t *testing.T) {
