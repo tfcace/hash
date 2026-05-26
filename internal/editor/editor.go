@@ -10,6 +10,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/tfcace/hash/internal/trace"
 	"golang.design/x/clipboard"
@@ -22,18 +23,33 @@ type Completion struct {
 	Description string
 }
 
+// completionDrillState stores parent directory context for drill-down navigation.
+type completionDrillState struct {
+	prefix string // The directory prefix that was drilled into
+	filter string // The filter text that was active before drilling
+	index  int    // The selected index before drilling
+	col    int    // The completionCol value before drilling
+}
+
 // Config configures the editor.
 type Config struct {
-	Keybindings    string                                   // "helix", "emacs", "vim"
-	HistoryFunc    func(dir int, currentLine string) string // -1=prev, +1=next; currentLine is for saving
-	CompleteFunc   func(line string, pos int) []Completion  // Tab completion
-	PrefetchFunc   func(line string, pos int)               // Background completion prefetch (on space)
-	OnInputReady   func()                                   // Called after editor chrome is rendered, before input loop
-	Gutter         bool                                     // Show gutter indicator
-	Prompt         string                                   // Prompt string to display before input
-	InputBgColor   string                                   // Background color for submitted input (hex)
-	ScrollbarColor string                                   // Foreground color for scrollbars (hex)
-	MaxPasteSize   uint                                     // Maximum paste size in bytes (default 10MB)
+	Keybindings             string                                   // "helix", "emacs", "vim"
+	HistoryFunc             func(dir int, currentLine string) string // -1=prev, +1=next; currentLine is for saving
+	CompleteFunc            func(line string, pos int) []Completion  // Tab completion
+	PrefetchFunc            func(line string, pos int)               // Background completion prefetch (on space)
+	SuggestionFunc          func(input string) string                // Inline suggestion from history (Fish-style)
+	OnInputReady            func()                                   // Called after editor chrome is rendered, before input loop
+	Gutter                  bool                                     // Show gutter indicator
+	Prompt                  string                                   // Prompt string to display before input
+	InputBgColor            string                                   // Background color for submitted input (hex)
+	ScrollbarColor          string                                   // Foreground color for scrollbars (hex)
+	MaxPasteSize            uint                                     // Maximum paste size in bytes (default 10MB)
+	DisableLineContinuation bool                                     // Disable shell-style line continuations on newline/paste
+	InputFrame              *InputFrame                              // Optional frame for custom input rendering
+	PreventEmptySubmit      bool                                     // Keep editor open when submitting an empty buffer
+	DisableHistorySearch    bool                                     // Disable Ctrl+R history search
+	DisableContextPicker    bool                                     // Disable Ctrl+P context picker
+	ClearOnCancel           bool                                     // Clear display when Ctrl+C cancels input
 }
 
 // Result is returned when the editor exits.
@@ -66,11 +82,13 @@ type Editor struct {
 	clipboardInit bool // Lazy clipboard initialization
 
 	// Completion state
-	completionActive bool
-	completionItems  []Completion
-	completionIndex  int    // Selected item in menu
-	completionPrefix string // Text being completed (for replacement)
-	completionCol    int    // Column where completion started
+	completionActive     bool
+	completionItems      []Completion
+	completionIndex      int                    // Selected item in menu
+	completionPrefix     string                 // Text being completed (for replacement)
+	completionCol        int                    // Column where completion started
+	completionFilter     string                 // Live filter text while menu is open
+	completionDrillStack []completionDrillState // Stack of parent dirs for backspace-up
 
 	// Ghost text state (inline suggestions)
 	ghost          *GhostText
@@ -102,11 +120,18 @@ func New(cfg Config, in io.Reader, out io.Writer) *Editor {
 	if cfg.ScrollbarColor != "" {
 		display.SetScrollbarColor(cfg.ScrollbarColor)
 	}
+	if cfg.InputFrame != nil {
+		display.SetFrame(cfg.InputFrame)
+	}
 
 	inputReader := NewInputReader(in)
 	if cfg.MaxPasteSize > 0 {
 		inputReader.SetMaxPasteSize(cfg.MaxPasteSize)
 	}
+
+	state.LineContinuation = !cfg.DisableLineContinuation
+	state.AllowHistorySearch = !cfg.DisableHistorySearch
+	state.AllowContextPicker = !cfg.DisableContextPicker
 
 	return &Editor{
 		config:  cfg,
@@ -247,7 +272,15 @@ func (e *Editor) Run(ctx context.Context) (Result, error) {
 
 	// Start keyboard reader goroutine
 	keyCh, keyErrCh, done := e.startKeyReader()
-	defer close(done)
+	defer func() {
+		close(done)
+		// Wait for the goroutine to fully exit so it stops reading stdin.
+		// Without this, the goroutine may still be polling stdin when
+		// bubbletea starts (e.g., for Ctrl+R history picker), causing a
+		// race where two readers split terminal responses (DECRPM).
+		for range keyCh {
+		}
+	}()
 
 	return e.runEventLoop(ctx, sigCh, keyCh, keyErrCh)
 }
@@ -288,10 +321,16 @@ func (e *Editor) startKeyReader() (keyCh chan Key, errCh chan error, done chan s
 	done = make(chan struct{})
 
 	go func() {
+		defer close(keyCh)
+		defer close(errCh)
+
 		for {
 			key, err := e.input.ReadKeyInterruptible(done)
 			if err != nil {
 				if err == context.Canceled {
+					return
+				}
+				if err == io.EOF {
 					return
 				}
 				select {
@@ -323,12 +362,16 @@ func (e *Editor) runEventLoop(ctx context.Context, sigCh <-chan os.Signal, keyCh
 			e.handleGhostTextUpdate(text, ok)
 		case err, ok := <-e.ghostErrChan:
 			e.handleGhostTextError(err, ok)
-		case err := <-keyErrCh:
-			if err == io.EOF {
-				return Result{Text: e.state.Buffer.Content(), Canceled: true}, nil
+		case err, ok := <-keyErrCh:
+			if !ok {
+				keyErrCh = nil
+				continue
 			}
 			return Result{}, err
-		case key := <-keyCh:
+		case key, ok := <-keyCh:
+			if !ok {
+				return Result{Text: e.state.Buffer.Content(), Canceled: true}, nil
+			}
 			if result, done := e.handleKeyEvent(key); done {
 				return result, nil
 			}
@@ -427,6 +470,9 @@ func (e *Editor) handleCtrlC() (Result, bool) {
 	}
 	e.ghost.Clear()
 	if e.state.Buffer.Content() == "" {
+		if e.config.ClearOnCancel {
+			e.display.Clear()
+		}
 		return Result{Canceled: true}, true
 	}
 	e.state.Buffer = NewBuffer()
@@ -444,6 +490,10 @@ func (e *Editor) processModeResult(result ModeResult) (Result, bool) {
 	e.handleAction(result.Action)
 
 	if result.Submit {
+		if e.config.PreventEmptySubmit && e.state.Buffer.Content() == "" {
+			e.render()
+			return Result{}, false
+		}
 		e.display.Finalize(e.state.Buffer)
 		return Result{Text: e.state.Buffer.Content()}, true
 	}
@@ -458,6 +508,11 @@ func (e *Editor) processModeResult(result ModeResult) (Result, bool) {
 
 	e.handleHistoryNavigation(result)
 	e.handleCompletionAndClipboard(result)
+
+	// Update inline suggestion after buffer changes
+	if result.Action == ActionInsert || result.Action == ActionDelete || result.Action == ActionPaste {
+		e.updateSuggestion()
+	}
 
 	return Result{}, false
 }
@@ -502,6 +557,48 @@ func (e *Editor) handleCompletionAndClipboard(result ModeResult) {
 	}
 }
 
+// updateSuggestion queries the SuggestionFunc and sets ghost text for inline suggestions.
+func (e *Editor) updateSuggestion() {
+	if e.config.SuggestionFunc == nil {
+		return
+	}
+
+	// Don't overwrite agent ghost text
+	if e.ghost.FromAgent {
+		return
+	}
+
+	content := e.state.Buffer.Content()
+
+	// Skip for short input (need at least 2 chars)
+	if len(content) < 2 {
+		e.ghost.Clear()
+		return
+	}
+
+	// Only suggest when cursor is at end of buffer
+	lastRow := e.state.Buffer.LineCount() - 1
+	lastCol := len(e.state.Buffer.Line(lastRow))
+	if e.state.Cursor.Pos.Row != lastRow || e.state.Cursor.Pos.Col != lastCol {
+		return
+	}
+
+	suggestion := e.config.SuggestionFunc(content)
+	if suggestion != "" && strings.HasPrefix(suggestion, content) {
+		suffix := suggestion[len(content):]
+		if suffix != "" {
+			e.ghost.Set(suffix)
+			e.ghost.FromAgent = false
+			return
+		}
+	}
+
+	// No match — clear non-agent ghost
+	if !e.ghost.FromAgent {
+		e.ghost.Clear()
+	}
+}
+
 func (e *Editor) render() {
 	hasSelection := e.state.Cursor.HasSelection()
 	e.display.SetMode(e.mode.Name())
@@ -516,12 +613,21 @@ func (e *Editor) render() {
 	e.display.RenderWithGhost(e.state.Buffer, e.state.Cursor, hasSelection, ghostText, ghostStreaming, ghostFromAgent, e.streamingModel)
 
 	// Render completion menu if active
-	if e.completionActive && len(e.completionItems) > 0 {
-		displayItems := make([]CompletionItem, len(e.completionItems))
-		for i, item := range e.completionItems {
-			displayItems[i] = CompletionItem(item)
+	if e.completionActive {
+		filtered := e.filteredCompletionItems()
+		if len(filtered) > 0 {
+			displayItems := make([]CompletionItem, len(filtered))
+			for i, item := range filtered {
+				displayItems[i] = CompletionItem(item)
+			}
+			e.display.RenderCompletionMenu(
+				displayItems,
+				e.completionIndex,
+				e.completionCol,
+				e.state.Cursor.Pos.Row,
+				e.state.Cursor.Pos.Col,
+			)
 		}
-		e.display.RenderCompletionMenu(displayItems, e.completionIndex, e.completionCol)
 	}
 }
 
@@ -530,7 +636,15 @@ func (e *Editor) render() {
 func (e *Editor) handleGhostTextKey(key Key) bool {
 	switch key.Special {
 	case KeyTab:
-		// Tab accepts the full ghost text and stops streaming
+		if !e.ghost.FromAgent {
+			// For history predictions: Tab dismisses ghost and triggers completion instead.
+			// Use Right arrow to accept predictions (fish-style).
+			e.ghost.Clear()
+			e.ghostTextChan = nil
+			e.ghostErrChan = nil
+			return false // Fall through to completion/mode handler
+		}
+		// For agent suggestions: Tab accepts the full ghost text
 		text := e.ghost.AcceptAll()
 		trace.AgentHigh("ghost_accept", map[string]any{
 			"key":      "Tab",
@@ -546,16 +660,19 @@ func (e *Editor) handleGhostTextKey(key Key) bool {
 		return true
 
 	case KeyRight:
-		// Right arrow accepts one character
-		text := e.ghost.AcceptChar()
+		// Right arrow accepts the full ghost text (fish-style)
+		text := e.ghost.AcceptAll()
 		trace.Agent("ghost_accept", map[string]any{
 			"key":      "Right",
 			"accepted": text,
-			"action":   "accept_char",
+			"action":   "accept_all",
 		})
 		if text != "" {
 			e.insertText(text)
 		}
+		// Stop any active streaming
+		e.ghostTextChan = nil
+		e.ghostErrChan = nil
 		return true
 
 	case KeyEscape:
@@ -570,17 +687,12 @@ func (e *Editor) handleGhostTextKey(key Key) bool {
 		return true
 
 	case KeyEnter:
-		// Enter accepts and submits (if ghost is a command)
-		text := e.ghost.AcceptAll()
+		// Enter dismisses ghost and submits what's typed (fish-style)
 		trace.AgentHigh("ghost_accept", map[string]any{
-			"key":      "Enter",
-			"accepted": text,
-			"action":   "accept_and_submit",
+			"key":    "Enter",
+			"action": "dismiss_and_submit",
 		})
-		if text != "" {
-			e.insertText(text)
-		}
-		// Stop any active streaming
+		e.ghost.Clear()
 		e.ghostTextChan = nil
 		e.ghostErrChan = nil
 		// Don't return true - let Enter propagate to submit
@@ -754,15 +866,16 @@ func (e *Editor) triggerCompletion() {
 	e.completionCol = e.findWordStart()
 	e.completionPrefix = currentLine[e.completionCol:e.state.Cursor.Pos.Col]
 
-	if len(items) == 1 {
-		// Single match: insert inline immediately
+	if len(items) == 1 && !strings.HasSuffix(items[0].Text, "/") {
+		// Single non-directory match: insert inline immediately
 		e.acceptCompletion(items[0])
 		return
 	}
 
-	// Multiple matches: show menu
+	// Multiple matches or single directory: show menu
 	e.completionItems = items
 	e.completionIndex = 0
+	e.completionFilter = ""
 	e.completionActive = true
 }
 
@@ -795,11 +908,54 @@ func (e *Editor) cursorOffset() int {
 // findWordStart returns the column where the current word starts.
 func (e *Editor) findWordStart() int {
 	line := e.state.Buffer.Line(e.state.Cursor.Pos.Row)
-	col := e.state.Cursor.Pos.Col
-	for col > 0 && col <= len(line) && line[col-1] != ' ' && line[col-1] != '\t' {
-		col--
+	pos := e.state.Cursor.Pos.Col
+	if pos > len(line) {
+		pos = len(line)
 	}
-	return col
+
+	start := 0
+	scanner := shellWordScanner{}
+
+	for i := 0; i < pos; {
+		r, size := utf8.DecodeRuneInString(line[i:pos])
+		if r == utf8.RuneError && size == 0 {
+			break
+		}
+
+		if scanner.consume(r) {
+			start = i + size
+		}
+
+		i += size
+	}
+
+	return start
+}
+
+type shellWordScanner struct {
+	inSingle bool
+	inDouble bool
+	escaped  bool
+}
+
+func (s *shellWordScanner) consume(r rune) bool {
+	if s.escaped {
+		s.escaped = false
+		return false
+	}
+	if r == '\\' && !s.inSingle {
+		s.escaped = true
+		return false
+	}
+	if r == '\'' && !s.inDouble {
+		s.inSingle = !s.inSingle
+		return false
+	}
+	if r == '"' && !s.inSingle {
+		s.inDouble = !s.inDouble
+		return false
+	}
+	return (r == ' ' || r == '\t') && !s.inSingle && !s.inDouble
 }
 
 // acceptCompletion replaces the current word with the selected completion.
@@ -820,55 +976,210 @@ func (e *Editor) acceptCompletion(item Completion) {
 	e.dismissCompletion()
 }
 
+// drillIntoDirectory replaces the current word with the directory path
+// and re-triggers completion to show its contents.
+func (e *Editor) drillIntoDirectory(item Completion) {
+	// Push current state onto drill stack
+	e.completionDrillStack = append(e.completionDrillStack, completionDrillState{
+		prefix: e.completionPrefix,
+		filter: e.completionFilter,
+		index:  e.completionIndex,
+		col:    e.completionCol,
+	})
+
+	// Replace the current word with the directory path
+	row := e.state.Cursor.Pos.Row
+	endCol := e.state.Cursor.Pos.Col
+	e.state.Buffer.Delete(Position{row, e.completionCol}, Position{row, endCol})
+	e.state.Buffer.Insert(row, e.completionCol, item.Text)
+	e.state.Cursor.Pos.Col = e.completionCol + len(item.Text)
+
+	// Reset filter
+	e.completionFilter = ""
+	e.completionIndex = 0
+
+	// Re-query completions for the new path
+	if e.config.CompleteFunc != nil {
+		line := e.state.Buffer.Content()
+		pos := e.cursorOffset()
+		items := e.config.CompleteFunc(line, pos)
+		if len(items) == 0 {
+			// Empty directory — accept as-is
+			e.completionDrillStack = e.completionDrillStack[:len(e.completionDrillStack)-1]
+			e.dismissCompletion()
+			return
+		}
+
+		e.completionItems = items
+		e.completionPrefix = item.Text
+		e.completionCol = e.findWordStart()
+
+		// Auto-drill single-child directories (with depth limit to prevent stack overflow)
+		if len(items) == 1 && strings.HasSuffix(items[0].Text, "/") && len(e.completionDrillStack) <= 20 {
+			e.drillIntoDirectory(items[0])
+			return
+		}
+	}
+}
+
+// drillUp pops the drill stack and restores the parent directory state.
+func (e *Editor) drillUp() {
+	if len(e.completionDrillStack) == 0 {
+		return
+	}
+
+	// Pop the last state
+	prev := e.completionDrillStack[len(e.completionDrillStack)-1]
+	e.completionDrillStack = e.completionDrillStack[:len(e.completionDrillStack)-1]
+
+	// Remove the drilled-into segment from the buffer.
+	// Delete from the parent's completionCol to the current cursor position,
+	// which removes everything that was inserted during the drill.
+	row := e.state.Cursor.Pos.Row
+	endCol := e.state.Cursor.Pos.Col
+	e.state.Buffer.Delete(Position{row, prev.col}, Position{row, endCol})
+	e.state.Cursor.Pos.Col = prev.col
+
+	// Restore completionCol from the stack
+	e.completionCol = prev.col
+
+	// Re-query completions for the parent
+	if e.config.CompleteFunc != nil {
+		line := e.state.Buffer.Content()
+		pos := e.cursorOffset()
+		items := e.config.CompleteFunc(line, pos)
+		e.completionItems = items
+	}
+
+	// Restore filter, index, and prefix
+	e.completionFilter = prev.filter
+	e.completionIndex = prev.index
+	if len(e.completionItems) > 0 && e.completionIndex >= len(e.completionItems) {
+		e.completionIndex = 0
+	}
+	e.completionPrefix = prev.prefix
+}
+
 // dismissCompletion closes the completion menu.
 func (e *Editor) dismissCompletion() {
 	if e.completionActive {
-		e.display.ClearCompletionMenu(len(e.completionItems))
+		e.display.ClearCompletionMenu(
+			len(e.filteredCompletionItems()),
+			e.state.Cursor.Pos.Row,
+			e.state.Cursor.Pos.Col,
+		)
 	}
 	e.completionActive = false
 	e.completionItems = nil
 	e.completionIndex = 0
+	e.completionFilter = ""
+	e.completionDrillStack = nil
+}
+
+// filterCompletionItems filters completion items by a case-insensitive prefix match.
+func filterCompletionItems(items []Completion, filter string) []Completion {
+	if filter == "" {
+		return items
+	}
+	filter = strings.ToLower(filter)
+	var result []Completion
+	for _, item := range items {
+		if strings.HasPrefix(strings.ToLower(item.Text), filter) {
+			result = append(result, item)
+		}
+	}
+	return result
+}
+
+// filteredCompletionItems returns the completion items filtered by the current filter text.
+func (e *Editor) filteredCompletionItems() []Completion {
+	return filterCompletionItems(e.completionItems, e.completionFilter)
 }
 
 // handleCompletionKey processes keys when completion menu is active.
 // Returns true if the key was handled, false to pass through.
+//
+//nolint:gocyclo // key dispatch switch is inherently branchy but straightforward
 func (e *Editor) handleCompletionKey(key Key) bool {
 	if len(e.completionItems) == 0 {
 		e.dismissCompletion()
 		return false
 	}
 
+	filtered := e.filteredCompletionItems()
+
 	switch key.Special {
 	case KeyDown:
-		e.completionIndex = (e.completionIndex + 1) % len(e.completionItems)
+		if len(filtered) > 0 {
+			e.completionIndex = (e.completionIndex + 1) % len(filtered)
+		}
 		return true
 
 	case KeyUp:
-		e.completionIndex--
-		if e.completionIndex < 0 {
-			e.completionIndex = len(e.completionItems) - 1
+		if len(filtered) > 0 {
+			e.completionIndex--
+			if e.completionIndex < 0 {
+				e.completionIndex = len(filtered) - 1
+			}
 		}
 		return true
 
 	case KeyTab:
-		// Tab moves down in completion menu
-		e.completionIndex = (e.completionIndex + 1) % len(e.completionItems)
+		// Tab cycles to next item (like Down)
+		if len(filtered) > 0 {
+			e.completionIndex = (e.completionIndex + 1) % len(filtered)
+		}
 		return true
 
 	case KeyEnter:
-		// Accept selected completion
-		e.acceptCompletion(e.completionItems[e.completionIndex])
+		// Enter always accepts the selected item and closes the menu
+		if len(filtered) > 0 {
+			e.acceptCompletion(filtered[e.completionIndex])
+		} else {
+			e.dismissCompletion()
+		}
+		return true
+
+	case KeyRight:
+		// Right arrow accepts and closes (even directories)
+		if len(filtered) > 0 {
+			e.acceptCompletion(filtered[e.completionIndex])
+		} else {
+			e.dismissCompletion()
+		}
 		return true
 
 	case KeyEscape:
-		// Dismiss menu
 		e.dismissCompletion()
 		return true
-	}
 
-	// Any other key dismisses completion and passes through
-	e.dismissCompletion()
-	return false
+	case KeyBackspace:
+		switch {
+		case e.completionFilter != "":
+			// Remove last character from filter
+			e.completionFilter = e.completionFilter[:len(e.completionFilter)-1]
+			e.completionIndex = 0
+		case len(e.completionDrillStack) > 0:
+			e.drillUp()
+		default:
+			// No filter, no drill stack — dismiss
+			e.dismissCompletion()
+			return false
+		}
+		return true
+
+	default:
+		// Printable characters: add to filter
+		if key.Special == 0 && key.Rune >= 32 && !key.Ctrl && !key.Alt {
+			e.completionFilter += string(key.Rune)
+			e.completionIndex = 0
+			return true
+		}
+
+		// Non-printable: dismiss and pass through
+		e.dismissCompletion()
+		return false
+	}
 }
 
 // extractText extracts text between two positions.

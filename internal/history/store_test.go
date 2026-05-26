@@ -139,3 +139,128 @@ func TestStore_FileCreated(t *testing.T) {
 		t.Error("Database file was not created")
 	}
 }
+
+func newTestStore(t *testing.T) *Store {
+	t.Helper()
+	dbPath := filepath.Join(t.TempDir(), "history.db")
+	store, err := NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("NewStore() error = %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+	return store
+}
+
+func TestSearchByPrefix_MatchesPrefix(t *testing.T) {
+	store := newTestStore(t)
+
+	store.Add(Command{Command: "git status", Cwd: "/", ExitCode: 0, Timestamp: time.Now()})
+	store.Add(Command{Command: "git push origin main", Cwd: "/", ExitCode: 0, Timestamp: time.Now()})
+	store.Add(Command{Command: "docker ps", Cwd: "/", ExitCode: 0, Timestamp: time.Now()})
+
+	results, err := store.SearchByPrefix("git", 10)
+	if err != nil {
+		t.Fatalf("SearchByPrefix() error = %v", err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("got %d results, want 2", len(results))
+	}
+}
+
+func TestSearchByPrefix_ExcludesFailed(t *testing.T) {
+	store := newTestStore(t)
+
+	store.Add(Command{Command: "git push", Cwd: "/", ExitCode: 1, Timestamp: time.Now()})
+	store.Add(Command{Command: "git status", Cwd: "/", ExitCode: 0, Timestamp: time.Now()})
+
+	results, err := store.SearchByPrefix("git", 10)
+	if err != nil {
+		t.Fatalf("SearchByPrefix() error = %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("got %d results, want 1 (only successful)", len(results))
+	}
+	if results[0] != "git status" {
+		t.Errorf("got %q, want %q", results[0], "git status")
+	}
+}
+
+func TestSearchByPrefix_Deduplicates(t *testing.T) {
+	store := newTestStore(t)
+
+	store.Add(Command{Command: "git status", Cwd: "/", ExitCode: 0, Timestamp: time.Now()})
+	store.Add(Command{Command: "git status", Cwd: "/", ExitCode: 0, Timestamp: time.Now()})
+
+	results, err := store.SearchByPrefix("git", 10)
+	if err != nil {
+		t.Fatalf("SearchByPrefix() error = %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("got %d results, want 1 (deduped)", len(results))
+	}
+}
+
+func TestSearchByPrefix_OrdersByRecent(t *testing.T) {
+	store := newTestStore(t)
+
+	store.Add(Command{Command: "git status", Cwd: "/", ExitCode: 0, Timestamp: time.Now().Add(-time.Hour)})
+	store.Add(Command{Command: "git push", Cwd: "/", ExitCode: 0, Timestamp: time.Now()})
+
+	results, err := store.SearchByPrefix("git", 10)
+	if err != nil {
+		t.Fatalf("SearchByPrefix() error = %v", err)
+	}
+	if len(results) < 2 {
+		t.Fatalf("got %d results, want 2", len(results))
+	}
+	if results[0] != "git push" {
+		t.Errorf("first result = %q, want %q (most recent)", results[0], "git push")
+	}
+}
+
+func TestSearchByPrefix_EmptyPrefix(t *testing.T) {
+	store := newTestStore(t)
+
+	store.Add(Command{Command: "git status", Cwd: "/", ExitCode: 0, Timestamp: time.Now()})
+
+	results, err := store.SearchByPrefix("", 10)
+	if err != nil {
+		t.Fatalf("SearchByPrefix() error = %v", err)
+	}
+	if results != nil {
+		t.Errorf("expected nil for empty prefix, got %v", results)
+	}
+}
+
+func TestSearchByPrefix_GlobEscaping(t *testing.T) {
+	store := newTestStore(t)
+
+	store.Add(Command{Command: "echo *", Cwd: "/", ExitCode: 0, Timestamp: time.Now()})
+	store.Add(Command{Command: "echo hello", Cwd: "/", ExitCode: 0, Timestamp: time.Now()})
+
+	// Searching for "echo *" should match literally, not as a glob wildcard
+	results, err := store.SearchByPrefix("echo *", 10)
+	if err != nil {
+		t.Fatalf("SearchByPrefix() error = %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("got %d results, want 1", len(results))
+	}
+	if results[0] != "echo *" {
+		t.Errorf("got %q, want %q", results[0], "echo *")
+	}
+}
+
+func TestSearchByPrefix_NoMatch(t *testing.T) {
+	store := newTestStore(t)
+
+	store.Add(Command{Command: "git status", Cwd: "/", ExitCode: 0, Timestamp: time.Now()})
+
+	results, err := store.SearchByPrefix("docker", 10)
+	if err != nil {
+		t.Fatalf("SearchByPrefix() error = %v", err)
+	}
+	if len(results) != 0 {
+		t.Errorf("got %d results, want 0", len(results))
+	}
+}

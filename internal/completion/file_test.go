@@ -268,8 +268,8 @@ func TestFileCompleter_DirectoryWithTrailingSlash(t *testing.T) {
 	completer := NewFileCompleter()
 	ctx := context.Background()
 
-	// Complete "cd mydir/" should list contents of mydir
-	result, err := completer.Complete(ctx, "cd mydir/", 9)
+	// Complete "ls mydir/" should list contents of mydir
+	result, err := completer.Complete(ctx, "ls mydir/", 9)
 	if err != nil {
 		t.Fatalf("Complete() error = %v", err)
 	}
@@ -279,6 +279,37 @@ func TestFileCompleter_DirectoryWithTrailingSlash(t *testing.T) {
 	}
 	if len(result.Items) > 0 && result.Items[0].Value != "inner.txt" {
 		t.Errorf("Value = %q, want %q", result.Items[0].Value, "inner.txt")
+	}
+}
+
+func TestFileCompleter_CdShowsOnlyDirectories(t *testing.T) {
+	tmpDir := t.TempDir()
+	os.Mkdir(filepath.Join(tmpDir, "subdir"), 0o755)
+	os.WriteFile(filepath.Join(tmpDir, "file.txt"), []byte{}, 0o644)
+
+	oldDir, _ := os.Getwd()
+	os.Chdir(tmpDir)
+	defer os.Chdir(oldDir)
+
+	completer := NewFileCompleter()
+	ctx := context.Background()
+
+	// "cd " should only show directories, not files
+	result, err := completer.Complete(ctx, "cd ", 3)
+	if err != nil {
+		t.Fatalf("Complete() error = %v", err)
+	}
+	if len(result.Items) != 1 {
+		t.Fatalf("Expected 1 directory, got %d: %v", len(result.Items), result.Items)
+	}
+	if result.Items[0].Value != "subdir/" {
+		t.Errorf("Value = %q, want %q", result.Items[0].Value, "subdir/")
+	}
+
+	// "ls " should show both files and directories
+	result2, _ := completer.Complete(ctx, "ls ", 3)
+	if len(result2.Items) != 2 {
+		t.Errorf("ls should show 2 items (dir + file), got %d", len(result2.Items))
 	}
 }
 
@@ -393,5 +424,88 @@ func TestFileCompleter_DotSlashPrefix(t *testing.T) {
 		if !strings.HasPrefix(fullPath, "./") {
 			t.Errorf("Full path should start with './', got %q", fullPath)
 		}
+	}
+}
+
+func TestFileCompleter_ShellEscapedPathInput(t *testing.T) {
+	tmpDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmpDir, "My File.txt"), []byte{}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	oldDir, _ := os.Getwd()
+	os.Chdir(tmpDir)
+	defer os.Chdir(oldDir)
+
+	completer := NewFileCompleter()
+	result, err := completer.Complete(context.Background(), `cat My\ `, len(`cat My\ `))
+	if err != nil {
+		t.Fatalf("Complete() error = %v", err)
+	}
+
+	if len(result.Items) != 1 {
+		t.Fatalf("expected 1 item, got %d: %v", len(result.Items), result.Items)
+	}
+	if result.Items[0].Value != `My\ File.txt` {
+		t.Fatalf("Value = %q, want %q", result.Items[0].Value, `My\ File.txt`)
+	}
+}
+
+func TestFileCompleter_QuotedPathInput(t *testing.T) {
+	tmpDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmpDir, "My File.txt"), []byte{}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	oldDir, _ := os.Getwd()
+	os.Chdir(tmpDir)
+	defer os.Chdir(oldDir)
+
+	completer := NewFileCompleter()
+	tests := []string{`cat 'My `, `cat "My `}
+	for _, line := range tests {
+		t.Run(line, func(t *testing.T) {
+			result, err := completer.Complete(context.Background(), line, len(line))
+			if err != nil {
+				t.Fatalf("Complete() error = %v", err)
+			}
+			if len(result.Items) != 1 {
+				t.Fatalf("expected 1 item, got %d: %v", len(result.Items), result.Items)
+			}
+			if result.Items[0].Value != `My\ File.txt` {
+				t.Fatalf("Value = %q, want %q", result.Items[0].Value, `My\ File.txt`)
+			}
+		})
+	}
+}
+
+func TestFileCompleter_EscapedDirectoryInput(t *testing.T) {
+	tmpDir := t.TempDir()
+	dir := filepath.Join(tmpDir, "My Dir")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "Child File.txt"), []byte{}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	oldDir, _ := os.Getwd()
+	os.Chdir(tmpDir)
+	defer os.Chdir(oldDir)
+
+	completer := NewFileCompleter()
+	result, err := completer.Complete(context.Background(), `cat My\ Dir/`, len(`cat My\ Dir/`))
+	if err != nil {
+		t.Fatalf("Complete() error = %v", err)
+	}
+
+	if result.Prefix != `My\ Dir/` {
+		t.Fatalf("Prefix = %q, want %q", result.Prefix, `My\ Dir/`)
+	}
+	if len(result.Items) != 1 {
+		t.Fatalf("expected 1 item, got %d: %v", len(result.Items), result.Items)
+	}
+	if result.Items[0].Value != `Child\ File.txt` {
+		t.Fatalf("Value = %q, want %q", result.Items[0].Value, `Child\ File.txt`)
 	}
 }

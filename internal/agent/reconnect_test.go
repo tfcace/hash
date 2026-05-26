@@ -63,25 +63,35 @@ func (p *mockPipe) IsBroken() bool {
 // the agent process may exit, breaking the pipe. Subsequent requests must
 // not fail with "broken pipe" - they should reconnect automatically.
 func TestACPTransport_ReconnectAfterBrokenPipe(t *testing.T) {
-	// This test documents the expected behavior.
-	// Currently, the transport does NOT recover from broken pipes,
-	// which is a bug that needs to be fixed.
-	t.Skip("This test documents expected behavior - currently fails due to bug")
+	// We can't fully integration-test reconnect here without a real ACP process,
+	// but we can assert the scenario no longer depends on caller retries.
+	transport := &ACPTransport{
+		config:   ACPConfig{Command: "test"},
+		messages: make(chan []byte, 1024),
+		done:     make(chan struct{}),
+	}
 
-	_ = NewACPTransport(ACPConfig{
-		Command: "echo", // dummy command
-		Args:    []string{},
-	})
+	// Simulate a connected state with a broken pipe and no session (typical
+	// state after sendCancel during Ctrl+C).
+	mockStdin := newMockPipe()
+	mockStdin.Break()
+	transport.stdin = mockStdin
+	transport.sessionID = ""
 
-	// Simulate the scenario:
-	// 1. First request succeeds
-	// 2. User cancels (context canceled)
-	// 3. Pipe breaks (agent exits)
-	// 4. Second request should reconnect, not fail with broken pipe
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
 
-	// We can't easily test this without the actual ACP process,
-	// but we can document the expected behavior and verify the
-	// reconnection logic is correct.
+	textCh, errCh := transport.SendStreaming(ctx, Request{Prompt: "test"})
+	for range textCh {
+	}
+	for range errCh {
+	}
+
+	transport.mu.Lock()
+	defer transport.mu.Unlock()
+	if transport.stdin != nil {
+		t.Fatal("expected broken connection to be reset for reconnect")
+	}
 }
 
 // TestACPTransport_WriteErrorResetsConnection verifies that write errors
@@ -89,7 +99,7 @@ func TestACPTransport_ReconnectAfterBrokenPipe(t *testing.T) {
 func TestACPTransport_WriteErrorResetsConnection(t *testing.T) {
 	// This test verifies the fix for the broken pipe issue.
 	// When stdin.Write fails, the connection should be reset so that
-	// the next Send() call will trigger a reconnect via lazy connect.
+	// the next SendStreaming() call will trigger a reconnect via lazy connect.
 
 	transport := &ACPTransport{
 		config:   ACPConfig{Command: "test"},
@@ -109,25 +119,28 @@ func TestACPTransport_WriteErrorResetsConnection(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 
-	respCh, err := transport.Send(ctx, Request{Prompt: "test"})
+	textCh, errCh := transport.SendStreaming(ctx, Request{Prompt: "test"})
 
-	// Send() returns a channel - the error occurs in the goroutine
-	if err != nil {
-		// Early error (e.g., in newSession) - connection should be reset
-		t.Logf("Send returned early error: %v", err)
-	} else {
-		// Wait for the response from the goroutine
-		resp := <-respCh
-		if resp.Type == ResponseTypeError {
-			t.Logf("Got error response: %s", resp.Error)
+	// Drain channels
+	for range textCh {
+	}
+
+	var gotErr error
+	for err := range errCh {
+		if err != nil {
+			gotErr = err
 		}
+	}
+
+	if gotErr != nil {
+		t.Logf("Got error (expected): %v", gotErr)
 	}
 
 	// Give the goroutine time to call resetConnection
 	time.Sleep(50 * time.Millisecond)
 
 	// After a write error, stdin should be reset to nil
-	// so the next Send() will trigger lazy reconnect.
+	// so the next SendStreaming() will trigger lazy reconnect.
 	transport.mu.Lock()
 	stdinAfterError := transport.stdin
 	transport.mu.Unlock()
@@ -150,13 +163,13 @@ SCENARIO: User cancels request, next request fails with broken pipe
    - cancel notification sent to agent
 4. Agent process may exit after receiving cancel
 5. User runs: ?? jj move pointer to master bookmark
-6. Send() is called:
+6. SendStreaming() is called:
    - stdin != nil (still points to broken pipe)
    - needSession is true (sessionID was cleared)
    - newSession() calls sendRequest()
    - sendRequest() tries stdin.Write()
    - FAILS with "broken pipe"
 
-FIX: When write fails, reset stdin to nil so next Send() reconnects.
+FIX: When write fails, reset stdin to nil so next SendStreaming() reconnects.
 	`)
 }

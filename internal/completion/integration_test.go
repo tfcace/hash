@@ -95,7 +95,7 @@ func TestIntegration_FuzzyDisabled(t *testing.T) {
 }
 
 func TestIntegration_DirectoryListingAfterCompletion(t *testing.T) {
-	// Simulates: user types "cd my", gets "mydir/", then presses TAB again
+	// Simulates: user types "ls my", gets "mydir/", then presses TAB again
 	// The second TAB should list contents of mydir/
 	tmpDir := t.TempDir()
 	myDir := filepath.Join(tmpDir, "mydir")
@@ -114,14 +114,14 @@ func TestIntegration_DirectoryListingAfterCompletion(t *testing.T) {
 	fileCompleter.SetFuzzyMode(true)
 	router.Register(fileCompleter, PriorityFilesystem)
 
-	// First completion: "cd my" -> should return "mydir/"
-	result1, _ := router.Complete(context.Background(), "cd my", 5)
+	// First completion: "ls my" -> should return "mydir/"
+	result1, _ := router.Complete(context.Background(), "ls my", 5)
 	if len(result1.Items) != 1 || result1.Items[0].Value != "mydir/" {
 		t.Fatalf("First completion should return mydir/, got: %v", result1.Items)
 	}
 
-	// Second completion: "cd mydir/" -> should list dir contents (unfiltered)
-	result2, _ := router.Complete(context.Background(), "cd mydir/", 9)
+	// Second completion: "ls mydir/" -> should list dir contents (unfiltered)
+	result2, _ := router.Complete(context.Background(), "ls mydir/", 9)
 	if len(result2.Items) != 2 {
 		t.Errorf("Second TAB should list 2 files in mydir/, got %d", len(result2.Items))
 	}
@@ -200,5 +200,31 @@ func TestIntegration_GitBranchLikeCompletion(t *testing.T) {
 	result2 := FuzzyFilter(items, "feat")
 	if len(result2) != 2 {
 		t.Errorf("'feat' should match 2 feature branches, got %d", len(result2))
+	}
+}
+
+func TestIntegration_CDCompletionUsesFilesystem(t *testing.T) {
+	tmpDir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(tmpDir, "site"), 0o755); err != nil {
+		t.Fatalf("mkdir site: %v", err)
+	}
+
+	oldDir, _ := os.Getwd()
+	os.Chdir(tmpDir)
+	defer os.Chdir(oldDir)
+
+	router := NewRouter()
+	router.Register(NewAliasCompleter(&mockFunctionProvider{functions: []string{"site"}}), PriorityAlias)
+	router.Register(NewFileCompleter(), PriorityFilesystem)
+
+	result, err := router.Complete(context.Background(), "cd si", len("cd si"))
+	if err != nil {
+		t.Fatalf("Complete() error = %v", err)
+	}
+	if len(result.Items) != 1 {
+		t.Fatalf("expected 1 filesystem completion for cd argument, got %d: %+v", len(result.Items), result.Items)
+	}
+	if result.Items[0].Value != "site/" {
+		t.Fatalf("expected directory completion site/, got %q", result.Items[0].Value)
 	}
 }

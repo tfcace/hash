@@ -86,12 +86,22 @@ func parseEscapeSequence(b []byte) Key {
 
 	// Alt+char: ESC followed by char
 	if len(b) == 2 && b[1] != '[' {
+		if b[1] == 0x7f || b[1] == 0x08 {
+			return Key{Special: KeyBackspace, Alt: true}
+		}
 		return Key{Rune: rune(b[1]), Alt: true}
 	}
 
 	// CSI sequences: ESC [
 	if b[1] != '[' {
 		return Key{Special: KeyEscape}
+	}
+
+	// Terminal responses (private mode reports, device attributes, etc.)
+	// These are CSI sequences starting with '?' — silently discard them.
+	// Examples: DECRPM \x1b[?2027;1$y, DA \x1b[?62;4c
+	if len(b) >= 3 && b[2] == '?' {
+		return Key{} // No-op: discard terminal response
 	}
 
 	// Simple arrow keys: ESC [ A/B/C/D

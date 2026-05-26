@@ -5,8 +5,8 @@ import (
 	"strings"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/tfcace/hash/internal/clipboard"
 	"github.com/tfcace/hash/internal/prompt"
 	sysClipboard "golang.design/x/clipboard"
@@ -76,7 +76,7 @@ func (ui *SearchUI) Init() tea.Cmd {
 // Update implements tea.Model.
 func (ui *SearchUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		return ui.handleKey(msg)
 
 	case tea.WindowSizeMsg:
@@ -106,7 +106,7 @@ func (ui *SearchUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return ui, nil
 }
 
-func (ui *SearchUI) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (ui *SearchUI) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// Clear status message on any keypress
 	ui.statusMessage = ""
 
@@ -118,7 +118,7 @@ func (ui *SearchUI) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "enter":
 		return ui, tea.Quit
 
-	case "up", "ctrl+p":
+	case "up", "ctrl+p", "shift+tab":
 		if ui.selected > 0 {
 			ui.selected--
 			ui.adjustScroll()
@@ -130,22 +130,6 @@ func (ui *SearchUI) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			ui.adjustScroll()
 		}
 
-	case "shift+tab":
-		if ui.selected > 0 {
-			ui.selected--
-			ui.adjustScroll()
-		}
-
-	case "backspace":
-		if ui.query != "" {
-			ui.query = ui.query[:len(ui.query)-1]
-			ui.selected = 0
-			ui.scrollOffset = 0
-			ui.debounceID++
-			cmd := ui.debounceSearch(ui.debounceID)
-			return ui, cmd
-		}
-
 	case "ctrl+y":
 		cmd := ui.copyCommand()
 		return ui, cmd
@@ -155,17 +139,37 @@ func (ui *SearchUI) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return ui, cmd
 
 	default:
-		if len(msg.String()) == 1 && msg.String()[0] >= 32 {
-			ui.query += msg.String()
-			ui.selected = 0
-			ui.scrollOffset = 0
-			ui.debounceID++
-			cmd := ui.debounceSearch(ui.debounceID)
-			return ui, cmd
-		}
+		cmd := ui.handleQueryEdit(msg)
+		return ui, cmd
 	}
 
 	return ui, nil
+}
+
+func (ui *SearchUI) handleQueryEdit(msg tea.KeyPressMsg) tea.Cmd {
+	switch msg.String() {
+	case "backspace":
+		if ui.query != "" {
+			ui.query = ui.query[:len(ui.query)-1]
+			return ui.resetAndSearch()
+		}
+	case "space":
+		ui.query += " "
+		return ui.resetAndSearch()
+	default:
+		if len(msg.String()) == 1 && msg.String()[0] >= 32 {
+			ui.query += msg.String()
+			return ui.resetAndSearch()
+		}
+	}
+	return nil
+}
+
+func (ui *SearchUI) resetAndSearch() tea.Cmd {
+	ui.selected = 0
+	ui.scrollOffset = 0
+	ui.debounceID++
+	return ui.debounceSearch(ui.debounceID)
 }
 
 func (ui *SearchUI) adjustScroll() {
@@ -179,7 +183,7 @@ func (ui *SearchUI) adjustScroll() {
 }
 
 // View implements tea.Model.
-func (ui *SearchUI) View() string {
+func (ui *SearchUI) View() tea.View {
 	var b strings.Builder
 
 	// Styles
@@ -281,7 +285,13 @@ func (ui *SearchUI) View() string {
 	help := "  ↑/↓ navigate  enter select  ctrl+y copy cmd  ctrl+o copy output  esc cancel"
 	b.WriteString(dimStyle.Render(help))
 
-	return b.String()
+	v := tea.NewView(b.String())
+	// Disable bracketed paste to prevent DECRQM queries on shutdown.
+	// Bubbletea queries modes 2026/2027 at exit; the terminal responses
+	// arrive on stdin after bubbletea's input reader closes, leaking
+	// characters like [?2027;1$y into the next editor session.
+	v.DisableBracketedPasteMode = true
+	return v
 }
 
 func (ui *SearchUI) formatResultLine(cmd Command, idx int, selected, normal, dim, errStyle lipgloss.Style) string {

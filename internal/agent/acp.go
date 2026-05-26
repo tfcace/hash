@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os/exec"
@@ -31,11 +32,19 @@ func (c ACPConfig) ParsedCommand() (program string, args []string) {
 	program = parts[0]
 	if len(parts) > 1 {
 		// Command string has embedded args - combine with explicit args
-		args = append(parts[1:], c.Args...)
+		args = append(args, parts[1:]...)
+		args = append(args, c.Args...)
 	} else {
 		args = c.Args
 	}
 	return program, args
+}
+
+// ToolPermissionRequest contains details about a tool call that requires permission.
+type ToolPermissionRequest struct {
+	Command    string // The command or operation to execute
+	ToolName   string // Tool name/type (e.g., "Bash", "Read", "Write")
+	ToolCallID string // Unique tool call ID
 }
 
 // ACPTransport communicates with an ACP-compatible agent via JSON-RPC 2.0.
@@ -52,6 +61,10 @@ type ACPTransport struct {
 	// Channel for incoming messages
 	messages chan []byte
 	done     chan struct{}
+
+	// Permission handler callback
+	permissionHandler  func(req ToolPermissionRequest) (allow bool, always bool)
+	permissionPromptMu sync.Mutex
 }
 
 // JSON-RPC 2.0 message types
@@ -114,6 +127,40 @@ type contentBlock struct {
 	Text string `json:"text,omitempty"`
 }
 
+// requestPermission types (agent -> client request)
+type requestPermissionParams struct {
+	SessionID string `json:"sessionId"`
+	ToolCall  struct {
+		ToolCallID string          `json:"toolCallId"`
+		Title      string          `json:"title"`
+		RawInput   json.RawMessage `json:"rawInput"`
+	} `json:"toolCall"`
+	Options []permissionOption `json:"options"`
+}
+
+type permissionOption struct {
+	Kind     string `json:"kind"`     // "allow_once", "allow_always", "reject_once"
+	Name     string `json:"name"`     // Display name
+	OptionID string `json:"optionId"` // ID to return
+}
+
+type permissionResponse struct {
+	Outcome *permissionOutcome `json:"outcome"`
+}
+
+type permissionOutcome struct {
+	Outcome  string `json:"outcome"`  // "selected" or "canceled"
+	OptionID string `json:"optionId"` // Which option was selected
+}
+
+// jsonRPCResponse is used to send responses to agent requests.
+type jsonRPCResponse struct {
+	JSONRPC string        `json:"jsonrpc"`
+	ID      int64         `json:"id"`
+	Result  interface{}   `json:"result,omitempty"`
+	Error   *jsonRPCError `json:"error,omitempty"`
+}
+
 // NewACPTransport creates a new ACP transport.
 func NewACPTransport(cfg ACPConfig) *ACPTransport {
 	return &ACPTransport{
@@ -121,6 +168,15 @@ func NewACPTransport(cfg ACPConfig) *ACPTransport {
 		messages: make(chan []byte, 1024),
 		done:     make(chan struct{}),
 	}
+}
+
+// SetPermissionHandler sets the callback for handling permission requests.
+// The callback receives a ToolPermissionRequest and returns (allow, always).
+// If always is true, the command should be added to the allowlist.
+func (t *ACPTransport) SetPermissionHandler(handler func(req ToolPermissionRequest) (allow bool, always bool)) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.permissionHandler = handler
 }
 
 // Name returns the transport name.
@@ -146,46 +202,60 @@ func (t *ACPTransport) connectLocked(ctx context.Context) error {
 	var err error
 	t.stdin, err = t.cmd.StdinPipe()
 	if err != nil {
-		return fmt.Errorf("stdin pipe: %w", err)
+		return errors.Join(ErrACPStartFailed, fmt.Errorf("stdin pipe: %w", err))
 	}
 
 	t.stdout, err = t.cmd.StdoutPipe()
 	if err != nil {
-		return fmt.Errorf("stdout pipe: %w", err)
+		t.stdin.Close()
+		t.stdin = nil
+		return errors.Join(ErrACPStartFailed, fmt.Errorf("stdout pipe: %w", err))
 	}
 
 	// Discard stderr to avoid blocking
 	t.cmd.Stderr = nil
 
-	if err := t.cmd.Start(); err != nil {
-		return fmt.Errorf("start agent: %w", err)
+	if err = t.cmd.Start(); err != nil {
+		t.stdin.Close()
+		t.stdin = nil
+		t.stdout = nil // stdout pipe is already invalidated when cmd fails to start
+		return errors.Join(ErrACPStartFailed, fmt.Errorf("start agent: %w", err))
 	}
 
 	t.reader = bufio.NewReader(t.stdout)
 
 	// Start reading messages in background
-	go t.readLoop()
+	go t.readLoop(t.reader, t.messages, t.done)
 
-	// Initialize protocol
-	if err := t.initialize(ctx); err != nil {
-		t.Close() //nolint:errcheck // best-effort cleanup on init failure
+	// Release the lock before initialize — it calls sendRequest which may
+	// call sendCancel or resetConnection, both of which acquire mu.
+	t.mu.Unlock()
+	err = t.initialize(ctx)
+	t.mu.Lock()
+
+	if err != nil {
+		t.resetConnectionLocked()
 		return fmt.Errorf("initialize: %w", err)
 	}
 
 	return nil
 }
 
-func (t *ACPTransport) readLoop() {
-	defer close(t.done)
-	defer close(t.messages)
+func (t *ACPTransport) readLoop(reader *bufio.Reader, messages chan []byte, done chan struct{}) {
+	defer close(done)
+	defer close(messages)
+
+	if reader == nil {
+		return
+	}
 
 	for {
-		line, err := t.reader.ReadBytes('\n')
+		line, err := reader.ReadBytes('\n')
 		if err != nil {
 			return
 		}
 		// Send to channel; backpressure avoids dropping responses.
-		t.messages <- line
+		messages <- line
 	}
 }
 
@@ -246,7 +316,7 @@ func (t *ACPTransport) sendRequest(ctx context.Context, method string, params in
 		// Write failed - pipe is likely broken (e.g., agent exited after cancel).
 		// Reset connection so next Send() will reconnect via lazy connect.
 		t.resetConnection()
-		return nil, fmt.Errorf("write request: %w", err)
+		return nil, errors.Join(ErrACPConnectionClosed, fmt.Errorf("write request: %w", err))
 	}
 
 	// Wait for response with matching ID
@@ -259,7 +329,7 @@ func (t *ACPTransport) sendRequest(ctx context.Context, method string, params in
 			if !ok {
 				// Connection closed (readLoop exited) - reset for reconnect
 				t.resetConnection()
-				return nil, fmt.Errorf("connection closed")
+				return nil, fmt.Errorf("%w: connection closed", ErrACPConnectionClosed)
 			}
 
 			var msg struct {
@@ -317,179 +387,14 @@ func (t *ACPTransport) newSession(ctx context.Context, cwd string) (string, erro
 	return sessionResult.SessionID, nil
 }
 
-// Send sends a request to the agent.
-//
-//nolint:gocyclo // SSE protocol parsing requires sequential event handling
-func (t *ACPTransport) Send(ctx context.Context, req Request) (<-chan Response, error) {
-	t.mu.Lock()
-
-	// Lazy connect
-	if t.stdin == nil {
-		if err := t.connectLocked(ctx); err != nil {
-			t.mu.Unlock()
-			return nil, fmt.Errorf("connect: %w", err)
-		}
-	}
-
-	// Check if we need a new session
-	needSession := t.sessionID == ""
-	t.mu.Unlock()
-
-	// Create session if needed (outside lock to avoid deadlock on timeout)
-	if needSession {
-		cwd := req.Context.Cwd
-		if cwd == "" {
-			cwd = "."
-		}
-		sessionID, err := t.newSession(ctx, cwd)
-		if err != nil {
-			return nil, fmt.Errorf("new session: %w", err)
-		}
-		t.mu.Lock()
-		t.sessionID = sessionID
-		t.mu.Unlock()
-	}
-
-	t.mu.Lock()
-	sessionID := t.sessionID
-	t.mu.Unlock()
-
-	respCh := make(chan Response, 1)
-
-	go func() {
-		defer close(respCh)
-
-		// Build prompt with context
-		promptText := buildPromptWithContext(req)
-
-		// Send prompt request
-		id := t.requestID.Add(1)
-		rpcReq := jsonRPCRequest{
-			JSONRPC: "2.0",
-			ID:      id,
-			Method:  "session/prompt",
-			Params: promptParams{
-				SessionID: sessionID,
-				Prompt: []promptPart{
-					{Type: "text", Text: promptText},
-				},
-			},
-		}
-
-		data, err := json.Marshal(rpcReq)
-		if err != nil {
-			respCh <- Response{Type: ResponseTypeError, Error: err.Error()}
-			return
-		}
-
-		t.mu.Lock()
-		_, err = t.stdin.Write(append(data, '\n'))
-		t.mu.Unlock()
-		if err != nil {
-			// Write failed - reset connection so next Send() reconnects
-			t.resetConnection()
-			respCh <- Response{Type: ResponseTypeError, Error: err.Error()}
-			return
-		}
-
-		// Collect response text from streaming notifications
-		var textBuilder strings.Builder
-
-		// Create idle timer
-		idleTimer := time.NewTimer(IdleTimeout)
-		defer idleTimer.Stop()
-
-		for {
-			select {
-			case <-ctx.Done():
-				t.sendCancel()
-				respCh <- Response{Type: ResponseTypeError, Error: ctx.Err().Error()}
-				return
-
-			case <-idleTimer.C:
-				// No message received for IdleTimeout - agent may be stuck
-				t.sendCancel()
-				text := textBuilder.String()
-				if text != "" {
-					// Return partial response with warning
-					respCh <- parseAgentResponse(text)
-				} else {
-					respCh <- Response{Type: ResponseTypeError, Error: fmt.Sprintf("agent idle timeout (%v without response)", IdleTimeout)}
-				}
-				return
-
-			case line, ok := <-t.messages:
-				if !ok {
-					// Connection closed (readLoop exited) - reset for reconnect
-					t.resetConnection()
-					text := textBuilder.String()
-					if text != "" {
-						respCh <- parseAgentResponse(text)
-					} else {
-						respCh <- Response{Type: ResponseTypeError, Error: "connection closed"}
-					}
-					return
-				}
-
-				// Reset idle timer on any message
-				if !idleTimer.Stop() {
-					select {
-					case <-idleTimer.C:
-					default:
-					}
-				}
-				idleTimer.Reset(IdleTimeout)
-
-				var msg struct {
-					JSONRPC string          `json:"jsonrpc"`
-					ID      *int64          `json:"id"`
-					Method  string          `json:"method"`
-					Params  json.RawMessage `json:"params"`
-					Result  json.RawMessage `json:"result"`
-					Error   *jsonRPCError   `json:"error"`
-				}
-				if err := json.Unmarshal(line, &msg); err != nil {
-					continue
-				}
-
-				// Check if it's our response (end of prompt)
-				if msg.ID != nil && *msg.ID == id {
-					if msg.Error != nil {
-						respCh <- Response{Type: ResponseTypeError, Error: msg.Error.Message}
-						return
-					}
-					// Prompt complete
-					text := textBuilder.String()
-					if text != "" {
-						respCh <- parseAgentResponse(text)
-					} else {
-						respCh <- Response{Type: ResponseTypeError, Error: "agent returned empty response"}
-					}
-					return
-				}
-
-				// Handle session/update notification
-				if msg.Method == "session/update" {
-					var updateParams sessionUpdateParams
-					if err := json.Unmarshal(msg.Params, &updateParams); err != nil {
-						continue
-					}
-
-					if updateParams.Update.SessionUpdate == "agent_message_chunk" &&
-						updateParams.Update.Content != nil &&
-						updateParams.Update.Content.Type == "text" {
-						textBuilder.WriteString(updateParams.Update.Content.Text)
-					}
-				}
-			}
-		}
-	}()
-
-	return respCh, nil
-}
-
 func parseAgentResponse(text string) Response {
 	text = strings.TrimSpace(text)
+	if text == "" {
+		return Response{
+			Type:  ResponseTypeError,
+			Error: "empty response",
+		}
+	}
 
 	// Simple heuristic: if it looks like a command, return as command
 	if looksLikeCommand(text) {
@@ -504,9 +409,160 @@ func parseAgentResponse(text string) Response {
 	}
 }
 
+// handleIncomingRequest processes requests from the agent (like session/request_permission).
+func (t *ACPTransport) handleIncomingRequest(id int64, method string, params json.RawMessage) {
+	switch method {
+	case "session/request_permission":
+		t.handleRequestPermission(id, params)
+	default:
+		// Unknown method - send error response
+		t.sendResponse(id, nil, &jsonRPCError{
+			Code:    -32601,
+			Message: "Method not found",
+		})
+	}
+}
+
+// handleRequestPermission handles permission requests from the agent.
+func (t *ACPTransport) handleRequestPermission(id int64, params json.RawMessage) {
+	var p requestPermissionParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		t.sendResponse(id, nil, &jsonRPCError{
+			Code:    -32602,
+			Message: "Invalid params",
+		})
+		return
+	}
+
+	// Extract command from tool call title or raw input
+	command := p.ToolCall.Title
+	if command == "" {
+		// Try to extract from rawInput (usually has "command" field for Bash)
+		var input struct {
+			Command string `json:"command"`
+		}
+		if err := json.Unmarshal(p.ToolCall.RawInput, &input); err == nil && input.Command != "" {
+			command = input.Command
+		}
+	}
+
+	// Extract tool name from rawInput if available
+	toolName := extractToolName(p.ToolCall.RawInput)
+
+	// Reject if we can't determine what command the agent wants to run
+	if command == "" {
+		t.sendResponse(id, permissionResponse{
+			Outcome: &permissionOutcome{
+				Outcome:  "selected",
+				OptionID: resolveOptionID(p.Options, "reject_once", "reject"),
+			},
+		}, nil)
+		return
+	}
+
+	// Call the permission handler
+	t.mu.Lock()
+	handler := t.permissionHandler
+	t.mu.Unlock()
+
+	req := ToolPermissionRequest{
+		Command:    command,
+		ToolName:   toolName,
+		ToolCallID: p.ToolCall.ToolCallID,
+	}
+
+	var outcome permissionOutcome
+	if handler == nil {
+		// No handler - deny by default
+		outcome = permissionOutcome{
+			Outcome:  "selected",
+			OptionID: resolveOptionID(p.Options, "reject_once", "reject"),
+		}
+	} else {
+		t.permissionPromptMu.Lock()
+		allow, always := handler(req)
+		t.permissionPromptMu.Unlock()
+		if allow {
+			if always {
+				outcome = permissionOutcome{
+					Outcome:  "selected",
+					OptionID: resolveOptionID(p.Options, "allow_always", "allow_always"),
+				}
+			} else {
+				outcome = permissionOutcome{
+					Outcome:  "selected",
+					OptionID: resolveOptionID(p.Options, "allow_once", "allow"),
+				}
+			}
+		} else {
+			outcome = permissionOutcome{
+				Outcome:  "selected",
+				OptionID: resolveOptionID(p.Options, "reject_once", "reject"),
+			}
+		}
+	}
+
+	t.sendResponse(id, permissionResponse{Outcome: &outcome}, nil)
+}
+
+// resolveOptionID finds the optionId for the given kind from the agent's
+// provided options. If no options were provided or no match is found, falls
+// back to the given default ID for backwards compatibility.
+func resolveOptionID(options []permissionOption, kind, fallback string) string {
+	for _, opt := range options {
+		if opt.Kind == kind {
+			return opt.OptionID
+		}
+	}
+	return fallback
+}
+
+// extractToolName attempts to extract a tool name from the rawInput JSON.
+// Agents typically include a "tool" or "name" field. Returns empty string
+// if no tool name can be determined.
+func extractToolName(rawInput json.RawMessage) string {
+	if len(rawInput) == 0 {
+		return ""
+	}
+	var fields struct {
+		Tool string `json:"tool"`
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(rawInput, &fields); err != nil {
+		return ""
+	}
+	if fields.Tool != "" {
+		return fields.Tool
+	}
+	return fields.Name
+}
+
+// sendResponse sends a JSON-RPC response.
+func (t *ACPTransport) sendResponse(id int64, result interface{}, err *jsonRPCError) {
+	resp := jsonRPCResponse{
+		JSONRPC: "2.0",
+		ID:      id,
+		Result:  result,
+		Error:   err,
+	}
+
+	data, marshalErr := json.Marshal(resp)
+	if marshalErr != nil {
+		return
+	}
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.stdin != nil {
+		t.stdin.Write(append(data, '\n'))
+	}
+}
+
 // buildPromptWithContext builds a prompt that includes context information.
 func buildPromptWithContext(req Request) string {
 	var b strings.Builder
+
+	b.WriteString("Be concise. Don't repeat information. No preamble.\n\n")
 
 	ctx := req.Context
 
@@ -552,12 +608,17 @@ func buildPromptWithContext(req Request) string {
 }
 
 // resetConnection closes the current connection and resets state so that
-// the next Send() will reconnect via lazy connect. This is called when
+// the next SendStreaming() will reconnect via lazy connect. This is called when
 // a write error occurs (e.g., broken pipe after agent exits).
 func (t *ACPTransport) resetConnection() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	t.resetConnectionLocked()
+}
 
+// resetConnectionLocked closes the current connection and resets state.
+// Must be called with mu held.
+func (t *ACPTransport) resetConnectionLocked() {
 	if t.stdin != nil {
 		t.stdin.Close()
 		t.stdin = nil
@@ -568,13 +629,15 @@ func (t *ACPTransport) resetConnection() {
 	}
 	t.reader = nil
 	t.sessionID = ""
-	// Note: We don't kill cmd here - it may have already exited.
-	// The next connectLocked() will start a fresh process.
 	if t.cmd != nil && t.cmd.Process != nil {
 		t.cmd.Process.Kill() //nolint:errcheck // best-effort kill
 		t.cmd.Wait()         //nolint:errcheck // ignore exit status
 		t.cmd = nil
 	}
+	// Recreate channels so the next connectLocked()/readLoop() cycle
+	// doesn't close already-closed channels (panic on double close).
+	t.messages = make(chan []byte, 1024)
+	t.done = make(chan struct{})
 }
 
 // Close terminates the agent process.
@@ -597,7 +660,17 @@ func (t *ACPTransport) Close() error {
 // If exceeded, the request is considered stuck and canceled.
 const IdleTimeout = 30 * time.Second
 
-// SendStreaming implements StreamingTransport for real-time text streaming.
+func idleTimeoutForContext(ctx context.Context) time.Duration {
+	if deadline, ok := ctx.Deadline(); ok {
+		remaining := time.Until(deadline)
+		if remaining > IdleTimeout {
+			return remaining
+		}
+	}
+	return IdleTimeout
+}
+
+// SendStreaming implements Transport for real-time text streaming.
 //
 //nolint:gocritic,gocyclo // unnamedResult + SSE streaming requires sequential event handling
 func (t *ACPTransport) SendStreaming(ctx context.Context, req Request) (<-chan string, <-chan error) {
@@ -608,149 +681,203 @@ func (t *ACPTransport) SendStreaming(ctx context.Context, req Request) (<-chan s
 		defer close(textCh)
 		defer close(errCh)
 
-		t.mu.Lock()
-
-		// Lazy connect
-		if t.stdin == nil {
-			if err := t.connectLocked(ctx); err != nil {
-				t.mu.Unlock()
-				errCh <- err
+		const maxAttempts = 2 // Initial try + one transparent reconnect retry
+		for attempt := 0; attempt < maxAttempts; attempt++ {
+			receivedText, err := t.sendStreamingAttempt(ctx, req, textCh)
+			if err == nil {
 				return
 			}
-		}
 
-		// Check if we need a new session
-		needSession := t.sessionID == ""
-		t.mu.Unlock()
-
-		// Create session if needed (outside lock to avoid deadlock on timeout)
-		if needSession {
-			cwd := req.Context.Cwd
-			if cwd == "" {
-				cwd = "."
-			}
-			sessionID, err := t.newSession(ctx, cwd)
-			if err != nil {
-				errCh <- err
-				return
-			}
-			t.mu.Lock()
-			t.sessionID = sessionID
-			t.mu.Unlock()
-		}
-
-		t.mu.Lock()
-		sessionID := t.sessionID
-		t.mu.Unlock()
-
-		// Build prompt with context
-		promptText := buildPromptWithContext(req)
-
-		// Send prompt request
-		id := t.requestID.Add(1)
-		rpcReq := jsonRPCRequest{
-			JSONRPC: "2.0",
-			ID:      id,
-			Method:  "session/prompt",
-			Params: promptParams{
-				SessionID: sessionID,
-				Prompt: []promptPart{
-					{Type: "text", Text: promptText},
-				},
-			},
-		}
-
-		data, err := json.Marshal(rpcReq)
-		if err != nil {
-			errCh <- err
-			return
-		}
-
-		t.mu.Lock()
-		_, err = t.stdin.Write(append(data, '\n'))
-		t.mu.Unlock()
-		if err != nil {
-			// Write failed - reset connection so next Send() reconnects
-			t.resetConnection()
-			errCh <- err
-			return
-		}
-
-		// Create idle timer
-		idleTimer := time.NewTimer(IdleTimeout)
-		defer idleTimer.Stop()
-
-		// Stream response text as it arrives
-		for {
-			select {
-			case <-ctx.Done():
-				t.sendCancel()
+			// Respect cancellation immediately; do not convert into transport errors.
+			if ctx.Err() != nil {
 				errCh <- ctx.Err()
 				return
-
-			case <-idleTimer.C:
-				// No message received for IdleTimeout - agent may be stuck
-				t.sendCancel()
-				errCh <- fmt.Errorf("agent idle timeout (%v without response)", IdleTimeout)
-				return
-
-			case line, ok := <-t.messages:
-				if !ok {
-					// Connection closed (readLoop exited) - reset for reconnect
-					t.resetConnection()
-					return
-				}
-
-				// Reset idle timer on any message
-				if !idleTimer.Stop() {
-					select {
-					case <-idleTimer.C:
-					default:
-					}
-				}
-				idleTimer.Reset(IdleTimeout)
-
-				var msg struct {
-					JSONRPC string          `json:"jsonrpc"`
-					ID      *int64          `json:"id"`
-					Method  string          `json:"method"`
-					Params  json.RawMessage `json:"params"`
-					Result  json.RawMessage `json:"result"`
-					Error   *jsonRPCError   `json:"error"`
-				}
-				if err := json.Unmarshal(line, &msg); err != nil {
-					continue
-				}
-
-				// Check if it's our response (end of prompt)
-				if msg.ID != nil && *msg.ID == id {
-					if msg.Error != nil {
-						errCh <- fmt.Errorf("rpc error %d: %s", msg.Error.Code, msg.Error.Message)
-					}
-					return
-				}
-
-				// Handle session/update notification - stream text chunks
-				if msg.Method == "session/update" {
-					var updateParams sessionUpdateParams
-					if err := json.Unmarshal(msg.Params, &updateParams); err != nil {
-						continue
-					}
-
-					if updateParams.Update.SessionUpdate == "agent_message_chunk" &&
-						updateParams.Update.Content != nil &&
-						updateParams.Update.Content.Type == "text" {
-						// Send text chunk immediately
-						textCh <- updateParams.Update.Content.Text
-					}
-				}
 			}
+
+			// Retry once for connection-level failures before any output is emitted.
+			if attempt < maxAttempts-1 && !receivedText && IsRetryableError(err) {
+				t.resetConnection()
+				continue
+			}
+
+			errCh <- err
+			return
 		}
 	}()
 
 	return textCh, errCh
 }
 
-// Compile-time checks
+// sendStreamingAttempt performs one ACP streaming attempt.
+// Returns whether any text chunks were emitted before completion/failure.
+func (t *ACPTransport) sendStreamingAttempt( //nolint:gocyclo // streaming protocol handler with multiple message types
+	ctx context.Context,
+	req Request,
+	textCh chan<- string,
+) (receivedText bool, retErr error) {
+	t.mu.Lock()
+
+	// Lazy connect
+	if t.stdin == nil {
+		if connectErr := t.connectLocked(ctx); connectErr != nil {
+			t.mu.Unlock()
+			return false, connectErr
+		}
+	}
+
+	// Check if we need a new session
+	needSession := t.sessionID == ""
+	t.mu.Unlock()
+
+	// Create session if needed (outside lock to avoid deadlock on timeout)
+	if needSession {
+		cwd := req.Context.Cwd
+		if cwd == "" {
+			cwd = "."
+		}
+		newSessionID, sessionErr := t.newSession(ctx, cwd)
+		if sessionErr != nil {
+			return false, sessionErr
+		}
+		t.mu.Lock()
+		t.sessionID = newSessionID
+		t.mu.Unlock()
+	}
+
+	t.mu.Lock()
+	sessionID := t.sessionID
+	t.mu.Unlock()
+
+	// Build prompt with context
+	promptText := buildPromptWithContext(req)
+
+	// Send prompt request
+	id := t.requestID.Add(1)
+	rpcReq := jsonRPCRequest{
+		JSONRPC: "2.0",
+		ID:      id,
+		Method:  "session/prompt",
+		Params: promptParams{
+			SessionID: sessionID,
+			Prompt: []promptPart{
+				{Type: "text", Text: promptText},
+			},
+		},
+	}
+
+	data, err := json.Marshal(rpcReq)
+	if err != nil {
+		return false, err
+	}
+
+	t.mu.Lock()
+	_, err = t.stdin.Write(append(data, '\n'))
+	t.mu.Unlock()
+	if err != nil {
+		// Write failed - reset connection so retry can lazily reconnect.
+		t.resetConnection()
+		return false, errors.Join(ErrACPConnectionClosed, fmt.Errorf("write prompt: %w", err))
+	}
+
+	idleTimeout := idleTimeoutForContext(ctx)
+	var permissionRequestsInFlight atomic.Int32
+	// Create idle timer
+	idleTimer := time.NewTimer(idleTimeout)
+	defer idleTimer.Stop()
+
+	// Stream response text as it arrives
+	for {
+		select {
+		case <-ctx.Done():
+			t.sendCancel()
+			return receivedText, ctx.Err()
+
+		case <-idleTimer.C:
+			// Don't timeout while we're waiting on a local permission prompt.
+			// The agent is blocked on our response, so this is user think-time,
+			// not transport idleness.
+			if permissionRequestsInFlight.Load() > 0 {
+				idleTimer.Reset(idleTimeout)
+				continue
+			}
+
+			// No message received for IdleTimeout - agent may be stuck.
+			t.sendCancel()
+			// Force reconnect after idle timeout: the process may be hung.
+			t.resetConnection()
+			return receivedText, errors.Join(
+				ErrACPIdleTimeout,
+				fmt.Errorf("agent idle timeout (%v without response)", idleTimeout),
+			)
+
+		case line, ok := <-t.messages:
+			if !ok {
+				// Connection closed (readLoop exited) - reset for reconnect.
+				t.resetConnection()
+				return receivedText, fmt.Errorf("%w: connection closed", ErrACPConnectionClosed)
+			}
+
+			// Reset idle timer on any message.
+			if !idleTimer.Stop() {
+				select {
+				case <-idleTimer.C:
+				default:
+				}
+			}
+			idleTimer.Reset(idleTimeout)
+
+			var msg struct {
+				JSONRPC string          `json:"jsonrpc"`
+				ID      *int64          `json:"id"`
+				Method  string          `json:"method"`
+				Params  json.RawMessage `json:"params"`
+				Result  json.RawMessage `json:"result"`
+				Error   *jsonRPCError   `json:"error"`
+			}
+			if err := json.Unmarshal(line, &msg); err != nil {
+				continue
+			}
+
+			// Check if this is an incoming request (has both ID and Method).
+			if msg.ID != nil && msg.Method != "" {
+				permissionRequestsInFlight.Add(1)
+				go func(id int64, method string, params json.RawMessage) {
+					defer permissionRequestsInFlight.Add(-1)
+					t.handleIncomingRequest(id, method, params)
+				}(*msg.ID, msg.Method, msg.Params)
+				continue
+			}
+
+			// Check if it's our response (end of prompt).
+			if msg.ID != nil && *msg.ID == id {
+				if msg.Error != nil {
+					return receivedText, fmt.Errorf("rpc error %d: %s", msg.Error.Code, msg.Error.Message)
+				}
+				return receivedText, nil
+			}
+
+			// Handle session/update notification - stream text chunks.
+			if msg.Method == "session/update" {
+				var updateParams sessionUpdateParams
+				if err := json.Unmarshal(msg.Params, &updateParams); err != nil {
+					continue
+				}
+				// Ignore stale updates from previous sessions.
+				if updateParams.SessionID != sessionID {
+					continue
+				}
+
+				if updateParams.Update.SessionUpdate == "agent_message_chunk" &&
+					updateParams.Update.Content != nil &&
+					updateParams.Update.Content.Type == "text" {
+					// Send text chunk immediately.
+					textCh <- updateParams.Update.Content.Text
+					receivedText = true
+				}
+			}
+		}
+	}
+}
+
+// Compile-time check
 var _ Transport = (*ACPTransport)(nil)
-var _ StreamingTransport = (*ACPTransport)(nil)

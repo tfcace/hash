@@ -1,6 +1,7 @@
 package shell
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"os"
@@ -139,9 +140,46 @@ func (s *Shell) checkFirstRunMigration(ctx context.Context) {
 	// Show the welcome prompt
 	fmt.Println(compat.FormatWelcomePromptFiles(shellFiles))
 
-	// For now, auto-load (interactive prompting requires terminal handling)
-	// TODO: Add proper interactive prompt with readline
-	fmt.Print("\nAuto-loading settings... ")
+	reader := bufio.NewReader(os.Stdin)
+	for {
+		fmt.Print("\nLoad these settings now? [Y/n/?]: ")
+		input, err := reader.ReadString('\n')
+		if err != nil {
+			fmt.Println("\nSkipping migration. Run 'hash migrate' anytime to import settings.")
+			return
+		}
+
+		switch strings.TrimSpace(strings.ToLower(input)) {
+		case "", "y", "yes":
+			s.importFirstRunMigration(ctx, shellFiles)
+			return
+		case "n", "no":
+			state := &compat.State{
+				SourceFile:  strings.Join(files, ", "),
+				SourceFiles: files,
+				SourceShell: shellFiles.Shell,
+				Declined:    true,
+			}
+			_ = state.Save(compat.DefaultStatePath())
+			fmt.Println("\nNo problem. Run 'hash migrate' anytime to import settings.")
+			return
+		case "?":
+			fmt.Print(`
+Hash can source your existing config with compatibility filtering:
+
+  Aliases, environment variables, functions, and PATH changes are imported.
+  Zsh-specific setup such as bindkey, setopt, and compdef is skipped.
+  Your original config files are not modified.
+`)
+		default:
+			fmt.Println("Please enter Y, n, or ?")
+		}
+	}
+}
+
+func (s *Shell) importFirstRunMigration(ctx context.Context, shellFiles compat.ShellFiles) {
+	files := shellFiles.Files()
+	fmt.Print("\nLoading settings... ")
 
 	// Filter and source all files, merge reports
 	var totalReport *compat.Report

@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/tfcace/hash/internal/prompt"
 )
 
@@ -86,7 +86,7 @@ func TestSearchUI_VeryLongCommands(t *testing.T) {
 	ui.selected = 0
 	ui.width = 80 // Standard terminal width
 
-	view := ui.View()
+	view := ui.View().Content
 	if view == "" {
 		t.Error("SearchUI.View() returned empty string")
 	}
@@ -135,7 +135,7 @@ func TestSearchUI_UnicodeCommands(t *testing.T) {
 	ui.results = results
 	ui.totalResults = len(results)
 	ui.selected = 0
-	view := ui.View()
+	view := ui.View().Content
 
 	if !strings.Contains(view, "World") {
 		t.Error("SearchUI did not render correctly")
@@ -165,7 +165,7 @@ func TestSearchUI_NoResults(t *testing.T) {
 	ui.totalResults = 0
 	ui.selected = -1
 
-	view := ui.View()
+	view := ui.View().Content
 	if view == "" {
 		t.Error("SearchUI.View() returned empty with no results")
 	}
@@ -212,7 +212,7 @@ func TestSearchUI_TerminalResize(t *testing.T) {
 	widths := []int{40, 80, 120, 200}
 	for _, width := range widths {
 		ui.width = width
-		view := ui.View()
+		view := ui.View().Content
 
 		if view == "" {
 			t.Errorf("SearchUI.View() returned empty for width %d", width)
@@ -258,7 +258,7 @@ func TestSearchUI_SelectedIndexBoundaries(t *testing.T) {
 
 	for _, tc := range testCases {
 		ui.selected = tc.selected
-		view := ui.View()
+		view := ui.View().Content
 
 		if tc.expected && view == "" {
 			t.Errorf("SearchUI.View() returned empty for valid selected=%d", tc.selected)
@@ -318,7 +318,7 @@ func TestSearchUI_ViewRendering(t *testing.T) {
 	ui.width = 80
 	ui.searchNow()
 
-	view := ui.View()
+	view := ui.View().Content
 
 	// Should contain header
 	if !strings.Contains(view, "Search") {
@@ -423,13 +423,13 @@ func TestSearchUI_PersistentCopyConfirmation(t *testing.T) {
 	ui.statusMessage = "Copied!"
 
 	// Status should persist in view
-	view := ui.View()
+	view := ui.View().Content
 	if !strings.Contains(view, "Copied!") {
 		t.Error("Status message should be visible")
 	}
 
 	// Simulate a keypress (any navigation)
-	ui.handleKey(tea.KeyMsg{Type: tea.KeyDown})
+	ui.handleKey(tea.KeyPressMsg{Code: tea.KeyDown})
 
 	// Status should be cleared after keypress
 	if ui.statusMessage != "" {
@@ -448,7 +448,7 @@ func TestSearchUI_ResultCountFormat(t *testing.T) {
 	ui := NewSearchUI(store, prompt.DefaultPalette())
 	ui.searchNow()
 
-	view := ui.View()
+	view := ui.View().Content
 
 	// Should use "result X of Y" format, not "[X/Y]"
 	if strings.Contains(view, "[1/5]") {
@@ -475,7 +475,7 @@ func TestSearchUI_PreviewPane(t *testing.T) {
 	ui := NewSearchUI(store, prompt.DefaultPalette())
 	ui.searchNow()
 
-	view := ui.View()
+	view := ui.View().Content
 
 	// Should contain preview section
 	if !strings.Contains(view, "Preview") {

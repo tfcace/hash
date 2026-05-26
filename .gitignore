@@ -18,3 +18,15 @@ Thumbs.db
 
 # Go
 /vendor/
+coverage.txt
+
+# Claude Code local settings
+.claude/settings.local.json
+
+# Trace/debug logs
+hash-*.log
+hash-*.jsonl
+*hash-trace*.jsonl
+
+# Legacy local allowlist file from pre-release builds
+.hash/allowed_commands.json

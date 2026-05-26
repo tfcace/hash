@@ -29,17 +29,33 @@ func (m *MockTransport) Connect(ctx context.Context) error {
 	return nil
 }
 
-// Send returns preset responses.
-func (m *MockTransport) Send(ctx context.Context, req Request) (<-chan Response, error) {
+// SendStreaming returns preset responses as streaming text chunks.
+//
+//nolint:gocritic // unnamedResult: can't name receive-only channel returns
+func (m *MockTransport) SendStreaming(ctx context.Context, req Request) (<-chan string, <-chan error) {
 	m.requests = append(m.requests, req)
 
-	respCh := make(chan Response, len(m.responses))
-	for _, resp := range m.responses {
-		respCh <- resp
-	}
-	close(respCh)
+	textCh := make(chan string, 1)
+	errCh := make(chan error, 1)
 
-	return respCh, nil
+	go func() {
+		defer close(textCh)
+		defer close(errCh)
+
+		for _, resp := range m.responses {
+			if resp.Type == ResponseTypeError {
+				errCh <- &AgentError{Message: resp.Error}
+				return
+			}
+			if resp.Command != "" {
+				textCh <- resp.Command
+			} else if resp.Explanation != "" {
+				textCh <- resp.Explanation
+			}
+		}
+	}()
+
+	return textCh, errCh
 }
 
 // Close simulates closing.
@@ -52,3 +68,6 @@ func (m *MockTransport) Close() error {
 func (m *MockTransport) Requests() []Request {
 	return m.requests
 }
+
+// Compile-time check
+var _ Transport = (*MockTransport)(nil)

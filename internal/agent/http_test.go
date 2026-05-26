@@ -75,18 +75,23 @@ func TestHTTPTransport_SendToMockServer(t *testing.T) {
 		Prompt: "find large files",
 	}
 
-	respCh, err := transport.Send(ctx, req)
-	if err != nil {
-		t.Fatalf("Send() error = %v", err)
+	textCh, errCh := transport.SendStreaming(ctx, req)
+
+	// Collect text
+	var text string
+	for chunk := range textCh {
+		text += chunk
 	}
 
-	// Get response
-	resp := <-respCh
-	if resp.Type == ResponseTypeError {
-		t.Errorf("Response is error: %s", resp.Error)
+	// Check for errors
+	for err := range errCh {
+		if err != nil {
+			t.Errorf("SendStreaming() error: %v", err)
+		}
 	}
-	if resp.Command == "" && resp.Explanation == "" {
-		t.Error("Response should have command or explanation")
+
+	if text == "" {
+		t.Error("Response should have text")
 	}
 }
 

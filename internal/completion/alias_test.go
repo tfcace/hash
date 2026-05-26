@@ -101,3 +101,41 @@ func TestAliasCompleter_CaseSensitive(t *testing.T) {
 		t.Errorf("expected 'myfunc', got %s", result.Items[0].Value)
 	}
 }
+
+func TestAliasCompleter_NotInArgumentPosition(t *testing.T) {
+	provider := &mockFunctionProvider{
+		functions: []string{"site", "serve"},
+	}
+	c := NewAliasCompleter(provider)
+	ctx := context.Background()
+
+	result, err := c.Complete(ctx, "cd si", len("cd si"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(result.Items) != 0 {
+		t.Fatalf("expected no alias completions in argument position, got %d", len(result.Items))
+	}
+}
+
+func TestAliasCompleter_CommandAfterPipe(t *testing.T) {
+	provider := &mockFunctionProvider{
+		functions: []string{"myfunc", "other"},
+	}
+	c := NewAliasCompleter(provider)
+	ctx := context.Background()
+
+	line := "echo hi | my"
+	result, err := c.Complete(ctx, line, len(line))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(result.Items) != 1 {
+		t.Fatalf("expected 1 completion after pipe, got %d", len(result.Items))
+	}
+	if result.Items[0].Value != "myfunc" {
+		t.Fatalf("expected myfunc, got %q", result.Items[0].Value)
+	}
+}

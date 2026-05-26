@@ -8,7 +8,7 @@ import (
 
 // TestClient_SequentialAsk tests sequential Ask calls on the same client.
 // Note: The real ACPTransport is designed for single-threaded use per session
-// (one request at a time). MockTransport similarly doesn't support concurrent Send.
+// (one request at a time). MockTransport similarly doesn't support concurrent SendStreaming.
 // This test verifies basic sequential usage.
 func TestClient_SequentialAsk(t *testing.T) {
 	mock := NewMockTransport(Response{
@@ -87,10 +87,10 @@ func TestStreamCollector_SequentialAppend(t *testing.T) {
 	}
 }
 
-// TestMockTransport_SequentialSend tests sequential Send operations.
-// Note: MockTransport is a test helper not designed for concurrent Send - that's
+// TestMockTransport_SequentialSendStreaming tests sequential SendStreaming operations.
+// Note: MockTransport is a test helper not designed for concurrent SendStreaming - that's
 // expected. This test verifies basic sequential usage.
-func TestMockTransport_SequentialSend(t *testing.T) {
+func TestMockTransport_SequentialSendStreaming(t *testing.T) {
 	mock := NewMockTransport(Response{
 		Type:    ResponseTypeCommand,
 		Command: "test",
@@ -100,13 +100,11 @@ func TestMockTransport_SequentialSend(t *testing.T) {
 	const numRequests = 10
 
 	for i := 0; i < numRequests; i++ {
-		respCh, err := mock.Send(ctx, Request{Prompt: "test"})
-		if err != nil {
-			t.Errorf("Send() error = %v", err)
-			continue
+		textCh, errCh := mock.SendStreaming(ctx, Request{Prompt: "test"})
+		// Drain channels
+		for range textCh {
 		}
-		// Drain the response channel
-		for range respCh {
+		for range errCh {
 		}
 	}
 

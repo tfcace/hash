@@ -304,6 +304,48 @@ func TestIntegration_CtrlW_DeleteWord(t *testing.T) {
 	}
 }
 
+func TestIntegration_CtrlW_DeletePathSegment(t *testing.T) {
+	// Ctrl+W on a path should delete one segment, not the whole path
+	input := []byte{
+		'c', 'm', 'd', '/', 'h', 'a', 's', 'h', '/', 'm', 'a', 'i', 'n', '.', 'g', 'o',
+		0x17,       // Ctrl+W (delete word back to /)
+		0x1b, '\r', // Submit
+	}
+
+	var output bytes.Buffer
+	ed := New(Config{Keybindings: "helix"}, bytes.NewReader(input), &output)
+
+	result, err := ed.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	if result.Text != "" {
+		t.Errorf("Text = %q, want %q", result.Text, "")
+	}
+}
+
+func TestIntegration_AltBackspace_DeleteWholeToken(t *testing.T) {
+	// Alt+Backspace should delete the whole shell token, including path separators.
+	input := []byte{
+		'c', 'd', ' ', '/', 't', 'm', 'p', '/', 'm', 'y', '/', 'f', 'i', 'l', 'e',
+		0x1b, 0x7f, // Alt+Backspace
+		0x1b, '\r', // Submit
+	}
+
+	var output bytes.Buffer
+	ed := New(Config{Keybindings: "helix"}, bytes.NewReader(input), &output)
+
+	result, err := ed.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	if result.Text != "cd " {
+		t.Errorf("Text = %q, want %q", result.Text, "cd ")
+	}
+}
+
 func TestIntegration_CtrlU_DeleteToStart(t *testing.T) {
 	// Type, Ctrl+U to delete to start
 	input := []byte{

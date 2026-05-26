@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/lipgloss/v2"
 )
 
 // Palette holds colors extracted from the prompt for consistent UI theming.
@@ -59,12 +59,18 @@ func ExtractPalette(starshipPath string) Palette {
 		return DefaultPalette()
 	}
 
+	successOutput := runStarship(starshipPath, 0)
+	errorOutput := runStarship(starshipPath, 1)
+	return ExtractPaletteFromOutputs(successOutput, errorOutput)
+}
+
+// ExtractPaletteFromOutputs extracts a color palette from pre-generated starship outputs.
+// This avoids spawning new starship subprocesses when outputs are already available.
+func ExtractPaletteFromOutputs(successOutput, errorOutput string) Palette {
 	palette := DefaultPalette()
 
-	// Get prompt with exit code 0 (success)
-	successPrompt := runStarship(starshipPath, 0)
-	if successPrompt != "" {
-		colors := parseANSIColors(successPrompt)
+	if successOutput != "" {
+		colors := parseANSIColors(successOutput)
 		if len(colors) > 0 {
 			palette.Secondary = colors[0]
 		}
@@ -74,7 +80,7 @@ func ExtractPalette(starshipPath string) Palette {
 		}
 
 		// Extract background colors
-		bgColors := parseANSIBgColors(successPrompt)
+		bgColors := parseANSIBgColors(successOutput)
 
 		// Find first colorful background as Primary (the chip accent color)
 		for _, bg := range bgColors {
@@ -93,10 +99,8 @@ func ExtractPalette(starshipPath string) Palette {
 		}
 	}
 
-	// Get prompt with exit code 1 (error)
-	errorPrompt := runStarship(starshipPath, 1)
-	if errorPrompt != "" {
-		colors := parseANSIColors(errorPrompt)
+	if errorOutput != "" {
+		colors := parseANSIColors(errorOutput)
 		// Last color is usually the error prompt char
 		if len(colors) > 0 {
 			palette.Error = colors[len(colors)-1]

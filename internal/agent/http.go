@@ -65,12 +65,18 @@ type ollamaResponse struct {
 	Error    string `json:"error,omitempty"`
 }
 
-// Send sends a request to the HTTP API.
-func (t *HTTPTransport) Send(ctx context.Context, req Request) (<-chan Response, error) {
-	respCh := make(chan Response, 1)
+// SendStreaming sends a request to the HTTP API and streams the response text.
+// HTTP transport is inherently non-streaming (Stream: false), so the full
+// response text is emitted as a single chunk on the text channel.
+//
+//nolint:gocritic // unnamedResult: can't name receive-only channel returns
+func (t *HTTPTransport) SendStreaming(ctx context.Context, req Request) (<-chan string, <-chan error) {
+	textCh := make(chan string, 1)
+	errCh := make(chan error, 1)
 
 	go func() {
-		defer close(respCh)
+		defer close(textCh)
+		defer close(errCh)
 
 		// Build prompt with context
 		prompt := t.buildPrompt(req)
@@ -84,20 +90,14 @@ func (t *HTTPTransport) Send(ctx context.Context, req Request) (<-chan Response,
 
 		body, err := json.Marshal(ollamaReq)
 		if err != nil {
-			respCh <- Response{
-				Type:  ResponseTypeError,
-				Error: fmt.Sprintf("marshal request: %v", err),
-			}
+			errCh <- fmt.Errorf("marshal request: %v", err)
 			return
 		}
 
 		// Create HTTP request
 		httpReq, err := http.NewRequestWithContext(ctx, "POST", t.config.URL, bytes.NewReader(body))
 		if err != nil {
-			respCh <- Response{
-				Type:  ResponseTypeError,
-				Error: fmt.Sprintf("create request: %v", err),
-			}
+			errCh <- fmt.Errorf("create request: %v", err)
 			return
 		}
 
@@ -109,10 +109,7 @@ func (t *HTTPTransport) Send(ctx context.Context, req Request) (<-chan Response,
 		// Send request
 		httpResp, err := t.client.Do(httpReq)
 		if err != nil {
-			respCh <- Response{
-				Type:  ResponseTypeError,
-				Error: fmt.Sprintf("http request: %v", err),
-			}
+			errCh <- fmt.Errorf("http request: %v", err)
 			return
 		}
 		defer httpResp.Body.Close()
@@ -120,44 +117,34 @@ func (t *HTTPTransport) Send(ctx context.Context, req Request) (<-chan Response,
 		// Read response
 		respBody, err := io.ReadAll(httpResp.Body)
 		if err != nil {
-			respCh <- Response{
-				Type:  ResponseTypeError,
-				Error: fmt.Sprintf("read response: %v", err),
-			}
+			errCh <- fmt.Errorf("read response: %v", err)
 			return
 		}
 
 		if httpResp.StatusCode != http.StatusOK {
-			respCh <- Response{
-				Type:  ResponseTypeError,
-				Error: fmt.Sprintf("http status %d: %s", httpResp.StatusCode, string(respBody)),
-			}
+			errCh <- fmt.Errorf("http status %d: %s", httpResp.StatusCode, string(respBody))
 			return
 		}
 
 		// Parse Ollama response
 		var ollamaResp ollamaResponse
 		if err := json.Unmarshal(respBody, &ollamaResp); err != nil {
-			respCh <- Response{
-				Type:  ResponseTypeError,
-				Error: fmt.Sprintf("parse response: %v", err),
-			}
+			errCh <- fmt.Errorf("parse response: %v", err)
 			return
 		}
 
 		if ollamaResp.Error != "" {
-			respCh <- Response{
-				Type:  ResponseTypeError,
-				Error: ollamaResp.Error,
-			}
+			errCh <- fmt.Errorf("%s", ollamaResp.Error)
 			return
 		}
 
-		// Parse the response text to determine type
-		respCh <- t.parseResponse(ollamaResp.Response)
+		// Emit the full response text as a single chunk
+		if ollamaResp.Response != "" {
+			textCh <- ollamaResp.Response
+		}
 	}()
 
-	return respCh, nil
+	return textCh, errCh
 }
 
 // buildPrompt constructs the prompt with context.
@@ -166,7 +153,8 @@ func (t *HTTPTransport) buildPrompt(req Request) string {
 
 	b.WriteString("You are a shell command assistant. ")
 	b.WriteString("When asked for a command, respond with ONLY the command, no explanation. ")
-	b.WriteString("When asked for an explanation, provide a clear explanation.\n\n")
+	b.WriteString("When asked for an explanation, provide a clear explanation. ")
+	b.WriteString("\n")
 
 	// Add context
 	if req.Context.Cwd != "" {
@@ -187,28 +175,15 @@ func (t *HTTPTransport) buildPrompt(req Request) string {
 	return b.String()
 }
 
-// parseResponse determines the response type from the text.
-func (t *HTTPTransport) parseResponse(text string) Response {
-	text = strings.TrimSpace(text)
-
-	// If it looks like a command (starts with common command prefixes or is short)
-	if looksLikeCommand(text) {
-		return Response{
-			Type:    ResponseTypeCommand,
-			Command: text,
-		}
-	}
-
-	return Response{
-		Type:        ResponseTypeExplanation,
-		Explanation: text,
-	}
-}
-
 // looksLikeCommand checks if the text appears to be a shell command.
 //
 //nolint:gocyclo // heuristic pattern matching requires multiple checks
 func looksLikeCommand(text string) bool {
+	text = unwrapMarkdownInline(strings.TrimSpace(text))
+	if text == "" {
+		return false
+	}
+
 	// Multi-line text is likely an explanation
 	if strings.Contains(text, "\n") {
 		return false
@@ -218,9 +193,11 @@ func looksLikeCommand(text string) bool {
 	prefixes := []string{
 		"find ", "grep ", "ls ", "cat ", "echo ", "cd ", "mkdir ", "rm ",
 		"cp ", "mv ", "chmod ", "chown ", "docker ", "kubectl ", "git ",
-		"npm ", "yarn ", "go ", "python ", "pip ", "curl ", "wget ",
-		"sed ", "awk ", "sort ", "uniq ", "head ", "tail ", "tar ",
-		"sudo ", "./", "/",
+		"npm ", "yarn ", "pnpm ", "bun ", "go ", "python ", "python3 ",
+		"pip ", "pip3 ", "curl ", "wget ",
+		"jq ", "sed ", "awk ", "sort ", "uniq ", "head ", "tail ", "tar ",
+		"sudo ", "make ", "jj ", "hash ", "brew ", "helm ", "cargo ",
+		"rustup ", "terraform ", "source ", "export ", "./", "../", "~/", "/",
 	}
 
 	lower := strings.ToLower(text)
@@ -230,30 +207,98 @@ func looksLikeCommand(text string) bool {
 		}
 	}
 
-	// Explanatory text patterns - if it has these, it's not a command
-	if strings.Contains(text, ". ") || // Multiple sentences
-		strings.HasPrefix(text, "The ") ||
-		strings.HasPrefix(text, "This ") ||
-		strings.HasPrefix(text, "To ") ||
-		strings.HasPrefix(text, "You ") ||
-		strings.HasPrefix(text, "I ") ||
-		strings.HasPrefix(text, "I'") || // Contractions like "I'll", "I'm", "I've"
-		strings.HasPrefix(text, "Here") ||
-		strings.HasPrefix(text, "Let") ||
-		strings.HasPrefix(text, "Looking") ||
-		strings.Contains(text, " is ") ||
-		strings.Contains(text, " are ") ||
-		strings.Contains(text, " will ") ||
-		strings.Contains(text, " can ") {
+	// Shell syntax strongly indicates executable text.
+	if strings.Contains(text, " | ") ||
+		strings.Contains(text, " > ") ||
+		strings.Contains(text, " < ") ||
+		strings.Contains(text, "&&") ||
+		strings.Contains(text, "||") ||
+		strings.Contains(text, ";") ||
+		strings.HasSuffix(text, "&") ||
+		strings.HasPrefix(text, "$(") {
+		return true
+	}
+
+	fields := strings.Fields(text)
+	if len(fields) == 0 {
 		return false
 	}
 
-	// Short single-line text without explanatory patterns might be a command
-	if len(text) < 80 {
+	// Leading env assignments are command-like when followed by a command.
+	if len(fields) > 1 && isEnvAssignment(fields[0]) {
+		return true
+	}
+
+	// Explanatory text patterns - if it has these, it's not a command
+	if strings.Contains(text, ". ") || // Multiple sentences
+		strings.HasPrefix(lower, "the ") ||
+		strings.HasPrefix(lower, "this ") ||
+		strings.HasPrefix(lower, "to ") ||
+		strings.HasPrefix(lower, "you ") ||
+		strings.HasPrefix(lower, "i ") ||
+		strings.HasPrefix(lower, "i'") || // Contractions like "I'll", "I'm", "I've"
+		strings.HasPrefix(lower, "here") ||
+		strings.HasPrefix(lower, "let") ||
+		strings.HasPrefix(lower, "looking") ||
+		strings.Contains(lower, " is ") ||
+		strings.Contains(lower, " are ") ||
+		strings.Contains(lower, " will ") ||
+		strings.Contains(lower, " can ") ||
+		strings.Contains(lower, " should ") {
+		return false
+	}
+
+	// Flag-based suggestions like "foo --bar baz" still look command-like.
+	if len(fields) > 1 && strings.HasPrefix(fields[1], "-") {
 		return true
 	}
 
 	return false
+}
+
+func unwrapMarkdownInline(text string) string {
+	wrappers := [][2]string{
+		{"**", "**"},
+		{"__", "__"},
+		{"`", "`"},
+		{"*", "*"},
+		{"_", "_"},
+	}
+
+	for {
+		changed := false
+		for _, wrapper := range wrappers {
+			prefix, suffix := wrapper[0], wrapper[1]
+			if len(text) < len(prefix)+len(suffix) ||
+				!strings.HasPrefix(text, prefix) ||
+				!strings.HasSuffix(text, suffix) {
+				continue
+			}
+			text = strings.TrimSpace(text[len(prefix) : len(text)-len(suffix)])
+			changed = true
+			break
+		}
+		if !changed {
+			return text
+		}
+	}
+}
+
+func isEnvAssignment(field string) bool {
+	name, _, ok := strings.Cut(field, "=")
+	if !ok || name == "" {
+		return false
+	}
+
+	for i, r := range name {
+		switch {
+		case r == '_' || (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z'):
+		case i > 0 && r >= '0' && r <= '9':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // Close closes the HTTP client (no-op for HTTP).
@@ -262,5 +307,5 @@ func (t *HTTPTransport) Close() error {
 	return nil
 }
 
-// Compile-time check that HTTPTransport implements Transport
+// Compile-time check
 var _ Transport = (*HTTPTransport)(nil)

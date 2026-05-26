@@ -276,6 +276,50 @@ func (m *ScenarioMockTransport) Send(ctx context.Context, req agent.Request) (<-
 	return respCh, nil
 }
 
+// SendStreaming adapts the scenario response API to the agent.Transport
+// streaming interface used by the shell.
+//
+//nolint:gocritic // unnamedResult: interface parity with Transport
+func (m *ScenarioMockTransport) SendStreaming(ctx context.Context, req agent.Request) (<-chan string, <-chan error) {
+	textCh := make(chan string, 1)
+	errCh := make(chan error, 1)
+
+	respCh, err := m.Send(ctx, req)
+	if err != nil {
+		defer close(textCh)
+		errCh <- err
+		close(errCh)
+		return textCh, errCh
+	}
+
+	go func() {
+		defer close(textCh)
+		defer close(errCh)
+
+		for resp := range respCh {
+			switch resp.Type {
+			case agent.ResponseTypeError:
+				if resp.Error == "" {
+					errCh <- errors.New("mock agent error")
+				} else {
+					errCh <- errors.New(resp.Error)
+				}
+				return
+			case agent.ResponseTypeCommand:
+				if resp.Command != "" {
+					textCh <- resp.Command
+				}
+			case agent.ResponseTypeExplanation:
+				if resp.Explanation != "" {
+					textCh <- resp.Explanation
+				}
+			}
+		}
+	}()
+
+	return textCh, errCh
+}
+
 func (m *ScenarioMockTransport) matchesRule(rule *ResponseRule, req agent.Request) bool {
 	// Check prompt contains
 	if rule.PromptContains != "" {

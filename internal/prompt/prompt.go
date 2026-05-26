@@ -9,6 +9,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 )
 
 // Config configures the prompt behavior.
@@ -26,10 +28,21 @@ type PromptContext struct {
 	Jobs       int
 }
 
+// precomputeResult holds a precomputed prompt output for fast reuse.
+type precomputeResult struct {
+	cwd        string
+	output     string
+	timeOutput string // raw starship module time output (for patching)
+	timeStr    string // extracted HH:MM from timeOutput
+}
+
 // Prompt generates shell prompts.
 type Prompt struct {
 	config       Config
 	starshipPath string
+
+	mu          sync.Mutex
+	precomputed *precomputeResult
 }
 
 // New creates a new Prompt generator.
@@ -145,6 +158,110 @@ func (p *Prompt) builtinPrompt(ctx PromptContext) string {
 
 func (p *Prompt) fallbackPrompt(ctx PromptContext) string {
 	return p.builtinPrompt(ctx)
+}
+
+// ResolveStarship forces the lazy starship binary lookup.
+// Call before concurrent Generate/GenerateForPalette to avoid races.
+func (p *Prompt) ResolveStarship() {
+	if p.config.Mode == "starship" && p.starshipPath == "" {
+		p.starshipPath = p.findStarship(p.config.StarshipPath)
+	}
+}
+
+// hhmmRe matches HH:MM time strings (used to patch cached time output).
+var hhmmRe = regexp.MustCompile(`\d{2}:\d{2}`)
+
+// StartPrecompute begins generating the next prompt in the background,
+// assuming exit code 0, zero duration, and the given cwd. The result is
+// stored and can be retrieved via TryPrecomputed. The time module output
+// is captured separately so it can be patched with the current time at
+// render without spawning a subprocess.
+func (p *Prompt) StartPrecompute(cwd string) {
+	if p.starshipPath == "" {
+		return
+	}
+	go func() {
+		ctx := PromptContext{Cwd: cwd, ExitCode: 0}
+		var output, timeOutput string
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			output = p.Generate(ctx)
+		}()
+		go func() {
+			defer wg.Done()
+			timeOutput = p.renderModule("time")
+		}()
+		wg.Wait()
+
+		var timeStr string
+		if timeOutput != "" {
+			timeStr = hhmmRe.FindString(timeOutput)
+		}
+
+		p.mu.Lock()
+		p.precomputed = &precomputeResult{
+			cwd: cwd, output: output,
+			timeOutput: timeOutput, timeStr: timeStr,
+		}
+		p.mu.Unlock()
+	}()
+}
+
+// TryPrecomputed returns a precomputed prompt if one is available and the
+// context matches. The time module is patched inline with the current time
+// (no subprocess). Returns ("", false) on miss — caller should Generate
+// synchronously.
+func (p *Prompt) TryPrecomputed(ctx PromptContext) (string, bool) {
+	// Only valid when the precomputed assumptions hold:
+	// exit=0, duration below cmd_duration threshold, same cwd.
+	if ctx.ExitCode != 0 || ctx.DurationMs >= 100 {
+		p.mu.Lock()
+		p.precomputed = nil
+		p.mu.Unlock()
+		return "", false
+	}
+	p.mu.Lock()
+	pc := p.precomputed
+	p.precomputed = nil
+	p.mu.Unlock()
+
+	if pc == nil || pc.cwd != ctx.Cwd {
+		return "", false
+	}
+
+	result := pc.output
+	// Patch the time module inline if precomputed time differs from now.
+	if pc.timeStr != "" && pc.timeOutput != "" {
+		now := time.Now().Format("15:04")
+		if now != pc.timeStr {
+			freshTime := strings.Replace(pc.timeOutput, pc.timeStr, now, 1)
+			result = strings.Replace(result, pc.timeOutput, freshTime, 1)
+		}
+	}
+	return result, true
+}
+
+// renderModule runs a single starship module and returns its output.
+func (p *Prompt) renderModule(name string) string {
+	cmd := exec.Command(p.starshipPath, "module", name)
+	cmd.Env = append(os.Environ(), "STARSHIP_SHELL=hash")
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	if err := cmd.Run(); err != nil {
+		return ""
+	}
+	return out.String()
+}
+
+// GenerateForPalette runs starship with the given exit code and returns raw output
+// suitable for palette extraction. Returns "" if starship is not available.
+func (p *Prompt) GenerateForPalette(exitCode int) string {
+	if p.starshipPath == "" {
+		return ""
+	}
+	return runStarship(p.starshipPath, exitCode)
 }
 
 // RightPrompt returns the right-side prompt (if supported).

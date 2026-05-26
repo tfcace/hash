@@ -336,6 +336,9 @@ func (u *ResponseUI) ShowAgentHint(transport, command, url string) {
 }
 
 // ShowConfirmation displays the compact confirmation UI below the response.
+//
+// Deprecated: Use AgentOutputCoordinator.ShowHints instead for proper
+// coordination with streaming output and permission prompts.
 func (u *ResponseUI) ShowConfirmation(ct ConfirmationType) {
 	var hint string
 	switch ct {

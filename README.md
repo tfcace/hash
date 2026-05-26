@@ -8,7 +8,7 @@
 
 > **⚠️ Early Stage Project**
 >
-> Hash is a heavily vibe-coded experiment built mostly by Claude. Expect bugs, rough edges, and breaking changes. This is a personal project shaped around my own preferences—not a polished tool for everyone. If that sounds fun, welcome aboard.
+> Hash is under active development. Expect bugs and breaking changes before 1.0. The 0.5.x line is the tool-calling release line, with safer agent permissions and daily-driver polish around setup, configuration, and shell compatibility.
 
 ## What is Hash?
 
@@ -39,9 +39,20 @@ No mode switching. No special commands. Just `??` where you need help.
 
 ### Agent Agnostic
 
-Use any AI that speaks ACP or HTTP. Configure Claude Code for powerful cloud AI, or Ollama for fully local inference:
+Use any AI that speaks ACP or HTTP. Configure one agent directly:
 
 ```toml
+[agent]
+transport = "stdio"
+command = "claude-code-acp"
+```
+
+Or define named agents and select one with `default`:
+
+```toml
+[agent]
+default = "ollama"
+
 [agent.claude]
 transport = "stdio"
 command = "claude"
@@ -51,6 +62,32 @@ transport = "http"
 url = "http://localhost:11434/api/generate"
 model = "codellama:13b"
 ```
+
+### Agent Permissions
+
+When the agent wants to run a command, Hash asks for permission:
+
+```
+▌ Agent wants to run:
+▌ kubectl get pods
+▌
+▌ [y]allow  [n]deny  [a]always allow this command
+```
+
+- Press **y** or **Enter** to allow once
+- Press **n** or **Esc** to deny
+- Press **a** to allow and remember (won't ask again for this exact command)
+
+Configure where "always allowed" commands are stored:
+
+```toml
+[agent]
+allowed_commands_scope = "project"  # or "global" or "session"
+```
+
+- **project** — Per-directory under `~/.config/hash/project_allowlists/`
+- **global** — Shared across all projects in `~/.config/hash/allowed_commands.json`
+- **session** — In memory only, cleared when shell exits
 
 ### Adaptive Learning
 
@@ -120,7 +157,7 @@ $ docker run -d \
 
 ```toml
 [input]
-keybindings = "helix"  # or "emacs" (coming soon)
+keybindings = "helix"  # or "emacs"
 gutter = true          # show visual indicator
 ```
 
@@ -200,7 +237,7 @@ brew install hash
 
 ### From Source
 
-Requires Go 1.21+.
+Requires Go 1.25+.
 
 ```bash
 git clone https://github.com/tfcace/hash.git
@@ -250,20 +287,16 @@ editor = "hx"
 keybindings = "helix"
 
 [agent]
-default = "claude"
-timeout = "30s"
-
-[agent.claude]
 transport = "stdio"
-command = "claude"
+command = "claude-code-acp"
+timeout = "120s"
 
 [completions]
 fuzzy = true
 file_icons = true
 
-[learning]
+[history]
 enabled = true
-suggestion_threshold = 0.7
 ```
 
 See [docs/config-reference.md](docs/config-reference.md) for the complete reference.
@@ -321,7 +354,7 @@ fi
 
 ### Migration from Bash/Zsh
 
-When you first launch Hash, it detects your previous shell and offers to load compatible settings. Hash fully supports bash syntax including `[[`, `==`, `&&`, `||`, and process substitution.
+When you first launch Hash, it detects your previous shell and asks before loading compatible settings. Hash supports common bash syntax including `[[`, `==`, `&&`, `||`, and process substitution.
 
 **Aliases are converted to functions:** Hash converts `alias foo='cmd1 && cmd2'` to `foo() { cmd1 && cmd2; }` internally. This is transparent — you use the alias name normally, and it works as expected.
 

@@ -6,6 +6,8 @@ import (
 	"io"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/tfcace/hash/internal/trace"
 )
 
 // ANSI escape sequences
@@ -40,6 +42,20 @@ type Display struct {
 	finalizedLines int    // Lines rendered by last Finalize call
 	scrollbarCode  string // ANSI code for scrollbar foreground color
 	lastMenuItems  int    // Number of items in last rendered completion menu
+	frame          *InputFrame
+}
+
+// InputFrame customizes how the input area is rendered.
+// PrefixWidth is the visible width of Prefix (ANSI excluded).
+type InputFrame struct {
+	TopLine           string // Rendered above input lines (no trailing newline)
+	BottomLine        string // Rendered below input lines (no trailing newline)
+	BottomExtraLine   string // Optional line rendered below BottomLine
+	Prefix            string // Rendered before each input line
+	PrefixWidth       int
+	LineBg            string // Optional ANSI background code for line padding
+	BottomLineBg      string // Optional ANSI background override for BottomLine
+	BottomExtraLineBg string // Optional ANSI background override for BottomExtraLine
 }
 
 // NewDisplay creates a new display.
@@ -73,6 +89,11 @@ func (d *Display) SetPrompt(prompt string) {
 	d.promptWidth = visibleWidth(prompt)
 }
 
+// SetFrame configures a custom frame for input rendering.
+func (d *Display) SetFrame(frame *InputFrame) {
+	d.frame = frame
+}
+
 // SetInputBgColor sets the background color for submitted input.
 // hexColor should be in format "#RRGGBB".
 func (d *Display) SetInputBgColor(hexColor string) {
@@ -102,6 +123,9 @@ func (d *Display) SetScrollbarColor(hexColor string) {
 // calcPrefixWidth calculates the prefix width for cursor positioning on a given row.
 // Structure: [mode bar "i│" or "n│" if gutter] + [prompt on line 0, space on others]
 func (d *Display) calcPrefixWidth(row int) int {
+	if d.frame != nil {
+		return d.frame.PrefixWidth
+	}
 	prefixWidth := 0
 	if d.gutter {
 		prefixWidth = 2 // Mode bar "i│" or "n│"
@@ -134,8 +158,166 @@ func visibleWidth(s string) int {
 	return width
 }
 
+// wrapWidth returns a safe wrapping width for terminal calculations.
+func (d *Display) wrapWidth() int {
+	if d.width <= 0 {
+		return 1
+	}
+	return d.width
+}
+
+// visualRowsForChars returns how many terminal rows are consumed by chars columns.
+func (d *Display) visualRowsForChars(chars int) int {
+	if chars <= 0 {
+		return 1
+	}
+	return (chars-1)/d.wrapWidth() + 1
+}
+
+// wrappedCursorForChars maps a logical character offset to wrapped row/column.
+// Returned column is a CSI nC distance from start-of-line after \r.
+func (d *Display) wrappedCursorForChars(chars int) (rowOffset, col int) {
+	if chars <= 0 {
+		return 0, 0
+	}
+
+	width := d.wrapWidth()
+	rowOffset = chars / width
+	col = chars % width
+	if col == 0 {
+		rowOffset--
+		col = width
+	}
+	return rowOffset, col
+}
+
+// clampCursorToBuffer keeps cursor coordinates in bounds for layout math.
+func clampCursorToBuffer(buf *Buffer, cur *Cursor) (row, col int) {
+	lineCount := buf.LineCount()
+	if lineCount <= 0 {
+		return 0, 0
+	}
+
+	row = cur.Pos.Row
+	if row < 0 {
+		row = 0
+	} else if row >= lineCount {
+		row = lineCount - 1
+	}
+
+	lineLen := len(buf.Line(row))
+	col = cur.Pos.Col
+	if col < 0 {
+		col = 0
+	} else if col > lineLen {
+		col = lineLen
+	}
+
+	return row, col
+}
+
+// renderedGhostSuffixWidth returns the visible width added by ghost rendering.
+func renderedGhostSuffixWidth(ghostText string, streaming, fromAgent bool) int {
+	if ghostText == "" {
+		if streaming {
+			return visibleWidth(" Agent thinking...")
+		}
+		return 0
+	}
+
+	ghostFirstLine := ghostText
+	if newlineIdx := strings.Index(ghostText, "\n"); newlineIdx >= 0 {
+		ghostFirstLine = ghostText[:newlineIdx]
+	}
+
+	width := visibleWidth(ghostFirstLine)
+	if fromAgent {
+		if streaming {
+			width += visibleWidth("▌")
+		} else {
+			width += visibleWidth("   [enter]run  [tab]edit  [esc]")
+		}
+	}
+
+	return width
+}
+
+// layoutForStandardRender computes visual cursor/line positions for wrapped input.
+func (d *Display) layoutForStandardRender(buf *Buffer, cur *Cursor, cursorLineExtraWidth int) (totalRows, cursorVisualRow, cursorVisualCol int) {
+	lineCount := buf.LineCount()
+	if lineCount <= 0 {
+		return 1, 0, 0
+	}
+
+	cursorRow, cursorCol := clampCursorToBuffer(buf, cur)
+	totalRows = 0
+	cursorVisualRow = 0
+	cursorVisualCol = 0
+
+	for i := 0; i < lineCount; i++ {
+		prefixWidth := d.calcPrefixWidth(i)
+		lineWidth := prefixWidth + len(buf.Line(i))
+
+		if i == cursorRow {
+			cursorChars := prefixWidth + cursorCol
+			rowOffset, col := d.wrappedCursorForChars(cursorChars)
+			cursorVisualRow = totalRows + rowOffset
+			cursorVisualCol = col
+			lineWidth += cursorLineExtraWidth
+		}
+
+		totalRows += d.visualRowsForChars(lineWidth)
+	}
+
+	return totalRows, cursorVisualRow, cursorVisualCol
+}
+
+// layoutForFrameRender computes visual cursor/line positions for wrapped framed input.
+func (d *Display) layoutForFrameRender(buf *Buffer, cur *Cursor, frame *InputFrame) (totalRows, cursorVisualRow, cursorVisualCol int) {
+	lineCount := buf.LineCount()
+	if lineCount <= 0 {
+		return 1, 0, 0
+	}
+
+	cursorRow, cursorCol := clampCursorToBuffer(buf, cur)
+	totalRows = 0
+
+	if frame.TopLine != "" {
+		totalRows += d.visualRowsForChars(visibleWidth(frame.TopLine))
+	}
+
+	cursorVisualRow = totalRows
+	cursorVisualCol = 0
+
+	for i := 0; i < lineCount; i++ {
+		lineWidth := frame.PrefixWidth + len(buf.Line(i))
+
+		if i == cursorRow {
+			cursorChars := frame.PrefixWidth + cursorCol
+			rowOffset, col := d.wrappedCursorForChars(cursorChars)
+			cursorVisualRow = totalRows + rowOffset
+			cursorVisualCol = col
+		}
+
+		totalRows += d.visualRowsForChars(lineWidth)
+	}
+
+	if frame.BottomLine != "" {
+		totalRows += d.visualRowsForChars(visibleWidth(frame.BottomLine))
+	}
+	if frame.BottomExtraLine != "" {
+		totalRows += d.visualRowsForChars(visibleWidth(frame.BottomExtraLine))
+	}
+
+	return totalRows, cursorVisualRow, cursorVisualCol
+}
+
 // Render draws the buffer content with cursor.
 func (d *Display) Render(buf *Buffer, cur *Cursor, hasSelection bool) {
+	if d.frame != nil {
+		d.renderWithFrame(buf, cur, hasSelection, "", false, false, "")
+		return
+	}
 	var sb strings.Builder
 
 	// Hide cursor during render for flicker-free updates
@@ -193,30 +375,24 @@ func (d *Display) Render(buf *Buffer, cur *Cursor, hasSelection bool) {
 	// Clear everything below the buffer (including any old menu)
 	sb.WriteString(ansiClearToEnd)
 
-	d.lastLines = buf.LineCount()
-
-	// Position cursor
-	cursorRow := cur.Pos.Row
-	cursorCol := cur.Pos.Col
-
-	// Move to cursor position
-	if cursorRow < buf.LineCount()-1 {
-		fmt.Fprintf(&sb, ansiCursorUp, buf.LineCount()-1-cursorRow)
+	// Position cursor using wrapped visual layout rather than logical rows.
+	totalRows, cursorVisualRow, cursorVisualCol := d.layoutForStandardRender(buf, cur, 0)
+	linesBelowCursor := totalRows - 1 - cursorVisualRow
+	if linesBelowCursor > 0 {
+		fmt.Fprintf(&sb, ansiCursorUp, linesBelowCursor)
 	}
 
-	// Calculate prefix width for cursor positioning
-	prefixWidth := d.calcPrefixWidth(cursorRow)
-
 	sb.WriteString("\r")
-	if cursorCol+prefixWidth > 0 {
-		fmt.Fprintf(&sb, ansiCursorForward, cursorCol+prefixWidth)
+	if cursorVisualCol > 0 {
+		fmt.Fprintf(&sb, ansiCursorForward, cursorVisualCol)
 	}
 
 	// Show cursor
 	sb.WriteString(ansiShowCursor)
 
 	// Remember where we left the cursor for next render
-	d.lastCursorRow = cursorRow
+	d.lastCursorRow = cursorVisualRow
+	d.lastLines = totalRows
 
 	d.out.Write([]byte(sb.String()))
 }
@@ -227,6 +403,10 @@ func (d *Display) Render(buf *Buffer, cur *Cursor, hasSelection bool) {
 //
 //nolint:gocyclo // terminal rendering requires many conditional escape sequences
 func (d *Display) RenderWithGhost(buf *Buffer, cur *Cursor, hasSelection bool, ghostText string, streaming, fromAgent bool, modelName string) {
+	if d.frame != nil {
+		d.renderWithFrame(buf, cur, hasSelection, ghostText, streaming, fromAgent, modelName)
+		return
+	}
 	var sb strings.Builder
 
 	// Hide cursor during render for flicker-free updates
@@ -250,7 +430,6 @@ func (d *Display) RenderWithGhost(buf *Buffer, cur *Cursor, hasSelection bool, g
 	}
 
 	cursorRow := cur.Pos.Row
-	cursorCol := cur.Pos.Col
 
 	for i := 0; i < buf.LineCount(); i++ {
 		if i > 0 {
@@ -320,26 +499,156 @@ func (d *Display) RenderWithGhost(buf *Buffer, cur *Cursor, hasSelection bool, g
 	// Clear everything below the buffer
 	sb.WriteString(ansiClearToEnd)
 
-	d.lastLines = buf.LineCount()
-
-	// Move to cursor position
-	if cursorRow < buf.LineCount()-1 {
-		fmt.Fprintf(&sb, ansiCursorUp, buf.LineCount()-1-cursorRow)
+	ghostWidth := renderedGhostSuffixWidth(ghostText, streaming, fromAgent)
+	totalRows, cursorVisualRow, cursorVisualCol := d.layoutForStandardRender(buf, cur, ghostWidth)
+	linesBelowCursor := totalRows - 1 - cursorVisualRow
+	if linesBelowCursor > 0 {
+		fmt.Fprintf(&sb, ansiCursorUp, linesBelowCursor)
 	}
 
-	// Calculate prefix width for cursor positioning
-	prefixWidth := d.calcPrefixWidth(cursorRow)
-
 	sb.WriteString("\r")
-	if cursorCol+prefixWidth > 0 {
-		fmt.Fprintf(&sb, ansiCursorForward, cursorCol+prefixWidth)
+	if cursorVisualCol > 0 {
+		fmt.Fprintf(&sb, ansiCursorForward, cursorVisualCol)
 	}
 
 	// Show cursor
 	sb.WriteString(ansiShowCursor)
 
 	// Remember where we left the cursor for next render
-	d.lastCursorRow = cursorRow
+	d.lastCursorRow = cursorVisualRow
+	d.lastLines = totalRows
+
+	d.out.Write([]byte(sb.String()))
+}
+
+//nolint:gocyclo // frame rendering requires handling many layout cases sequentially
+func (d *Display) renderWithFrame(buf *Buffer, cur *Cursor, hasSelection bool, ghostText string, streaming, fromAgent bool, modelName string) {
+	frame := d.frame
+	var sb strings.Builder
+	traceEnabled := trace.Enabled("editor")
+
+	// Hide cursor during render for flicker-free updates
+	sb.WriteString(ansiHideCursor)
+
+	// Move up from where cursor was left to first line of our content
+	if d.lastCursorRow > 0 {
+		fmt.Fprintf(&sb, ansiCursorUp, d.lastCursorRow)
+	}
+	sb.WriteString("\r")
+
+	if frame.TopLine != "" {
+		d.renderFrameLine(&sb, frame.TopLine, frame.LineBg)
+		sb.WriteString("\r\n")
+	}
+
+	cursorRow := cur.Pos.Row
+	cursorCol := cur.Pos.Col
+	if traceEnabled {
+		trace.EditorHigh("frame_render", map[string]any{
+			"width":        d.width,
+			"height":       d.height,
+			"lines":        buf.LineCount(),
+			"cursor_row":   cursorRow,
+			"cursor_col":   cursorCol,
+			"prefix_width": frame.PrefixWidth,
+			"line_bg":      frame.LineBg != "",
+			"top_line":     frame.TopLine != "",
+			"bottom_line":  frame.BottomLine != "",
+		})
+	}
+
+	for i := 0; i < buf.LineCount(); i++ {
+		if i > 0 {
+			sb.WriteString("\r\n")
+		}
+		sb.WriteString(ansiClearLine)
+		sb.WriteString(frame.Prefix)
+
+		line := buf.Line(i)
+		if hasSelection && cur.HasSelection() {
+			d.renderLineWithSelection(&sb, line, i, cur)
+		} else {
+			sb.WriteString(line)
+		}
+
+		if traceEnabled {
+			trace.EditorDetailed("frame_render_line", map[string]any{
+				"index":          i,
+				"line_width":     visibleWidth(line),
+				"content_width":  frame.PrefixWidth + visibleWidth(line),
+				"display_width":  d.width,
+				"line_bg_active": frame.LineBg != "",
+			})
+		}
+
+		// Fill to terminal EOL with the frame background to avoid width mismatches.
+		if frame.LineBg != "" {
+			fillLineBg(&sb, frame.LineBg)
+		}
+	}
+
+	if frame.BottomLine != "" {
+		if buf.LineCount() > 0 {
+			sb.WriteString("\r\n")
+		}
+		bottomLineBg := frame.LineBg
+		if frame.BottomLineBg != "" {
+			bottomLineBg = frame.BottomLineBg
+		}
+		d.renderFrameLine(&sb, frame.BottomLine, bottomLineBg)
+	}
+	if frame.BottomExtraLine != "" {
+		if buf.LineCount() > 0 || frame.BottomLine != "" {
+			sb.WriteString("\r\n")
+		}
+		extraLineBg := frame.LineBg
+		if frame.BottomExtraLineBg != "" {
+			extraLineBg = frame.BottomExtraLineBg
+		}
+		d.renderFrameLine(&sb, frame.BottomExtraLine, extraLineBg)
+	}
+
+	// Clear everything below the buffer.
+	// Use the lowest visible frame row background when available.
+	clearBg := frame.LineBg
+	if frame.BottomExtraLineBg != "" {
+		clearBg = frame.BottomExtraLineBg
+	} else if frame.BottomLineBg != "" {
+		clearBg = frame.BottomLineBg
+	}
+	if clearBg != "" {
+		sb.WriteString(clearBg)
+	}
+	sb.WriteString(ansiClearToEnd)
+	if clearBg != "" {
+		sb.WriteString(ansiReset)
+	}
+	if traceEnabled {
+		trace.EditorDetailed("frame_render_clear", map[string]any{
+			"clear_strategy": "line_bg_clear_to_end",
+			"display_width":  d.width,
+			"line_bg":        frame.LineBg != "",
+		})
+	}
+
+	totalRows, cursorVisualRow, cursorVisualCol := d.layoutForFrameRender(buf, cur, frame)
+	linesBelowCursor := totalRows - 1 - cursorVisualRow
+	if linesBelowCursor > 0 {
+		fmt.Fprintf(&sb, ansiCursorUp, linesBelowCursor)
+	}
+
+	// Position cursor within the line
+	sb.WriteString("\r")
+	if cursorVisualCol > 0 {
+		fmt.Fprintf(&sb, ansiCursorForward, cursorVisualCol)
+	}
+
+	// Show cursor
+	sb.WriteString(ansiShowCursor)
+
+	// Remember where we left the cursor for next render
+	d.lastCursorRow = cursorVisualRow
+	d.lastLines = totalRows
 
 	d.out.Write([]byte(sb.String()))
 }
@@ -393,6 +702,10 @@ func (d *Display) Clear() {
 // Finalize leaves the content on screen and moves to a new line.
 // Re-renders with background highlight to distinguish from output.
 func (d *Display) Finalize(buf *Buffer) {
+	if d.frame != nil {
+		d.finalizeWithFrame(buf)
+		return
+	}
 	var sb strings.Builder
 
 	// Move cursor to beginning of the displayed content
@@ -454,6 +767,79 @@ func (d *Display) Finalize(buf *Buffer) {
 	d.finalizedLines = buf.LineCount()
 	d.lastLines = 0
 	d.lastCursorRow = 0
+}
+
+func (d *Display) finalizeWithFrame(buf *Buffer) {
+	frame := d.frame
+	var sb strings.Builder
+
+	// Move cursor to beginning of the displayed content
+	if d.lastCursorRow > 0 {
+		fmt.Fprintf(&sb, ansiCursorUp, d.lastCursorRow)
+	}
+	sb.WriteString("\r")
+
+	linesWritten := 0
+	if frame.TopLine != "" {
+		d.renderFrameLine(&sb, frame.TopLine, frame.LineBg)
+		sb.WriteString("\r\n")
+		linesWritten++
+	}
+
+	for i := 0; i < buf.LineCount(); i++ {
+		sb.WriteString(ansiClearLine)
+		sb.WriteString(frame.Prefix)
+		sb.WriteString(buf.Line(i))
+
+		if frame.LineBg != "" {
+			fillLineBg(&sb, frame.LineBg)
+		}
+
+		sb.WriteString("\r\n")
+		linesWritten++
+	}
+
+	if frame.BottomLine != "" {
+		bottomLineBg := frame.LineBg
+		if frame.BottomLineBg != "" {
+			bottomLineBg = frame.BottomLineBg
+		}
+		d.renderFrameLine(&sb, frame.BottomLine, bottomLineBg)
+		sb.WriteString("\r\n")
+		linesWritten++
+	}
+	if frame.BottomExtraLine != "" {
+		extraLineBg := frame.LineBg
+		if frame.BottomExtraLineBg != "" {
+			extraLineBg = frame.BottomExtraLineBg
+		}
+		d.renderFrameLine(&sb, frame.BottomExtraLine, extraLineBg)
+		sb.WriteString("\r\n")
+		linesWritten++
+	}
+
+	d.out.Write([]byte(sb.String()))
+	d.finalizedLines = linesWritten
+	d.lastLines = 0
+	d.lastCursorRow = 0
+}
+
+func (d *Display) renderFrameLine(sb *strings.Builder, line, lineBg string) {
+	sb.WriteString(ansiClearLine)
+	sb.WriteString(line)
+
+	if lineBg == "" {
+		return
+	}
+
+	// Fill to end of line with the frame background to avoid off-by-one gaps.
+	fillLineBg(sb, lineBg)
+}
+
+func fillLineBg(sb *strings.Builder, lineBg string) {
+	sb.WriteString(lineBg)
+	sb.WriteString("\x1b[K")
+	sb.WriteString(ansiReset)
 }
 
 // FinalizedLines returns how many lines were rendered by Finalize.
@@ -528,20 +914,16 @@ type CompletionItem struct {
 // RenderCompletionMenu draws the completion dropdown below the cursor.
 //
 //nolint:gocyclo // completion menu rendering requires layout and scroll calculations
-func (d *Display) RenderCompletionMenu(items []CompletionItem, selected, startCol int) {
+func (d *Display) RenderCompletionMenu(items []CompletionItem, selected, startCol, cursorRow, cursorCol int) {
 	if len(items) == 0 {
 		return
 	}
 
 	var sb strings.Builder
 
-	// Save cursor position before rendering menu - will restore at end
-	sb.WriteString("\x1b[s")
-
-	// Add prefix width (gutter + prompt on row 0) to startCol for proper positioning
-	// The menu appears below line 0, so use row 0's prefix width
-	prefixWidth := d.calcPrefixWidth(0)
-	menuCol := startCol + prefixWidth
+	// Add prefix width to startCol for proper positioning.
+	prefixWidth := d.calcPrefixWidth(cursorRow)
+	_, menuCol := d.wrappedCursorForChars(startCol + prefixWidth)
 
 	// Calculate max width for alignment
 	maxTextWidth := 0
@@ -551,7 +933,7 @@ func (d *Display) RenderCompletionMenu(items []CompletionItem, selected, startCo
 		}
 	}
 
-	// Limit visible items (show max 6, scrollbar appears for 7+)
+	// Limit visible items (show max 6, scrolling needed for 7+)
 	maxVisible := 6
 	if len(items) < maxVisible {
 		maxVisible = len(items)
@@ -563,11 +945,13 @@ func (d *Display) RenderCompletionMenu(items []CompletionItem, selected, startCo
 		scrollOffset = selected - maxVisible + 1
 	}
 
-	// Calculate scrollbar thumb position and size (only if scrolling needed)
-	needsScrollbar := len(items) > maxVisible && d.scrollbarCode != ""
+	// Draw a colored rail whenever completion menu is visible.
+	// For long lists, render a proportional thumb on that rail.
+	needsScrollbar := d.scrollbarCode != ""
+	scrolling := len(items) > maxVisible
 	thumbSize := 1
 	thumbStart := 0
-	if needsScrollbar {
+	if needsScrollbar && scrolling {
 		// Thumb size proportional to visible/total ratio, minimum 1
 		thumbSize = maxVisible * maxVisible / len(items)
 		if thumbSize < 1 {
@@ -579,6 +963,8 @@ func (d *Display) RenderCompletionMenu(items []CompletionItem, selected, startCo
 		if scrollRange > 0 && thumbRange > 0 {
 			thumbStart = scrollOffset * thumbRange / scrollRange
 		}
+	} else if needsScrollbar {
+		thumbSize = maxVisible
 	}
 
 	// Render menu items
@@ -646,8 +1032,14 @@ func (d *Display) RenderCompletionMenu(items []CompletionItem, selected, startCo
 		}
 	}
 
-	// Restore cursor position (saved at start of function)
-	sb.WriteString("\x1b[u")
+	// Return to the original input cursor position explicitly instead of relying
+	// on terminal-specific cursor save/restore behavior.
+	fmt.Fprintf(&sb, ansiCursorUp, maxVisible)
+	sb.WriteString("\r")
+	_, restoreCol := d.wrappedCursorForChars(cursorCol + prefixWidth)
+	if restoreCol > 0 {
+		fmt.Fprintf(&sb, ansiCursorForward, restoreCol)
+	}
 
 	d.out.Write([]byte(sb.String()))
 
@@ -656,15 +1048,12 @@ func (d *Display) RenderCompletionMenu(items []CompletionItem, selected, startCo
 }
 
 // ClearCompletionMenu removes the completion menu from display.
-func (d *Display) ClearCompletionMenu(numItems int) {
+func (d *Display) ClearCompletionMenu(numItems, cursorRow, cursorCol int) {
 	if numItems == 0 {
 		return
 	}
 
 	var sb strings.Builder
-
-	// Save cursor position
-	sb.WriteString("\x1b[s")
 
 	// Move down and clear each menu line
 	maxVisible := 6
@@ -677,11 +1066,72 @@ func (d *Display) ClearCompletionMenu(numItems int) {
 		sb.WriteString(ansiClearLine)
 	}
 
-	// Restore cursor position
-	sb.WriteString("\x1b[u")
+	// Move back to where the input cursor was before clearing.
+	fmt.Fprintf(&sb, ansiCursorUp, maxVisible)
+	sb.WriteString("\r")
+	prefixWidth := d.calcPrefixWidth(cursorRow)
+	_, restoreCol := d.wrappedCursorForChars(cursorCol + prefixWidth)
+	if restoreCol > 0 {
+		fmt.Fprintf(&sb, ansiCursorForward, restoreCol)
+	}
 
 	d.out.Write([]byte(sb.String()))
 
 	// Reset tracked menu size
 	d.lastMenuItems = 0
+}
+
+// RenderPermissionPrompt draws the permission request UI.
+// Returns after drawing - caller should handle input and then call ClearPermissionPrompt.
+//
+// Deprecated: Use AgentOutputCoordinator.RenderPermissionPrompt instead for
+// proper coordination with streaming output.
+func (d *Display) RenderPermissionPrompt(command, accentColor string) {
+	var sb strings.Builder
+
+	// Build accent color ANSI code
+	accentCode := ""
+	if accentColor != "" && len(accentColor) == 7 && accentColor[0] == '#' {
+		var r, g, b int
+		fmt.Sscanf(accentColor[1:], "%02x%02x%02x", &r, &g, &b) //nolint:errcheck
+		accentCode = fmt.Sprintf("\x1b[38;2;%d;%d;%dm", r, g, b)
+	} else {
+		accentCode = "\x1b[36m" // Fallback to cyan
+	}
+
+	// Render the prompt box with colored bar and background
+	// Use bold + color for high visibility
+	barStyle := accentCode + ansiBold
+	lines := []string{
+		"",
+		barStyle + "│" + ansiReset + " " + ansiBold + "Agent wants to run:" + ansiReset,
+		barStyle + "│" + ansiReset + " " + accentCode + ansiBold + command + ansiReset,
+		barStyle + "│" + ansiReset,
+		barStyle + "│" + ansiReset + " [y]allow  [n]deny  [a]always allow",
+	}
+
+	for _, line := range lines {
+		sb.WriteString("\r\n")
+		sb.WriteString(ansiClearLine)
+		sb.WriteString(line)
+	}
+
+	d.out.Write([]byte(sb.String()))
+}
+
+// ClearPermissionPrompt removes the permission prompt from display.
+//
+// Deprecated: Use AgentOutputCoordinator.ClearPermissionPrompt instead for
+// proper coordination with streaming output.
+func (d *Display) ClearPermissionPrompt() {
+	var sb strings.Builder
+
+	// Move up 5 lines and clear each
+	for i := 0; i < 5; i++ {
+		fmt.Fprintf(&sb, ansiCursorUp, 1)
+		sb.WriteString("\r")
+		sb.WriteString(ansiClearLine)
+	}
+
+	d.out.Write([]byte(sb.String()))
 }

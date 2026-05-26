@@ -2,6 +2,7 @@ package completion
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -41,7 +42,7 @@ func (c *FileCompleter) SetShowHidden(show bool) {
 //nolint:gocyclo // file completion handles multiple path formats and edge cases
 func (c *FileCompleter) Complete(ctx context.Context, line string, pos int) (Result, error) {
 	// Extract the word being completed
-	word := extractWord(line, pos)
+	word := shellUnescapeWord(shellWordAt(line, pos))
 	originalWord := word // Save for hidden file detection
 	if word == "" {
 		word = "."
@@ -66,16 +67,35 @@ func (c *FileCompleter) Complete(ctx context.Context, line string, pos int) (Res
 		prefix = ""
 	}
 
-	// Read directory
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return Result{}, nil //nolint:nilerr // graceful degradation: return empty on unreadable dir
+	// Read directory (in a goroutine so context cancellation is respected)
+	type readDirResult struct {
+		entries []os.DirEntry
+		err     error
+	}
+	ch := make(chan readDirResult, 1)
+	go func() {
+		entries, err := os.ReadDir(dir)
+		ch <- readDirResult{entries, err}
+	}()
+
+	var entries []os.DirEntry
+	select {
+	case <-ctx.Done():
+		return Result{}, nil
+	case res := <-ch:
+		if res.err != nil {
+			return Result{}, nil //nolint:nilerr // graceful degradation: return empty on unreadable dir
+		}
+		entries = res.entries
 	}
 
 	// Show hidden files if user is explicitly typing a dot prefix
 	// Use originalWord to avoid false positive when word defaults to "."
 	wantsDotFiles := originalWord != "" && strings.HasPrefix(filepath.Base(originalWord), ".")
 	showHidden := c.showHidden || wantsDotFiles
+
+	// Check if the command only accepts directories (cd, pushd, popd, rmdir)
+	dirsOnly := isDirOnlyCommand(line, pos)
 
 	var items []Item
 	for _, entry := range entries {
@@ -104,32 +124,43 @@ func (c *FileCompleter) Complete(ctx context.Context, line string, pos int) (Res
 			value += "/"
 		}
 
+		// Skip non-directories for directory-only commands
+		if dirsOnly && !isDir {
+			continue
+		}
+
 		items = append(items, Item{
-			Value:   value,
-			Display: name,
-			Icon:    getFileIcon(entry),
+			Value:       value,
+			Display:     name,
+			Icon:        getFileIcon(entry),
+			Description: fileDescription(filepath.Join(dir, name), entry, isDir),
 		})
+	}
+
+	rawPrefix := getCompletionPrefix(originalWord, prefix)
+	for i := range items {
+		items[i].Value = EscapeShellWord(items[i].Value)
 	}
 
 	return Result{
 		Items:  items,
-		Prefix: getCompletionPrefix(word, prefix),
+		Prefix: EscapeShellWord(rawPrefix),
 	}, nil
 }
 
-// extractWord extracts the word at position from the line.
-func extractWord(line string, pos int) string {
-	if pos > len(line) {
-		pos = len(line)
+// isDirOnlyCommand checks if the command on the line only accepts directories.
+func isDirOnlyCommand(line string, pos int) bool {
+	// Use pipe context so "ls | cd <TAB>" correctly identifies cd
+	segment, segPos := ExtractPipeContext(line, pos)
+	parts := strings.Fields(segment[:segPos])
+	if len(parts) == 0 {
+		return false
 	}
-
-	// Find start of word (go backwards until space or start)
-	start := pos
-	for start > 0 && line[start-1] != ' ' && line[start-1] != '\t' {
-		start--
+	switch parts[0] {
+	case "cd", "pushd", "popd", "rmdir":
+		return true
 	}
-
-	return line[start:pos]
+	return false
 }
 
 // expandTilde expands ~ to home directory.
@@ -166,6 +197,67 @@ func getCompletionPrefix(original, matched string) string {
 		return dir
 	}
 	return dir + "/"
+}
+
+// fileDescription returns a short description for a file entry (type + size).
+func fileDescription(path string, entry os.DirEntry, isDir bool) string {
+	if isDir {
+		return "directory"
+	}
+
+	info, err := entry.Info()
+	if err != nil {
+		return fileTypeName(entry.Name())
+	}
+	return fileTypeName(entry.Name()) + "  " + formatSize(info.Size())
+}
+
+// fileTypeName returns a human-readable file type from the extension.
+func fileTypeName(name string) string {
+	ext := strings.ToLower(filepath.Ext(name))
+	switch ext {
+	case ".go":
+		return "go"
+	case ".py":
+		return "python"
+	case ".js":
+		return "javascript"
+	case ".ts":
+		return "typescript"
+	case ".md":
+		return "markdown"
+	case ".json":
+		return "json"
+	case ".yaml", ".yml":
+		return "yaml"
+	case ".sh", ".bash", ".zsh":
+		return "shell"
+	case ".txt":
+		return "text"
+	case ".toml":
+		return "toml"
+	case ".sum":
+		return "checksum"
+	case ".mod":
+		return "go module"
+	default:
+		if ext != "" {
+			return ext[1:] // strip dot
+		}
+		return "file"
+	}
+}
+
+// formatSize returns a human-readable file size.
+func formatSize(bytes int64) string {
+	switch {
+	case bytes < 1024:
+		return fmt.Sprintf("%d B", bytes)
+	case bytes < 1024*1024:
+		return fmt.Sprintf("%.1f KB", float64(bytes)/1024)
+	default:
+		return fmt.Sprintf("%.1f MB", float64(bytes)/(1024*1024))
+	}
 }
 
 // getFileIcon returns a Nerd Font icon for the file type.

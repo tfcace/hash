@@ -43,8 +43,7 @@ func TestStreamCollector_Explanation(t *testing.T) {
 	}
 }
 
-func TestClient_StreamRequest_Fallback(t *testing.T) {
-	// Create a mock transport that doesn't support streaming
+func TestClient_StreamRequest(t *testing.T) {
 	mock := NewMockTransport(Response{
 		Type:    ResponseTypeCommand,
 		Command: "ls -la",
@@ -62,12 +61,10 @@ func TestClient_StreamRequest_Fallback(t *testing.T) {
 	}
 
 	// Check for errors
-	select {
-	case err := <-errCh:
+	for err := range errCh {
 		if err != nil {
 			t.Errorf("unexpected error: %v", err)
 		}
-	default:
 	}
 
 	if text != "ls -la" {
@@ -89,7 +86,9 @@ func TestLooksLikeCommand(t *testing.T) {
 	}{
 		{"find . -type f -size +100M", true},
 		{"git push origin main", true},
+		{"jj status", true},
 		{"The largest files are config.db and logs.tar", false},
+		{"**servicer-111-222-333 at 7d5h**", false},
 		{"ls -la | sort -k5 -h | head", true},
 		{"This is a multi-line\nexplanation of how to do something.", false},
 		// Contractions and conversational patterns
@@ -114,5 +113,18 @@ func TestLooksLikeCommand(t *testing.T) {
 				t.Errorf("looksLikeCommand(%q) = %v, want %v", tt.text, got, tt.expected)
 			}
 		})
+	}
+}
+
+func TestStreamCollector_PlainAnswerStaysExplanation(t *testing.T) {
+	c := NewStreamCollector()
+	c.Append("**servicer-111-222-333 at 7d5h**")
+
+	resp := c.Response()
+	if resp.Type != ResponseTypeExplanation {
+		t.Fatalf("expected ResponseTypeExplanation, got %v", resp.Type)
+	}
+	if resp.Explanation != "**servicer-111-222-333 at 7d5h**" {
+		t.Errorf("Explanation = %q, want %q", resp.Explanation, "**servicer-111-222-333 at 7d5h**")
 	}
 }

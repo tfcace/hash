@@ -44,8 +44,12 @@ type Transport interface {
 	// Connect establishes connection to the agent.
 	Connect(ctx context.Context) error
 
-	// Send sends a request and returns a channel for streaming responses.
-	Send(ctx context.Context, req Request) (<-chan Response, error)
+	// SendStreaming sends a request and returns channels for streaming text chunks.
+	// Text chunks arrive on the first channel as they are received from the agent.
+	// Errors arrive on the second channel. Both channels are closed when done.
+	//
+	//nolint:gocritic // unnamedResult: can't name receive-only channel returns
+	SendStreaming(ctx context.Context, req Request) (<-chan string, <-chan error)
 
 	// Close terminates the connection.
 	Close() error
@@ -64,19 +68,21 @@ func NewClient(transport Transport) *Client {
 	return &Client{transport: transport}
 }
 
-// Ask sends a prompt to the agent and waits for the response.
+// Ask sends a prompt to the agent and waits for the complete response.
 func (c *Client) Ask(ctx context.Context, req Request) (Response, error) {
-	respCh, err := c.transport.Send(ctx, req)
-	if err != nil {
+	textCh, errCh := c.transport.SendStreaming(ctx, req)
+
+	collector := NewStreamCollector()
+	for chunk := range textCh {
+		collector.Append(chunk)
+	}
+
+	// Check for errors after text channel is drained
+	if err, ok := <-errCh; ok && err != nil {
 		return Response{Type: ResponseTypeError, Error: err.Error()}, err
 	}
 
-	// For now, just get the first response (blocking)
-	for resp := range respCh {
-		return resp, nil
-	}
-
-	return Response{Type: ResponseTypeError, Error: "no response from agent"}, nil
+	return collector.Response(), nil
 }
 
 // Close closes the underlying transport.

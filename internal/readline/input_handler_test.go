@@ -30,9 +30,6 @@ func TestInputHandler_NewInputHandler(t *testing.T) {
 	defer rl.Close()
 
 	ih := NewInputHandler(rl, store)
-	if ih == nil {
-		t.Fatal("NewInputHandler() returned nil")
-	}
 
 	if ih.readline != rl {
 		t.Error("InputHandler.readline not set correctly")

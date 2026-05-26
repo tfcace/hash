@@ -58,6 +58,61 @@ mode = "built-in"
 	}
 }
 
+func TestLoadConfig_NamedAgents(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.toml")
+
+	content := []byte(`
+[agent]
+default = "ollama"
+timeout = "45s"
+
+[agent.ollama]
+transport = "http"
+url = "http://localhost:11434/api/generate"
+model = "codellama:13b"
+headers = { Authorization = "Bearer token" }
+`)
+	if err := os.WriteFile(configPath, content, 0o644); err != nil { //nolint:gosec // G306: test file
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(tmpDir)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	agent := cfg.EffectiveAgent()
+	if agent.Transport != "http" {
+		t.Errorf("Transport = %q, want http", agent.Transport)
+	}
+	if agent.URL != "http://localhost:11434/api/generate" {
+		t.Errorf("URL = %q", agent.URL)
+	}
+	if agent.Model != "codellama:13b" {
+		t.Errorf("Model = %q", agent.Model)
+	}
+	if agent.Timeout != "45s" {
+		t.Errorf("Timeout = %q, want 45s", agent.Timeout)
+	}
+	if agent.Headers["Authorization"] != "Bearer token" {
+		t.Errorf("Authorization header = %q", agent.Headers["Authorization"])
+	}
+}
+
+func TestEffectiveAgent_FlatConfigStillWorks(t *testing.T) {
+	cfg := Default()
+	cfg.Agent.Default = "custom"
+	cfg.Agent.Transport = "http"
+	cfg.Agent.URL = "http://localhost:11434/api/generate"
+	cfg.Agent.Model = "llama3"
+
+	agent := cfg.EffectiveAgent()
+	if agent.Transport != "http" || agent.URL == "" || agent.Model != "llama3" {
+		t.Fatalf("flat agent config not preserved: %+v", agent)
+	}
+}
+
 func TestConfig_StartupFiles(t *testing.T) {
 	tmpDir := t.TempDir()
 	configPath := filepath.Join(tmpDir, "config.toml")
@@ -179,6 +234,7 @@ keybindings = "vim"
 	// But should also return usable defaults
 	if cfg == nil {
 		t.Fatal("Load() should return defaults even on parse error")
+		return
 	}
 
 	// Check that defaults are applied
@@ -215,5 +271,42 @@ func TestLoadWithWarnings_WritesWarning(t *testing.T) {
 	}
 	if !strings.Contains(warning, "Warning") {
 		t.Errorf("Warning should contain 'Warning', got: %q", warning)
+	}
+}
+
+func TestLoadConfig_HooksChpwd(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.toml")
+
+	content := []byte(`
+[shell.hooks]
+chpwd = ["zoxide add -- \"$PWD\"", "echo changed"]
+`)
+	if err := os.WriteFile(configPath, content, 0o644); err != nil { //nolint:gosec // G306: test file
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(tmpDir)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	if len(cfg.Shell.Hooks.Chpwd) != 2 {
+		t.Fatalf("expected 2 chpwd hooks, got %d", len(cfg.Shell.Hooks.Chpwd))
+	}
+	if cfg.Shell.Hooks.Chpwd[0] != `zoxide add -- "$PWD"` {
+		t.Errorf("Hooks.Chpwd[0] = %q, want %q", cfg.Shell.Hooks.Chpwd[0], `zoxide add -- "$PWD"`)
+	}
+	if cfg.Shell.Hooks.Chpwd[1] != "echo changed" {
+		t.Errorf("Hooks.Chpwd[1] = %q, want %q", cfg.Shell.Hooks.Chpwd[1], "echo changed")
+	}
+}
+
+func TestLoadConfig_HooksChpwd_Default(t *testing.T) {
+	cfg := Default()
+
+	// Default should have no chpwd hooks
+	if len(cfg.Shell.Hooks.Chpwd) != 0 {
+		t.Errorf("expected 0 default chpwd hooks, got %d", len(cfg.Shell.Hooks.Chpwd))
 	}
 }

@@ -104,13 +104,19 @@ func (r *InputReader) DrainPending() {
 		}
 
 		// Parse and queue the key
+		var key Key
 		if r.buf[0] == 0x1b {
 			// Might be start of escape sequence - try to read more
-			key := r.drainEscapeSequence(fd)
-			r.pendingKeys = append(r.pendingKeys, key)
+			key = r.drainEscapeSequence(fd)
 		} else {
-			r.pendingKeys = append(r.pendingKeys, ParseKey(r.buf[:1]))
+			key = ParseKey(r.buf[:1])
 		}
+
+		// Skip no-op keys (terminal responses like DECRPM that were parsed and discarded)
+		if key.Special == KeyNone && key.Rune == 0 {
+			continue
+		}
+		r.pendingKeys = append(r.pendingKeys, key)
 	}
 }
 
@@ -136,11 +142,13 @@ func hasDataAvailableWithTimeout(fd int, timeout time.Duration) bool {
 }
 
 // drainEscapeSequence reads an escape sequence during drain.
+// Uses a small timeout (2ms) between bytes to avoid splitting multi-byte
+// terminal responses (e.g., DECRPM \x1b[?2027;1$y) into partial reads.
 func (r *InputReader) drainEscapeSequence(fd int) Key {
 	total := 1 // Already have ESC in buf[0]
 
 	for total < len(r.buf) {
-		if !hasDataAvailable(fd) {
+		if !hasDataAvailableWithTimeout(fd, 2*time.Millisecond) {
 			break
 		}
 		n, err := r.in.Read(r.buf[total : total+1])
@@ -207,6 +215,13 @@ func (r *InputReader) ReadKeyInterruptible(done <-chan struct{}) (Key, error) {
 				break // Data available, proceed to read
 			}
 			// No data, loop back to check done channel
+		}
+		// Re-check done after poll to avoid reading stdin when the
+		// editor is shutting down (e.g., for Ctrl+R → bubbletea handoff).
+		select {
+		case <-done:
+			return Key{}, context.Canceled
+		default:
 		}
 	}
 
