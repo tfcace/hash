@@ -914,9 +914,7 @@ func (e *Editor) findWordStart() int {
 	}
 
 	start := 0
-	inSingle := false
-	inDouble := false
-	escaped := false
+	scanner := shellWordScanner{}
 
 	for i := 0; i < pos; {
 		r, size := utf8.DecodeRuneInString(line[i:pos])
@@ -924,16 +922,7 @@ func (e *Editor) findWordStart() int {
 			break
 		}
 
-		switch {
-		case escaped:
-			escaped = false
-		case r == '\\' && !inSingle:
-			escaped = true
-		case r == '\'' && !inDouble:
-			inSingle = !inSingle
-		case r == '"' && !inSingle:
-			inDouble = !inDouble
-		case (r == ' ' || r == '\t') && !inSingle && !inDouble:
+		if scanner.consume(r) {
 			start = i + size
 		}
 
@@ -941,6 +930,32 @@ func (e *Editor) findWordStart() int {
 	}
 
 	return start
+}
+
+type shellWordScanner struct {
+	inSingle bool
+	inDouble bool
+	escaped  bool
+}
+
+func (s *shellWordScanner) consume(r rune) bool {
+	if s.escaped {
+		s.escaped = false
+		return false
+	}
+	if r == '\\' && !s.inSingle {
+		s.escaped = true
+		return false
+	}
+	if r == '\'' && !s.inDouble {
+		s.inSingle = !s.inSingle
+		return false
+	}
+	if r == '"' && !s.inSingle {
+		s.inDouble = !s.inDouble
+		return false
+	}
+	return (r == ' ' || r == '\t') && !s.inSingle && !s.inDouble
 }
 
 // acceptCompletion replaces the current word with the selected completion.
