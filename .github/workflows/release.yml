@@ -151,6 +151,18 @@ jobs:
         run: |
           gh release upload ${{ needs.release-please.outputs.tag_name }} dist/*.tar.gz dist/checksums.txt --clobber
 
+      - name: Apply curated release notes
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ needs.release-please.outputs.tag_name }}"
+          NOTES_FILE="docs/releases/${TAG}.md"
+          if [ -f "$NOTES_FILE" ]; then
+            gh release edit "$TAG" --notes-file "$NOTES_FILE"
+          else
+            echo "::warning::Curated release notes not found: ${NOTES_FILE}"
+          fi
+
       - name: Update Homebrew tap
         env:
           GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
