@@ -123,7 +123,6 @@ func FormatHashrcComment(rcFile string) string {
 		displayFile = "~" + rcFile[len(home):]
 	}
 	return fmt.Sprintf(`# Hash migration: sourcing %s config with compatibility filtering
-# Run 'hash migrate generate' to create a standalone .hashrc
 # Run 'hash migrate status' to see what was skipped
 source %s
 `, displayFile, rcFile)
@@ -147,7 +146,6 @@ func FormatHashrcCommentFiles(files []string) string {
 	}
 	b.WriteString("#\n")
 	b.WriteString("# Files are sourced at startup with bash syntax support.\n")
-	b.WriteString("# Run 'hash migrate generate' to create a standalone .hashrc\n")
 	b.WriteString("# Run 'hash migrate status' to see what was skipped\n")
 	b.WriteString("#\n")
 	b.WriteString("# Add your own customizations below:\n\n")

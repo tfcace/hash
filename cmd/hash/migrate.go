@@ -17,12 +17,9 @@ func printMigrateHelp() {
 
 Commands:
   status      Show what was imported/skipped from last migration
-  generate    Create a standalone ~/.hashrc from imported settings
 
 Flags:
   --from <shell>    Import from specific shell (zsh, bash)
-  --dry-run         Show what would be imported without making changes
-  --file <path>     Import from specific file instead of auto-detect
 
 Examples:
   hash migrate              Interactive import prompt
@@ -43,8 +40,6 @@ func runMigrate(args []string) int {
 			return 1
 		}
 		return 0
-	case "generate":
-		return runMigrateGenerate(args[1:])
 	case "--from":
 		if len(args) < 2 {
 			fmt.Fprintf(os.Stderr, "hash migrate: --from requires a shell name\n")
@@ -246,10 +241,4 @@ func runMigrateFrom(shell string, args []string) int {
 	}
 
 	return 0
-}
-
-func runMigrateGenerate(args []string) int {
-	// TODO: Implement generate
-	fmt.Println("hash migrate generate: not yet implemented")
-	return 1
 }
