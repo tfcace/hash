@@ -51,6 +51,7 @@ type Shell struct {
 	agentHandler *AgentHandler
 	responseUI   *ResponseUI
 	history      *history.Store
+	historyPath  string
 	learning     *learning.FixStore
 	clipboard    *clipboard.Buffer
 	predictor    *prediction.Predictor
@@ -83,6 +84,7 @@ type Shell struct {
 //nolint:gocyclo // shell initialization wires up many subsystems sequentially
 func New(cfg *config.Config) (*Shell, error) {
 	e := executor.New()
+	agentCfg := cfg.EffectiveAgent()
 
 	promptCfg := prompt.Config{
 		Mode:         cfg.Prompt.Mode,
@@ -134,19 +136,20 @@ func New(cfg *config.Config) (*Shell, error) {
 	// Select transport based on config
 	var transport agent.Transport
 	var acpTransport *agent.ACPTransport
-	switch cfg.Agent.Transport {
+	switch agentCfg.Transport {
 	case "http":
-		if cfg.Agent.URL != "" {
+		if agentCfg.URL != "" {
 			transport = agent.NewHTTPTransport(agent.HTTPConfig{
-				URL:   cfg.Agent.URL,
-				Model: cfg.Agent.Model,
+				URL:     agentCfg.URL,
+				Model:   agentCfg.Model,
+				Headers: agentCfg.Headers,
 			})
 		}
 	default: // "stdio" or "acp" or unset - use ACP protocol
-		if cfg.Agent.Command != "" {
+		if agentCfg.Command != "" {
 			acpTransport = agent.NewACPTransport(agent.ACPConfig{
-				Command: cfg.Agent.Command,
-				Args:    cfg.Agent.Args,
+				Command: agentCfg.Command,
+				Args:    agentCfg.Args,
 			})
 			transport = acpTransport
 		}
@@ -155,7 +158,7 @@ func New(cfg *config.Config) (*Shell, error) {
 	// Create allowlist manager for agent permission requests
 	cwd, _ := os.Getwd()
 	allowlistMgr := allowlist.New(
-		cfg.Agent.AllowedCommandsScope,
+		agentCfg.AllowedCommandsScope,
 		cwd,
 		getConfigDir(),
 	)
@@ -176,12 +179,14 @@ func New(cfg *config.Config) (*Shell, error) {
 
 	// Initialize history store (must happen before readline creation)
 	var historyStore *history.Store
-	historyPath := filepath.Join(getDataDir(), "history.db")
+	historyPath := configuredHistoryPath(cfg)
 	var err error
-	historyStore, err = history.NewStore(historyPath)
-	if err != nil {
-		// Log warning but don't fail - history is optional
-		fmt.Fprintf(os.Stderr, "hash: warning: history unavailable: %v\n", err)
+	if cfg.History.Enabled {
+		historyStore, err = history.NewStore(historyPath)
+		if err != nil {
+			// Log warning but don't fail - history is optional
+			fmt.Fprintf(os.Stderr, "hash: warning: history unavailable: %v\n", err)
+		}
 	}
 
 	// Create input handler and Ctrl+R filter
@@ -317,6 +322,7 @@ func New(cfg *config.Config) (*Shell, error) {
 		agentHandler: agentHandler,
 		responseUI:   NewResponseUI(os.Stdout),
 		history:      historyStore,
+		historyPath:  historyPath,
 		learning:     learningStore,
 		clipboard:    clipboardBuf,
 		predictor:    predictor,
@@ -386,6 +392,7 @@ func (s *Shell) Run(ctx context.Context) error {
 		}
 		return err
 	}
+	s.showWelcomeIfNeeded()
 
 	// Generate first prompt and extract color palette concurrently.
 	// This replaces separate refreshColorPalette() + updatePrompt() calls,
@@ -427,6 +434,18 @@ func (s *Shell) Run(ctx context.Context) error {
 		s.runChpwdHook(ctx)
 		s.updatePrompt()
 	}
+}
+
+func (s *Shell) showWelcomeIfNeeded() {
+	if !s.mode.Interactive {
+		return
+	}
+	welcome := NewWelcome(getConfigDir())
+	if !welcome.ShouldShow() {
+		return
+	}
+	fmt.Print(welcome.Message())
+	_ = welcome.MarkShown()
 }
 
 // emitShellIntegration emits OSC shell integration sequences before prompt.
@@ -891,9 +910,10 @@ func (s *Shell) handleAgentRequest(ctx context.Context, parsed parser.ParseResul
 }
 
 func (s *Shell) agentRequestTimeout() time.Duration {
+	agentCfg := s.config.EffectiveAgent()
 	timeout := 120 * time.Second // Match config default
-	if s.config.Agent.Timeout != "" {
-		if parsedDur, err := time.ParseDuration(s.config.Agent.Timeout); err == nil {
+	if agentCfg.Timeout != "" {
+		if parsedDur, err := time.ParseDuration(agentCfg.Timeout); err == nil {
 			timeout = parsedDur
 		}
 	}
@@ -1442,6 +1462,23 @@ func getDataDir() string {
 	}
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".local", "share", "hash")
+}
+
+func configuredHistoryPath(cfg *config.Config) string {
+	if cfg != nil && cfg.History.Path != "" {
+		return expandUserPath(cfg.History.Path)
+	}
+	return filepath.Join(getDataDir(), "history.db")
+}
+
+func expandUserPath(path string) string {
+	if strings.HasPrefix(path, "~") {
+		home, _ := os.UserHomeDir()
+		if home != "" {
+			return filepath.Join(home, path[1:])
+		}
+	}
+	return path
 }
 
 // getConfigDir returns the config directory for hash.

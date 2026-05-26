@@ -29,6 +29,43 @@ func TestNewShell(t *testing.T) {
 	}
 }
 
+func TestNewShell_HistoryDisabled(t *testing.T) {
+	cfg := config.Default()
+	cfg.History.Enabled = false
+
+	sh, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer sh.Close()
+
+	if sh.history != nil {
+		t.Fatal("history should be nil when history.enabled is false")
+	}
+}
+
+func TestNewShell_HistoryPathFromConfig(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := config.Default()
+	cfg.History.Path = filepath.Join(tmpDir, "custom-history.db")
+
+	sh, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer sh.Close()
+
+	if sh.history == nil {
+		t.Fatal("history should be initialized")
+	}
+	if sh.historyPath != cfg.History.Path {
+		t.Fatalf("historyPath = %q, want %q", sh.historyPath, cfg.History.Path)
+	}
+	if _, err := os.Stat(cfg.History.Path); err != nil {
+		t.Fatalf("history database was not created at configured path: %v", err)
+	}
+}
+
 func TestShell_ChpwdHook(t *testing.T) {
 	// Save and restore working directory
 	origDir, err := os.Getwd()

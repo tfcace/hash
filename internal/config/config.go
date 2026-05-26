@@ -11,14 +11,15 @@ import (
 
 // Config represents the Hash shell configuration.
 type Config struct {
-	Shell       ShellConfig       `toml:"shell"`
-	Input       InputConfig       `toml:"input"`
-	Prompt      PromptConfig      `toml:"prompt"`
-	Agent       AgentConfig       `toml:"agent"`
-	History     HistoryConfig     `toml:"history"`
-	Completions CompletionsConfig `toml:"completions"`
-	Clipboard   ClipboardConfig   `toml:"clipboard"`
-	Prediction  PredictionConfig  `toml:"prediction"`
+	Shell       ShellConfig              `toml:"shell"`
+	Input       InputConfig              `toml:"input"`
+	Prompt      PromptConfig             `toml:"prompt"`
+	Agent       AgentConfig              `toml:"agent"`
+	Agents      map[string]AgentEndpoint `toml:"-"`
+	History     HistoryConfig            `toml:"history"`
+	Completions CompletionsConfig        `toml:"completions"`
+	Clipboard   ClipboardConfig          `toml:"clipboard"`
+	Prediction  PredictionConfig         `toml:"prediction"`
 }
 
 type ShellConfig struct {
@@ -70,14 +71,26 @@ type PromptConfig struct {
 }
 
 type AgentConfig struct {
-	Default              string   `toml:"default"`
-	Timeout              string   `toml:"timeout"`
-	Transport            string   `toml:"transport"`              // "stdio" or "http"
-	Command              string   `toml:"command"`                // For stdio transport
-	Args                 []string `toml:"args"`                   // For stdio transport
-	URL                  string   `toml:"url"`                    // For http transport (e.g., "http://localhost:11434/api/generate")
-	Model                string   `toml:"model"`                  // For http transport (e.g., "codellama")
-	AllowedCommandsScope string   `toml:"allowed_commands_scope"` // "project", "global", "session"
+	Default              string            `toml:"default"`
+	Timeout              string            `toml:"timeout"`
+	Transport            string            `toml:"transport"`              // "stdio" or "http"
+	Command              string            `toml:"command"`                // For stdio transport
+	Args                 []string          `toml:"args"`                   // For stdio transport
+	URL                  string            `toml:"url"`                    // For http transport (e.g., "http://localhost:11434/api/generate")
+	Model                string            `toml:"model"`                  // For http transport (e.g., "codellama")
+	Headers              map[string]string `toml:"headers"`                // For http transport
+	AllowedCommandsScope string            `toml:"allowed_commands_scope"` // "project", "global", "session"
+}
+
+// AgentEndpoint is an individual named agent under [agent.<name>].
+type AgentEndpoint struct {
+	Transport string            `toml:"transport"`
+	Command   string            `toml:"command"`
+	Args      []string          `toml:"args"`
+	URL       string            `toml:"url"`
+	Model     string            `toml:"model"`
+	Headers   map[string]string `toml:"headers"`
+	Timeout   string            `toml:"timeout"`
 }
 
 type HistoryConfig struct {
@@ -191,6 +204,8 @@ func Load(configDir string) (*Config, error) {
 		return Default(), fmt.Errorf("config parse error (using defaults): %w", err)
 	}
 
+	cfg.loadNamedAgents(data)
+
 	// Apply defaults for empty values
 	if cfg.Shell.Keybindings == "" {
 		cfg.Shell.Keybindings = "emacs"
@@ -203,6 +218,115 @@ func Load(configDir string) (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// EffectiveAgent returns the concrete agent settings selected by [agent].default.
+// It supports both the original flat [agent] shape and documented [agent.<name>] tables.
+func (c *Config) EffectiveAgent() AgentConfig {
+	if c == nil {
+		return Default().Agent
+	}
+	agent := c.Agent
+	if agent.Default == "" || len(c.Agents) == 0 {
+		return agent
+	}
+
+	named, ok := c.Agents[agent.Default]
+	if !ok {
+		return agent
+	}
+
+	if named.Transport != "" {
+		agent.Transport = named.Transport
+	}
+	if named.Command != "" {
+		agent.Command = named.Command
+	}
+	if named.Args != nil {
+		agent.Args = named.Args
+	}
+	if named.URL != "" {
+		agent.URL = named.URL
+	}
+	if named.Model != "" {
+		agent.Model = named.Model
+	}
+	if named.Headers != nil {
+		agent.Headers = named.Headers
+	}
+	if named.Timeout != "" {
+		agent.Timeout = named.Timeout
+	}
+
+	return agent
+}
+
+func (c *Config) loadNamedAgents(data []byte) {
+	var raw map[string]interface{}
+	if err := toml.Unmarshal(data, &raw); err != nil {
+		return
+	}
+
+	agentRaw, ok := raw["agent"].(map[string]interface{})
+	if !ok {
+		return
+	}
+
+	agents := make(map[string]AgentEndpoint)
+	for name, value := range agentRaw {
+		table, ok := value.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		agents[name] = AgentEndpoint{
+			Transport: stringValue(table, "transport"),
+			Command:   stringValue(table, "command"),
+			Args:      stringSliceValue(table, "args"),
+			URL:       stringValue(table, "url"),
+			Model:     stringValue(table, "model"),
+			Headers:   stringMapValue(table, "headers"),
+			Timeout:   stringValue(table, "timeout"),
+		}
+	}
+
+	if len(agents) > 0 {
+		c.Agents = agents
+	}
+}
+
+func stringValue(values map[string]interface{}, key string) string {
+	if value, ok := values[key].(string); ok {
+		return value
+	}
+	return ""
+}
+
+func stringSliceValue(values map[string]interface{}, key string) []string {
+	raw, ok := values[key].([]interface{})
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(raw))
+	for _, value := range raw {
+		if str, ok := value.(string); ok {
+			out = append(out, str)
+		}
+	}
+	return out
+}
+
+func stringMapValue(values map[string]interface{}, key string) map[string]string {
+	raw, ok := values[key].(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	out := make(map[string]string, len(raw))
+	for k, value := range raw {
+		if str, ok := value.(string); ok {
+			out[k] = str
+		}
+	}
+	return out
 }
 
 // LoadWithWarnings is like Load but writes warnings to the given writer.
