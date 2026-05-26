@@ -91,6 +91,17 @@ Options:
   -v, --version   Show version
   -h, --help      Show this help
 
+Subcommands:
+  migrate         Import compatible bash/zsh settings
+
+Interactive builtins:
+  tips            Show common Hash shortcuts and AI syntax
+  status          Show subsystem status
+  history         Search and inspect command history
+  copy            Copy recent command output
+  issue           Draft a GitHub issue from shell context
+  setup-zoxide    Configure zoxide integration
+
 Environment:
   HASH_LOGIN=1        Set when running as login shell
   HASH_INTERACTIVE=1  Set when running interactively

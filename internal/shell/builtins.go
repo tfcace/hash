@@ -332,14 +332,8 @@ func (s *Shell) builtinStatus() error {
 
 // builtinTips shows helpful tips about Hash features.
 func (s *Shell) builtinTips(args []string) error {
-	// Handle "tips off" to disable hints (stored in config)
-	if len(args) > 0 && args[0] == "off" {
-		fmt.Println("Hints disabled. Run 'tips on' to re-enable.")
-		// TODO: persist to config
-		return nil
-	}
-	if len(args) > 0 && args[0] == "on" {
-		fmt.Println("Hints enabled.")
+	if len(args) > 0 && (args[0] == "off" || args[0] == "on") {
+		fmt.Println("Startup tips are shown only once. Run 'tips' anytime to view them.")
 		return nil
 	}
 
@@ -377,12 +371,13 @@ func (s *Shell) builtinTips(args []string) error {
 	fmt.Printf("  %s  %s\n", keyStyle.Render("Ctrl+O"), dimStyle.Render("Copy last output"))
 	fmt.Println()
 
-	fmt.Println(dimStyle.Render("Run 'tips off' to disable startup hints."))
+	fmt.Println(dimStyle.Render("Startup tips are shown once; run 'tips' anytime to view this list."))
 	return nil
 }
 
 // collectStatus gathers the current status of all subsystems.
 func (s *Shell) collectStatus() *SystemStatus {
+	agentCfg := s.config.EffectiveAgent()
 	status := &SystemStatus{
 		Version: version.Version,
 	}
@@ -395,13 +390,16 @@ func (s *Shell) collectStatus() *SystemStatus {
 	}
 
 	// History status
-	if s.history != nil {
+	switch {
+	case s.config != nil && !s.config.History.Enabled:
+		status.HistoryErr = "disabled in config"
+	case s.history != nil:
 		status.HistoryOK = true
-		status.HistoryPath = "~/.local/share/hash/history.db"
+		status.HistoryPath = s.historyPath
 		if count, err := s.history.Count(); err == nil {
 			status.HistoryCount = count
 		}
-	} else {
+	default:
 		status.HistoryErr = "not initialized"
 	}
 
@@ -416,9 +414,9 @@ func (s *Shell) collectStatus() *SystemStatus {
 	}
 
 	// Agent status
-	status.AgentName = s.config.Agent.Default
+	status.AgentName = agentCfg.Default
 	if status.AgentName == "" {
-		status.AgentName = s.config.Agent.Command
+		status.AgentName = agentCfg.Command
 	}
 	status.AgentOK = s.agentHandler != nil
 
