@@ -4,6 +4,9 @@ import (
 	"context"
 	"sort"
 	"strings"
+	"time"
+
+	"github.com/tfcace/hash/internal/trace"
 )
 
 // Router dispatches completion requests to registered completers.
@@ -48,11 +51,44 @@ func (r *Router) Register(c Completer, priority Priority) {
 
 // Complete tries each completer in priority order until one returns results.
 func (r *Router) Complete(ctx context.Context, line string, pos int) (Result, error) {
+	start := time.Now()
+	traceEnabled := trace.Enabled("completion")
+
 	// Extract the query (word being completed) for fuzzy filtering
 	query := extractCompletionQuery(line, pos)
+	if traceEnabled {
+		trace.Emit("completion", "router_start", trace.LevelDetailed, map[string]any{
+			"line":       line,
+			"pos":        pos,
+			"query":      query,
+			"fuzzy":      r.fuzzy,
+			"completers": len(r.completers),
+		})
+	}
 
 	for _, rc := range r.completers {
+		completerStart := time.Now()
+		if traceEnabled {
+			trace.Emit("completion", "completer_start", trace.LevelDetailed, map[string]any{
+				"name":     rc.completer.Name(),
+				"priority": int(rc.priority),
+			})
+		}
+
 		result, err := rc.completer.Complete(ctx, line, pos)
+		if traceEnabled {
+			errText := ""
+			if err != nil {
+				errText = err.Error()
+			}
+			trace.Emit("completion", "completer_done", trace.LevelDetailed, map[string]any{
+				"name":        rc.completer.Name(),
+				"priority":    int(rc.priority),
+				"items":       len(result.Items),
+				"error":       errText,
+				"duration_ms": float64(time.Since(completerStart).Microseconds()) / 1000.0,
+			})
+		}
 		if err != nil {
 			continue // Try next completer on error
 		}
@@ -71,10 +107,24 @@ func (r *Router) Complete(ctx context.Context, line string, pos int) (Result, er
 					result.Items = FuzzyFilter(result.Items, filterQuery)
 				}
 			}
+			if traceEnabled {
+				trace.Emit("completion", "router_done", trace.LevelDetailed, map[string]any{
+					"winner":      rc.completer.Name(),
+					"items":       len(result.Items),
+					"duration_ms": float64(time.Since(start).Microseconds()) / 1000.0,
+				})
+			}
 			return result, nil
 		}
 	}
 
+	if traceEnabled {
+		trace.Emit("completion", "router_done", trace.LevelDetailed, map[string]any{
+			"winner":      "",
+			"items":       0,
+			"duration_ms": float64(time.Since(start).Microseconds()) / 1000.0,
+		})
+	}
 	return Result{}, nil
 }
 

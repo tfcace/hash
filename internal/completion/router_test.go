@@ -2,7 +2,12 @@ package completion
 
 import (
 	"context"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/tfcace/hash/internal/trace"
 )
 
 // MockCompleter for testing
@@ -158,6 +163,42 @@ func TestRouter_FuzzyDisabled(t *testing.T) {
 
 	if len(result.Items) != 2 {
 		t.Errorf("Expected 2 items unchanged, got %d", len(result.Items))
+	}
+}
+
+func TestRouter_EmitsCompletionTraceEvents(t *testing.T) {
+	tmpDir := t.TempDir()
+	tracePath := filepath.Join(tmpDir, "completion-trace.jsonl")
+	t.Setenv("HASH_TRACE", "completion")
+	t.Setenv("HASH_TRACE_PATH", tracePath)
+	t.Setenv("HASH_TRACE_LEVEL", "detailed")
+
+	if err := trace.Init(); err != nil {
+		t.Fatalf("trace init: %v", err)
+	}
+	t.Cleanup(trace.Close)
+
+	router := NewRouter()
+	router.Register(&MockCompleter{
+		name:  "mock",
+		items: []Item{{Value: "result"}},
+	}, PriorityFilesystem)
+
+	if _, err := router.Complete(context.Background(), "cat r", 5); err != nil {
+		t.Fatalf("Complete() error = %v", err)
+	}
+	trace.Close()
+
+	content, err := os.ReadFile(tracePath)
+	if err != nil {
+		t.Fatalf("ReadFile(%q): %v", tracePath, err)
+	}
+	text := string(content)
+	if !strings.Contains(text, `"event":"router_start"`) {
+		t.Fatalf("trace missing router_start event:\n%s", text)
+	}
+	if !strings.Contains(text, `"event":"completer_done"`) {
+		t.Fatalf("trace missing completer_done event:\n%s", text)
 	}
 }
 

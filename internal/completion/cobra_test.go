@@ -2,7 +2,10 @@ package completion
 
 import (
 	"context"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -55,6 +58,68 @@ func TestCobraCompleter_NonCobraCommand(t *testing.T) {
 	result, _ := completer.Complete(ctx, "ls -", 4)
 	if len(result.Items) != 0 {
 		t.Errorf("Items count = %d, want 0 for non-Cobra", len(result.Items))
+	}
+}
+
+func TestCobraCompleter_CompleteUsesCacheOnly(t *testing.T) {
+	tmpDir := t.TempDir()
+	cmdPath := filepath.Join(tmpDir, "fakecobra")
+	if err := os.WriteFile(cmdPath, []byte("#!/bin/sh\necho unexpected\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile(%q): %v", cmdPath, err)
+	}
+	t.Setenv("PATH", tmpDir)
+
+	completer := NewCobraCompleter()
+	result, err := completer.Complete(context.Background(), "fakecobra get ", len("fakecobra get "))
+	if err != nil {
+		t.Fatalf("Complete() error = %v", err)
+	}
+	if len(result.Items) != 0 {
+		t.Fatalf("Complete() without prefetch should return no items, got %#v", result.Items)
+	}
+
+	completer.lookPathCacheMu.RLock()
+	_, cached := completer.lookPathCache["fakecobra"]
+	completer.lookPathCacheMu.RUnlock()
+	if cached {
+		t.Fatal("Complete should not scan PATH or populate lookPath cache")
+	}
+}
+
+func TestCobraCompleter_SkipsShellBuiltinCd(t *testing.T) {
+	tmpDir := t.TempDir()
+	cmdPath := filepath.Join(tmpDir, "cd")
+	if err := os.WriteFile(cmdPath, []byte("#!/bin/sh\necho cobra-cd\\tdescription\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile(%q): %v", cmdPath, err)
+	}
+	t.Setenv("PATH", tmpDir)
+
+	completer := NewCobraCompleter()
+	completer.Prefetch("cd ", len("cd "))
+	completer.lookPathCacheMu.RLock()
+	_, cachedPath := completer.lookPathCache["cd"]
+	completer.lookPathCacheMu.RUnlock()
+	if cachedPath {
+		t.Fatal("Prefetch should not scan PATH for shell builtin cd")
+	}
+
+	cacheKey := cmdPath + ":" + strings.Join([]string{"__complete", ""}, " ")
+	completer.lookPathCacheMu.Lock()
+	completer.lookPathCache["cd"] = cmdPath
+	completer.lookPathCacheMu.Unlock()
+	completer.cacheMu.Lock()
+	completer.cache[cacheKey] = cachedResult{
+		result:    Result{Items: []Item{{Value: "cobra-cd"}}},
+		expiresAt: time.Now().Add(time.Minute),
+	}
+	completer.cacheMu.Unlock()
+
+	result, err := completer.Complete(context.Background(), "cd ", len("cd "))
+	if err != nil {
+		t.Fatalf("Complete() error = %v", err)
+	}
+	if len(result.Items) != 0 {
+		t.Fatalf("cd should bypass Cobra completion, got %#v", result.Items)
 	}
 }
 

@@ -6,6 +6,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
+
+	"github.com/tfcace/hash/internal/trace"
 )
 
 // FileCompleter completes filesystem paths.
@@ -41,6 +44,9 @@ func (c *FileCompleter) SetShowHidden(show bool) {
 //
 //nolint:gocyclo // file completion handles multiple path formats and edge cases
 func (c *FileCompleter) Complete(ctx context.Context, line string, pos int) (Result, error) {
+	start := time.Now()
+	traceEnabled := trace.Enabled("completion")
+
 	// Extract the word being completed
 	word := shellUnescapeWord(shellWordAt(line, pos))
 	originalWord := word // Save for hidden file detection
@@ -67,12 +73,27 @@ func (c *FileCompleter) Complete(ctx context.Context, line string, pos int) (Res
 		prefix = ""
 	}
 
+	// Check if the command only accepts directories (cd, pushd, popd, rmdir)
+	dirsOnly := isDirOnlyCommand(line, pos)
+	if traceEnabled {
+		trace.Emit("completion", "file_start", trace.LevelDetailed, map[string]any{
+			"line":       line,
+			"pos":        pos,
+			"word":       originalWord,
+			"dir":        dir,
+			"prefix":     prefix,
+			"dirs_only":  dirsOnly,
+			"fuzzy_mode": c.fuzzyMode,
+		})
+	}
+
 	// Read directory (in a goroutine so context cancellation is respected)
 	type readDirResult struct {
 		entries []os.DirEntry
 		err     error
 	}
 	ch := make(chan readDirResult, 1)
+	readStart := time.Now()
 	go func() {
 		entries, err := os.ReadDir(dir)
 		ch <- readDirResult{entries, err}
@@ -81,8 +102,26 @@ func (c *FileCompleter) Complete(ctx context.Context, line string, pos int) (Res
 	var entries []os.DirEntry
 	select {
 	case <-ctx.Done():
+		if traceEnabled {
+			trace.Emit("completion", "file_readdir_canceled", trace.LevelDetailed, map[string]any{
+				"dir":         dir,
+				"duration_ms": float64(time.Since(readStart).Microseconds()) / 1000.0,
+			})
+		}
 		return Result{}, nil
 	case res := <-ch:
+		if traceEnabled {
+			errText := ""
+			if res.err != nil {
+				errText = res.err.Error()
+			}
+			trace.Emit("completion", "file_readdir_done", trace.LevelDetailed, map[string]any{
+				"dir":         dir,
+				"entries":     len(res.entries),
+				"error":       errText,
+				"duration_ms": float64(time.Since(readStart).Microseconds()) / 1000.0,
+			})
+		}
 		if res.err != nil {
 			return Result{}, nil //nolint:nilerr // graceful degradation: return empty on unreadable dir
 		}
@@ -94,28 +133,45 @@ func (c *FileCompleter) Complete(ctx context.Context, line string, pos int) (Res
 	wantsDotFiles := originalWord != "" && strings.HasPrefix(filepath.Base(originalWord), ".")
 	showHidden := c.showHidden || wantsDotFiles
 
-	// Check if the command only accepts directories (cd, pushd, popd, rmdir)
-	dirsOnly := isDirOnlyCommand(line, pos)
-
 	var items []Item
+	var hiddenSkipped, prefixSkipped, nonDirSkipped, symlinkAssumed int
 	for _, entry := range entries {
+		select {
+		case <-ctx.Done():
+			if traceEnabled {
+				trace.Emit("completion", "file_canceled", trace.LevelDetailed, map[string]any{
+					"items":       len(items),
+					"duration_ms": float64(time.Since(start).Microseconds()) / 1000.0,
+				})
+			}
+			return Result{}, nil
+		default:
+		}
+
 		name := entry.Name()
 
 		// Skip hidden files unless enabled or prefix starts with "."
 		if !showHidden && strings.HasPrefix(name, ".") {
+			hiddenSkipped++
 			continue
 		}
 
 		// Skip if doesn't match prefix (unless fuzzy mode - let router filter)
 		if !c.fuzzyMode && prefix != "" && !strings.HasPrefix(strings.ToLower(name), strings.ToLower(prefix)) {
+			prefixSkipped++
 			continue
 		}
 
 		// Build completion value
 		value := name
 		isDir := entry.IsDir()
-		// For symlinks, check if the target is a directory
-		if entry.Type()&os.ModeSymlink != 0 {
+		isSymlink := entry.Type()&os.ModeSymlink != 0
+		// For directory-only commands, avoid following symlinks. Network or
+		// cloud-backed symlink targets can block path completion.
+		if dirsOnly && isSymlink {
+			isDir = true
+			symlinkAssumed++
+		} else if isSymlink {
 			if target, err := os.Stat(filepath.Join(dir, name)); err == nil {
 				isDir = target.IsDir()
 			}
@@ -126,6 +182,7 @@ func (c *FileCompleter) Complete(ctx context.Context, line string, pos int) (Res
 
 		// Skip non-directories for directory-only commands
 		if dirsOnly && !isDir {
+			nonDirSkipped++
 			continue
 		}
 
@@ -140,6 +197,18 @@ func (c *FileCompleter) Complete(ctx context.Context, line string, pos int) (Res
 	rawPrefix := getCompletionPrefix(originalWord, prefix)
 	for i := range items {
 		items[i].Value = EscapeShellWord(items[i].Value)
+	}
+	if traceEnabled {
+		trace.Emit("completion", "file_done", trace.LevelDetailed, map[string]any{
+			"entries":          len(entries),
+			"items":            len(items),
+			"hidden_skipped":   hiddenSkipped,
+			"prefix_skipped":   prefixSkipped,
+			"non_dir_skipped":  nonDirSkipped,
+			"symlink_assumed":  symlinkAssumed,
+			"duration_ms":      float64(time.Since(start).Microseconds()) / 1000.0,
+			"context_canceled": ctx.Err() != nil,
+		})
 	}
 
 	return Result{

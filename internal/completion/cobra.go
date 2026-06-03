@@ -65,6 +65,13 @@ func (c *CobraCompleter) lookPath(name string) (string, error) {
 	return p, nil
 }
 
+func (c *CobraCompleter) cachedPath(name string) (string, bool) {
+	c.lookPathCacheMu.RLock()
+	defer c.lookPathCacheMu.RUnlock()
+	p, ok := c.lookPathCache[name]
+	return p, ok
+}
+
 // Complete returns completions from cache only.
 // Use Prefetch to populate the cache in the background.
 func (c *CobraCompleter) Complete(ctx context.Context, line string, pos int) (Result, error) {
@@ -78,10 +85,14 @@ func (c *CobraCompleter) Complete(ctx context.Context, line string, pos int) (Re
 	}
 
 	cmdName := parts[0]
+	if isShellBuiltinForCobra(cmdName) {
+		return Result{}, nil
+	}
 
-	// Check if command exists (cached to avoid PATH scan on every TAB)
-	cmdPath, err := c.lookPath(cmdName)
-	if err != nil {
+	// Complete must be cache-only. PATH scans can block on slow mounts and
+	// must stay in background prefetch.
+	cmdPath, ok := c.cachedPath(cmdName)
+	if !ok {
 		return Result{}, nil
 	}
 
@@ -116,10 +127,7 @@ func (c *CobraCompleter) Prefetch(line string, pos int) {
 	}
 
 	cmdName := parts[0]
-
-	// Check if command exists (cached to avoid PATH scan on every TAB)
-	cmdPath, err := c.lookPath(cmdName)
-	if err != nil {
+	if isShellBuiltinForCobra(cmdName) {
 		return
 	}
 
@@ -128,6 +136,27 @@ func (c *CobraCompleter) Prefetch(line string, pos int) {
 	if strings.HasSuffix(line[:pos], " ") {
 		args = append(args, "")
 	}
+
+	// Check if already prefetching or recently failed
+	prefetchKey := cmdName + ":" + strings.Join(args, " ")
+	c.prefetchMu.Lock()
+	if c.prefetched[prefetchKey] {
+		c.prefetchMu.Unlock()
+		return
+	}
+	c.prefetched[prefetchKey] = true
+	c.prefetchMu.Unlock()
+
+	// Run prefetch in background
+	go c.prefetchCommand(cmdName, args)
+}
+
+func (c *CobraCompleter) prefetchCommand(cmdName string, args []string) {
+	cmdPath, err := c.lookPath(cmdName)
+	if err != nil {
+		return
+	}
+
 	cacheKey := cmdPath + ":" + strings.Join(args, " ")
 
 	// Check if already cached
@@ -138,17 +167,7 @@ func (c *CobraCompleter) Prefetch(line string, pos int) {
 	}
 	c.cacheMu.RUnlock()
 
-	// Check if already prefetching or recently failed
-	c.prefetchMu.Lock()
-	if c.prefetched[cacheKey] {
-		c.prefetchMu.Unlock()
-		return
-	}
-	c.prefetched[cacheKey] = true
-	c.prefetchMu.Unlock()
-
-	// Run prefetch in background
-	go c.doPrefetch(cmdPath, args, cacheKey)
+	c.doPrefetch(cmdPath, args, cacheKey)
 }
 
 // doPrefetch runs the actual Cobra completion in the background.
@@ -227,6 +246,17 @@ func (c *CobraCompleter) parseOutput(output string) Result {
 	}
 
 	return Result{Items: items}
+}
+
+func isShellBuiltinForCobra(cmd string) bool {
+	switch cmd {
+	case "cd", "pushd", "popd", "exit", "quit", "history", "copy", "issue", "status", "tips", "setup-zoxide":
+		return true
+	case "alias", "unalias", "export", "unset", "source", ".":
+		return true
+	default:
+		return false
+	}
 }
 
 // SetCacheTTL sets the cache TTL.
