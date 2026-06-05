@@ -167,6 +167,21 @@ func TestDisplay_RenderCompletionMenu_ShowsColoredRailForShortLists(t *testing.T
 	}
 }
 
+func TestDisplay_ClearCompletionMenu_DoesNotEmitNewLines(t *testing.T) {
+	var buf bytes.Buffer
+	d := NewDisplay(&buf, 80, 24)
+
+	d.ClearCompletionMenu(12, 0, 4)
+
+	output := buf.String()
+	if strings.Contains(output, "\r\n") || strings.Contains(output, "\n") {
+		t.Fatalf("clear should move across existing menu rows without emitting new lines, got %q", output)
+	}
+	if !strings.Contains(output, "\x1b[1B") {
+		t.Fatalf("clear should move down into existing menu rows, got %q", output)
+	}
+}
+
 func TestDisplay_RenderWithFrame_FillsLineBgToEOL(t *testing.T) {
 	var out bytes.Buffer
 	d := NewDisplay(&out, 20, 24)

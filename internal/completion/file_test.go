@@ -185,6 +185,30 @@ func TestFileCompleter_SymlinkToDirectory(t *testing.T) {
 	t.Error("symlink_dir not found in completions")
 }
 
+func TestFileCompleter_CdIncludesBrokenSymlinkWithoutFollowingTarget(t *testing.T) {
+	tmpDir := t.TempDir()
+	if err := os.Symlink(filepath.Join(tmpDir, "missing"), filepath.Join(tmpDir, "broken_link")); err != nil {
+		t.Skipf("Cannot create symlink: %v", err)
+	}
+
+	oldDir, _ := os.Getwd()
+	os.Chdir(tmpDir)
+	defer os.Chdir(oldDir)
+
+	completer := NewFileCompleter()
+	result, err := completer.Complete(context.Background(), "cd ", 3)
+	if err != nil {
+		t.Fatalf("Complete() error = %v", err)
+	}
+
+	for _, item := range result.Items {
+		if item.Value == "broken_link/" {
+			return
+		}
+	}
+	t.Fatalf("broken symlink should be offered as a cd candidate without following target; got %#v", result.Items)
+}
+
 func TestFileCompleter_HiddenFiles(t *testing.T) {
 	tmpDir := t.TempDir()
 	os.WriteFile(filepath.Join(tmpDir, ".hidden"), []byte{}, 0644)

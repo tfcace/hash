@@ -292,6 +292,25 @@ func TestEditor_AcceptCompletion(t *testing.T) {
 	}
 }
 
+func TestEditor_GhostModifiedTabAcceptsWord(t *testing.T) {
+	ed := New(Config{}, strings.NewReader(""), io.Discard)
+	ed.state.Buffer = NewBufferFromString("git ")
+	ed.state.Cursor.MoveTo(0, 4)
+	ed.ghost.Set("commit -m test")
+	ed.ghost.FromAgent = true
+
+	handled := ed.handleGhostTextKey(Key{Special: KeyTab, Alt: true})
+	if !handled {
+		t.Fatal("expected Alt+Tab to be handled")
+	}
+	if got := ed.state.Buffer.Content(); got != "git commit " {
+		t.Fatalf("buffer = %q, want %q", got, "git commit ")
+	}
+	if got := ed.ghost.Remaining(); got != "-m test" {
+		t.Fatalf("remaining ghost = %q, want %q", got, "-m test")
+	}
+}
+
 func TestEditor_FindWordStartShellAware(t *testing.T) {
 	tests := []struct {
 		name string

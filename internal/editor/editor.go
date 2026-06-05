@@ -634,6 +634,21 @@ func (e *Editor) render() {
 // handleGhostTextKey processes keys when ghost text is active.
 // Returns true if the key was handled.
 func (e *Editor) handleGhostTextKey(key Key) bool {
+	// Modified Tab accepts one word at a time. Check this before plain Tab so
+	// Alt/Ctrl+Tab does not get swallowed by the accept-all path.
+	if key.Special == KeyTab && (key.Alt || key.Ctrl) {
+		text := e.ghost.AcceptWord()
+		trace.Agent("ghost_accept", map[string]any{
+			"key":      "Alt/Ctrl+Tab",
+			"accepted": text,
+			"action":   "accept_word",
+		})
+		if text != "" {
+			e.insertText(text)
+		}
+		return true
+	}
+
 	switch key.Special {
 	case KeyTab:
 		if !e.ghost.FromAgent {
@@ -697,20 +712,6 @@ func (e *Editor) handleGhostTextKey(key Key) bool {
 		e.ghostErrChan = nil
 		// Don't return true - let Enter propagate to submit
 		return false
-	}
-
-	// Alt+Tab or Ctrl+Tab could accept word-by-word
-	if key.Special == KeyTab && (key.Alt || key.Ctrl) {
-		text := e.ghost.AcceptWord()
-		trace.Agent("ghost_accept", map[string]any{
-			"key":      "Alt/Ctrl+Tab",
-			"accepted": text,
-			"action":   "accept_word",
-		})
-		if text != "" {
-			e.insertText(text)
-		}
-		return true
 	}
 
 	// Any other key clears ghost text (handled by caller)
@@ -1141,9 +1142,13 @@ func (e *Editor) handleCompletionKey(key Key) bool {
 		return true
 
 	case KeyRight:
-		// Right arrow accepts and closes (even directories)
 		if len(filtered) > 0 {
-			e.acceptCompletion(filtered[e.completionIndex])
+			selected := filtered[e.completionIndex]
+			if strings.HasSuffix(selected.Text, "/") {
+				e.drillIntoDirectory(selected)
+			} else {
+				e.acceptCompletion(selected)
+			}
 		} else {
 			e.dismissCompletion()
 		}
@@ -1169,11 +1174,11 @@ func (e *Editor) handleCompletionKey(key Key) bool {
 		return true
 
 	default:
-		// Printable characters: add to filter
+		// Printable characters should continue editing the command. Dismiss the
+		// menu and let the active mode handle the key.
 		if key.Special == 0 && key.Rune >= 32 && !key.Ctrl && !key.Alt {
-			e.completionFilter += string(key.Rune)
-			e.completionIndex = 0
-			return true
+			e.dismissCompletion()
+			return false
 		}
 
 		// Non-printable: dismiss and pass through

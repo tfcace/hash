@@ -3,7 +3,12 @@ package completion
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/tfcace/hash/internal/trace"
 )
 
 func TestVCSCompleter_Name(t *testing.T) {
@@ -28,6 +33,45 @@ func TestVCSCompleter_GitCheckout(t *testing.T) {
 	}
 	if result.Items[0].Value != "feature/api" {
 		t.Fatalf("expected feature/api, got %q", result.Items[0].Value)
+	}
+}
+
+func TestVCSCompleter_GitCheckoutEmitsLookupTrace(t *testing.T) {
+	tmpDir := t.TempDir()
+	tracePath := filepath.Join(tmpDir, "vcs-trace.jsonl")
+	t.Setenv("HASH_TRACE", "completion")
+	t.Setenv("HASH_TRACE_PATH", tracePath)
+	t.Setenv("HASH_TRACE_LEVEL", "detailed")
+
+	if err := trace.Init(); err != nil {
+		t.Fatalf("trace init: %v", err)
+	}
+	t.Cleanup(trace.Close)
+
+	c := NewVCSCompleter()
+	c.listGitRefs = func(ctx context.Context) ([]string, error) {
+		return []string{"main", "feature/api"}, nil
+	}
+
+	result, err := c.Complete(context.Background(), "git checkout ", len("git checkout "))
+	if err != nil {
+		t.Fatalf("Complete() error = %v", err)
+	}
+	if len(result.Items) != 2 {
+		t.Fatalf("expected 2 items, got %d: %+v", len(result.Items), result.Items)
+	}
+	trace.Close()
+
+	content, err := os.ReadFile(tracePath)
+	if err != nil {
+		t.Fatalf("ReadFile(%q): %v", tracePath, err)
+	}
+	text := string(content)
+	if !strings.Contains(text, `"event":"vcs_lookup_done"`) {
+		t.Fatalf("trace missing vcs_lookup_done event:\n%s", text)
+	}
+	if !strings.Contains(text, `"kind":"git_refs"`) {
+		t.Fatalf("trace missing git_refs lookup kind:\n%s", text)
 	}
 }
 

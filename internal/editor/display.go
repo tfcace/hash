@@ -1055,14 +1055,17 @@ func (d *Display) ClearCompletionMenu(numItems, cursorRow, cursorCol int) {
 
 	var sb strings.Builder
 
-	// Move down and clear each menu line
+	// Move through the already-rendered menu rows and clear them. Do not emit
+	// CRLF here: when the prompt is near the terminal bottom, newlines can
+	// scroll the viewport and leave the editor cursor out of sync after Esc.
 	maxVisible := 6
 	if numItems < maxVisible {
 		maxVisible = numItems
 	}
 
 	for i := 0; i < maxVisible; i++ {
-		sb.WriteString("\r\n")
+		fmt.Fprintf(&sb, ansiCursorDown, 1)
+		sb.WriteString("\r")
 		sb.WriteString(ansiClearLine)
 	}
 

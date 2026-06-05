@@ -11,6 +11,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/tfcace/hash/internal/trace"
 )
 
 const vcsQueryTimeout = 150 * time.Millisecond
@@ -77,13 +79,13 @@ func (c *VCSCompleter) completeGit(ctx context.Context, parts []string, trailing
 		if !shouldCompleteGitRef(subcommand, current, before) {
 			return Result{}
 		}
-		return lookupAndFilter(ctx, c.listGitRefs, current)
+		return lookupAndFilter(ctx, "git_refs", c.listGitRefs, current)
 
 	case "add":
 		if strings.HasPrefix(current, "-") {
 			return Result{}
 		}
-		return lookupAndFilter(ctx, c.listGitModified, current)
+		return lookupAndFilter(ctx, "git_modified", c.listGitModified, current)
 
 	case "branch":
 		return c.completeGitBranch(ctx, current, before)
@@ -101,7 +103,7 @@ func (c *VCSCompleter) completeGit(ctx context.Context, parts []string, trailing
 
 func (c *VCSCompleter) completeGitBranch(ctx context.Context, current string, before []string) Result {
 	if containsToken(before, "-d") || containsToken(before, "-D") {
-		return lookupAndFilter(ctx, c.listGitRefs, current)
+		return lookupAndFilter(ctx, "git_refs", c.listGitRefs, current)
 	}
 	return Result{}
 }
@@ -112,7 +114,7 @@ func (c *VCSCompleter) completeGitStash(ctx context.Context, current string, bef
 	}
 	switch before[0] {
 	case "pop", "apply", "drop", "show":
-		return lookupAndFilter(ctx, c.listGitStashes, current)
+		return lookupAndFilter(ctx, "git_stashes", c.listGitStashes, current)
 	default:
 		return Result{}
 	}
@@ -124,19 +126,46 @@ func (c *VCSCompleter) completeGitRemote(ctx context.Context, current string, be
 	}
 	switch before[0] {
 	case "remove", "rename", "show", "prune":
-		return lookupAndFilter(ctx, c.listGitRemotes, current)
+		return lookupAndFilter(ctx, "git_remotes", c.listGitRemotes, current)
 	default:
 		return Result{}
 	}
 }
 
 // lookupAndFilter calls a list function and prefix-filters the results.
-func lookupAndFilter(ctx context.Context, listFn func(context.Context) ([]string, error), prefix string) Result {
+func lookupAndFilter(ctx context.Context, kind string, listFn func(context.Context) ([]string, error), prefix string) Result {
+	start := time.Now()
+	traceEnabled := trace.Enabled("completion")
+	if traceEnabled {
+		trace.Emit("completion", "vcs_lookup_start", trace.LevelDetailed, map[string]any{
+			"kind":   kind,
+			"prefix": prefix,
+		})
+	}
+
 	values, err := listFn(ctx)
+	result := Result{}
+	if err == nil {
+		result = prefixFilterItems(values, prefix)
+	}
+	if traceEnabled {
+		errText := ""
+		if err != nil {
+			errText = err.Error()
+		}
+		trace.Emit("completion", "vcs_lookup_done", trace.LevelDetailed, map[string]any{
+			"kind":        kind,
+			"prefix":      prefix,
+			"values":      len(values),
+			"items":       len(result.Items),
+			"error":       errText,
+			"duration_ms": float64(time.Since(start).Microseconds()) / 1000.0,
+		})
+	}
 	if err != nil {
 		return Result{}
 	}
-	return prefixFilterItems(values, prefix)
+	return result
 }
 
 func (c *VCSCompleter) completeJJ(ctx context.Context, parts []string, trailingSpace bool) Result {
@@ -161,7 +190,7 @@ func (c *VCSCompleter) completeJJ(ctx context.Context, parts []string, trailingS
 		if !shouldCompleteJJRev(current, before) {
 			return Result{}
 		}
-		return lookupAndFilter(ctx, c.listJJChangeIDs, current)
+		return lookupAndFilter(ctx, "jj_change_ids", c.listJJChangeIDs, current)
 
 	default:
 		return Result{}
