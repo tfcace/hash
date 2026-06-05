@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.1](https://github.com/tfcace/hash/compare/v0.5.0...v0.5.1) (2026-06-05)
+
+
+### Bug Fixes
+
+* **completion:** stabilize autocomplete interactions ([#57](https://github.com/tfcace/hash/issues/57)) ([0ab97a4](https://github.com/tfcace/hash/commit/0ab97a4dec044de5e9eb9ee947d78649b9836ff9))
+
 ## [0.5.0](https://github.com/tfcace/hash/compare/v0.4.3...v0.5.0) (2026-05-26)
 
 
