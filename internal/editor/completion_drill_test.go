@@ -652,7 +652,9 @@ func TestHandleCompletionKeyEnterFile(t *testing.T) {
 	}
 }
 
-// TestHandleCompletionKeyTyping verifies that printable characters update the filter.
+// TestHandleCompletionKeyTyping verifies that printable characters are passed
+// through to the active editing mode instead of being trapped in a hidden menu
+// filter.
 func TestHandleCompletionKeyTyping(t *testing.T) {
 	items := []Completion{
 		{Text: "internal/", Description: "directory"},
@@ -662,68 +664,15 @@ func TestHandleCompletionKeyTyping(t *testing.T) {
 	}
 	e := newTestEditorForCompletion(items)
 
-	// Type 'i' — filter should be "i", filtered items: internal/, interface.go, init.go
 	handled := e.handleCompletionKey(Key{Rune: 'i'})
-	if !handled {
-		t.Fatal("expected key 'i' to be handled")
+	if handled {
+		t.Fatal("expected printable key to pass through")
 	}
-	if e.completionFilter != "i" {
-		t.Errorf("filter = %q, want %q", e.completionFilter, "i")
+	if e.completionActive {
+		t.Fatal("expected printable key to dismiss completion")
 	}
-	filtered := e.filteredCompletionItems()
-	if len(filtered) != 3 {
-		t.Fatalf("expected 3 filtered items after 'i', got %d", len(filtered))
-	}
-	if e.completionIndex != 0 {
-		t.Errorf("completionIndex = %d, want 0 after typing", e.completionIndex)
-	}
-
-	// Type 'n' — filter should be "in", filtered items: internal/, interface.go, init.go
-	handled = e.handleCompletionKey(Key{Rune: 'n'})
-	if !handled {
-		t.Fatal("expected key 'n' to be handled")
-	}
-	if e.completionFilter != "in" {
-		t.Errorf("filter = %q, want %q", e.completionFilter, "in")
-	}
-	filtered = e.filteredCompletionItems()
-	if len(filtered) != 3 {
-		t.Fatalf("expected 3 filtered items after 'in', got %d", len(filtered))
-	}
-
-	// Type 't' — filter should be "int", filtered items: internal/, interface.go
-	handled = e.handleCompletionKey(Key{Rune: 't'})
-	if !handled {
-		t.Fatal("expected key 't' to be handled")
-	}
-	if e.completionFilter != "int" {
-		t.Errorf("filter = %q, want %q", e.completionFilter, "int")
-	}
-	filtered = e.filteredCompletionItems()
-	if len(filtered) != 2 {
-		t.Fatalf("expected 2 filtered items after 'int', got %d", len(filtered))
-	}
-
-	// Backspace — filter should go back to "in"
-	handled = e.handleCompletionKey(Key{Special: KeyBackspace})
-	if !handled {
-		t.Fatal("expected Backspace to be handled")
-	}
-	if e.completionFilter != "in" {
-		t.Errorf("filter = %q, want %q after backspace", e.completionFilter, "in")
-	}
-	filtered = e.filteredCompletionItems()
-	if len(filtered) != 3 {
-		t.Fatalf("expected 3 filtered items after backspace to 'in', got %d", len(filtered))
-	}
-
-	// Backspace — filter should go back to "i"
-	handled = e.handleCompletionKey(Key{Special: KeyBackspace})
-	if !handled {
-		t.Fatal("expected Backspace to be handled")
-	}
-	if e.completionFilter != "i" {
-		t.Errorf("filter = %q, want %q after second backspace", e.completionFilter, "i")
+	if e.completionFilter != "" {
+		t.Errorf("filter = %q, want empty", e.completionFilter)
 	}
 }
 
@@ -798,10 +747,10 @@ func TestHandleCompletionKeyAccept(t *testing.T) {
 		}
 	})
 
-	t.Run("right_accepts_filtered", func(t *testing.T) {
+	t.Run("right_accepts_filtered_file", func(t *testing.T) {
 		e := newTestEditorForCompletion(items)
 		e.completionFilter = "int"
-		e.completionIndex = 0 // internal/ in filtered list
+		e.completionIndex = 1 // interface.go in filtered list
 
 		handled := e.handleCompletionKey(Key{Special: KeyRight})
 		if !handled {
@@ -824,6 +773,71 @@ func TestHandleCompletionKeyAccept(t *testing.T) {
 			t.Error("expected completion to be dismissed when no filtered items")
 		}
 	})
+}
+
+func TestHandleCompletionKeyRightDrillsIntoDirectory(t *testing.T) {
+	items := []Completion{
+		{Text: "internal/", Description: "directory"},
+		{Text: "interface.go", Description: "file"},
+	}
+	e := newTestEditorForCompletion(items)
+	e.state = NewEditorState()
+	e.state.Buffer = NewBufferFromString("ls int")
+	e.state.Cursor.MoveTo(0, 6)
+	e.completionCol = 3
+	e.completionPrefix = "int"
+	e.completionIndex = 0
+	e.config.CompleteFunc = func(line string, pos int) []Completion {
+		if line == "ls internal/" && pos == len(line) {
+			return []Completion{
+				{Text: "internal/editor/", Description: "directory"},
+				{Text: "internal/shell/", Description: "directory"},
+			}
+		}
+		return nil
+	}
+
+	handled := e.handleCompletionKey(Key{Special: KeyRight})
+	if !handled {
+		t.Fatal("expected Right to be handled")
+	}
+	if !e.completionActive {
+		t.Fatal("expected completion to stay active after drilling into a directory")
+	}
+	if got := e.state.Buffer.Content(); got != "ls internal/" {
+		t.Fatalf("buffer = %q, want %q", got, "ls internal/")
+	}
+	if len(e.completionItems) != 2 || e.completionItems[0].Text != "internal/editor/" {
+		t.Fatalf("completion items after drill = %#v", e.completionItems)
+	}
+	if len(e.completionDrillStack) != 1 {
+		t.Fatalf("drill stack length = %d, want 1", len(e.completionDrillStack))
+	}
+}
+
+func TestCompletionMenuTypingContinuesEditing(t *testing.T) {
+	e := newTestEditorForCompletion([]Completion{
+		{Text: "README.md", Description: "file"},
+		{Text: "release-notes.md", Description: "file"},
+	})
+	e.state = NewEditorState()
+	e.mode = NewInsertMode()
+	e.ghost = NewGhostText()
+	e.state.Buffer = NewBufferFromString("ls r")
+	e.state.Cursor.MoveTo(0, 4)
+	e.completionCol = 3
+	e.completionPrefix = "r"
+
+	result, done := e.handleKeyEvent(Key{Rune: 'e'})
+	if done {
+		t.Fatalf("typing while completion is active should not finish editing: %#v", result)
+	}
+	if e.completionActive {
+		t.Fatal("typing while completion is active should dismiss the menu")
+	}
+	if got := e.state.Buffer.Content(); got != "ls re" {
+		t.Fatalf("buffer = %q, want %q", got, "ls re")
+	}
 }
 
 // TestHandleCompletionKeyDismiss verifies Escape and Backspace dismiss behavior.
