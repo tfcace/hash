@@ -326,7 +326,7 @@ func (aoc *AgentOutputCoordinator) ShowHints(ct ConfirmationType) {
 	case ConfirmTypeCommand:
 		hint = "[Enter: run] [Tab: edit] [Esc: cancel]"
 	case ConfirmTypeExplanation:
-		hint = "[Enter: ok] [Tab: copy] [Esc: cancel]"
+		hint = "[Enter: done] [Tab: copy] [r: reply] [Esc: cancel]"
 	case ConfirmTypeError:
 		hint = "[Enter: retry] [Esc: cancel]"
 	}

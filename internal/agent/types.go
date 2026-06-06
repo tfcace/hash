@@ -68,6 +68,14 @@ func NewClient(transport Transport) *Client {
 	return &Client{transport: transport}
 }
 
+// Name returns the underlying transport name.
+func (c *Client) Name() string {
+	if c == nil || c.transport == nil {
+		return ""
+	}
+	return c.transport.Name()
+}
+
 // Ask sends a prompt to the agent and waits for the complete response.
 func (c *Client) Ask(ctx context.Context, req Request) (Response, error) {
 	textCh, errCh := c.transport.SendStreaming(ctx, req)

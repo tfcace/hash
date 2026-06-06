@@ -306,7 +306,7 @@ func TestShell_ExecuteRegularCommand_BuiltinFailureUpdatesLastError(t *testing.T
 
 func TestConfirmationTypeForAgentResponse(t *testing.T) {
 	t.Run("command requires confirmation", func(t *testing.T) {
-		confirmType, ok := confirmationTypeForAgentResponse(agent.Response{Type: agent.ResponseTypeCommand})
+		confirmType, ok := confirmationTypeForAgentResponse(agent.Response{Type: agent.ResponseTypeCommand}, false)
 		if !ok {
 			t.Fatal("expected command response to require confirmation")
 		}
@@ -315,9 +315,19 @@ func TestConfirmationTypeForAgentResponse(t *testing.T) {
 		}
 	})
 
-	t.Run("explanation skips confirmation", func(t *testing.T) {
-		if _, ok := confirmationTypeForAgentResponse(agent.Response{Type: agent.ResponseTypeExplanation}); ok {
+	t.Run("explanation skips confirmation without reply", func(t *testing.T) {
+		if _, ok := confirmationTypeForAgentResponse(agent.Response{Type: agent.ResponseTypeExplanation}, false); ok {
 			t.Fatal("expected explanation response to skip confirmation")
+		}
+	})
+
+	t.Run("explanation can request reply confirmation", func(t *testing.T) {
+		confirmType, ok := confirmationTypeForAgentResponse(agent.Response{Type: agent.ResponseTypeExplanation}, true)
+		if !ok {
+			t.Fatal("expected explanation response to require confirmation when reply is allowed")
+		}
+		if confirmType != ConfirmTypeExplanation {
+			t.Fatalf("confirmType = %v, want %v", confirmType, ConfirmTypeExplanation)
 		}
 	})
 }

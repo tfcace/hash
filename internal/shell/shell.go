@@ -41,30 +41,31 @@ type Mode struct {
 
 // Shell is the main Hash shell instance.
 type Shell struct {
-	mode         Mode // Startup mode
-	config       *config.Config
-	executor     *executor.Executor
-	prompt       *prompt.Prompt
-	readline     *readline.Readline
-	inputHandler *readline.InputHandler // For Ctrl+R search
-	editorCfg    editor.Config          // Editor configuration
-	agentHandler *AgentHandler
-	responseUI   *ResponseUI
-	history      *history.Store
-	historyPath  string
-	learning     *learning.FixStore
-	clipboard    *clipboard.Buffer
-	predictor    *prediction.Predictor
-	suggestor    *CommandSuggestor
-	colorPalette prompt.Palette
-	allowlist    *allowlist.Manager
-	agentOutput  *AgentOutputCoordinator
-	readKey      func() byte
-	lastExitCode int
-	lastDuration time.Duration
-	lastCommand  string // Last executed command
-	lastStderr   string // Stderr from last command (truncated)
-	lastCwd      string // Working directory of last command
+	mode                Mode // Startup mode
+	config              *config.Config
+	executor            *executor.Executor
+	prompt              *prompt.Prompt
+	readline            *readline.Readline
+	inputHandler        *readline.InputHandler // For Ctrl+R search
+	editorCfg           editor.Config          // Editor configuration
+	agentHandler        *AgentHandler
+	responseUI          *ResponseUI
+	history             *history.Store
+	historyPath         string
+	learning            *learning.FixStore
+	clipboard           *clipboard.Buffer
+	predictor           *prediction.Predictor
+	suggestor           *CommandSuggestor
+	colorPalette        prompt.Palette
+	allowlist           *allowlist.Manager
+	agentOutput         *AgentOutputCoordinator
+	readKey             func() byte
+	agentReplyInputHook func(context.Context) (string, error)
+	lastExitCode        int
+	lastDuration        time.Duration
+	lastCommand         string // Last executed command
+	lastStderr          string // Stderr from last command (truncated)
+	lastCwd             string // Working directory of last command
 
 	osc *integration.Emitter // OSC shell integration emitter
 
@@ -1083,10 +1084,17 @@ func (s *Shell) handleAgentFullStreaming(ctx context.Context, parsed parser.Pars
 		}
 	}
 
+	responseText := strings.TrimSpace(streamResult.responseText)
+	if responseText == "" {
+		s.responseUI.ClearLine()
+		s.responseUI.ShowError(emptyAgentResponseMessage)
+		s.lastExitCode = 1
+		return
+	}
+
 	// Success path - add newline after response and clear spinner
 	fmt.Println()
 	s.responseUI.ClearLine()
-	responseText := strings.TrimSpace(streamResult.responseText)
 	lineCount := streamResult.lineCount + 1
 
 	// Determine response type (single-turn flow)
@@ -1094,7 +1102,15 @@ func (s *Shell) handleAgentFullStreaming(ctx context.Context, parsed parser.Pars
 	collector.Append(responseText)
 	resp := collector.Response()
 
-	confirmType, needsConfirmation := confirmationTypeForAgentResponse(resp)
+	allowReply := agentTurnAllowsReply(parsed.Type, resp)
+	transcript := s.initialAgentConversationTranscript(parsed, responseText)
+	if agentTurnShouldPromptForReply(parsed.Type, resp, responseText) {
+		s.responseUI.StopProgress()
+		s.runAgentConversationLoop(ctx, modelName, transcript)
+		return
+	}
+
+	confirmType, needsConfirmation := confirmationTypeForAgentResponse(resp, allowReply)
 	if !needsConfirmation {
 		s.responseUI.StopProgress()
 		return
@@ -1109,20 +1125,178 @@ func (s *Shell) handleAgentFullStreaming(ctx context.Context, parsed parser.Pars
 	// Stop progress bar before any action
 	s.responseUI.StopProgress()
 
+	if action == ConfirmReply {
+		s.runAgentConversationLoop(ctx, modelName, transcript)
+		return
+	}
+
 	if s.handleAgentConfirmAction(ctx, action, confirmType, resp, responseText, lineCount) {
 		return
 	}
 }
 
-func confirmationTypeForAgentResponse(resp agent.Response) (ConfirmationType, bool) {
+func (s *Shell) initialAgentConversationTranscript(parsed parser.ParseResult, responseText string) []agentConversationMessage {
+	userPrompt := strings.TrimSpace(parsed.AgentPrompt)
+	if s.agentHandler != nil {
+		if req, err := s.agentHandler.buildRequest(parsed); err == nil {
+			userPrompt = strings.TrimSpace(req.Prompt)
+		}
+	}
+
+	transcript := make([]agentConversationMessage, 0, 2)
+	if userPrompt != "" {
+		transcript = append(transcript, agentConversationMessage{Role: "user", Text: userPrompt})
+	}
+	if responseText != "" {
+		transcript = append(transcript, agentConversationMessage{Role: "assistant", Text: responseText})
+	}
+	return transcript
+}
+
+func (s *Shell) runAgentConversationLoop(ctx context.Context, modelName string, transcript []agentConversationMessage) {
+	for {
+		reply, ok := s.readAgentConversationReply(ctx)
+		if !ok {
+			return
+		}
+		if agentConversationReplyEndsConversation(reply) {
+			return
+		}
+
+		priorTranscript := append([]agentConversationMessage(nil), transcript...)
+		resp, responseText, lineCount, ok := s.streamAgentFollowUpTurn(ctx, reply, priorTranscript)
+		transcript = append(transcript, agentConversationMessage{Role: "user", Text: reply})
+		if !ok {
+			return
+		}
+		transcript = append(transcript, agentConversationMessage{Role: "assistant", Text: responseText})
+
+		if agentTurnShouldPromptForReply(parser.CommandTypeAgent, resp, responseText) {
+			continue
+		}
+
+		confirmType, needsConfirmation := confirmationTypeForAgentResponse(
+			resp,
+			agentTurnAllowsReply(parser.CommandTypeAgent, resp),
+		)
+		if !needsConfirmation {
+			return
+		}
+
+		s.agentOutput.EnterConfirming()
+		s.agentOutput.ShowHints(confirmType)
+		action := s.responseUI.WaitForConfirmationByType(confirmType)
+		s.agentOutput.ExitConfirming()
+		fmt.Println()
+
+		s.responseUI.StopProgress()
+
+		if action == ConfirmReply {
+			continue
+		}
+		s.handleAgentConfirmAction(ctx, action, confirmType, resp, responseText, lineCount)
+		return
+	}
+}
+
+func (s *Shell) readAgentConversationReply(ctx context.Context) (string, bool) {
+	if s.agentReplyInputHook != nil {
+		reply, err := s.agentReplyInputHook(ctx)
+		if err != nil {
+			return "", false
+		}
+		reply = strings.TrimSpace(reply)
+		return reply, reply != ""
+	}
+
+	cfg := s.editorCfg
+	cfg.Prompt = agentConversationReplyPrompt
+	cfg.CompleteFunc = nil
+	cfg.PrefetchFunc = nil
+	cfg.SuggestionFunc = nil
+	cfg.DisableHistorySearch = true
+	cfg.DisableContextPicker = true
+	cfg.DisableLineContinuation = true
+
+	ed := editor.New(cfg, os.Stdin, os.Stdout)
+	result, err := ed.Run(ctx)
+	if err != nil || result.Canceled || result.EOF {
+		return "", false
+	}
+
+	reply := strings.TrimSpace(result.Text)
+	return reply, reply != ""
+}
+
+func (s *Shell) streamAgentFollowUpTurn(
+	ctx context.Context,
+	reply string,
+	transcript []agentConversationMessage,
+) (agent.Response, string, int, bool) {
+	requestCtx, timeoutCancel := context.WithTimeout(ctx, s.agentRequestTimeout())
+	defer timeoutCancel()
+
+	s.responseUI.ShowState(AgentStateThinking)
+	textCh, errCh := s.agentHandler.StreamFollowUp(requestCtx, reply, transcript)
+
+	streamResult := s.collectAgentStream(ctx, textCh, errCh, agentStreamCollectionOptions{
+		onFirstChunk: func() {
+			s.agentOutput.StartStreaming()
+			s.responseUI.ShowState(AgentStateReceiving)
+			s.responseUI.ClearLine()
+		},
+		writeRendered: func(rendered string) {
+			s.agentOutput.WriteStream(rendered)
+		},
+		flushDelay: 50 * time.Millisecond,
+	})
+
+	if streamResult.canceled {
+		s.responseUI.ClearLine()
+		fmt.Fprintln(os.Stderr, "hash: request canceled")
+		s.lastExitCode = 1
+		return agent.Response{}, "", 0, false
+	}
+
+	s.agentOutput.EndStreaming()
+
+	if streamResult.streamErr != nil {
+		s.responseUI.ClearLine()
+		s.responseUI.ShowError(streamResult.streamErr.Error())
+		s.lastExitCode = 1
+		return agent.Response{}, "", 0, false
+	}
+
+	responseText := strings.TrimSpace(streamResult.responseText)
+	if responseText == "" {
+		s.responseUI.ClearLine()
+		s.responseUI.ShowError(emptyAgentResponseMessage)
+		s.lastExitCode = 1
+		return agent.Response{}, "", 0, false
+	}
+
+	fmt.Println()
+	s.responseUI.ClearLine()
+
+	collector := agent.NewStreamCollector()
+	collector.Append(responseText)
+	return collector.Response(), responseText, streamResult.lineCount + 1, true
+}
+
+func confirmationTypeForAgentResponse(resp agent.Response, allowExplanationReply bool) (ConfirmationType, bool) {
 	switch resp.Type {
 	case agent.ResponseTypeCommand:
 		return ConfirmTypeCommand, true
+	case agent.ResponseTypeExplanation:
+		if allowExplanationReply {
+			return ConfirmTypeExplanation, true
+		}
 	case agent.ResponseTypeError:
 		return ConfirmTypeError, true
 	default:
 		return 0, false
 	}
+	return 0, false
 }
 
 // handleAgentConfirmAction processes the user's confirmation choice.

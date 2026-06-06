@@ -36,6 +36,7 @@ func (s *Shell) collectAgentStream(
 
 	var response strings.Builder
 	renderer := markdown.NewStreamingRenderer()
+	sanitizer := newLegacyAgentMarkerSanitizer()
 
 	firstChunkSeen := false
 	trimLeadingResponse := opts.trimLeadingNewline
@@ -105,16 +106,25 @@ collectLoop:
 			}
 
 			responseText := trimLeadingSingleNewline(text, &trimLeadingResponse)
-			appendResponse(responseText)
-
 			renderText := trimLeadingSingleNewline(text, &trimLeadingRender)
-			writeRendered(renderer.Write(renderText))
+			if responseText != renderText {
+				// Leading-newline trimming is configured the same way for both paths,
+				// but keep response/render text coherent if that ever changes.
+				renderText = responseText
+			}
+			cleanText := sanitizer.Write(responseText)
+			appendResponse(cleanText)
+			writeRendered(renderer.Write(cleanText))
 
 			if flushTimer != nil {
 				resetStreamFlushTimer(flushTimer, opts.flushDelay)
 			}
 		}
 	}
+
+	cleanTail := sanitizer.Flush()
+	appendResponse(cleanTail)
+	writeRendered(renderer.Write(cleanTail))
 
 	// Drain any pending error after text channel closed
 	select {

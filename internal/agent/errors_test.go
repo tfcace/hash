@@ -11,6 +11,9 @@ func TestIsStartupError(t *testing.T) {
 	if !IsStartupError(errors.Join(ErrACPStartFailed, exec.ErrNotFound)) {
 		t.Fatal("expected startup error to be detected")
 	}
+	if !IsStartupError(ErrACPUnsupportedAgent) {
+		t.Fatal("expected unsupported agent to be detected as startup error")
+	}
 	if IsStartupError(context.DeadlineExceeded) {
 		t.Fatal("deadline exceeded should not be classified as startup error")
 	}

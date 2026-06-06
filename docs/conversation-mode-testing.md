@@ -1,281 +1,145 @@
-# Conversation Mode Manual Testing Checklist
+# Turn-by-Turn Agent Conversation Manual Testing Checklist
 
-This document describes the manual testing steps for the conversation mode feature.
+This checklist covers marker-free follow-up conversations for full `??` agent requests.
 
 ## Prerequisites
 
 - Build the hash binary: `go build -o hash ./cmd/hash`
-- Configure an agent in `~/.config/hash/config.toml` that supports the `[AWAITING_INPUT]` marker
-- Have a working agent available (Claude Code, Gemini CLI, or local model)
+- Configure an agent in `~/.config/hash/config.toml`
+- Use a working agent such as Claude Agent ACP, Gemini CLI ACP, or a configured HTTP/local model
 
 ## Test Cases
 
-### 1. Basic Conversation Flow (No Marker)
+### 1. Basic Single-Turn Explanation
 
-**Test:** Verify single-turn UI still works for responses without marker.
-
-**Steps:**
-1. Run `hash`
-2. Enter: `?? what time is it?`
-3. Wait for agent response
-
-**Expected:**
-- Agent responds with current time information
-- Single-turn confirmation UI appears (Run/Edit/Cancel)
-- No conversation mode activated
-- Shell returns to normal prompt after confirmation
-
-**Status:** ⬜ Not tested / ✅ Pass / ❌ Fail
-
----
-
-### 2. Conversation Mode Trigger
-
-**Test:** Verify conversation mode activates when agent sends `[AWAITING_INPUT]` marker.
+**Test:** Verify normal explanatory responses can be dismissed.
 
 **Steps:**
 1. Run `hash`
-2. Use a prompt that triggers the agent to ask a follow-up question
-3. Agent should respond with `[AWAITING_INPUT]` at the end
+2. Enter: `?? explain what pwd does`
+3. Wait for the response
+4. Press Enter
 
 **Expected:**
-- Agent response is displayed (without the `[AWAITING_INPUT]` marker visible)
-- Background tint appears (subtle color based on prompt theme)
-- `║` input prompt appears in accent color
-- Hints appear: "Esc exit · !cmd shell"
-- Cursor is ready for user input
+- Response streams without hidden markers
+- Hints include done, copy, reply, and cancel actions
+- Enter dismisses the response and returns to the normal shell prompt
 
-**Status:** ⬜ Not tested / ✅ Pass / ❌ Fail
+### 2. Automatic Follow-Up Prompt
 
----
+**Test:** Verify Hash prompts for input when the agent ends with a question.
+
+**Steps:**
+1. Run `hash`
+2. Enter a prompt likely to need clarification, such as `?? help me find a config file but ask me which directory first`
+3. Wait for the agent to ask a question
+
+**Expected:**
+- No `[AWAITING_INPUT]` marker is displayed
+- Hash shows a `you> ` reply prompt
+- The normal shell prompt does not appear before the reply prompt
 
 ### 3. Reply Flow
 
-**Test:** Verify multi-turn conversation works.
+**Test:** Verify a reply is sent as the next agent turn.
 
 **Steps:**
-1. After entering conversation mode (see test 2)
-2. Type a reply to the agent's question
-3. Press Enter
-4. Wait for agent response
-
-**Expected:**
-- Input is sent to agent
-- "Thinking" indicator appears briefly
-- Agent response streams in with markdown rendering
-- If agent includes `[AWAITING_INPUT]` again, conversation continues
-- If no marker, conversation mode exits
-
-**Status:** ⬜ Not tested / ✅ Pass / ❌ Fail
-
----
-
-### 4. Shell Escape
-
-**Test:** Verify `!cmd` executes shell commands within conversation.
-
-**Steps:**
-1. Enter conversation mode
-2. At the `║` prompt, type: `!ls`
+1. Enter automatic follow-up mode from test 2
+2. Type a reply, such as `internal/shell`
 3. Press Enter
 
 **Expected:**
-- Command executes immediately
-- Output appears (directory listing)
-- Returns to `║` prompt after command completes
-- Conversation mode remains active
-- Hints still visible
+- Reply is sent to the agent
+- Agent response streams normally
+- If the agent asks another question, another `you> ` prompt appears
+- If the agent finishes, reply-capable confirmation hints appear
 
-**Advanced test:**
-```
-!echo "test" > /tmp/testfile
-!cat /tmp/testfile
-!rm /tmp/testfile
-```
+### 4. Explicit Reply Action
 
-**Status:** ⬜ Not tested / ✅ Pass / ❌ Fail
-
----
-
-### 5. Exit via Escape Key
-
-**Test:** Verify Esc key exits conversation mode.
+**Test:** Verify the user can continue even when Hash does not auto-detect a question.
 
 **Steps:**
-1. Enter conversation mode
-2. Press `Esc` key
+1. Run `hash`
+2. Enter: `?? explain this repository structure briefly`
+3. When the response finishes, press `r`
+4. Type a follow-up question and press Enter
 
 **Expected:**
-- Conversation mode exits immediately
-- Background tint disappears
-- Normal shell prompt appears
-- Shell is ready for next command
+- Pressing `r` opens the `you> ` prompt
+- The follow-up is sent to the same conversation flow
+- Pressing Enter instead of `r` dismisses the response
 
-**Status:** ⬜ Not tested / ✅ Pass / ❌ Fail
+### 5. Legacy Marker Compatibility
 
----
-
-### 6. Exit via /done Command
-
-**Test:** Verify `/done` command exits conversation mode.
+**Test:** Verify legacy markers are stripped if an agent still emits them.
 
 **Steps:**
-1. Enter conversation mode
-2. Type: `/done`
-3. Press Enter
+1. Use or mock an agent response ending in `[AWAITING_INPUT]`
+2. Run a full `??` request
 
 **Expected:**
-- Conversation mode exits
-- Background tint disappears
-- Normal shell prompt appears
+- `[AWAITING_INPUT]` is not visible
+- `[CONVERSATION]` is not visible if emitted
+- If the visible final response asks a question, `you> ` appears
 
-**Status:** ⬜ Not tested / ✅ Pass / ❌ Fail
+### 6. Command Suggestion Unchanged
 
----
-
-### 7. Ctrl+C During Streaming
-
-**Test:** Verify Ctrl+C during agent response.
+**Test:** Verify command suggestions keep the existing run/edit/cancel flow.
 
 **Steps:**
-1. Enter conversation mode
-2. Send a message that will have a long response
-3. Press Ctrl+C while agent is streaming
+1. Run `hash`
+2. Enter: `?? command to list hidden files`
+3. Wait for a command suggestion
 
 **Expected:**
-- Streaming stops
-- Error message: "hash: request canceled"
-- Conversation mode remains active
-- Returns to `║` prompt (user can continue or exit)
+- Existing command confirmation hints appear
+- Enter runs, Tab edits, Esc cancels
+- No `you> ` prompt appears for command suggestions
 
-**Status:** ⬜ Not tested / ✅ Pass / ❌ Fail
+### 7. Pipe Mode Unchanged
 
----
-
-### 8. Ctrl+C at Input Prompt
-
-**Test:** Verify Ctrl+C at the conversation input prompt.
+**Test:** Verify pipe mode remains single-turn.
 
 **Steps:**
-1. Enter conversation mode
-2. At the `║` prompt (not during streaming), press Ctrl+C
+1. Run: `ls | ?? summarize these files`
 
 **Expected:**
-- Conversation mode exits
-- Returns to normal shell prompt
+- Agent receives pipe output as context
+- Response streams normally
+- No automatic `you> ` prompt appears
 
-**Status:** ⬜ Not tested / ✅ Pass / ❌ Fail
+### 8. Exit Reply Prompt
 
----
-
-### 9. Pipe Mode Unchanged
-
-**Test:** Verify pipe mode still works in single-turn (no conversation).
+**Test:** Verify the reply prompt exits cleanly.
 
 **Steps:**
-1. Run: `ls | ?? what files are here`
+1. Enter automatic follow-up mode
+2. Press Enter on an empty `you> ` prompt
+3. Repeat and press Ctrl+C at the `you> ` prompt
 
 **Expected:**
-- Agent receives ls output as context
-- Agent responds with analysis
-- Single-turn confirmation UI appears (not conversation mode)
-- Pipe mode never triggers conversation mode, even if marker present
+- Empty input exits the conversation
+- Ctrl+C exits the conversation
+- Normal shell prompt returns
 
-**Status:** ⬜ Not tested / ✅ Pass / ❌ Fail
+### 9. Twenty Questions With Side Request
 
----
-
-### 10. Empty Input Handling
-
-**Test:** Verify empty input in conversation mode.
+**Test:** Verify the user can pause an ongoing conversation for tool-backed work.
 
 **Steps:**
-1. Enter conversation mode
-2. At the `║` prompt, press Enter without typing anything
+1. Run `hash`
+2. Enter: `?? Let's play twenty questions. You guess what repo file I'm thinking of. Ask one yes/no question at a time.`
+3. Answer one or two questions at `you> `
+4. Type: `let's pause the game and list my kubernetes contexts`
+5. Approve or deny any resulting tool permission prompt
 
 **Expected:**
-- Nothing is sent to agent
-- `║` prompt appears again
-- Hints appear again
-- Conversation mode remains active
+- The side request is sent as the next agent turn
+- The agent can request an appropriate tool call
+- Permission prompt rendering does not break streaming or the reply prompt
+- The agent preserves the twenty-questions state and resumes or asks whether to resume
+- No marker text is displayed
 
-**Status:** ⬜ Not tested / ✅ Pass / ❌ Fail
+## Notes
 
----
-
-### 11. Visual Verification
-
-**Test:** Verify visual appearance of conversation mode.
-
-**Check:**
-- [ ] Background tint is subtle (not overwhelming)
-- [ ] Tint color matches shell theme accent color
-- [ ] `║` prompt is clearly visible in accent color
-- [ ] Hints are visible but not distracting (dim gray)
-- [ ] Markdown rendering works (bold, code blocks, lists)
-- [ ] Text is readable with tint background
-
-**Status:** ⬜ Not tested / ✅ Pass / ❌ Fail
-
----
-
-## Edge Cases
-
-### 12. Multiple Conversation Turns
-
-**Test:** Verify extended multi-turn conversation.
-
-**Steps:**
-1. Enter conversation mode
-2. Exchange 5+ messages with the agent
-3. Use a mix of text replies and shell escapes
-
-**Expected:**
-- All turns work correctly
-- Background tint persists
-- No memory leaks or performance degradation
-
-**Status:** ⬜ Not tested / ✅ Pass / ❌ Fail
-
----
-
-### 13. Long Agent Responses
-
-**Test:** Verify conversation mode with very long responses.
-
-**Steps:**
-1. Ask agent for a long explanation (e.g., "explain how TCP/IP works in detail")
-2. Agent should include `[AWAITING_INPUT]` at the end
-
-**Expected:**
-- Full response streams correctly
-- Markdown rendering works throughout
-- Scrolling works properly
-- Returns to `║` prompt after complete response
-
-**Status:** ⬜ Not tested / ✅ Pass / ❌ Fail
-
----
-
-## Known Limitations
-
-Document any discovered limitations here:
-
--
-
-## Issues Found
-
-Document any bugs or issues discovered during testing:
-
--
-
-## Testing Notes
-
-Date tested: ___________
-Tester: ___________
-Agent used: ___________
-Terminal: ___________
-OS: ___________
-
-Additional observations:
-
+Turn-by-turn continuation is controlled by Hash, not by agent-visible markers. ACP agents reuse their protocol session for follow-up turns. Stateless transports receive a compact transcript prompt.

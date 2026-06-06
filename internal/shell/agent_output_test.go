@@ -268,7 +268,7 @@ func TestAgentOutputCoordinator_ShowHints(t *testing.T) {
 		expected string
 	}{
 		{"command", ConfirmTypeCommand, "[Enter: run]"},
-		{"explanation", ConfirmTypeExplanation, "[Enter: ok]"},
+		{"explanation", ConfirmTypeExplanation, "[r: reply]"},
 		{"error", ConfirmTypeError, "[Enter: retry]"},
 	}
 

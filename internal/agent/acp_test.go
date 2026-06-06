@@ -2,14 +2,19 @@ package agent
 
 import (
 	"bufio"
+	"context"
+	"encoding/json"
+	"errors"
 	"io"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
 
 func TestACPTransport_New(t *testing.T) {
 	cfg := ACPConfig{
-		Command: "claude-code-acp",
+		Command: "claude-agent-acp",
 		Args:    []string{},
 	}
 
@@ -166,5 +171,404 @@ func TestACPTransport_ReadLoopClosesOnlyOriginalChannels(t *testing.T) {
 		}
 		t.Fatal("replacement messages channel should remain unused")
 	default:
+	}
+}
+
+func TestACPTransport_SendStreamingAttemptEmitsCompletedToolCallContent(t *testing.T) {
+	transport := &ACPTransport{
+		config:    ACPConfig{Command: "test"},
+		stdin:     newMockPipe(),
+		sessionID: "test-session",
+		messages:  make(chan []byte, 10),
+		done:      make(chan struct{}),
+	}
+	transport.messages <- []byte(`{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"test-session","update":{"sessionUpdate":"tool_call_update","toolCallId":"call-1","status":"completed","content":[{"type":"content","content":{"type":"text","text":"docker-desktop\nkind-kind"}}]}}}`)
+	transport.messages <- []byte(`{"jsonrpc":"2.0","id":1,"result":{"stopReason":"end_turn"}}`)
+
+	textCh := make(chan string, 10)
+	receivedText, err := transport.sendStreamingAttempt(context.Background(), Request{Prompt: "list contexts"}, textCh)
+	if err != nil {
+		t.Fatalf("sendStreamingAttempt returned error: %v", err)
+	}
+	if !receivedText {
+		t.Fatal("sendStreamingAttempt receivedText = false, want true")
+	}
+
+	var got strings.Builder
+	for {
+		select {
+		case text := <-textCh:
+			got.WriteString(text)
+		default:
+			if got.String() != "docker-desktop\nkind-kind" {
+				t.Fatalf("streamed text = %q, want tool output", got.String())
+			}
+			return
+		}
+	}
+}
+
+func TestACPTransport_SendStreamingAttemptNoTextIncludesStopReason(t *testing.T) {
+	transport := &ACPTransport{
+		config:    ACPConfig{Command: "test"},
+		stdin:     newMockPipe(),
+		sessionID: "test-session",
+		messages:  make(chan []byte, 10),
+		done:      make(chan struct{}),
+	}
+	transport.messages <- []byte(`{"jsonrpc":"2.0","id":1,"result":{"stopReason":"max_tokens"}}`)
+
+	textCh := make(chan string, 10)
+	receivedText, err := transport.sendStreamingAttempt(context.Background(), Request{Prompt: "hello"}, textCh)
+	if err == nil {
+		t.Fatal("sendStreamingAttempt returned nil error, want no-output error")
+	}
+	if receivedText {
+		t.Fatal("sendStreamingAttempt receivedText = true, want false")
+	}
+	if !errors.Is(err, ErrACPNoOutput) {
+		t.Fatalf("error = %v, want ErrACPNoOutput", err)
+	}
+	if !strings.Contains(err.Error(), "max_tokens") {
+		t.Fatalf("error = %v, want stop reason", err)
+	}
+}
+
+func TestACPTransport_InitializeUsesV1ClientCapabilities(t *testing.T) {
+	stdin := newMockPipe()
+	transport := &ACPTransport{
+		config:   ACPConfig{Command: "test"},
+		stdin:    stdin,
+		messages: make(chan []byte, 10),
+		done:     make(chan struct{}),
+	}
+	transport.messages <- []byte(`{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{},"authMethods":[]}}`)
+
+	if err := transport.initialize(context.Background()); err != nil {
+		t.Fatalf("initialize returned error: %v", err)
+	}
+
+	stdin.mu.Lock()
+	written := string(stdin.written)
+	stdin.mu.Unlock()
+
+	if strings.Contains(written, `"capabilities"`) {
+		t.Fatalf("initialize request used legacy capabilities field: %s", written)
+	}
+	if !strings.Contains(written, `"clientCapabilities"`) {
+		t.Fatalf("initialize request missing clientCapabilities: %s", written)
+	}
+	if !strings.Contains(written, `"readTextFile":false`) ||
+		!strings.Contains(written, `"writeTextFile":false`) ||
+		!strings.Contains(written, `"terminal":false`) {
+		t.Fatalf("initialize request should explicitly advertise unsupported client capabilities: %s", written)
+	}
+}
+
+func TestACPTransport_InitializeParsesLifecycleCapabilities(t *testing.T) {
+	transport := &ACPTransport{
+		config:   ACPConfig{Command: "test"},
+		stdin:    newMockPipe(),
+		messages: make(chan []byte, 10),
+		done:     make(chan struct{}),
+	}
+	transport.messages <- []byte(`{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true,"sessionCapabilities":{"close":{},"resume":{},"list":{},"fork":{}}}}}`)
+
+	if err := transport.initialize(context.Background()); err != nil {
+		t.Fatalf("initialize returned error: %v", err)
+	}
+
+	if !transport.capabilities.LoadSession {
+		t.Fatal("LoadSession capability = false, want true")
+	}
+	if !transport.capabilities.SessionClose {
+		t.Fatal("SessionClose capability = false, want true")
+	}
+	if !transport.capabilities.SessionResume {
+		t.Fatal("SessionResume capability = false, want true")
+	}
+	if !transport.capabilities.SessionList {
+		t.Fatal("SessionList capability = false, want true")
+	}
+	if !transport.capabilities.SessionFork {
+		t.Fatal("SessionFork capability = false, want true")
+	}
+}
+
+func TestACPTransport_InitializeRejectsDeprecatedClaudeCodeACP(t *testing.T) {
+	transport := &ACPTransport{
+		config:   ACPConfig{Command: "test"},
+		stdin:    newMockPipe(),
+		messages: make(chan []byte, 10),
+		done:     make(chan struct{}),
+	}
+	transport.messages <- []byte(`{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{"sessionCapabilities":{"resume":{}}},"agentInfo":{"name":"@zed-industries/claude-code-acp","title":"Claude Code","version":"0.12.6"}}}`)
+
+	err := transport.initialize(context.Background())
+	if err == nil {
+		t.Fatal("initialize returned nil error, want unsupported agent error")
+	}
+	if !errors.Is(err, ErrACPUnsupportedAgent) {
+		t.Fatalf("error = %v, want ErrACPUnsupportedAgent", err)
+	}
+	if !strings.Contains(err.Error(), "claude-agent-acp") {
+		t.Fatalf("error = %v, want claude-agent-acp migration hint", err)
+	}
+}
+
+func TestACPTransport_InitializeRejectsUnsupportedProtocolVersion(t *testing.T) {
+	transport := &ACPTransport{
+		config:   ACPConfig{Command: "test"},
+		stdin:    newMockPipe(),
+		messages: make(chan []byte, 10),
+		done:     make(chan struct{}),
+	}
+	transport.messages <- []byte(`{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":2}}`)
+
+	err := transport.initialize(context.Background())
+	if err == nil {
+		t.Fatal("initialize returned nil error, want unsupported protocol error")
+	}
+	if !strings.Contains(err.Error(), "unsupported ACP protocol version 2") {
+		t.Fatalf("initialize error = %v, want unsupported protocol version", err)
+	}
+}
+
+func TestACPTransport_CloseCurrentSessionUsesSessionCloseWhenSupported(t *testing.T) {
+	stdin := newMockPipe()
+	transport := &ACPTransport{
+		config:     ACPConfig{Command: "test"},
+		stdin:      stdin,
+		sessionID:  "test-session",
+		sessionCWD: "/tmp/hash-test",
+		capabilities: acpCapabilities{
+			SessionClose: true,
+		},
+		messages: make(chan []byte, 10),
+		done:     make(chan struct{}),
+	}
+	transport.messages <- []byte(`{"jsonrpc":"2.0","id":1,"result":{}}`)
+
+	transport.closeCurrentSession()
+
+	if transport.sessionID != "" {
+		t.Fatalf("sessionID = %q, want cleared", transport.sessionID)
+	}
+	if transport.sessionCWD != "" {
+		t.Fatalf("sessionCWD = %q, want cleared", transport.sessionCWD)
+	}
+
+	stdin.mu.Lock()
+	written := append([]byte(nil), stdin.written...)
+	stdin.mu.Unlock()
+
+	var req struct {
+		Method string `json:"method"`
+		Params struct {
+			SessionID string `json:"sessionId"`
+		} `json:"params"`
+	}
+	if err := json.Unmarshal(written, &req); err != nil {
+		t.Fatalf("unmarshal close request: %v\n%s", err, string(written))
+	}
+	if req.Method != "session/close" {
+		t.Fatalf("method = %q, want session/close", req.Method)
+	}
+	if req.Params.SessionID != "test-session" {
+		t.Fatalf("sessionId = %q, want test-session", req.Params.SessionID)
+	}
+}
+
+func TestACPTransport_CloseCurrentSessionFallsBackToCancelWhenUnsupported(t *testing.T) {
+	stdin := newMockPipe()
+	transport := &ACPTransport{
+		config:     ACPConfig{Command: "test"},
+		stdin:      stdin,
+		sessionID:  "test-session",
+		sessionCWD: "/tmp/hash-test",
+		messages:   make(chan []byte, 10),
+		done:       make(chan struct{}),
+	}
+
+	transport.closeCurrentSession()
+
+	stdin.mu.Lock()
+	written := append([]byte(nil), stdin.written...)
+	stdin.mu.Unlock()
+
+	var notification struct {
+		Method string `json:"method"`
+		Params struct {
+			SessionID string `json:"sessionId"`
+		} `json:"params"`
+	}
+	if err := json.Unmarshal(written, &notification); err != nil {
+		t.Fatalf("unmarshal cancel notification: %v\n%s", err, string(written))
+	}
+	if notification.Method != "session/cancel" {
+		t.Fatalf("method = %q, want session/cancel", notification.Method)
+	}
+	if notification.Params.SessionID != "test-session" {
+		t.Fatalf("sessionId = %q, want test-session", notification.Params.SessionID)
+	}
+}
+
+func TestACPTransport_ResetConnectionKeepsResumeCandidateWhenSupported(t *testing.T) {
+	transport := &ACPTransport{
+		config:     ACPConfig{Command: "test"},
+		stdin:      newMockPipe(),
+		sessionID:  "test-session",
+		sessionCWD: "/tmp/hash-test",
+		capabilities: acpCapabilities{
+			SessionResume: true,
+		},
+		messages: make(chan []byte, 10),
+		done:     make(chan struct{}),
+	}
+
+	transport.resetConnection()
+
+	if transport.resumeSessionID != "test-session" {
+		t.Fatalf("resumeSessionID = %q, want test-session", transport.resumeSessionID)
+	}
+	if transport.resumeSessionCWD != "/tmp/hash-test" {
+		t.Fatalf("resumeSessionCWD = %q, want /tmp/hash-test", transport.resumeSessionCWD)
+	}
+	if transport.sessionID != "" {
+		t.Fatalf("sessionID = %q, want cleared", transport.sessionID)
+	}
+}
+
+func TestACPTransport_SendStreamingAttemptResumesBeforeNewSession(t *testing.T) {
+	stdin := newMockPipe()
+	transport := &ACPTransport{
+		config:           ACPConfig{Command: "test"},
+		stdin:            stdin,
+		resumeSessionID:  "previous-session",
+		resumeSessionCWD: "/tmp/hash-test",
+		capabilities: acpCapabilities{
+			SessionResume: true,
+		},
+		messages: make(chan []byte, 10),
+		done:     make(chan struct{}),
+	}
+	transport.messages <- []byte(`{"jsonrpc":"2.0","id":1,"result":{}}`)
+	transport.messages <- []byte(`{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"previous-session","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"resumed"}}}}`)
+	transport.messages <- []byte(`{"jsonrpc":"2.0","id":2,"result":{"stopReason":"end_turn"}}`)
+
+	textCh := make(chan string, 10)
+	receivedText, err := transport.sendStreamingAttempt(context.Background(), Request{
+		Prompt: "continue",
+		Context: Context{
+			Cwd: "/tmp/hash-test",
+		},
+	}, textCh)
+	if err != nil {
+		t.Fatalf("sendStreamingAttempt returned error: %v", err)
+	}
+	if !receivedText {
+		t.Fatal("receivedText = false, want true")
+	}
+	if transport.sessionID != "previous-session" {
+		t.Fatalf("sessionID = %q, want previous-session", transport.sessionID)
+	}
+	if transport.resumeSessionID != "" {
+		t.Fatalf("resumeSessionID = %q, want cleared", transport.resumeSessionID)
+	}
+
+	stdin.mu.Lock()
+	written := string(stdin.written)
+	stdin.mu.Unlock()
+
+	if !strings.Contains(written, `"method":"session/resume"`) {
+		t.Fatalf("written RPCs missing session/resume: %s", written)
+	}
+	if strings.Contains(written, `"method":"session/new"`) {
+		t.Fatalf("written RPCs should not create a new session after resume: %s", written)
+	}
+}
+
+func TestACPTransport_EnsureSessionKeepsResumeCandidateWhenResumeConnectionDrops(t *testing.T) {
+	transport := &ACPTransport{
+		config:           ACPConfig{Command: "test"},
+		stdin:            newMockPipe(),
+		resumeSessionID:  "previous-session",
+		resumeSessionCWD: "/tmp/hash-test",
+		capabilities: acpCapabilities{
+			SessionResume: true,
+		},
+		messages: make(chan []byte),
+		done:     make(chan struct{}),
+	}
+	close(transport.messages)
+
+	sessionID, err := transport.ensureSession(context.Background(), "/tmp/hash-test")
+	if err == nil {
+		t.Fatal("ensureSession returned nil error, want retryable connection error")
+	}
+	if sessionID != "" {
+		t.Fatalf("sessionID = %q, want empty on failed resume", sessionID)
+	}
+	if !errors.Is(err, ErrACPConnectionClosed) {
+		t.Fatalf("error = %v, want ErrACPConnectionClosed", err)
+	}
+	if transport.resumeSessionID != "previous-session" {
+		t.Fatalf("resumeSessionID = %q, want preserved previous-session", transport.resumeSessionID)
+	}
+}
+
+func TestACPTransport_EnsureSessionClearsResumeCandidateWhenResumeUnsupported(t *testing.T) {
+	transport := &ACPTransport{
+		config:           ACPConfig{Command: "test"},
+		stdin:            newMockPipe(),
+		resumeSessionID:  "previous-session",
+		resumeSessionCWD: "/tmp/hash-test",
+		messages:         make(chan []byte, 10),
+		done:             make(chan struct{}),
+	}
+	transport.messages <- []byte(`{"jsonrpc":"2.0","id":1,"result":{"sessionId":"fresh-session"}}`)
+
+	sessionID, err := transport.ensureSession(context.Background(), "/tmp/hash-test")
+	if err != nil {
+		t.Fatalf("ensureSession returned error: %v", err)
+	}
+	if sessionID != "fresh-session" {
+		t.Fatalf("sessionID = %q, want fresh-session", sessionID)
+	}
+	if transport.resumeSessionID != "" {
+		t.Fatalf("resumeSessionID = %q, want cleared", transport.resumeSessionID)
+	}
+}
+
+func TestACPTransport_NewSessionSendsAbsoluteCWD(t *testing.T) {
+	stdin := newMockPipe()
+	transport := &ACPTransport{
+		config:   ACPConfig{Command: "test"},
+		stdin:    stdin,
+		messages: make(chan []byte, 10),
+		done:     make(chan struct{}),
+	}
+	transport.messages <- []byte(`{"jsonrpc":"2.0","id":1,"result":{"sessionId":"test-session"}}`)
+
+	sessionID, err := transport.newSession(context.Background(), ".")
+	if err != nil {
+		t.Fatalf("newSession returned error: %v", err)
+	}
+	if sessionID != "test-session" {
+		t.Fatalf("sessionID = %q, want test-session", sessionID)
+	}
+
+	stdin.mu.Lock()
+	written := append([]byte(nil), stdin.written...)
+	stdin.mu.Unlock()
+
+	var req struct {
+		Params newSessionParams `json:"params"`
+	}
+	if err := json.Unmarshal(written, &req); err != nil {
+		t.Fatalf("unmarshal new session request: %v\n%s", err, string(written))
+	}
+	if !filepath.IsAbs(req.Params.Cwd) {
+		t.Fatalf("session cwd = %q, want absolute path", req.Params.Cwd)
 	}
 }

@@ -26,6 +26,7 @@ const (
 	ConfirmRun    ConfirmAction = iota // User pressed Enter - run the command
 	ConfirmEdit                        // User pressed Tab - edit the command
 	ConfirmCancel                      // User pressed Esc - cancel
+	ConfirmReply                       // User pressed r - continue the conversation
 )
 
 // ConfirmationType determines which confirmation options to show.
@@ -33,7 +34,7 @@ type ConfirmationType int
 
 const (
 	ConfirmTypeCommand     ConfirmationType = iota // [Enter: run] [Tab: edit] [Esc: cancel]
-	ConfirmTypeExplanation                         // [Enter: ok] [Tab: copy] [Esc: cancel]
+	ConfirmTypeExplanation                         // [Enter: done] [Tab: copy] [r: reply] [Esc: cancel]
 	ConfirmTypeError                               // [Enter: retry] [Esc: cancel]
 )
 
@@ -345,7 +346,7 @@ func (u *ResponseUI) ShowConfirmation(ct ConfirmationType) {
 	case ConfirmTypeCommand:
 		hint = "[Enter: run] [Tab: edit] [Esc: cancel]"
 	case ConfirmTypeExplanation:
-		hint = "[Enter: ok] [Tab: copy] [Esc: cancel]"
+		hint = "[Enter: done] [Tab: copy] [r: reply] [Esc: cancel]"
 	case ConfirmTypeError:
 		hint = "[Enter: retry] [Esc: cancel]"
 	}
@@ -381,6 +382,11 @@ func (u *ResponseUI) WaitForConfirmationByType(ct ConfirmationType) ConfirmActio
 				continue // No Tab action for errors
 			}
 			return ConfirmEdit // ConfirmEdit means "secondary action" (edit/copy)
+		case 'r', 'R':
+			if ct == ConfirmTypeExplanation {
+				return ConfirmReply
+			}
+			continue
 		case 0x1b: // Escape - might be standalone or start of sequence
 			// Use channel-based timeout since SetReadDeadline doesn't work on terminals
 			if u.isStandaloneEscape(buf[1:]) {

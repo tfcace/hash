@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/tfcace/hash/internal/agent"
 	"github.com/tfcace/hash/internal/clipboard"
@@ -153,30 +154,31 @@ func (h *AgentHandler) StreamRequest(ctx context.Context, parsed parser.ParseRes
 	return tracedTextCh, tracedErrCh
 }
 
+// StreamFollowUp sends a conversation follow-up turn to the agent.
+//
+//nolint:gocritic // unnamedResult: receive-only channels match Transport style
+func (h *AgentHandler) StreamFollowUp(ctx context.Context, reply string, transcript []agentConversationMessage) (<-chan string, <-chan error) {
+	if h.client == nil {
+		errCh := make(chan error, 1)
+		errCh <- fmt.Errorf("no agent configured")
+		close(errCh)
+		return nil, errCh
+	}
+
+	req, err := h.buildFollowUpRequest(reply, transcript)
+	if err != nil {
+		errCh := make(chan error, 1)
+		errCh <- err
+		close(errCh)
+		return nil, errCh
+	}
+
+	return h.client.StreamRequest(ctx, req)
+}
+
 // buildRequest constructs an agent.Request from a parsed result.
 func (h *AgentHandler) buildRequest(parsed parser.ParseResult) (agent.Request, error) {
-	// Build context - use selected context if available, otherwise auto-detect
-	var agentCtx agent.Context
-	if h.selectedContext != nil && len(h.selectedContext.SelectedItems()) > 0 {
-		agentCtx = h.buildContextFromSelection()
-	} else {
-		ctxBuilder := agent.NewContextBuilder().
-			DetectGitBranch().
-			DetectKubeContext()
-
-		if h.clipboardBuf != nil {
-			if lastOutput := h.clipboardBuf.LastOutput(); lastOutput != "" {
-				ctxBuilder.WithLastOutput(lastOutput)
-			}
-		}
-		agentCtx = ctxBuilder.Build()
-	}
-
-	// Populate last error context if available
-	if h.lastError != nil {
-		agentCtx.LastError = fmt.Sprintf("Command '%s' failed (exit %d):\n%s",
-			h.lastError.Command, h.lastError.ExitCode, h.lastError.Stderr)
-	}
+	agentCtx := h.buildAgentContext()
 
 	// Build the prompt based on parse type
 	var prompt string
@@ -214,6 +216,97 @@ Respond with ONLY the completion to append (single line).
 		CommandLine: parsed.Command,
 		Context:     agentCtx,
 	}, nil
+}
+
+func (h *AgentHandler) buildFollowUpRequest(reply string, transcript []agentConversationMessage) (agent.Request, error) {
+	reply = strings.TrimSpace(reply)
+	if reply == "" {
+		return agent.Request{}, fmt.Errorf("empty follow-up reply")
+	}
+
+	if h.client != nil && h.client.Name() == "acp" {
+		return agent.Request{Prompt: buildACPFollowUpPrompt(reply)}, nil
+	}
+
+	return agent.Request{
+		Prompt:  buildStatelessFollowUpPrompt(reply, transcript),
+		Context: h.buildAgentContext(),
+	}, nil
+}
+
+func buildACPFollowUpPrompt(reply string) string {
+	var b strings.Builder
+	writeFollowUpTurnInstructions(&b)
+	b.WriteString("\nLatest user message: ")
+	b.WriteString(reply)
+	return b.String()
+}
+
+func buildStatelessFollowUpPrompt(reply string, transcript []agentConversationMessage) string {
+	var b strings.Builder
+	b.WriteString("Continue this conversation. Use the prior turns as context, then answer the latest user message.\n")
+	writeFollowUpTurnInstructions(&b)
+	b.WriteString("\n")
+	b.WriteString("Conversation so far:\n")
+	for _, msg := range transcript {
+		role := strings.TrimSpace(msg.Role)
+		text := strings.TrimSpace(msg.Text)
+		if role == "" || text == "" {
+			continue
+		}
+		b.WriteString(roleTitle(role))
+		b.WriteString(": ")
+		b.WriteString(text)
+		b.WriteString("\n")
+	}
+	b.WriteString("\nLatest user message: ")
+	b.WriteString(reply)
+	return b.String()
+}
+
+func writeFollowUpTurnInstructions(b *strings.Builder) {
+	b.WriteString("Treat this as the user's next turn in the current conversation.\n")
+	b.WriteString("Side requests are allowed. If the user pauses or redirects, handle it normally, including tool use when appropriate.\n")
+	b.WriteString("After a side request, preserve the prior conversation state and resume or ask whether to resume.")
+	b.WriteString("\n")
+}
+
+func roleTitle(role string) string {
+	switch strings.ToLower(role) {
+	case "assistant":
+		return "Assistant"
+	case "user":
+		return "User"
+	default:
+		return role
+	}
+}
+
+func (h *AgentHandler) buildAgentContext() agent.Context {
+	// Build context - use selected context if available, otherwise auto-detect
+	var agentCtx agent.Context
+	if h.selectedContext != nil && len(h.selectedContext.SelectedItems()) > 0 {
+		agentCtx = h.buildContextFromSelection()
+	} else {
+		ctxBuilder := agent.NewContextBuilder().
+			DetectGitBranch().
+			DetectKubeContext()
+
+		if h.clipboardBuf != nil {
+			if lastOutput := h.clipboardBuf.LastOutput(); lastOutput != "" {
+				ctxBuilder.WithLastOutput(lastOutput)
+			}
+		}
+		agentCtx = ctxBuilder.Build()
+	}
+
+	// Populate last error context if available
+	if h.lastError != nil {
+		agentCtx.LastError = fmt.Sprintf("Command '%s' failed (exit %d):\n%s",
+			h.lastError.Command, h.lastError.ExitCode, h.lastError.Stderr)
+	}
+
+	return agentCtx
 }
 
 // buildContextFromSelection converts user-selected context to agent.Context.

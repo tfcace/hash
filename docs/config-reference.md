@@ -36,7 +36,7 @@ allowed_commands_scope = "project"
 
 [agent.claude]
 transport = "stdio"
-command = "claude-code-acp"
+command = "claude-agent-acp"
 
 [agent.ollama]
 transport = "http"
@@ -127,9 +127,13 @@ format tables are not currently supported.
 
 AI agent selection and shared behavior.
 
+For Claude over ACP, install the current adapter with
+`npm install -g @agentclientprotocol/claude-agent-acp` and use
+`command = "claude-agent-acp"`.
+
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `default` | string | `"claude-code-acp"` | Name of the selected `[agent.<name>]`, or a label for flat config. |
+| `default` | string | `"claude-agent-acp"` | Name of the selected `[agent.<name>]`, or a label for flat config. |
 | `timeout` | duration string | `"120s"` | Agent request timeout. |
 | `allowed_commands_scope` | `"project"` \| `"global"` \| `"session"` | `"project"` | Where persistent tool approvals are stored. |
 
@@ -140,7 +144,7 @@ Flat config:
 ```toml
 [agent]
 transport = "stdio"
-command = "claude-code-acp"
+command = "claude-agent-acp"
 args = []
 ```
 

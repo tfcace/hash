@@ -21,12 +21,12 @@ func TestHandleAgentStreamError_NoResponseStartupShowsTroubleshooting(t *testing
 		agentOutput: NewAgentOutputCoordinator(&out),
 	}
 	sh.config.Agent.Transport = "stdio"
-	sh.config.Agent.Command = "claude-code-acp"
+	sh.config.Agent.Command = "claude-agent-acp"
 
 	handled := sh.handleAgentStreamError(
 		context.Background(),
 		parser.ParseResult{},
-		"claude-code-acp",
+		"claude-agent-acp",
 		errors.Join(agent.ErrACPStartFailed, exec.ErrNotFound),
 		0,
 		0,
@@ -56,7 +56,7 @@ func TestHandleAgentStreamError_NoResponseTimeoutDoesNotShowTroubleshooting(t *t
 	handled := sh.handleAgentStreamError(
 		context.Background(),
 		parser.ParseResult{},
-		"claude-code-acp",
+		"claude-agent-acp",
 		errors.Join(agent.ErrACPIdleTimeout, context.DeadlineExceeded),
 		0,
 		0,

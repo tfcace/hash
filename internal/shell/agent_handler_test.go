@@ -9,6 +9,30 @@ import (
 	"github.com/tfcace/hash/internal/parser"
 )
 
+type namedTestTransport struct {
+	name string
+}
+
+func (t namedTestTransport) Connect(ctx context.Context) error {
+	return nil
+}
+
+func (t namedTestTransport) SendStreaming(ctx context.Context, req agent.Request) (<-chan string, <-chan error) {
+	textCh := make(chan string)
+	errCh := make(chan error)
+	close(textCh)
+	close(errCh)
+	return textCh, errCh
+}
+
+func (t namedTestTransport) Close() error {
+	return nil
+}
+
+func (t namedTestTransport) Name() string {
+	return t.name
+}
+
 func TestAgentHandler_HandleRequest(t *testing.T) {
 	mockResp := agent.Response{
 		Type:    agent.ResponseTypeCommand,
@@ -188,5 +212,61 @@ func TestBuildRequest_PipeModeIgnoresLastError(t *testing.T) {
 	// But Context.LastError is still available for the agent
 	if !strings.Contains(req.Context.LastError, "bad-cmd") {
 		t.Errorf("Context.LastError should still be set, got %q", req.Context.LastError)
+	}
+}
+
+func TestBuildFollowUpRequest_ACPFramesSideRequestsWithoutTranscript(t *testing.T) {
+	handler := NewAgentHandler(agent.NewClient(namedTestTransport{name: "acp"}))
+	transcript := []agentConversationMessage{
+		{Role: "user", Text: "Let's play twenty questions."},
+		{Role: "assistant", Text: "Is it in the repository?"},
+	}
+
+	req, err := handler.buildFollowUpRequest("let's pause the game and list my kubernetes contexts", transcript)
+	if err != nil {
+		t.Fatalf("buildFollowUpRequest() error = %v", err)
+	}
+
+	want := []string{
+		"Treat this as the user's next turn in the current conversation.",
+		"handle it normally, including tool use",
+		"preserve the prior conversation state",
+		"Latest user message: let's pause the game and list my kubernetes contexts",
+	}
+	for _, substr := range want {
+		if !strings.Contains(req.Prompt, substr) {
+			t.Fatalf("Prompt missing %q:\n%s", substr, req.Prompt)
+		}
+	}
+	if strings.Contains(req.Prompt, "Let's play twenty questions.") {
+		t.Fatalf("ACP follow-up should not duplicate transcript, got %q", req.Prompt)
+	}
+}
+
+func TestBuildFollowUpRequest_StatelessTransportIncludesTranscript(t *testing.T) {
+	handler := NewAgentHandler(agent.NewClient(agent.NewMockTransport()))
+	transcript := []agentConversationMessage{
+		{Role: "user", Text: "Find my config files"},
+		{Role: "assistant", Text: "Which directory should I inspect?"},
+	}
+
+	req, err := handler.buildFollowUpRequest("internal/shell", transcript)
+	if err != nil {
+		t.Fatalf("buildFollowUpRequest() error = %v", err)
+	}
+
+	want := []string{
+		"Continue this conversation.",
+		"Side requests are allowed.",
+		"including tool use",
+		"resume or ask whether to resume",
+		"User: Find my config files",
+		"Assistant: Which directory should I inspect?",
+		"Latest user message: internal/shell",
+	}
+	for _, substr := range want {
+		if !strings.Contains(req.Prompt, substr) {
+			t.Fatalf("Prompt missing %q:\n%s", substr, req.Prompt)
+		}
 	}
 }

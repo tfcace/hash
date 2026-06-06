@@ -153,8 +153,8 @@ func Default() *Config {
 			Mode: "starship",
 		},
 		Agent: AgentConfig{
-			Default:              "claude-code-acp",
-			Command:              "claude-code-acp",
+			Default:              "claude-agent-acp",
+			Command:              "claude-agent-acp",
 			Timeout:              "120s",
 			AllowedCommandsScope: "project",
 		},

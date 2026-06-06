@@ -39,12 +39,18 @@ No mode switching. No special commands. Just `??` where you need help.
 
 ### Agent Agnostic
 
-Use any AI that speaks ACP or HTTP. Configure one agent directly:
+Use any AI that speaks ACP or HTTP. For Claude, install the current ACP adapter:
+
+```bash
+npm install -g @agentclientprotocol/claude-agent-acp
+```
+
+Then configure one agent directly:
 
 ```toml
 [agent]
 transport = "stdio"
-command = "claude-code-acp"
+command = "claude-agent-acp"
 ```
 
 Or define named agents and select one with `default`:
@@ -55,7 +61,7 @@ default = "ollama"
 
 [agent.claude]
 transport = "stdio"
-command = "claude"
+command = "claude-agent-acp"
 
 [agent.ollama]
 transport = "http"
@@ -288,7 +294,7 @@ keybindings = "helix"
 
 [agent]
 transport = "stdio"
-command = "claude-code-acp"
+command = "claude-agent-acp"
 timeout = "120s"
 
 [completions]

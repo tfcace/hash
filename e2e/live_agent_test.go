@@ -1,6 +1,6 @@
 //go:build e2e_live
 
-// These tests run against the real claude-code-acp agent.
+// These tests run against the real claude-agent-acp agent.
 // They are non-deterministic and may fail due to agent response variations.
 // Run with: go test -tags=e2e_live -v ./e2e/...
 
@@ -22,12 +22,12 @@ import (
 // testTimeout is the maximum time for each test
 const testTimeout = 60 * time.Second
 
-// newLiveAgent creates a real ACP transport connected to claude-code-acp.
+// newLiveAgent creates a real ACP transport connected to claude-agent-acp.
 func newLiveAgent(t *testing.T) (*agent.ACPTransport, func()) {
 	t.Helper()
 
 	transport := agent.NewACPTransport(agent.ACPConfig{
-		Command: "claude-code-acp",
+		Command: "claude-agent-acp",
 		Args:    []string{},
 	})
 
@@ -35,7 +35,7 @@ func newLiveAgent(t *testing.T) (*agent.ACPTransport, func()) {
 	defer cancel()
 
 	if err := transport.Connect(ctx); err != nil {
-		t.Fatalf("Failed to connect to claude-code-acp: %v", err)
+		t.Fatalf("Failed to connect to claude-agent-acp: %v", err)
 	}
 
 	cleanup := func() {
