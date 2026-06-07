@@ -16,11 +16,22 @@ type KillHandler struct {
 	cacheExpires  time.Time
 	cached        []processInfo
 	now           func() time.Time
+
+	inflightMu         sync.Mutex
+	inflight           map[string]*processListCall
+	inflightMaxWaitAge time.Duration
 }
 
 type processInfo struct {
 	PID  string
 	Name string
+}
+
+type processListCall struct {
+	done      chan struct{}
+	started   time.Time
+	processes []processInfo
+	err       error
 }
 
 // NewKillHandler creates a kill/killall completion handler.
@@ -89,7 +100,7 @@ func (h *KillHandler) cachedProcesses(ctx context.Context) ([]processInfo, error
 		h.cacheMu.Unlock()
 	}
 
-	processes, err := listProcessesUntilContext(ctx, h.listProcesses)
+	processes, err := h.lookupProcesses(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -100,6 +111,59 @@ func (h *KillHandler) cachedProcesses(ctx context.Context) ([]processInfo, error
 		h.cacheMu.Unlock()
 	}
 	return processes, nil
+}
+
+func (h *KillHandler) lookupProcesses(ctx context.Context) ([]processInfo, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	key := h.command
+	now := time.Now()
+	h.inflightMu.Lock()
+	if call, ok := h.inflight[key]; ok {
+		if !contextReadCallIsStale(call.started, now, h.inflightMaxWaitAge) {
+			h.inflightMu.Unlock()
+			return waitForProcessList(ctx, call)
+		}
+		delete(h.inflight, key)
+	}
+
+	call := &processListCall{done: make(chan struct{}), started: now}
+	if h.inflight == nil {
+		h.inflight = make(map[string]*processListCall)
+	}
+	h.inflight[key] = call
+	h.inflightMu.Unlock()
+
+	go h.finishProcessList(ctx, key, call)
+	return waitForProcessList(ctx, call)
+}
+
+func (h *KillHandler) finishProcessList(ctx context.Context, key string, call *processListCall) {
+	list := h.listProcesses
+	if list == nil {
+		list = defaultListProcesses
+	}
+	processes, err := list(ctx)
+
+	h.inflightMu.Lock()
+	call.processes = processes
+	call.err = err
+	if h.inflight[key] == call {
+		delete(h.inflight, key)
+	}
+	h.inflightMu.Unlock()
+	close(call.done)
+}
+
+func waitForProcessList(ctx context.Context, call *processListCall) ([]processInfo, error) {
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-call.done:
+		return append([]processInfo(nil), call.processes...), call.err
+	}
 }
 
 func (h *KillHandler) timeNow() time.Time {

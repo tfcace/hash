@@ -2,6 +2,7 @@ package completion
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -159,5 +160,43 @@ func TestKillHandler_ReturnsWhenProcessListIgnoresContext(t *testing.T) {
 		}
 	case <-time.After(100 * time.Millisecond):
 		t.Fatal("kill completion did not return after context cancellation")
+	}
+}
+
+func TestKillHandler_CoalescesFreshBlockedLookupAndRetriesWhenStale(t *testing.T) {
+	release := make(chan struct{})
+	defer close(release)
+	var calls atomic.Int32
+	h := &KillHandler{
+		command: "kill",
+		listProcesses: func(ctx context.Context) ([]processInfo, error) {
+			call := calls.Add(1)
+			if call == 1 {
+				<-release
+				return []processInfo{{PID: "999", Name: "stale"}}, nil
+			}
+			return []processInfo{{PID: "123", Name: "bash"}}, nil
+		},
+	}
+
+	for i := 0; i < 2; i++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+		result := h.Complete(ctx, nil, "")
+		cancel()
+		if len(result.Items) != 0 {
+			t.Fatalf("expected no items from blocked process lookup, got %#v", result.Items)
+		}
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("expected second blocked kill completion to coalesce, got %d process lookups", got)
+	}
+
+	time.Sleep(90 * time.Millisecond)
+	result := h.Complete(context.Background(), nil, "1")
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("expected stale process lookup to retry, got %d process lookups", got)
+	}
+	if len(result.Items) != 1 || result.Items[0].Value != "123" {
+		t.Fatalf("expected fresh process completion after stale retry, got %#v", result.Items)
 	}
 }
