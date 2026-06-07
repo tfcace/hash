@@ -25,6 +25,7 @@ type Config struct {
 type ShellConfig struct {
 	Editor          string             `toml:"editor"`
 	Keybindings     string             `toml:"keybindings"`
+	Dialect         string             `toml:"dialect"`          // "bash" or "zsh" parser dialect
 	InitCommands    []string           `toml:"init_commands"`    // Legacy: run always
 	ProfileCommands []string           `toml:"profile"`          // Run on login shells
 	RCCommands      []string           `toml:"rc_commands"`      // Run on interactive shells
@@ -133,6 +134,7 @@ func Default() *Config {
 		Shell: ShellConfig{
 			Editor:      os.Getenv("EDITOR"),
 			Keybindings: "emacs",
+			Dialect:     "bash",
 			StartupFiles: StartupFilesConfig{
 				Login: []string{
 					"/etc/profile",
@@ -209,6 +211,9 @@ func Load(configDir string) (*Config, error) {
 	// Apply defaults for empty values
 	if cfg.Shell.Keybindings == "" {
 		cfg.Shell.Keybindings = "emacs"
+	}
+	if cfg.Shell.Dialect == "" {
+		cfg.Shell.Dialect = "bash"
 	}
 	if cfg.Input.Keybindings == "" {
 		cfg.Input.Keybindings = "helix"

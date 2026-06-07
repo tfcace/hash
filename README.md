@@ -321,7 +321,7 @@ chsh -s $(which hash)
 
 ### Startup Files
 
-Hash follows zsh-style conventions for startup files:
+Hash uses its own startup files by default:
 
 | Mode | Environment | Files Sourced |
 |------|-------------|---------------|
@@ -329,6 +329,27 @@ Hash follows zsh-style conventions for startup files:
 | Interactive | `HASH_INTERACTIVE=1` | `~/.hashrc` |
 | Login+Interactive | Both | All of the above, in order |
 | Non-interactive | Neither | `init_commands` only |
+
+Hash parses shell code as bash by default. To opt into zsh parsing for commands,
+`source`, `eval`, configured startup files, and migrated zsh files:
+
+```toml
+[shell]
+dialect = "zsh"
+```
+
+Then configure zsh startup files explicitly if you want Hash to source them
+directly:
+
+```toml
+[shell.startup_files]
+login = ["/etc/zprofile", "~/.zprofile", "~/.hash_profile"]
+interactive = ["~/.zshrc", "~/.hashrc"]
+```
+
+Zsh parsing is experimental upstream. Hash still no-ops unsupported zsh
+integration builtins such as `bindkey`, `setopt`, and `compdef`, while bash mode
+continues to filter zsh-only migration lines for compatibility.
 
 **Recommended setup:**
 
@@ -360,7 +381,11 @@ fi
 
 ### Migration from Bash/Zsh
 
-When you first launch Hash, it detects your previous shell and asks before loading compatible settings. Hash supports common bash syntax including `[[`, `==`, `&&`, `||`, and process substitution.
+When you first launch Hash, it detects your previous shell and asks before
+loading compatible settings. Migration uses your configured `shell.dialect`:
+bash mode filters zsh-only init/eval lines, while zsh mode preserves zsh syntax
+where possible. Unsupported zsh shell/editor integration builtins such as
+`bindkey`, `setopt`, and `compdef` remain compatibility no-ops.
 
 **Aliases are converted to functions:** Hash converts `alias foo='cmd1 && cmd2'` to `foo() { cmd1 && cmd2; }` internally. This is transparent — you use the alias name normally, and it works as expected.
 

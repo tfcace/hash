@@ -21,6 +21,9 @@ func TestLoadConfig_DefaultValues(t *testing.T) {
 	if cfg.Shell.Keybindings != "emacs" {
 		t.Errorf("Keybindings = %q, want %q", cfg.Shell.Keybindings, "emacs")
 	}
+	if cfg.Shell.Dialect != "bash" {
+		t.Errorf("Dialect = %q, want %q", cfg.Shell.Dialect, "bash")
+	}
 	if cfg.Prompt.Mode != "starship" {
 		t.Errorf("Prompt.Mode = %q, want %q", cfg.Prompt.Mode, "starship")
 	}
@@ -34,6 +37,7 @@ func TestLoadConfig_FromFile(t *testing.T) {
 [shell]
 keybindings = "vim"
 editor = "nvim"
+dialect = "zsh"
 
 [prompt]
 mode = "built-in"
@@ -52,6 +56,9 @@ mode = "built-in"
 	}
 	if cfg.Shell.Editor != "nvim" {
 		t.Errorf("Editor = %q, want %q", cfg.Shell.Editor, "nvim")
+	}
+	if cfg.Shell.Dialect != "zsh" {
+		t.Errorf("Dialect = %q, want %q", cfg.Shell.Dialect, "zsh")
 	}
 	if cfg.Prompt.Mode != "built-in" {
 		t.Errorf("Prompt.Mode = %q, want %q", cfg.Prompt.Mode, "built-in")

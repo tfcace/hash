@@ -126,6 +126,45 @@ export EDITOR=vim
 	}
 }
 
+func TestFilterWithDialect_ZshKeepsZshInitLines(t *testing.T) {
+	tmpDir := t.TempDir()
+	rcFile := filepath.Join(tmpDir, ".zshrc")
+
+	content := `# zsh mode should keep zsh eval/source lines
+eval "$(zoxide init zsh)"
+source ~/.zsh/zsh-autosuggestions/zsh-autosuggestions.zsh
+setopt AUTO_CD
+`
+	if err := os.WriteFile(rcFile, []byte(content), 0o644); err != nil {
+		t.Fatalf("failed to write rc file: %v", err)
+	}
+
+	bashFiltered, _, err := FilterWithCompat(rcFile, "zsh")
+	if err != nil {
+		t.Fatalf("FilterWithCompat() error = %v", err)
+	}
+	if !strings.Contains(bashFiltered, "# [hash-compat] eval \"$(zoxide init zsh)\"") {
+		t.Fatalf("bash compatibility should still comment zsh init lines, got:\n%s", bashFiltered)
+	}
+
+	zshFiltered, report, err := FilterWithDialect(rcFile, "zsh", "zsh")
+	if err != nil {
+		t.Fatalf("FilterWithDialect(zsh) error = %v", err)
+	}
+	if strings.Contains(zshFiltered, "# [hash-compat] eval \"$(zoxide init zsh)\"") {
+		t.Fatalf("zsh dialect should keep zsh init lines, got:\n%s", zshFiltered)
+	}
+	if strings.Contains(zshFiltered, "# [hash-compat] source ~/.zsh/zsh-autosuggestions") {
+		t.Fatalf("zsh dialect should keep zsh source lines, got:\n%s", zshFiltered)
+	}
+	if !strings.Contains(zshFiltered, "# [hash-compat] setopt AUTO_CD") {
+		t.Fatalf("zsh builtins without runtime support should still be no-oped, got:\n%s", zshFiltered)
+	}
+	if report.Summary.Skipped != 1 {
+		t.Fatalf("Skipped = %d, want 1 for setopt only", report.Summary.Skipped)
+	}
+}
+
 func TestCheckSourceChanged(t *testing.T) {
 	tmpDir := t.TempDir()
 	rcFile := filepath.Join(tmpDir, ".zshrc")

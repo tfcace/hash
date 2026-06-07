@@ -129,9 +129,8 @@ source %s
 }
 
 // FormatHashrcCommentFiles returns the comment block for .hashrc with multiple source files.
-// Note: We don't include source commands here because mvdan/sh's internal source
-// builtin parses with POSIX mode. Instead, Hash sources migration files directly
-// at startup using SourceWithCompat which uses LangBash parsing.
+// Note: We don't include source commands here because Hash sources migration
+// files directly at startup with the configured parser dialect.
 func FormatHashrcCommentFiles(files []string) string {
 	home := os.Getenv("HOME")
 	var b strings.Builder
@@ -145,7 +144,7 @@ func FormatHashrcCommentFiles(files []string) string {
 		b.WriteString(fmt.Sprintf("#   %s\n", displayFile))
 	}
 	b.WriteString("#\n")
-	b.WriteString("# Files are sourced at startup with bash syntax support.\n")
+	b.WriteString("# Files are sourced at startup with the configured shell dialect.\n")
 	b.WriteString("# Run 'hash migrate status' to see what was skipped\n")
 	b.WriteString("#\n")
 	b.WriteString("# Add your own customizations below:\n\n")

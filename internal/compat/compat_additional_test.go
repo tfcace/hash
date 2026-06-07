@@ -75,7 +75,7 @@ func TestShouldSkipLine(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			reason := shouldSkipLine(tt.line)
+			reason := shouldSkipLine(tt.line, "bash")
 			gotSkip := reason != ""
 
 			if gotSkip != tt.wantSkip {

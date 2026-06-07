@@ -86,6 +86,9 @@ type Shell struct {
 //nolint:gocyclo // shell initialization wires up many subsystems sequentially
 func New(cfg *config.Config) (*Shell, error) {
 	e := executor.New()
+	if err := e.SetDialect(cfg.Shell.Dialect); err != nil {
+		fmt.Fprintf(os.Stderr, "hash: warning: %v; using bash dialect\n", err)
+	}
 	agentCfg := cfg.EffectiveAgent()
 
 	promptCfg := prompt.Config{

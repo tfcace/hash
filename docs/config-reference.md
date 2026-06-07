@@ -19,6 +19,7 @@ or `XDG_DATA_HOME` to change the default config/data roots.
 ```toml
 [shell]
 editor = "hx"
+dialect = "bash"
 disable_builtins = ["cd"]
 
 [input]
@@ -74,6 +75,7 @@ Core shell behavior.
 |-----|------|---------|-------------|
 | `editor` | string | `$EDITOR` | Terminal editor used by edit flows. |
 | `keybindings` | `"emacs"` \| `"vim"` \| `"helix"` | `"emacs"` | Readline compatibility mode. |
+| `dialect` | `"bash"` \| `"zsh"` | `"bash"` | Shell parser dialect for commands, `source`, `eval`, startup files, and migrated files. |
 | `init_commands` | array of strings | `[]` | Commands run for every shell mode. |
 | `profile` | array of strings | `[]` | Commands run for login shells. |
 | `rc_commands` | array of strings | `[]` | Commands run for interactive shells. |
@@ -81,6 +83,30 @@ Core shell behavior.
 
 Disableable builtins include `cd`, `history`, `copy`, `issue`, `status`,
 `tips`, `setup-zoxide`, `source`, `exit`, and `quit`.
+
+### Shell Dialect
+
+Hash uses the `mvdan.cc/sh` interpreter. The default dialect is bash for
+stability and backwards compatibility:
+
+```toml
+[shell]
+dialect = "bash"
+```
+
+To opt into zsh parsing:
+
+```toml
+[shell]
+dialect = "zsh"
+```
+
+In zsh mode, normal commands, `source`, `eval`, configured startup files, and
+migrated zsh files are parsed with `syntax.LangZsh`. Upstream zsh support is
+experimental and incomplete, so Hash still treats shell/editor integration
+builtins such as `bindkey`, `setopt`, `compdef`, and `zstyle` as compatibility
+no-ops. Bash mode continues to filter common zsh-only init/eval lines during
+migration.
 
 ### `[shell.startup_files]`
 
@@ -91,6 +117,21 @@ Disableable builtins include `cd`, `history`, `copy`, `issue`, `status`,
 
 Startup order is migration files, login files, `profile`, interactive files,
 `rc_commands`, then `init_commands`.
+
+The defaults stay Hash-specific even in zsh mode. To source zsh startup files
+directly, configure them explicitly:
+
+```toml
+[shell]
+dialect = "zsh"
+
+[shell.startup_files]
+login = ["/etc/zprofile", "~/.zprofile", "~/.hash_profile"]
+interactive = ["~/.zshrc", "~/.hashrc"]
+```
+
+If you rely on `~/.zshenv`, add it carefully to the startup lists you need;
+Hash does not currently have a separate “all shell invocations” startup bucket.
 
 ### `[shell.hooks]`
 
@@ -236,4 +277,6 @@ Interactive builtins:
 | `source <file>` / `. <file>` | Source shell setup files. |
 
 Compatibility no-op builtins such as `bindkey`, `setopt`, and `compdef` exist
-so common zsh setup files can be filtered or sourced without failing.
+so common zsh setup files can be filtered or sourced without failing. In
+`shell.dialect = "zsh"`, zsh syntax and zsh init/eval lines are preserved where
+possible, while unsupported runtime integration builtins remain no-ops.

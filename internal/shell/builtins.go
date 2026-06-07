@@ -34,7 +34,7 @@ func isBuiltin(cmd string) bool {
 	switch cmd {
 	case "cd", "exit", "quit", "history", "copy", "issue", "status", "tips", "setup-zoxide":
 		return true
-	// Source builtin with LangBash support
+	// Source builtin with executor dialect support
 	case "source", ".":
 		return true
 	// No-op builtins for zsh compatibility
@@ -438,8 +438,7 @@ func (s *Shell) collectStatus() *SystemStatus {
 	return status
 }
 
-// builtinSource sources a shell script file using LangBash parsing.
-// This ensures bash syntax like [[ ]] and == works correctly.
+// builtinSource sources a shell script file using the executor parser dialect.
 func (s *Shell) builtinSource(ctx context.Context, args []string) error {
 	if len(args) < 1 {
 		return fmt.Errorf("source: need filename")
@@ -470,7 +469,7 @@ func (s *Shell) builtinSource(ctx context.Context, args []string) error {
 		return fmt.Errorf("source: %w", err)
 	}
 
-	// Execute through the executor (which parses with LangBash)
+	// Execute through the executor (which parses with the configured dialect)
 	if s.executor != nil {
 		_, err = s.executor.Execute(ctx, string(content), os.Stdout, os.Stderr)
 		return err

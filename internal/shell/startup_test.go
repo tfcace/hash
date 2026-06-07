@@ -1,9 +1,11 @@
 package shell
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/tfcace/hash/internal/compat"
@@ -181,4 +183,95 @@ func TestStartup_FirstRunMigration(t *testing.T) {
 	_ = shouldShow
 	_ = shell
 	_ = rcFile
+}
+
+func TestStartup_SourceMigrationFilesUsesZshDialect(t *testing.T) {
+	const envName = "HASH_TEST_ZSH_MIGRATION_MARKER"
+	tmpDir := t.TempDir()
+	dataDir := filepath.Join(tmpDir, "data")
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("XDG_DATA_HOME", dataDir)
+	t.Setenv(envName, "")
+
+	zshrc := filepath.Join(tmpDir, ".zshrc")
+	content := `: &!
+export ` + envName + `=loaded
+`
+	if err := os.WriteFile(zshrc, []byte(content), 0o644); err != nil {
+		t.Fatalf("failed to write zshrc: %v", err)
+	}
+
+	state := &compat.State{
+		SourceFile:  zshrc,
+		SourceFiles: []string{zshrc},
+		SourceShell: "zsh",
+	}
+	if err := state.Save(compat.DefaultStatePath()); err != nil {
+		t.Fatalf("failed to save migration state: %v", err)
+	}
+
+	cfg := config.Default()
+	cfg.Shell.Dialect = "zsh"
+	cfg.Shell.StartupFiles.Login = nil
+	cfg.Shell.StartupFiles.Interactive = nil
+	cfg.Shell.InitCommands = nil
+
+	sh, err := NewWithMode(cfg, Mode{Interactive: true})
+	if err != nil {
+		t.Fatalf("failed to create shell: %v", err)
+	}
+	defer sh.Close()
+
+	sh.sourceMigrationFiles(context.Background())
+
+	var stdout, stderr bytes.Buffer
+	if _, err := sh.executor.Execute(context.Background(), `echo "$`+envName+`"`, &stdout, &stderr); err != nil {
+		t.Fatalf("echo failed: %v, stderr: %s", err, stderr.String())
+	}
+	if got := strings.TrimSpace(stdout.String()); got != "loaded" {
+		t.Fatalf("migration export = %q, want loaded", got)
+	}
+}
+
+func TestStartup_ConfiguredZshStartupFileUsesZshDialect(t *testing.T) {
+	const envName = "HASH_TEST_ZSH_STARTUP_MARKER"
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("XDG_DATA_HOME", filepath.Join(tmpDir, "data"))
+	t.Setenv(envName, "")
+
+	zshrc := filepath.Join(tmpDir, ".zshrc")
+	content := `: &!
+export ` + envName + `=loaded
+`
+	if err := os.WriteFile(zshrc, []byte(content), 0o644); err != nil {
+		t.Fatalf("failed to write zshrc: %v", err)
+	}
+	if err := (&compat.State{Declined: true}).Save(compat.DefaultStatePath()); err != nil {
+		t.Fatalf("failed to save migration state: %v", err)
+	}
+
+	cfg := config.Default()
+	cfg.Shell.Dialect = "zsh"
+	cfg.Shell.StartupFiles.Login = nil
+	cfg.Shell.StartupFiles.Interactive = []string{zshrc}
+	cfg.Shell.InitCommands = nil
+
+	sh, err := NewWithMode(cfg, Mode{Interactive: true})
+	if err != nil {
+		t.Fatalf("failed to create shell: %v", err)
+	}
+	defer sh.Close()
+
+	if err := sh.runStartup(context.Background()); err != nil {
+		t.Fatalf("startup failed: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if _, err := sh.executor.Execute(context.Background(), `echo "$`+envName+`"`, &stdout, &stderr); err != nil {
+		t.Fatalf("echo failed: %v, stderr: %s", err, stderr.String())
+	}
+	if got := strings.TrimSpace(stdout.String()); got != "loaded" {
+		t.Fatalf("startup export = %q, want loaded", got)
+	}
 }

@@ -110,7 +110,11 @@ Environment:
 Startup files:
   Login shell:       /etc/profile, ~/.profile, ~/.hash_profile
   Interactive shell: ~/.hashrc
-  Login+Interactive: All of the above`)
+  Login+Interactive: All of the above
+
+Parser dialect:
+  Default:           bash
+  Optional:          set [shell] dialect = "zsh" in config.toml`)
 }
 
 func printVersion() {
