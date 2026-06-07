@@ -3,6 +3,7 @@ package completion
 import (
 	"context"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -13,6 +14,17 @@ type PipHandler struct {
 	cache      stringListCache
 	cacheTTL   time.Duration
 	now        func() time.Time
+
+	inflightMu         sync.Mutex
+	inflight           map[string]*pipFreezeCall
+	inflightMaxWaitAge time.Duration
+}
+
+type pipFreezeCall struct {
+	done    chan struct{}
+	started time.Time
+	lines   []string
+	err     error
 }
 
 // NewPipHandler creates a pip completion handler.
@@ -60,7 +72,7 @@ func (h *PipHandler) listInstalled(ctx context.Context) []string {
 	queryCtx, cancel := context.WithTimeout(ctx, vcsQueryTimeout)
 	defer cancel()
 
-	lines, err := runCommandUntilContext(queryCtx, h.runCommand, command, "freeze")
+	lines, err := h.runFreeze(queryCtx, command)
 	if err != nil {
 		if queryCtx.Err() != nil {
 			return nil
@@ -95,4 +107,56 @@ func (h *PipHandler) timeNow() time.Time {
 		return h.now()
 	}
 	return time.Now()
+}
+
+func (h *PipHandler) runFreeze(ctx context.Context, command string) ([]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	now := time.Now()
+	h.inflightMu.Lock()
+	if call, ok := h.inflight[command]; ok {
+		if !contextReadCallIsStale(call.started, now, h.inflightMaxWaitAge) {
+			h.inflightMu.Unlock()
+			return waitForPipFreeze(ctx, call)
+		}
+		delete(h.inflight, command)
+	}
+
+	call := &pipFreezeCall{done: make(chan struct{}), started: now}
+	if h.inflight == nil {
+		h.inflight = make(map[string]*pipFreezeCall)
+	}
+	h.inflight[command] = call
+	h.inflightMu.Unlock()
+
+	go h.finishFreeze(ctx, command, call)
+	return waitForPipFreeze(ctx, call)
+}
+
+func (h *PipHandler) finishFreeze(ctx context.Context, command string, call *pipFreezeCall) {
+	run := h.runCommand
+	if run == nil {
+		run = runIsolatedCommand
+	}
+	lines, err := run(ctx, command, "freeze")
+
+	h.inflightMu.Lock()
+	call.lines = lines
+	call.err = err
+	if h.inflight[command] == call {
+		delete(h.inflight, command)
+	}
+	h.inflightMu.Unlock()
+	close(call.done)
+}
+
+func waitForPipFreeze(ctx context.Context, call *pipFreezeCall) ([]string, error) {
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-call.done:
+		return append([]string(nil), call.lines...), call.err
+	}
 }

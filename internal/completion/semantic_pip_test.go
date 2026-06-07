@@ -179,6 +179,43 @@ func TestPipHandler_ReturnsWhenFreezeCommandIgnoresContext(t *testing.T) {
 	}
 }
 
+func TestPipHandler_CoalescesFreshBlockedFreezeAndRetriesWhenStale(t *testing.T) {
+	release := make(chan struct{})
+	defer close(release)
+	var calls atomic.Int32
+	h := &PipHandler{
+		command: "pip3",
+		runCommand: func(ctx context.Context, name string, args ...string) ([]string, error) {
+			if calls.Add(1) == 1 {
+				<-release
+				return []string{"stale==1.0"}, nil
+			}
+			return []string{"fresh==1.0"}, nil
+		},
+	}
+
+	for i := 0; i < 2; i++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+		result := h.Complete(ctx, []string{"uninstall"}, "")
+		cancel()
+		if len(result.Items) != 0 {
+			t.Fatalf("expected no items from blocked freeze, got %#v", result.Items)
+		}
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("expected second blocked freeze completion to coalesce, got %d calls", got)
+	}
+
+	time.Sleep(90 * time.Millisecond)
+	result := h.Complete(context.Background(), []string{"uninstall"}, "")
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("expected stale blocked freeze to be retried, got %d calls", got)
+	}
+	if len(result.Items) != 1 || result.Items[0].Value != "fresh" {
+		t.Fatalf("expected fresh pip package after stale retry, got %#v", result.Items)
+	}
+}
+
 func TestPipHandler_DoesNotCacheCanceledPackageLookup(t *testing.T) {
 	release := make(chan struct{})
 	finished := make(chan struct{})
