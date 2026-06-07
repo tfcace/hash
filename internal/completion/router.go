@@ -3,6 +3,7 @@ package completion
 import (
 	"context"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -12,12 +13,14 @@ import (
 
 // Router dispatches completion requests to registered completers.
 type Router struct {
-	completers       []registeredCompleter
-	fuzzy            bool
-	boundedMu        sync.Mutex
-	boundedInFlight  bool
-	prefetchMu       sync.Mutex
-	prefetchInFlight bool
+	completers        []registeredCompleter
+	fuzzy             bool
+	completerMu       sync.Mutex
+	completerInFlight map[string]bool
+	boundedMu         sync.Mutex
+	boundedInFlight   bool
+	prefetchMu        sync.Mutex
+	prefetchInFlight  bool
 }
 
 type registeredCompleter struct {
@@ -26,6 +29,11 @@ type registeredCompleter struct {
 }
 
 type boundedCompletionResult struct {
+	result Result
+	err    error
+}
+
+type completerCallResult struct {
 	result Result
 	err    error
 }
@@ -96,7 +104,7 @@ func (r *Router) Complete(ctx context.Context, line string, pos int) (Result, er
 			})
 		}
 
-		result, err := rc.completer.Complete(ctx, line, pos)
+		result, err := r.completeWithBoundary(ctx, rc, line, pos)
 		if traceEnabled {
 			errText := ""
 			if err != nil {
@@ -148,6 +156,50 @@ func (r *Router) Complete(ctx context.Context, line string, pos int) (Result, er
 		})
 	}
 	return Result{}, nil
+}
+
+func (r *Router) completeWithBoundary(ctx context.Context, rc registeredCompleter, line string, pos int) (Result, error) {
+	key := completerInFlightKey(rc)
+	if !r.beginCompleterCall(key) {
+		return Result{}, nil
+	}
+
+	done := make(chan completerCallResult, 1)
+	go func() {
+		defer r.endCompleterCall(key)
+		result, err := rc.completer.Complete(ctx, line, pos)
+		done <- completerCallResult{result: result, err: err}
+	}()
+
+	select {
+	case <-ctx.Done():
+		return Result{}, ctx.Err()
+	case result := <-done:
+		return result.result, result.err
+	}
+}
+
+func completerInFlightKey(rc registeredCompleter) string {
+	return rc.completer.Name() + "\x00" + strconv.Itoa(int(rc.priority))
+}
+
+func (r *Router) beginCompleterCall(key string) bool {
+	r.completerMu.Lock()
+	defer r.completerMu.Unlock()
+	if r.completerInFlight == nil {
+		r.completerInFlight = make(map[string]bool)
+	}
+	if r.completerInFlight[key] {
+		return false
+	}
+	r.completerInFlight[key] = true
+	return true
+}
+
+func (r *Router) endCompleterCall(key string) {
+	r.completerMu.Lock()
+	delete(r.completerInFlight, key)
+	r.completerMu.Unlock()
 }
 
 // CompleteBounded runs completion behind the provided context boundary.

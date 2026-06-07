@@ -116,6 +116,70 @@ func TestRouter_CompleteBoundedDoesNotPileUpStuckWorkers(t *testing.T) {
 	}
 }
 
+func TestRouter_CompleteReturnsWhenCompleterIgnoresContext(t *testing.T) {
+	release := make(chan struct{})
+	defer close(release)
+	blocking := &blockingCountingCompleter{release: release}
+
+	router := NewRouter()
+	router.Register(blocking, PriorityToolNative)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	result, err := completeWithTestTimeout(t, router, ctx, "cat ", len("cat "))
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("Complete() error = %v", err)
+	}
+	if elapsed > 100*time.Millisecond {
+		t.Fatalf("router completion took %s with stuck completer, want under 100ms", elapsed)
+	}
+	if len(result.Items) != 0 {
+		t.Fatalf("expected no completion after context timeout, got %#v", result.Items)
+	}
+	if got := blocking.calls.Load(); got != 1 {
+		t.Fatalf("expected stuck completer to be called once, got %d", got)
+	}
+}
+
+func TestRouter_CompleteSkipsAlreadyStuckCompleterAndUsesFallback(t *testing.T) {
+	release := make(chan struct{})
+	defer close(release)
+	blocking := &blockingCountingCompleter{release: release}
+	fallback := &MockCompleter{
+		name:  "fallback",
+		items: []Item{{Value: "fallback-result"}},
+	}
+
+	router := NewRouter()
+	router.Register(blocking, PriorityToolNative)
+	router.Register(fallback, PriorityFilesystem)
+
+	started := make(chan struct{})
+	go func() {
+		close(started)
+		_, _ = router.Complete(context.Background(), "cat ", len("cat "))
+	}()
+	<-started
+	if !eventuallyTrue(100*time.Millisecond, func() bool {
+		return blocking.calls.Load() == 1
+	}) {
+		t.Fatalf("expected background completion to call stuck completer once, got %d", blocking.calls.Load())
+	}
+
+	result, err := completeWithTestTimeout(t, router, context.Background(), "cat ", len("cat "))
+	if err != nil {
+		t.Fatalf("Complete() error = %v", err)
+	}
+	if got := blocking.calls.Load(); got != 1 {
+		t.Fatalf("expected second completion to skip already-stuck completer, got %d calls", got)
+	}
+	if len(result.Items) != 1 || result.Items[0].Value != "fallback-result" {
+		t.Fatalf("expected fallback completion after skipping stuck completer, got %#v", result.Items)
+	}
+}
+
 func TestRouter_PrefetchBoundedDoesNotBlock(t *testing.T) {
 	release := make(chan struct{})
 	defer close(release)
@@ -487,6 +551,26 @@ func eventuallyTrue(timeout time.Duration, fn func() bool) bool {
 		time.Sleep(time.Millisecond)
 	}
 	return fn()
+}
+
+func completeWithTestTimeout(t *testing.T, router *Router, ctx context.Context, line string, pos int) (Result, error) {
+	t.Helper()
+	type completeResult struct {
+		result Result
+		err    error
+	}
+	done := make(chan completeResult, 1)
+	go func() {
+		result, err := router.Complete(ctx, line, pos)
+		done <- completeResult{result: result, err: err}
+	}()
+	select {
+	case result := <-done:
+		return result.result, result.err
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("router completion did not return within test timeout")
+		return Result{}, nil
+	}
 }
 
 // mockEnvProvider implements EnvProvider for testing
