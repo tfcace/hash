@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -25,6 +26,17 @@ func (s slowCompletionProvider) Complete(ctx context.Context, line string, pos i
 	case <-ctx.Done():
 		return completion.Result{}, nil
 	}
+}
+
+type contextIgnoringCompletionProvider struct {
+	release <-chan struct{}
+}
+
+func (s contextIgnoringCompletionProvider) Name() string { return "context-ignoring" }
+
+func (s contextIgnoringCompletionProvider) Complete(ctx context.Context, line string, pos int) (completion.Result, error) {
+	<-s.release
+	return completion.Result{Items: []completion.Item{{Value: "late-result"}}}, nil
 }
 
 // createTestDirStructure creates a temp directory with:
@@ -82,6 +94,39 @@ func TestCompletionIntegration_AdapterCutsOffSlowCompleter(t *testing.T) {
 	}
 	if len(items) != 0 {
 		t.Fatalf("slow completion should be cut off, got %#v", items)
+	}
+}
+
+func TestCompletionIntegration_AdapterCutsOffContextIgnoringCompleter(t *testing.T) {
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	defer releaseOnce.Do(func() { close(release) })
+
+	router := completion.NewRouter()
+	router.Register(contextIgnoringCompletionProvider{release: release}, completion.PriorityFilesystem)
+	completeFunc := makeEditorCompleteFunc(router)
+
+	done := make(chan []editor.Completion, 1)
+	start := time.Now()
+	go func() {
+		done <- completeFunc("slow ", len("slow "))
+	}()
+
+	var items []editor.Completion
+	select {
+	case items = <-done:
+	case <-time.After(250 * time.Millisecond):
+		releaseOnce.Do(func() { close(release) })
+		<-done
+		t.Fatal("editor completion adapter did not return when completer ignored context")
+	}
+	releaseOnce.Do(func() { close(release) })
+	elapsed := time.Since(start)
+	if elapsed > 250*time.Millisecond {
+		t.Fatalf("completion adapter took %s, want under 250ms", elapsed)
+	}
+	if len(items) != 0 {
+		t.Fatalf("context-ignoring completion should be cut off, got %#v", items)
 	}
 }
 

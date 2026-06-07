@@ -30,7 +30,7 @@ func (c *CompleterAdapter) Do(line []rune, pos int) (candidates [][]rune, length
 	ctx, cancel := context.WithTimeout(context.Background(), adapterCompletionTimeout)
 	defer cancel()
 
-	result, err := c.router.Complete(ctx, string(line), pos)
+	result, err := c.router.CompleteBounded(ctx, string(line), pos)
 	if err != nil || len(result.Items) == 0 {
 		return nil, 0
 	}

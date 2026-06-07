@@ -1553,7 +1553,7 @@ func makeEditorCompleteFunc(router *completion.Router) func(string, int) []edito
 		ctx, cancel := context.WithTimeout(context.Background(), editorCompletionTimeout)
 		defer cancel()
 
-		result, err := router.Complete(ctx, line, pos)
+		result, err := router.CompleteBounded(ctx, line, pos)
 		if err != nil || len(result.Items) == 0 {
 			return nil
 		}

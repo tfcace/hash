@@ -20,6 +20,11 @@ type registeredCompleter struct {
 	priority  Priority
 }
 
+type boundedCompletionResult struct {
+	result Result
+	err    error
+}
+
 // NewRouter creates a new completion router.
 func NewRouter() *Router {
 	return &Router{}
@@ -137,6 +142,27 @@ func (r *Router) Complete(ctx context.Context, line string, pos int) (Result, er
 		})
 	}
 	return Result{}, nil
+}
+
+// CompleteBounded runs completion behind the provided context boundary.
+// This protects UI callers from completers that ignore context cancellation.
+func (r *Router) CompleteBounded(ctx context.Context, line string, pos int) (Result, error) {
+	if err := ctx.Err(); err != nil {
+		return Result{}, err
+	}
+
+	done := make(chan boundedCompletionResult, 1)
+	go func() {
+		result, err := r.Complete(ctx, line, pos)
+		done <- boundedCompletionResult{result: result, err: err}
+	}()
+
+	select {
+	case <-ctx.Done():
+		return Result{}, ctx.Err()
+	case result := <-done:
+		return result.result, result.err
+	}
 }
 
 // extractCompletionQuery extracts the word being completed.

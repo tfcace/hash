@@ -2,6 +2,7 @@ package readline
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -43,6 +44,16 @@ func (m slowCompleter) Complete(ctx context.Context, line string, pos int) (comp
 	}
 }
 
+type contextIgnoringCompleter struct {
+	release <-chan struct{}
+}
+
+func (m contextIgnoringCompleter) Name() string { return "context-ignoring" }
+func (m contextIgnoringCompleter) Complete(ctx context.Context, line string, pos int) (completion.Result, error) {
+	<-m.release
+	return completion.Result{Items: []completion.Item{{Value: "late-result"}}}, nil
+}
+
 func TestCompleterAdapter_CutsOffSlowCompleter(t *testing.T) {
 	router := completion.NewRouter()
 	router.Register(slowCompleter{delay: 300 * time.Millisecond}, completion.PriorityFilesystem)
@@ -57,6 +68,41 @@ func TestCompleterAdapter_CutsOffSlowCompleter(t *testing.T) {
 	}
 	if len(candidates) != 0 || length != 0 {
 		t.Fatalf("slow completion should be cut off, got candidates=%q length=%d", candidates, length)
+	}
+}
+
+func TestCompleterAdapter_CutsOffContextIgnoringCompleter(t *testing.T) {
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	defer releaseOnce.Do(func() { close(release) })
+
+	router := completion.NewRouter()
+	router.Register(contextIgnoringCompleter{release: release}, completion.PriorityFilesystem)
+	adapter := NewCompleterAdapter(router)
+
+	done := make(chan struct{})
+	var candidates [][]rune
+	var length int
+	start := time.Now()
+	go func() {
+		candidates, length = adapter.Do([]rune("slow "), len("slow "))
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(250 * time.Millisecond):
+		releaseOnce.Do(func() { close(release) })
+		<-done
+		t.Fatal("CompleterAdapter.Do() did not return when completer ignored context")
+	}
+	releaseOnce.Do(func() { close(release) })
+	elapsed := time.Since(start)
+	if elapsed > 250*time.Millisecond {
+		t.Fatalf("CompleterAdapter.Do() took %s, want under 250ms", elapsed)
+	}
+	if len(candidates) != 0 || length != 0 {
+		t.Fatalf("context-ignoring completion should be cut off, got candidates=%q length=%d", candidates, length)
 	}
 }
 
