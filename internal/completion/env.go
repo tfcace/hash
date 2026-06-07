@@ -78,6 +78,9 @@ func (c *EnvCompleter) Complete(ctx context.Context, line string, pos int) (Resu
 				Description: truncateValue(displayValue, 40),
 				Icon:        "$",
 			})
+			if len(items) >= completionItemLimit {
+				break
+			}
 		}
 	}
 
