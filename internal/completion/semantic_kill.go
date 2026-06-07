@@ -89,7 +89,7 @@ func (h *KillHandler) cachedProcesses(ctx context.Context) ([]processInfo, error
 		h.cacheMu.Unlock()
 	}
 
-	processes, err := h.listProcesses(ctx)
+	processes, err := listProcessesUntilContext(ctx, h.listProcesses)
 	if err != nil {
 		return nil, err
 	}

@@ -128,3 +128,36 @@ func TestKillHandler_CachesProcessList(t *testing.T) {
 		t.Fatalf("unexpected cached second result: %#v", second.Items)
 	}
 }
+
+func TestKillHandler_ReturnsWhenProcessListIgnoresContext(t *testing.T) {
+	release := make(chan struct{})
+	defer close(release)
+	h := &KillHandler{
+		command: "kill",
+		listProcesses: func(ctx context.Context) ([]processInfo, error) {
+			<-release
+			return []processInfo{{PID: "123", Name: "bash"}}, nil
+		},
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+
+	done := make(chan Result, 1)
+	start := time.Now()
+	go func() {
+		done <- h.Complete(ctx, nil, "")
+	}()
+
+	select {
+	case result := <-done:
+		elapsed := time.Since(start)
+		if elapsed > 100*time.Millisecond {
+			t.Fatalf("kill completion took %s after context cancellation, want under 100ms", elapsed)
+		}
+		if len(result.Items) != 0 {
+			t.Fatalf("expected no items after context cancellation, got %#v", result.Items)
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("kill completion did not return after context cancellation")
+	}
+}

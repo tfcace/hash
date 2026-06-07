@@ -60,8 +60,11 @@ func (h *PipHandler) listInstalled(ctx context.Context) []string {
 	queryCtx, cancel := context.WithTimeout(ctx, vcsQueryTimeout)
 	defer cancel()
 
-	lines, err := h.runCommand(queryCtx, command, "freeze")
+	lines, err := runCommandUntilContext(queryCtx, h.runCommand, command, "freeze")
 	if err != nil {
+		if queryCtx.Err() != nil {
+			return nil
+		}
 		if h.cacheTTL > 0 {
 			h.cache.set(command, nil, h.timeNow().Add(h.cacheTTL))
 		}

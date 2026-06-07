@@ -32,7 +32,7 @@ func (h *ManHandler) Complete(ctx context.Context, args []string, current string
 	queryCtx, cancel := context.WithTimeout(ctx, 200*vcsQueryTimeout/150) // ~200ms
 	defer cancel()
 
-	lines, err := h.runCommand(queryCtx, "apropos", current)
+	lines, err := runCommandUntilContext(queryCtx, h.runCommand, "apropos", current)
 	if err != nil {
 		return Result{}
 	}
