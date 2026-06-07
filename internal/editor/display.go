@@ -7,6 +7,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/mattn/go-runewidth"
 	"github.com/tfcace/hash/internal/trace"
 )
 
@@ -144,8 +145,19 @@ func (d *Display) calcPrefixWidth(row int) int {
 func visibleWidth(s string) int {
 	width := 0
 	inEscape := false
+	var text strings.Builder
+
+	flushText := func() {
+		if text.Len() == 0 {
+			return
+		}
+		width += runewidth.StringWidth(text.String())
+		text.Reset()
+	}
+
 	for _, r := range s {
 		if r == '\x1b' {
+			flushText()
 			inEscape = true
 			continue
 		}
@@ -155,8 +167,9 @@ func visibleWidth(s string) int {
 			}
 			continue
 		}
-		width++
+		text.WriteRune(r)
 	}
+	flushText()
 	return width
 }
 
@@ -912,7 +925,7 @@ func (d *Display) AnnotateDuration(outputLines int, durationMs int64) {
 	}
 
 	// Position at right side (column = width - text length)
-	col := d.width - len(text)
+	col := d.width - visibleWidth(text)
 	if col > 0 {
 		fmt.Fprintf(&sb, ansiCursorCol, col)
 	}
@@ -960,8 +973,8 @@ func (d *Display) RenderCompletionMenu(items []CompletionItem, selected, startCo
 	// Calculate max width for alignment
 	maxTextWidth := 0
 	for _, item := range items {
-		if len(item.Text) > maxTextWidth {
-			maxTextWidth = len(item.Text)
+		if itemWidth := visibleWidth(item.Text); itemWidth > maxTextWidth {
+			maxTextWidth = itemWidth
 		}
 	}
 
@@ -1032,7 +1045,7 @@ func (d *Display) RenderCompletionMenu(items []CompletionItem, selected, startCo
 		sb.WriteString(item.Text)
 
 		// Pad to align descriptions
-		padding := maxTextWidth - len(item.Text) + 2
+		padding := maxTextWidth - visibleWidth(item.Text) + 2
 		for j := 0; j < padding; j++ {
 			sb.WriteByte(' ')
 		}
