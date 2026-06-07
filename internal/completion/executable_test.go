@@ -3,6 +3,7 @@ package completion
 import (
 	"context"
 	"os"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -126,6 +127,48 @@ func TestExecutableCompleter_ReturnsPromptlyWhenColdScanIsSlow(t *testing.T) {
 	}
 	if len(result.Items) != 0 {
 		t.Fatalf("cold slow scan should not return speculative items, got %#v", result.Items)
+	}
+}
+
+func TestExecutableCompleter_StartsFreshRefreshAfterStaleScan(t *testing.T) {
+	c := NewExecutableCompleter()
+	var calls atomic.Int32
+	firstStarted := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	c.coldScanWait = 5 * time.Millisecond
+	c.scanExecutables = func() []string {
+		if calls.Add(1) == 1 {
+			close(firstStarted)
+			<-releaseFirst
+			return []string{"stalecmd"}
+		}
+		return []string{"freshcmd"}
+	}
+	defer close(releaseFirst)
+
+	result, err := c.Complete(context.Background(), "fresh", len("fresh"))
+	if err != nil {
+		t.Fatalf("first Complete() error = %v", err)
+	}
+	if len(result.Items) != 0 {
+		t.Fatalf("first slow scan should not return items, got %#v", result.Items)
+	}
+	select {
+	case <-firstStarted:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("expected first executable refresh to start")
+	}
+
+	time.Sleep(90 * time.Millisecond)
+	result, err = c.Complete(context.Background(), "fresh", len("fresh"))
+	if err != nil {
+		t.Fatalf("second Complete() error = %v", err)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("expected stale executable refresh to be retried, got %d scan calls", got)
+	}
+	if len(result.Items) != 1 || result.Items[0].Value != "freshcmd" {
+		t.Fatalf("second Complete() items = %#v, want freshcmd", result.Items)
 	}
 }
 

@@ -18,7 +18,9 @@ type ExecutableCompleter struct {
 	cacheTTL        time.Duration
 	refreshMu       sync.Mutex
 	refreshing      bool
+	refreshStarted  time.Time
 	refreshDone     chan struct{}
+	refreshMaxAge   time.Duration
 	coldScanWait    time.Duration
 	scanExecutables func() []string
 	readDir         func(string) ([]os.DirEntry, error)
@@ -27,9 +29,10 @@ type ExecutableCompleter struct {
 // NewExecutableCompleter creates a new executable completer.
 func NewExecutableCompleter() *ExecutableCompleter {
 	c := &ExecutableCompleter{
-		cacheTTL:     30 * time.Second,
-		coldScanWait: 50 * time.Millisecond,
-		readDir:      os.ReadDir,
+		cacheTTL:      30 * time.Second,
+		refreshMaxAge: contextReadInflightMaxWaitAge,
+		coldScanWait:  50 * time.Millisecond,
+		readDir:       os.ReadDir,
 	}
 	c.scanExecutables = c.scanPATHExecutables
 	return c
@@ -130,13 +133,20 @@ func (c *ExecutableCompleter) cacheSnapshot() ([]string, bool) {
 func (c *ExecutableCompleter) refreshAsync() <-chan struct{} {
 	c.refreshMu.Lock()
 	if c.refreshing {
-		done := c.refreshDone
-		c.refreshMu.Unlock()
-		return done
+		maxAge := c.refreshMaxAge
+		if maxAge == 0 {
+			maxAge = contextReadInflightMaxWaitAge
+		}
+		if maxAge < 0 || time.Since(c.refreshStarted) < maxAge {
+			done := c.refreshDone
+			c.refreshMu.Unlock()
+			return done
+		}
 	}
 
 	done := make(chan struct{})
 	c.refreshing = true
+	c.refreshStarted = time.Now()
 	c.refreshDone = done
 	scan := c.scanExecutables
 	if scan == nil {
@@ -147,15 +157,21 @@ func (c *ExecutableCompleter) refreshAsync() <-chan struct{} {
 	go func() {
 		executables := scan()
 
+		c.refreshMu.Lock()
+		if c.refreshDone != done {
+			c.refreshMu.Unlock()
+			close(done)
+			return
+		}
+
 		c.cacheMu.Lock()
 		c.cache = executables
 		c.cacheTime = time.Now()
 		c.cacheMu.Unlock()
 
-		c.refreshMu.Lock()
 		c.refreshing = false
-		close(done)
 		c.refreshMu.Unlock()
+		close(done)
 	}()
 
 	return done
