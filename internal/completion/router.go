@@ -123,6 +123,7 @@ func (r *Router) Complete(ctx context.Context, line string, pos int) (Result, er
 					result.Items = FuzzyFilter(result.Items, filterQuery)
 				}
 			}
+			result.Items = limitCompletionItems(result.Items)
 			if traceEnabled {
 				trace.Emit("completion", "router_done", trace.LevelDetailed, map[string]any{
 					"winner":      rc.completer.Name(),

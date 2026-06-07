@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -204,6 +205,24 @@ func TestRouter_FuzzyDisabled(t *testing.T) {
 
 	if len(result.Items) != 2 {
 		t.Errorf("Expected 2 items unchanged, got %d", len(result.Items))
+	}
+}
+
+func TestRouter_LimitsOversizedResults(t *testing.T) {
+	items := make([]Item, 5000)
+	for i := range items {
+		items[i] = Item{Value: "item-" + strconv.Itoa(i)}
+	}
+
+	router := NewRouter()
+	router.Register(&MockCompleter{name: "huge", items: items}, PriorityFilesystem)
+
+	result, err := router.Complete(context.Background(), "cat ", len("cat "))
+	if err != nil {
+		t.Fatalf("Complete() error = %v", err)
+	}
+	if len(result.Items) > 200 {
+		t.Fatalf("expected router to cap oversized completion results, got %d items", len(result.Items))
 	}
 }
 
