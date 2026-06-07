@@ -75,7 +75,17 @@ func (h *BrewHandler) listInstalled(ctx context.Context) []string {
 			casks = lines
 		}
 	}()
-	wg.Wait()
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-queryCtx.Done():
+		return nil
+	case <-done:
+	}
 
 	seen := make(map[string]bool)
 	var packages []string
