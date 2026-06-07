@@ -141,6 +141,40 @@ func TestRouter_CompleteBoundedDoesNotPileUpStuckWorkers(t *testing.T) {
 	}
 }
 
+func TestRouter_CompleteBoundedUsesFallbackWhileEarlierCompleterIsStuck(t *testing.T) {
+	release := make(chan struct{})
+	defer close(release)
+	blocking := &blockingCountingCompleter{release: release}
+	fallback := &MockCompleter{
+		name:  "fallback",
+		items: []Item{{Value: "fallback-result"}},
+	}
+
+	router := NewRouter()
+	router.Register(blocking, PriorityToolNative)
+	router.Register(fallback, PriorityFilesystem)
+
+	go func() {
+		_, _ = router.CompleteBounded(context.Background(), "cat ", len("cat "))
+	}()
+	if !eventuallyTrue(100*time.Millisecond, func() bool {
+		return blocking.calls.Load() == 1
+	}) {
+		t.Fatalf("expected first bounded completion to call stuck completer once, got %d", blocking.calls.Load())
+	}
+
+	result, err := completeBoundedWithTestTimeout(t, router, context.Background(), "cat ", len("cat "))
+	if err != nil {
+		t.Fatalf("CompleteBounded() error = %v", err)
+	}
+	if got := blocking.calls.Load(); got != 1 {
+		t.Fatalf("expected second bounded completion to skip already-stuck completer, got %d calls", got)
+	}
+	if len(result.Items) != 1 || result.Items[0].Value != "fallback-result" {
+		t.Fatalf("expected fallback completion while earlier completer is stuck, got %#v", result.Items)
+	}
+}
+
 func TestRouter_CompleteReturnsWhenCompleterIgnoresContext(t *testing.T) {
 	release := make(chan struct{})
 	defer close(release)
@@ -654,6 +688,26 @@ func completeWithTestTimeout(t *testing.T, router *Router, ctx context.Context, 
 		return result.result, result.err
 	case <-time.After(100 * time.Millisecond):
 		t.Fatal("router completion did not return within test timeout")
+		return Result{}, nil
+	}
+}
+
+func completeBoundedWithTestTimeout(t *testing.T, router *Router, ctx context.Context, line string, pos int) (Result, error) {
+	t.Helper()
+	type completeResult struct {
+		result Result
+		err    error
+	}
+	done := make(chan completeResult, 1)
+	go func() {
+		result, err := router.CompleteBounded(ctx, line, pos)
+		done <- completeResult{result: result, err: err}
+	}()
+	select {
+	case result := <-done:
+		return result.result, result.err
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("bounded router completion did not return within test timeout")
 		return Result{}, nil
 	}
 }
