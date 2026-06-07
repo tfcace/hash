@@ -61,6 +61,21 @@ func TestResponseUI_FormatError(t *testing.T) {
 	}
 }
 
+func TestResponseUI_ShowAgentHintIncludesACPInstallCommand(t *testing.T) {
+	var buf bytes.Buffer
+	ui := NewResponseUI(&buf)
+
+	ui.ShowAgentHint("stdio", "claude-agent-acp", "")
+	output := buf.String()
+
+	if !strings.Contains(output, "npm install -g @agentclientprotocol/claude-agent-acp") {
+		t.Fatalf("expected claude-agent-acp install hint, got:\n%s", output)
+	}
+	if !strings.Contains(output, "which claude-agent-acp") {
+		t.Fatalf("expected PATH hint for claude-agent-acp, got:\n%s", output)
+	}
+}
+
 func TestResponseUI_LoadingStates(t *testing.T) {
 	var buf bytes.Buffer
 	ui := NewResponseUI(&buf)

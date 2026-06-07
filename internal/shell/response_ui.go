@@ -358,6 +358,8 @@ func (u *ResponseUI) ShowError(errMsg string) {
 	fmt.Fprintf(u.out, "\033[31m✗ %s\033[0m\n", errMsg)
 }
 
+const claudeAgentACPInstallCommand = "npm install -g @agentclientprotocol/claude-agent-acp"
+
 // ShowAgentHint displays troubleshooting hints for agent connection failures.
 func (u *ResponseUI) ShowAgentHint(transport, command, url string) {
 	fmt.Fprintln(u.out)
@@ -370,6 +372,9 @@ func (u *ResponseUI) ShowAgentHint(transport, command, url string) {
 	} else {
 		// stdio transport (default)
 		fmt.Fprintf(u.out, "\033[90m  • Is '%s' installed?\033[0m\n", command)
+		if command == "claude-agent-acp" {
+			fmt.Fprintf(u.out, "\033[90m  • Install it with: %s\033[0m\n", claudeAgentACPInstallCommand)
+		}
 		fmt.Fprintf(u.out, "\033[90m  • Is it in your PATH? (try: which %s)\033[0m\n", command)
 		fmt.Fprintf(u.out, "\033[90m  • Is it executable? (try: ls -la $(which %s))\033[0m\n", command)
 	}

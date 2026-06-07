@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -859,11 +860,7 @@ func (s *Shell) handleAgentRequest(ctx context.Context, parsed parser.ParseResul
 	fmt.Fprintf(os.Stdout, "\033[90m[agent: %s]\033[0m ", modeLabel)
 
 	if s.agentHandler == nil {
-		fmt.Fprintf(os.Stderr, "\n\033[31m✗ Agent not configured.\033[0m\n")
-		fmt.Fprintf(os.Stderr, "  Configure an agent in ~/.config/hash/config.toml:\n")
-		fmt.Fprintf(os.Stderr, "  [agent]\n")
-		fmt.Fprintf(os.Stderr, "  command = \"claude\"\n")
-		fmt.Fprintf(os.Stderr, "  See docs/config-reference.md for options.\n")
+		writeAgentNotConfiguredHint(os.Stderr)
 		s.lastExitCode = 1
 		return nil
 	}
@@ -1391,6 +1388,16 @@ func agentStreamErrorMessage(err error) string {
 		return emptyAgentResponseMessage
 	}
 	return err.Error()
+}
+
+func writeAgentNotConfiguredHint(w io.Writer) {
+	fmt.Fprintf(w, "\n\033[31m✗ Agent not configured.\033[0m\n")
+	fmt.Fprintf(w, "  Install the default ACP adapter:\n")
+	fmt.Fprintf(w, "  %s\n", claudeAgentACPInstallCommand)
+	fmt.Fprintf(w, "  Configure an agent in ~/.config/hash/config.toml:\n")
+	fmt.Fprintf(w, "  [agent]\n")
+	fmt.Fprintf(w, "  command = \"claude-agent-acp\"\n")
+	fmt.Fprintf(w, "  See docs/config-reference.md for options.\n")
 }
 
 // handleEditCommand opens editor with command for editing.

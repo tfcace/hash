@@ -29,6 +29,23 @@ func TestNewShell(t *testing.T) {
 	}
 }
 
+func TestWriteAgentNotConfiguredHintUsesACPDefault(t *testing.T) {
+	var out strings.Builder
+
+	writeAgentNotConfiguredHint(&out)
+	output := out.String()
+
+	if !strings.Contains(output, "command = \"claude-agent-acp\"") {
+		t.Fatalf("expected claude-agent-acp config snippet, got:\n%s", output)
+	}
+	if strings.Contains(output, "command = \"claude\"") {
+		t.Fatalf("did not expect deprecated claude command snippet, got:\n%s", output)
+	}
+	if !strings.Contains(output, "npm install -g @agentclientprotocol/claude-agent-acp") {
+		t.Fatalf("expected install command in setup hint, got:\n%s", output)
+	}
+}
+
 func TestNewShell_HistoryDisabled(t *testing.T) {
 	cfg := config.Default()
 	cfg.History.Enabled = false
