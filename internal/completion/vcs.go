@@ -468,13 +468,16 @@ func containsToken(tokens []string, target string) bool {
 }
 
 func prefixFilterItems(values []string, prefix string) Result {
-	items := make([]Item, 0, len(values))
+	items := make([]Item, 0, min(len(values), completionItemLimit))
 	for _, value := range values {
 		if prefix == "" || strings.HasPrefix(value, prefix) {
 			items = append(items, Item{
 				Value:   value,
 				Display: value,
 			})
+			if len(items) >= completionItemLimit {
+				break
+			}
 		}
 	}
 	return Result{Items: items}
