@@ -55,6 +55,21 @@ func TestEditor_EnterSubmitsInInsertMode(t *testing.T) {
 	}
 }
 
+func TestEditor_UTF8HebrewInputRoundTrips(t *testing.T) {
+	input := bytes.NewReader(append([]byte("שלום"), '\r'))
+	var output bytes.Buffer
+
+	ed := New(Config{Keybindings: "helix"}, input, &output)
+
+	result, err := ed.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if result.Text != "שלום" {
+		t.Fatalf("Text = %q, want %q", result.Text, "שלום")
+	}
+}
+
 func TestEditor_EscapeCancelsWhenConfigured(t *testing.T) {
 	input := bytes.NewReader([]byte{
 		0x1b, // Escape

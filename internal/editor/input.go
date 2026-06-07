@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/tfcace/hash/internal/trace"
 	"golang.org/x/sys/unix"
@@ -108,6 +109,8 @@ func (r *InputReader) DrainPending() {
 		if r.buf[0] == 0x1b {
 			// Might be start of escape sequence - try to read more
 			key = r.drainEscapeSequence(fd)
+		} else if r.buf[0] >= utf8.RuneSelf {
+			key = r.drainUTF8Rune(fd)
 		} else {
 			key = ParseKey(r.buf[:1])
 		}
@@ -159,6 +162,23 @@ func (r *InputReader) drainEscapeSequence(fd int) Key {
 		if isCompleteSequence(r.buf[:total]) {
 			break
 		}
+	}
+
+	return ParseKey(r.buf[:total])
+}
+
+func (r *InputReader) drainUTF8Rune(fd int) Key {
+	total := 1
+
+	for total < len(r.buf) && !utf8.FullRune(r.buf[:total]) {
+		if !hasDataAvailableWithTimeout(fd, 2*time.Millisecond) {
+			break
+		}
+		n, err := r.in.Read(r.buf[total : total+1])
+		if err != nil || n == 0 {
+			break
+		}
+		total++
 	}
 
 	return ParseKey(r.buf[:total])
@@ -251,13 +271,40 @@ func (r *InputReader) ReadKeyInterruptible(done <-chan struct{}) (Key, error) {
 		return key, err
 	}
 
-	key := ParseKey(r.buf[:1])
+	total := 1
+	if r.buf[0] >= utf8.RuneSelf {
+		var err error
+		total, err = r.readUTF8Sequence()
+		if err != nil && err != io.EOF {
+			trace.Editor("key_read", map[string]any{
+				"error": err.Error(),
+			})
+			return Key{}, err
+		}
+	}
+
+	key := ParseKey(r.buf[:total])
 	trace.Editor("key_read", map[string]any{
 		"source": "direct",
-		"raw":    r.buf[:1],
+		"raw":    r.buf[:total],
 		"parsed": keyString(key),
 	})
 	return key, nil
+}
+
+func (r *InputReader) readUTF8Sequence() (int, error) {
+	total := 1
+	for total < len(r.buf) && !utf8.FullRune(r.buf[:total]) {
+		n, err := r.in.Read(r.buf[total : total+1])
+		if err != nil {
+			return total, err
+		}
+		if n == 0 {
+			return total, io.EOF
+		}
+		total++
+	}
+	return total, nil
 }
 
 // specialKeyNames maps special key codes to their display names.

@@ -743,7 +743,7 @@ func (e *Editor) insertText(text string) {
 			row++
 			col = 0
 		} else {
-			col++
+			col += len(string(r))
 		}
 	}
 	e.state.Cursor.Pos.Row = row
@@ -821,9 +821,9 @@ func (e *Editor) paste(before bool) {
 
 	if !before {
 		// Move past current character for 'p' (paste after)
-		lineLen := len(e.state.Buffer.Line(row))
-		if col < lineLen {
-			col++
+		line := e.state.Buffer.Line(row)
+		if col < len(line) {
+			col = nextRuneBoundary(line, col)
 		}
 	}
 

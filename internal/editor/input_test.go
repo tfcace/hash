@@ -19,6 +19,22 @@ func TestInputReader_ReadKey_Printable(t *testing.T) {
 	}
 }
 
+func TestInputReader_ReadKey_UTF8Hebrew(t *testing.T) {
+	input := bytes.NewReader([]byte("ש"))
+	reader := NewInputReader(input)
+
+	key, err := reader.ReadKey()
+	if err != nil {
+		t.Fatalf("ReadKey() error = %v", err)
+	}
+	if key.Rune != 'ש' {
+		t.Fatalf("Rune = %q, want %q", key.Rune, 'ש')
+	}
+	if key.Special != KeyNone {
+		t.Fatalf("Special = %v, want KeyNone", key.Special)
+	}
+}
+
 func TestInputReader_ReadKey_EscapeSequence(t *testing.T) {
 	// Arrow up: ESC [ A
 	input := bytes.NewReader([]byte{0x1b, '[', 'A'})

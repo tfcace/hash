@@ -27,6 +27,16 @@ func TestParseKey_Escape(t *testing.T) {
 	}
 }
 
+func TestParseKey_UTF8HebrewRune(t *testing.T) {
+	key := ParseKey([]byte("ש"))
+	if key.Rune != 'ש' {
+		t.Fatalf("Rune = %q, want %q", key.Rune, 'ש')
+	}
+	if key.Special != KeyNone {
+		t.Fatalf("Special = %v, want KeyNone", key.Special)
+	}
+}
+
 func TestParseKey_ArrowUp(t *testing.T) {
 	key := ParseKey([]byte{0x1b, '[', 'A'})
 	if key.Special != KeyUp {

@@ -3,6 +3,7 @@ package editor
 
 import (
 	"bytes"
+	"io"
 	"strings"
 	"testing"
 )
@@ -338,6 +339,20 @@ func TestDisplay_Render_LongWrappedLineTracksVisualCursorRow(t *testing.T) {
 	output := out.String()
 	if !strings.Contains(output, "\x1b[1A") {
 		t.Fatalf("second render should move up one wrapped row, got %q", output)
+	}
+}
+
+func TestDisplay_LayoutUsesUTF8VisibleWidth(t *testing.T) {
+	d := NewDisplay(io.Discard, 80, 24)
+	d.SetPrompt("$ ")
+
+	buf := NewBufferFromString("שלום")
+	cur := NewCursor()
+	cur.MoveTo(0, len("שלום"))
+
+	_, _, cursorCol := d.layoutForStandardRender(buf, cur, 0)
+	if cursorCol != d.promptWidth+4 {
+		t.Fatalf("cursorCol = %d, want prompt width %d + 4 visible Hebrew runes", cursorCol, d.promptWidth)
 	}
 }
 

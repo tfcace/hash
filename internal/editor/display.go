@@ -214,8 +214,14 @@ func clampCursorToBuffer(buf *Buffer, cur *Cursor) (row, col int) {
 	} else if col > lineLen {
 		col = lineLen
 	}
+	col = clampByteIndexToRuneBoundary(buf.Line(row), col)
 
 	return row, col
+}
+
+func visibleWidthAtByteIndex(s string, col int) int {
+	col = clampByteIndexToRuneBoundary(s, col)
+	return visibleWidth(s[:col])
 }
 
 // renderedGhostSuffixWidth returns the visible width added by ghost rendering.
@@ -258,10 +264,11 @@ func (d *Display) layoutForStandardRender(buf *Buffer, cur *Cursor, cursorLineEx
 
 	for i := 0; i < lineCount; i++ {
 		prefixWidth := d.calcPrefixWidth(i)
-		lineWidth := prefixWidth + len(buf.Line(i))
+		line := buf.Line(i)
+		lineWidth := prefixWidth + visibleWidth(line)
 
 		if i == cursorRow {
-			cursorChars := prefixWidth + cursorCol
+			cursorChars := prefixWidth + visibleWidthAtByteIndex(line, cursorCol)
 			rowOffset, col := d.wrappedCursorForChars(cursorChars)
 			cursorVisualRow = totalRows + rowOffset
 			cursorVisualCol = col
@@ -295,10 +302,11 @@ func (d *Display) layoutForFrameRender(buf *Buffer, cur *Cursor, frame *InputFra
 	cursorVisualCol = 0
 
 	for i := 0; i < lineCount; i++ {
-		lineWidth := frame.PrefixWidth + len(buf.Line(i))
+		line := buf.Line(i)
+		lineWidth := frame.PrefixWidth + visibleWidth(line)
 
 		if i == cursorRow {
-			cursorChars := frame.PrefixWidth + cursorCol
+			cursorChars := frame.PrefixWidth + visibleWidthAtByteIndex(line, cursorCol)
 			rowOffset, col := d.wrappedCursorForChars(cursorChars)
 			cursorVisualRow = totalRows + rowOffset
 			cursorVisualCol = col
@@ -764,7 +772,7 @@ func (d *Display) Finalize(buf *Buffer) {
 		sb.WriteString(ansiBold)
 		sb.WriteString(buf.Line(i))
 		sb.WriteString(ansiReset)
-		contentWidth += len(buf.Line(i))
+		contentWidth += visibleWidth(buf.Line(i))
 
 		// Pad to full terminal width for clean block look
 		if d.inputBgCode != "" && d.width > contentWidth {
