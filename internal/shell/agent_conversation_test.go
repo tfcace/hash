@@ -9,6 +9,7 @@ import (
 
 	"github.com/tfcace/hash/internal/agent"
 	"github.com/tfcace/hash/internal/config"
+	"github.com/tfcace/hash/internal/editor"
 	"github.com/tfcace/hash/internal/parser"
 )
 
@@ -92,6 +93,9 @@ func TestAgentConversationInputFrame(t *testing.T) {
 	if !strings.Contains(frame.TopLine, "conversation") {
 		t.Fatalf("frame top line should label conversation mode, got %q", frame.TopLine)
 	}
+	if !strings.Contains(frame.TopLine, agentConversationLiveRailStyle+"╭─ conversation\033[0m") {
+		t.Fatalf("frame top line should use live rail color for header, got %q", frame.TopLine)
+	}
 	if !strings.Contains(frame.TopLine, "/exit") {
 		t.Fatalf("frame top line should show exit affordance, got %q", frame.TopLine)
 	}
@@ -102,6 +106,17 @@ func TestAgentConversationInputFrame(t *testing.T) {
 	if frame.BottomLine != "" || frame.BottomExtraLine != "" {
 		t.Fatalf("conversation frame should stay open across turns, got bottom=%q extra=%q",
 			frame.BottomLine, frame.BottomExtraLine)
+	}
+}
+
+func TestAgentConversationEditorConfigCancelsOnEscape(t *testing.T) {
+	base := editor.Config{Keybindings: "helix", Gutter: true}
+	cfg := agentConversationEditorConfig(base, true)
+	if !cfg.CancelOnEscape {
+		t.Fatal("conversation reply editor should let Escape leave the conversation")
+	}
+	if cfg.InputFrame == nil || !strings.Contains(cfg.InputFrame.TopLine, "Esc/Ctrl+C leaves") {
+		t.Fatalf("conversation reply editor should render matching Escape hint, got %#v", cfg.InputFrame)
 	}
 }
 

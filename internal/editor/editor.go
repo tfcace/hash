@@ -50,6 +50,7 @@ type Config struct {
 	DisableHistorySearch    bool                                     // Disable Ctrl+R history search
 	DisableContextPicker    bool                                     // Disable Ctrl+P context picker
 	ClearOnCancel           bool                                     // Clear display when Ctrl+C cancels input
+	CancelOnEscape          bool                                     // Treat Escape as canceled input instead of mode/completion handling
 }
 
 // Result is returned when the editor exits.
@@ -430,6 +431,14 @@ func (e *Editor) handleKeyEvent(key Key) (Result, bool) {
 			return Result{EOF: true}, true
 		}
 		return Result{}, false
+	}
+
+	if e.config.CancelOnEscape && key.Special == KeyEscape {
+		e.dismissCompletion()
+		e.ghost.Clear()
+		e.ghostTextChan = nil
+		e.ghostErrChan = nil
+		return Result{Canceled: true}, true
 	}
 
 	// Handle ghost text interception

@@ -1207,16 +1207,7 @@ func (s *Shell) readAgentConversationReply(ctx context.Context, openRail bool) (
 		return reply, reply != ""
 	}
 
-	cfg := s.editorCfg
-	cfg.Prompt = agentConversationReplyPrompt
-	cfg.CompleteFunc = nil
-	cfg.PrefetchFunc = nil
-	cfg.SuggestionFunc = nil
-	cfg.Gutter = false
-	cfg.InputFrame = agentConversationInputFrame(openRail)
-	cfg.DisableHistorySearch = true
-	cfg.DisableContextPicker = true
-	cfg.DisableLineContinuation = true
+	cfg := agentConversationEditorConfig(s.editorCfg, openRail)
 
 	ed := editor.New(cfg, os.Stdin, os.Stdout)
 	result, err := ed.Run(ctx)

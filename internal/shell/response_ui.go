@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"io"
+	"math/rand"
 	"os"
 	"sync"
 	"syscall"
@@ -16,8 +17,28 @@ import (
 	"golang.org/x/term"
 )
 
-// Braille spinner frames for animation
-var spinnerFrames = []rune{'⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'}
+var agentStatusReplacementPool = []string{
+	"░",
+	"▒",
+	"▓",
+	"█",
+	"-",
+	"\\",
+	"|",
+	"/",
+	"+",
+	"*",
+	"h",
+	"a",
+	"s",
+	"h",
+	"$",
+	"#",
+}
+
+type agentStatusRandom interface {
+	Intn(n int) int
+}
 
 // ConfirmAction represents the user's response to a command suggestion.
 type ConfirmAction int
@@ -75,14 +96,16 @@ type ResponseUI struct {
 	spinnerStop    chan struct{}
 	spinnerDone    chan struct{} // signals when spinner goroutine has exited
 	spinnerText    string
+	spinnerRand    agentStatusRandom
 }
 
 // NewResponseUI creates a new response UI.
 func NewResponseUI(out io.Writer) *ResponseUI {
 	return &ResponseUI{
-		out:      out,
-		in:       os.Stdin,
-		progress: progress.NewOSC(out),
+		out:         out,
+		in:          os.Stdin,
+		progress:    progress.NewOSC(out),
+		spinnerRand: rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
 }
 
@@ -166,11 +189,28 @@ func (u *ResponseUI) runSpinner() {
 			text := u.spinnerText
 			u.spinnerMu.Unlock()
 
-			char := spinnerFrames[frame%len(spinnerFrames)]
-			fmt.Fprintf(u.out, "\r\033[K\033[90m%c %s\033[0m", char, text)
+			motion := selectAgentStatusMotion(frame, u.spinnerRand)
+			fmt.Fprintf(u.out, "\r\033[K%s", formatAgentStatusMotion(text, motion))
 			frame++
 		}
 	}
+}
+
+func selectAgentStatusMotion(frame int, rng agentStatusRandom) string {
+	if len(agentStatusReplacementPool) == 0 {
+		return ""
+	}
+	if rng != nil {
+		return agentStatusReplacementPool[rng.Intn(len(agentStatusReplacementPool))]
+	}
+	return agentStatusReplacementPool[frame%len(agentStatusReplacementPool)]
+}
+
+func formatAgentStatusMotion(text string, motion string) string {
+	if motion == "" {
+		return fmt.Sprintf(" \033[90m%s\033[0m", text)
+	}
+	return fmt.Sprintf(" %s%s\033[0m \033[90m%s\033[0m", agentConversationLiveRailStyle, motion, text)
 }
 
 // StopSpinner stops the animated spinner if running and waits for it to exit.

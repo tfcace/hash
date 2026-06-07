@@ -55,6 +55,28 @@ func TestEditor_EnterSubmitsInInsertMode(t *testing.T) {
 	}
 }
 
+func TestEditor_EscapeCancelsWhenConfigured(t *testing.T) {
+	input := bytes.NewReader([]byte{
+		0x1b, // Escape
+		'\r', // Would submit if Escape only switched modes
+	})
+	var output bytes.Buffer
+
+	cfg := Config{
+		Keybindings:    "helix",
+		CancelOnEscape: true,
+	}
+	ed := New(cfg, input, &output)
+
+	result, err := ed.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if !result.Canceled {
+		t.Fatalf("Escape should cancel when configured, got result %#v", result)
+	}
+}
+
 func TestEditor_HistoryCallback(t *testing.T) {
 	// Up arrow on first line should trigger history callback
 	input := bytes.NewReader([]byte{

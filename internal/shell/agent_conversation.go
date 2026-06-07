@@ -15,8 +15,9 @@ type agentConversationMessage struct {
 
 const (
 	agentConversationReplyPrompt       = "\x1b[38;2;94;234;212m│\x1b[0m \x1b[1;38;2;94;234;212myou\x1b[0m › "
-	agentConversationLiveRailLine      = "\x1b[1;38;2;255;209;102m┆\x1b[0m"
-	agentConversationLiveReplyPrompt   = "\x1b[1;38;2;255;209;102m┆\x1b[0m \x1b[1;38;2;94;234;212myou\x1b[0m › "
+	agentConversationLiveRailStyle     = "\x1b[1;38;2;255;209;102m"
+	agentConversationLiveRailLine      = agentConversationLiveRailStyle + "┆\x1b[0m"
+	agentConversationLiveReplyPrompt   = agentConversationLiveRailStyle + "┆\x1b[0m \x1b[1;38;2;94;234;212myou\x1b[0m › "
 	agentConversationReplyPromptWidth  = 8
 	agentConversationAgentPrefix       = "│ agent › "
 	agentConversationAgentContinuation = "│         "
@@ -34,9 +35,24 @@ func agentConversationInputFrame(openRail bool) *editor.InputFrame {
 		PrefixWidth: agentConversationReplyPromptWidth,
 	}
 	if openRail {
-		frame.TopLine = "\x1b[38;2;94;234;212m╭─ conversation\x1b[0m \x1b[90mEnter sends · Esc/Ctrl+C leaves · /exit ends\x1b[0m"
+		frame.TopLine = agentConversationLiveRailStyle + "╭─ conversation\x1b[0m \x1b[90mEnter sends · Esc/Ctrl+C leaves · /exit ends\x1b[0m"
 	}
 	return frame
+}
+
+func agentConversationEditorConfig(base editor.Config, openRail bool) editor.Config {
+	cfg := base
+	cfg.Prompt = agentConversationReplyPrompt
+	cfg.CompleteFunc = nil
+	cfg.PrefetchFunc = nil
+	cfg.SuggestionFunc = nil
+	cfg.Gutter = false
+	cfg.InputFrame = agentConversationInputFrame(openRail)
+	cfg.DisableHistorySearch = true
+	cfg.DisableContextPicker = true
+	cfg.DisableLineContinuation = true
+	cfg.CancelOnEscape = true
+	return cfg
 }
 
 type agentConversationRailPrefixer struct {
