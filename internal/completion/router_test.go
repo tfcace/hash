@@ -51,6 +51,19 @@ func (m *blockingCountingCompleter) Complete(ctx context.Context, line string, p
 	return Result{Items: []Item{{Value: "late-result"}}}, nil
 }
 
+type namedBlockingCompleter struct {
+	name    string
+	release <-chan struct{}
+	calls   atomic.Int32
+}
+
+func (m *namedBlockingCompleter) Name() string { return m.name }
+func (m *namedBlockingCompleter) Complete(ctx context.Context, line string, pos int) (Result, error) {
+	m.calls.Add(1)
+	<-m.release
+	return Result{Items: []Item{{Value: "late-result"}}}, nil
+}
+
 type blockingPrefetchCompleter struct {
 	release <-chan struct{}
 	calls   atomic.Int32
@@ -177,6 +190,43 @@ func TestRouter_CompleteSkipsAlreadyStuckCompleterAndUsesFallback(t *testing.T) 
 	}
 	if len(result.Items) != 1 || result.Items[0].Value != "fallback-result" {
 		t.Fatalf("expected fallback completion after skipping stuck completer, got %#v", result.Items)
+	}
+}
+
+func TestRouter_StuckCompleterDoesNotSkipDistinctCompleterWithSameNameAndPriority(t *testing.T) {
+	release := make(chan struct{})
+	defer close(release)
+	blocking := &namedBlockingCompleter{name: "same", release: release}
+	fallback := &MockCompleter{
+		name:  "same",
+		items: []Item{{Value: "fallback-result"}},
+	}
+
+	router := NewRouter()
+	router.Register(blocking, PriorityFilesystem)
+	router.Register(fallback, PriorityFilesystem)
+
+	started := make(chan struct{})
+	go func() {
+		close(started)
+		_, _ = router.Complete(context.Background(), "cat ", len("cat "))
+	}()
+	<-started
+	if !eventuallyTrue(100*time.Millisecond, func() bool {
+		return blocking.calls.Load() == 1
+	}) {
+		t.Fatalf("expected background completion to call stuck completer once, got %d", blocking.calls.Load())
+	}
+
+	result, err := completeWithTestTimeout(t, router, context.Background(), "cat ", len("cat "))
+	if err != nil {
+		t.Fatalf("Complete() error = %v", err)
+	}
+	if got := blocking.calls.Load(); got != 1 {
+		t.Fatalf("expected second completion to skip only the already-stuck instance, got %d calls", got)
+	}
+	if len(result.Items) != 1 || result.Items[0].Value != "fallback-result" {
+		t.Fatalf("expected same-name fallback completion after skipping stuck instance, got %#v", result.Items)
 	}
 }
 

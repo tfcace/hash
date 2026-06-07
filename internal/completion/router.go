@@ -3,7 +3,6 @@ package completion
 import (
 	"context"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -14,9 +13,10 @@ import (
 // Router dispatches completion requests to registered completers.
 type Router struct {
 	completers        []registeredCompleter
+	nextCompleterID   uint64
 	fuzzy             bool
 	completerMu       sync.Mutex
-	completerInFlight map[string]bool
+	completerInFlight map[uint64]bool
 	boundedMu         sync.Mutex
 	boundedInFlight   bool
 	prefetchMu        sync.Mutex
@@ -26,6 +26,7 @@ type Router struct {
 type registeredCompleter struct {
 	completer Completer
 	priority  Priority
+	id        uint64
 }
 
 type boundedCompletionResult struct {
@@ -56,14 +57,19 @@ func (r *Router) Fuzzy() bool {
 // Register adds a completer with the given priority.
 // Lower priority values are tried first.
 func (r *Router) Register(c Completer, priority Priority) {
+	r.nextCompleterID++
 	r.completers = append(r.completers, registeredCompleter{
 		completer: c,
 		priority:  priority,
+		id:        r.nextCompleterID,
 	})
 
 	// Sort by priority (lower first)
 	sort.Slice(r.completers, func(i, j int) bool {
-		return r.completers[i].priority < r.completers[j].priority
+		if r.completers[i].priority != r.completers[j].priority {
+			return r.completers[i].priority < r.completers[j].priority
+		}
+		return r.completers[i].id < r.completers[j].id
 	})
 }
 
@@ -179,15 +185,15 @@ func (r *Router) completeWithBoundary(ctx context.Context, rc registeredComplete
 	}
 }
 
-func completerInFlightKey(rc registeredCompleter) string {
-	return rc.completer.Name() + "\x00" + strconv.Itoa(int(rc.priority))
+func completerInFlightKey(rc registeredCompleter) uint64 {
+	return rc.id
 }
 
-func (r *Router) beginCompleterCall(key string) bool {
+func (r *Router) beginCompleterCall(key uint64) bool {
 	r.completerMu.Lock()
 	defer r.completerMu.Unlock()
 	if r.completerInFlight == nil {
-		r.completerInFlight = make(map[string]bool)
+		r.completerInFlight = make(map[uint64]bool)
 	}
 	if r.completerInFlight[key] {
 		return false
@@ -196,7 +202,7 @@ func (r *Router) beginCompleterCall(key string) bool {
 	return true
 }
 
-func (r *Router) endCompleterCall(key string) {
+func (r *Router) endCompleterCall(key uint64) {
 	r.completerMu.Lock()
 	delete(r.completerInFlight, key)
 	r.completerMu.Unlock()
