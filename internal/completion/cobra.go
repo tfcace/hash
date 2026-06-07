@@ -319,6 +319,9 @@ func (c *CobraCompleter) parseOutput(output string) Result {
 			Display:     value,
 			Description: desc,
 		})
+		if len(items) >= completionItemLimit {
+			break
+		}
 	}
 
 	return Result{Items: items}

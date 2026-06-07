@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -313,6 +314,29 @@ func TestCobraCompleter_PrefetchReturnsWhenChildKeepsStdoutOpen(t *testing.T) {
 
 	if elapsed > 150*time.Millisecond {
 		t.Fatalf("cobra prefetch waited %s for child-held stdout pipe, want under 150ms", elapsed)
+	}
+}
+
+func TestCobraCompleter_ParseOutputLimitsLargeResultSet(t *testing.T) {
+	var b strings.Builder
+	for i := 0; i < 5000; i++ {
+		b.WriteString("resource-")
+		b.WriteString(strconv.Itoa(i))
+		b.WriteString("\tdescription\n")
+	}
+
+	result := NewCobraCompleter().parseOutput(b.String())
+	if len(result.Items) > completionItemLimit {
+		t.Fatalf("parseOutput returned %d items, want at most %d", len(result.Items), completionItemLimit)
+	}
+	if len(result.Items) != completionItemLimit {
+		t.Fatalf("parseOutput returned %d items, want %d", len(result.Items), completionItemLimit)
+	}
+	if result.Items[0].Value != "resource-0" || result.Items[len(result.Items)-1].Value != "resource-199" {
+		t.Fatalf("parseOutput should preserve first parsed entries, got first=%q last=%q",
+			result.Items[0].Value,
+			result.Items[len(result.Items)-1].Value,
+		)
 	}
 }
 
