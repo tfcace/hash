@@ -2,6 +2,7 @@ package completion
 
 import (
 	"context"
+	"strconv"
 	"testing"
 )
 
@@ -61,6 +62,25 @@ func TestAliasCompleter_EmptyPrefix(t *testing.T) {
 
 	if len(result.Items) != 3 {
 		t.Errorf("expected 3 completions, got %d", len(result.Items))
+	}
+}
+
+func TestAliasCompleter_LimitsLargeFunctionList(t *testing.T) {
+	functions := make([]string, 5000)
+	for i := range functions {
+		functions[i] = "fn-" + strconv.Itoa(i)
+	}
+	c := NewAliasCompleter(&mockFunctionProvider{functions: functions})
+
+	result, err := c.Complete(context.Background(), "fn-", len("fn-"))
+	if err != nil {
+		t.Fatalf("Complete() error = %v", err)
+	}
+	if len(result.Items) > completionItemLimit {
+		t.Fatalf("alias completion returned %d items, want at most %d", len(result.Items), completionItemLimit)
+	}
+	if len(result.Items) != completionItemLimit {
+		t.Fatalf("alias completion returned %d items, want %d", len(result.Items), completionItemLimit)
 	}
 }
 
