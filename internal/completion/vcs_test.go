@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -63,6 +64,118 @@ func TestVCSCompleter_CachesGitRefsForRepeatedCompletion(t *testing.T) {
 	}
 	if len(second.Items) != 1 || second.Items[0].Value != "feature/ui" {
 		t.Fatalf("expected cached feature/ui completion, got %#v", second.Items)
+	}
+}
+
+func TestVCSCompleter_ReturnsWhenGitRefLookupIgnoresContext(t *testing.T) {
+	c := NewVCSCompleter()
+	release := make(chan struct{})
+	defer close(release)
+	c.listGitRefs = func(ctx context.Context) ([]string, error) {
+		<-release
+		return []string{"main"}, nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+
+	done := make(chan Result, 1)
+	start := time.Now()
+	go func() {
+		result, _ := c.Complete(ctx, "git checkout ", len("git checkout "))
+		done <- result
+	}()
+
+	select {
+	case result := <-done:
+		elapsed := time.Since(start)
+		if elapsed > 100*time.Millisecond {
+			t.Fatalf("git ref completion took %s after context cancellation, want under 100ms", elapsed)
+		}
+		if len(result.Items) != 0 {
+			t.Fatalf("expected no items after context cancellation, got %#v", result.Items)
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("git ref completion did not return after context cancellation")
+	}
+}
+
+func TestVCSCompleter_JJRevisionReturnsWhenLookupIgnoresContext(t *testing.T) {
+	c := NewVCSCompleter()
+	release := make(chan struct{})
+	defer close(release)
+	c.listJJRevs = func(ctx context.Context) ([]string, error) {
+		<-release
+		return []string{"main"}, nil
+	}
+	c.listJJChangeIDs = func(ctx context.Context) ([]string, error) {
+		return []string{"abc123"}, nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+
+	done := make(chan Result, 1)
+	start := time.Now()
+	go func() {
+		result, _ := c.Complete(ctx, "jj edit ", len("jj edit "))
+		done <- result
+	}()
+
+	select {
+	case result := <-done:
+		elapsed := time.Since(start)
+		if elapsed > 100*time.Millisecond {
+			t.Fatalf("jj revision completion took %s after context cancellation, want under 100ms", elapsed)
+		}
+		if len(result.Items) != 0 {
+			t.Fatalf("expected no items after context cancellation, got %#v", result.Items)
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("jj revision completion did not return after context cancellation")
+	}
+}
+
+func TestVCSCompleter_DoesNotCacheCanceledGitRefLookup(t *testing.T) {
+	c := NewVCSCompleter()
+	c.cacheTTL = time.Minute
+	release := make(chan struct{})
+	finished := make(chan struct{})
+	var first atomic.Bool
+	first.Store(true)
+	c.listGitRefs = func(ctx context.Context) ([]string, error) {
+		if first.Swap(false) {
+			<-release
+			close(finished)
+		}
+		return []string{"main"}, nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	done := make(chan Result, 1)
+	go func() {
+		result, _ := c.Complete(ctx, "git checkout ", len("git checkout "))
+		done <- result
+	}()
+	var result Result
+	select {
+	case result = <-done:
+	case <-time.After(100 * time.Millisecond):
+		cancel()
+		t.Fatal("git ref completion did not return after context cancellation")
+	}
+	cancel()
+	if len(result.Items) != 0 {
+		t.Fatalf("expected no items after timeout, got %#v", result.Items)
+	}
+
+	close(release)
+	<-finished
+
+	result, err := c.Complete(context.Background(), "git checkout ", len("git checkout "))
+	if err != nil {
+		t.Fatalf("Complete() error = %v", err)
+	}
+	if len(result.Items) != 1 || result.Items[0].Value != "main" {
+		t.Fatalf("canceled lookup should not cache an empty result, got %#v", result.Items)
 	}
 }
 

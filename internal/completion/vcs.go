@@ -197,12 +197,14 @@ func (c *VCSCompleter) lookupValues(ctx context.Context, kind string, listFn fun
 		c.cacheMu.Unlock()
 	}
 
-	values, err := listFn(ctx)
-	cacheValues := values
+	values, err := listStringsUntilContext(ctx, listFn)
 	if err != nil {
-		cacheValues = nil
+		if ctx.Err() == nil {
+			c.storeCachedValues(cacheKey, nil)
+		}
+		return values, false, err
 	}
-	c.storeCachedValues(cacheKey, cacheValues)
+	c.storeCachedValues(cacheKey, values)
 	return values, false, err
 }
 
@@ -280,6 +282,9 @@ func (c *VCSCompleter) completeJJRevision(ctx context.Context, current string) R
 		ids, _, _ = c.lookupValues(ctx, "jj_change_ids", c.listJJChangeIDs)
 	}()
 	wg.Wait()
+	if ctx.Err() != nil {
+		return Result{}
+	}
 
 	seen := make(map[string]bool)
 	var values []string
