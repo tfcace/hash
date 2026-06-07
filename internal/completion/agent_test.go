@@ -31,6 +31,17 @@ func TestAgentCompleter_DetectsInlineAgent(t *testing.T) {
 	}
 }
 
+func TestAgentCompleter_ClampsCursorBeforeSlicing(t *testing.T) {
+	completer := NewAgentCompleter(nil)
+
+	if _, err := completer.Complete(context.Background(), "echo ?? value", len("echo ?? value")+10); err != nil {
+		t.Fatalf("Complete() with oversized cursor error = %v", err)
+	}
+	if _, err := completer.Complete(context.Background(), "echo ?? value", -1); err != nil {
+		t.Fatalf("Complete() with negative cursor error = %v", err)
+	}
+}
+
 func TestAgentCompleter_ReturnsWhenAgentStreamIgnoresContext(t *testing.T) {
 	client := agent.NewClient(blockingAgentTransport{})
 	completer := NewAgentCompleter(client)

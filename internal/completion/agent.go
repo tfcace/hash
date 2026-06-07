@@ -28,6 +28,8 @@ func (c *AgentCompleter) Name() string {
 
 // Complete returns AI-assisted completions for ?? inline patterns.
 func (c *AgentCompleter) Complete(ctx context.Context, line string, pos int) (Result, error) {
+	pos = clampCursor(line, pos)
+
 	// Only handle lines with ?? (but not at the start - that's full agent mode)
 	lineUpToPos := line[:pos]
 

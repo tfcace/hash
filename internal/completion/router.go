@@ -237,9 +237,7 @@ func extractCompletionQuery(line string, pos int) string {
 // For "ls -la", returns ("ls -la", 5) unchanged.
 // This allows completers to work correctly with piped commands.
 func ExtractPipeContext(line string, pos int) (extracted string, newPos int) {
-	if pos > len(line) {
-		pos = len(line)
-	}
+	pos = clampCursor(line, pos)
 
 	// Find the last pipe character before pos
 	lastPipe := -1

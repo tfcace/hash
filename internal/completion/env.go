@@ -40,9 +40,7 @@ func (c *EnvCompleter) Name() string {
 // Complete returns completions for environment variables.
 // Triggers when the user types $ or ${ followed by variable name prefix.
 func (c *EnvCompleter) Complete(ctx context.Context, line string, pos int) (Result, error) {
-	if pos > len(line) {
-		pos = len(line)
-	}
+	pos = clampCursor(line, pos)
 
 	// Find $VAR or ${VAR pattern before cursor
 	prefix, hasDollar := extractEnvPrefix(line, pos)

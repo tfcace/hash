@@ -9,9 +9,7 @@ import (
 // shellWordAt extracts the shell token ending at pos. Whitespace inside quotes
 // or escaped with a backslash remains part of the token.
 func shellWordAt(line string, pos int) string {
-	if pos > len(line) {
-		pos = len(line)
-	}
+	pos = clampCursor(line, pos)
 
 	start := 0
 	scanner := shellWordScanner{}
@@ -30,6 +28,16 @@ func shellWordAt(line string, pos int) string {
 	}
 
 	return line[start:pos]
+}
+
+func clampCursor(line string, pos int) int {
+	if pos < 0 {
+		return 0
+	}
+	if pos > len(line) {
+		return len(line)
+	}
+	return pos
 }
 
 type shellWordScanner struct {

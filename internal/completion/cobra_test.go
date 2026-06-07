@@ -49,6 +49,20 @@ func TestCobraCompleter_PrefetchAndComplete(t *testing.T) {
 	}
 }
 
+func TestCobraCompleter_ClampsCursorBeforeSlicing(t *testing.T) {
+	completer := NewCobraCompleter()
+
+	if _, err := completer.Complete(context.Background(), "kubectl get ", len("kubectl get ")+10); err != nil {
+		t.Fatalf("Complete() with oversized cursor error = %v", err)
+	}
+	if _, err := completer.Complete(context.Background(), "kubectl get ", -1); err != nil {
+		t.Fatalf("Complete() with negative cursor error = %v", err)
+	}
+
+	completer.Prefetch("kubectl get ", len("kubectl get ")+10)
+	completer.Prefetch("kubectl get ", -1)
+}
+
 func TestCobraCompleter_NonCobraCommand(t *testing.T) {
 	completer := NewCobraCompleter()
 	ctx := context.Background()

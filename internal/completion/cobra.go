@@ -104,6 +104,8 @@ func (c *CobraCompleter) cachedPath(name string) (string, bool) {
 // Complete returns completions from cache only.
 // Use Prefetch to populate the cache in the background.
 func (c *CobraCompleter) Complete(ctx context.Context, line string, pos int) (Result, error) {
+	pos = clampCursor(line, pos)
+
 	// Extract pipe context - get command segment after last pipe
 	pipeLine, pipePos := ExtractPipeContext(line, pos)
 
@@ -146,6 +148,8 @@ func (c *CobraCompleter) Complete(ctx context.Context, line string, pos int) (Re
 // Prefetch triggers background fetching of Cobra completions.
 // Call this when the user types a space after a command.
 func (c *CobraCompleter) Prefetch(line string, pos int) {
+	pos = clampCursor(line, pos)
+
 	// Extract pipe context - get command segment after last pipe
 	pipeLine, pipePos := ExtractPipeContext(line, pos)
 
