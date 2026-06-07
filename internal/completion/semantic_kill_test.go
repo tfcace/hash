@@ -2,6 +2,7 @@ package completion
 
 import (
 	"context"
+	"strconv"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -127,6 +128,28 @@ func TestKillHandler_CachesProcessList(t *testing.T) {
 	}
 	if len(second.Items) != 1 || second.Items[0].Value != "456" {
 		t.Fatalf("unexpected cached second result: %#v", second.Items)
+	}
+}
+
+func TestKillHandler_LimitsLargeProcessList(t *testing.T) {
+	processes := make([]processInfo, 5000)
+	for i := range processes {
+		pid := strconv.Itoa(10000 + i)
+		processes[i] = processInfo{PID: pid, Name: "proc-" + pid}
+	}
+	h := &KillHandler{
+		command: "kill",
+		listProcesses: func(ctx context.Context) ([]processInfo, error) {
+			return processes, nil
+		},
+	}
+
+	result := h.Complete(context.Background(), nil, "1")
+	if len(result.Items) > completionItemLimit {
+		t.Fatalf("kill completion returned %d items, want at most %d", len(result.Items), completionItemLimit)
+	}
+	if len(result.Items) != completionItemLimit {
+		t.Fatalf("kill completion returned %d items, want %d", len(result.Items), completionItemLimit)
 	}
 }
 

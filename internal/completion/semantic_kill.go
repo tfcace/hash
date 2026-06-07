@@ -73,6 +73,9 @@ func (h *KillHandler) Complete(ctx context.Context, args []string, current strin
 					Value:   p.Name,
 					Display: p.Name,
 				})
+				if len(items) >= completionItemLimit {
+					break
+				}
 			}
 			continue
 		}
@@ -84,6 +87,9 @@ func (h *KillHandler) Complete(ctx context.Context, args []string, current strin
 				Display:     p.PID,
 				Description: p.Name,
 			})
+			if len(items) >= completionItemLimit {
+				break
+			}
 		}
 	}
 	return Result{Items: items}
