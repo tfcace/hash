@@ -58,6 +58,11 @@ func TestIsRetryableError(t *testing.T) {
 			want: true,
 		},
 		{
+			name: "no output is retryable",
+			err:  ErrACPNoOutput,
+			want: true,
+		},
+		{
 			name: "broken pipe message fallback is retryable",
 			err:  errors.New("write request: broken pipe"),
 			want: true,

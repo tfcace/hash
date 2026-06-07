@@ -441,7 +441,7 @@ func TestHandleAgentFullStreaming_EmptyStreamShowsErrorWithoutRetryPrompt(t *tes
 	}, "test-model")
 
 	output := out.String()
-	if !strings.Contains(output, "empty agent response") {
+	if !strings.Contains(output, emptyAgentResponseMessage) {
 		t.Fatalf("expected empty response error, got:\n%s", output)
 	}
 	if strings.Contains(output, "[Enter: retry]") {
@@ -469,7 +469,7 @@ func TestStreamAgentFollowUpTurn_EmptyStreamShowsErrorWithoutResponse(t *testing
 		t.Fatal("expected empty follow-up stream to fail")
 	}
 	output := out.String()
-	if !strings.Contains(output, "empty agent response") {
+	if !strings.Contains(output, emptyAgentResponseMessage) {
 		t.Fatalf("expected empty response error, got:\n%s", output)
 	}
 	if strings.Contains(output, "[Enter: retry]") {

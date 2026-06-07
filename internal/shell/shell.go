@@ -1256,7 +1256,7 @@ func (s *Shell) streamAgentFollowUpTurn(
 
 	if streamResult.streamErr != nil {
 		s.responseUI.ClearLine()
-		s.responseUI.ShowError(streamResult.streamErr.Error())
+		s.responseUI.ShowError(agentStreamErrorMessage(streamResult.streamErr))
 		s.lastExitCode = 1
 		return agent.Response{}, "", 0, false
 	}
@@ -1338,7 +1338,7 @@ func (s *Shell) executeAgentCommand(ctx context.Context, command string) {
 // Returns true if the caller should return (error was fully handled).
 func (s *Shell) handleAgentStreamError(ctx context.Context, parsed parser.ParseResult, modelName string, streamErr error, responseLen, lineCount int) bool {
 	s.responseUI.ClearLine() // Stop spinner and clear the line
-	s.responseUI.ShowError(streamErr.Error())
+	s.responseUI.ShowError(agentStreamErrorMessage(streamErr))
 
 	// If no response was received, classify the failure before showing hints.
 	// Startup errors get install/PATH hints; transient errors get retry.
@@ -1384,6 +1384,13 @@ func (s *Shell) handleAgentStreamError(ctx context.Context, parsed parser.ParseR
 	// lineCount + error line + confirmation line + blank line
 	s.responseUI.ClearLines(lineCount + 3)
 	return true
+}
+
+func agentStreamErrorMessage(err error) string {
+	if errors.Is(err, agent.ErrACPNoOutput) {
+		return emptyAgentResponseMessage
+	}
+	return err.Error()
 }
 
 // handleEditCommand opens editor with command for editing.

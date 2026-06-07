@@ -51,7 +51,8 @@ func IsRetryableError(err error) bool {
 	if IsTimeoutError(err) {
 		return true
 	}
-	if errors.Is(err, ErrACPConnectionClosed) ||
+	if errors.Is(err, ErrACPNoOutput) ||
+		errors.Is(err, ErrACPConnectionClosed) ||
 		errors.Is(err, io.EOF) ||
 		errors.Is(err, io.ErrClosedPipe) ||
 		errors.Is(err, syscall.EPIPE) ||
