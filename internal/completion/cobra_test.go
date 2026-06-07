@@ -240,6 +240,38 @@ func TestCobraCompleter_PrefetchRetryAfterBusyCommandLookup(t *testing.T) {
 	}
 }
 
+func TestCobraCompleter_PrefetchRetriesStaleCommandPathLookup(t *testing.T) {
+	completer := NewCobraCompleter()
+	release := make(chan struct{})
+	defer close(release)
+	started := make(chan struct{}, 4)
+	var calls atomic.Int32
+	completer.resolvePath = func(name string) (string, error) {
+		if calls.Add(1) == 1 {
+			started <- struct{}{}
+			<-release
+			return "", errors.New("stale lookup")
+		}
+		started <- struct{}{}
+		return "", errors.New("not found")
+	}
+
+	completer.Prefetch("kubectl get ", len("kubectl get "))
+	select {
+	case <-started:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("first command path lookup did not start")
+	}
+
+	time.Sleep(90 * time.Millisecond)
+	completer.Prefetch("kubectl describe ", len("kubectl describe "))
+	if !eventually(100*time.Millisecond, func() bool {
+		return calls.Load() == 2
+	}) {
+		t.Fatalf("expected stale command path lookup to be retried, got %d calls", calls.Load())
+	}
+}
+
 func TestCobraCompleter_PrefetchReturnsWhenChildKeepsStdoutOpen(t *testing.T) {
 	tmpDir := t.TempDir()
 	cmdPath := filepath.Join(tmpDir, "fakecobra")

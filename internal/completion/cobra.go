@@ -22,8 +22,13 @@ type CobraCompleter struct {
 
 	resolvePath      func(string) (string, error)
 	lookPathCache    map[string]string // command name → resolved path
-	lookPathInFlight map[string]bool
+	lookPathInFlight map[string]*cobraLookPathCall
+	lookPathMaxAge   time.Duration
 	lookPathCacheMu  sync.RWMutex
+}
+
+type cobraLookPathCall struct {
+	started time.Time
 }
 
 type cachedResult struct {
@@ -43,7 +48,8 @@ func NewCobraCompleter() *CobraCompleter {
 		prefetched:       make(map[string]bool),
 		resolvePath:      exec.LookPath,
 		lookPathCache:    make(map[string]string),
-		lookPathInFlight: make(map[string]bool),
+		lookPathInFlight: make(map[string]*cobraLookPathCall),
+		lookPathMaxAge:   contextReadInflightMaxWaitAge,
 	}
 }
 
@@ -68,13 +74,22 @@ func (c *CobraCompleter) lookPath(name string) (string, error) {
 		return p, nil
 	}
 	if c.lookPathInFlight == nil {
-		c.lookPathInFlight = make(map[string]bool)
+		c.lookPathInFlight = make(map[string]*cobraLookPathCall)
 	}
-	if c.lookPathInFlight[name] {
-		c.lookPathCacheMu.Unlock()
-		return "", errCobraLookPathBusy
+	now := time.Now()
+	if call, ok := c.lookPathInFlight[name]; ok {
+		maxAge := c.lookPathMaxAge
+		if maxAge == 0 {
+			maxAge = contextReadInflightMaxWaitAge
+		}
+		if maxAge < 0 || now.Sub(call.started) < maxAge {
+			c.lookPathCacheMu.Unlock()
+			return "", errCobraLookPathBusy
+		}
+		delete(c.lookPathInFlight, name)
 	}
-	c.lookPathInFlight[name] = true
+	call := &cobraLookPathCall{started: now}
+	c.lookPathInFlight[name] = call
 	c.lookPathCacheMu.Unlock()
 
 	resolve := c.resolvePath
@@ -84,6 +99,10 @@ func (c *CobraCompleter) lookPath(name string) (string, error) {
 	p, err := resolve(name)
 
 	c.lookPathCacheMu.Lock()
+	if c.lookPathInFlight[name] != call {
+		c.lookPathCacheMu.Unlock()
+		return "", errCobraLookPathBusy
+	}
 	delete(c.lookPathInFlight, name)
 	if err != nil {
 		c.lookPathCacheMu.Unlock()
