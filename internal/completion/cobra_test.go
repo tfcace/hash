@@ -234,7 +234,8 @@ func TestCobraCompleter_PrefetchRetryAfterBusyCommandLookup(t *testing.T) {
 	if !eventually(100*time.Millisecond, func() bool {
 		completer.prefetchMu.RLock()
 		defer completer.prefetchMu.RUnlock()
-		return !completer.prefetched["kubectl:__complete describe "]
+		_, ok := completer.prefetched["kubectl:__complete describe "]
+		return !ok
 	}) {
 		t.Fatal("prefetch skipped by busy command lookup should be retryable")
 	}
@@ -269,6 +270,32 @@ func TestCobraCompleter_PrefetchRetriesStaleCommandPathLookup(t *testing.T) {
 		return calls.Load() == 2
 	}) {
 		t.Fatalf("expected stale command path lookup to be retried, got %d calls", calls.Load())
+	}
+}
+
+func TestCobraCompleter_RetriesStaleFailedPrefetch(t *testing.T) {
+	completer := NewCobraCompleter()
+	completer.cacheTTL = time.Millisecond
+	var calls atomic.Int32
+	completer.resolvePath = func(name string) (string, error) {
+		calls.Add(1)
+		return "", errors.New("temporary lookup failure")
+	}
+
+	const line = "kubectl get "
+	completer.Prefetch(line, len(line))
+	if !eventually(100*time.Millisecond, func() bool {
+		return calls.Load() == 1
+	}) {
+		t.Fatalf("expected first prefetch to attempt path lookup, got %d calls", calls.Load())
+	}
+
+	time.Sleep(2 * time.Millisecond)
+	completer.Prefetch(line, len(line))
+	if !eventually(100*time.Millisecond, func() bool {
+		return calls.Load() == 2
+	}) {
+		t.Fatalf("expected stale failed prefetch to retry, got %d calls", calls.Load())
 	}
 }
 

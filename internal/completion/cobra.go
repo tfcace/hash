@@ -17,7 +17,7 @@ type CobraCompleter struct {
 	cache      map[string]cachedResult
 	cacheMu    sync.RWMutex
 	cacheTTL   time.Duration
-	prefetched map[string]bool // tracks prefetch attempts (including failures)
+	prefetched map[string]time.Time // prefetch key -> next retry time
 	prefetchMu sync.RWMutex
 
 	resolvePath      func(string) (string, error)
@@ -37,6 +37,7 @@ type cachedResult struct {
 }
 
 const cobraPrefetchTimeout = 100 * time.Millisecond
+const cobraFailedPrefetchTTL = 2 * time.Second
 
 var errCobraLookPathBusy = errors.New("cobra command path lookup already in progress")
 
@@ -45,7 +46,7 @@ func NewCobraCompleter() *CobraCompleter {
 	return &CobraCompleter{
 		cache:            make(map[string]cachedResult),
 		cacheTTL:         5 * time.Minute,
-		prefetched:       make(map[string]bool),
+		prefetched:       make(map[string]time.Time),
 		resolvePath:      exec.LookPath,
 		lookPathCache:    make(map[string]string),
 		lookPathInFlight: make(map[string]*cobraLookPathCall),
@@ -191,12 +192,13 @@ func (c *CobraCompleter) Prefetch(line string, pos int) {
 
 	// Check if already prefetching or recently failed
 	prefetchKey := cmdName + ":" + strings.Join(args, " ")
+	now := time.Now()
 	c.prefetchMu.Lock()
-	if c.prefetched[prefetchKey] {
+	if retryAt, ok := c.prefetched[prefetchKey]; ok && now.Before(retryAt) {
 		c.prefetchMu.Unlock()
 		return
 	}
-	c.prefetched[prefetchKey] = true
+	c.prefetched[prefetchKey] = c.nextFailedPrefetchRetry(now)
 	c.prefetchMu.Unlock()
 
 	// Run prefetch in background
@@ -218,6 +220,7 @@ func (c *CobraCompleter) prefetchCommand(prefetchKey string, cmdName string, arg
 	c.cacheMu.RLock()
 	if cached, ok := c.cache[cacheKey]; ok && time.Now().Before(cached.expiresAt) {
 		c.cacheMu.RUnlock()
+		c.markPrefetchedUntil(prefetchKey, cached.expiresAt)
 		return
 	}
 	c.cacheMu.RUnlock()
@@ -229,6 +232,20 @@ func (c *CobraCompleter) forgetPrefetch(prefetchKey string) {
 	c.prefetchMu.Lock()
 	delete(c.prefetched, prefetchKey)
 	c.prefetchMu.Unlock()
+}
+
+func (c *CobraCompleter) markPrefetchedUntil(prefetchKey string, retryAt time.Time) {
+	c.prefetchMu.Lock()
+	c.prefetched[prefetchKey] = retryAt
+	c.prefetchMu.Unlock()
+}
+
+func (c *CobraCompleter) nextFailedPrefetchRetry(now time.Time) time.Time {
+	ttl := cobraFailedPrefetchTTL
+	if c.cacheTTL > 0 && c.cacheTTL < ttl {
+		ttl = c.cacheTTL
+	}
+	return now.Add(ttl)
 }
 
 // doPrefetch runs the actual Cobra completion in the background.
@@ -330,7 +347,7 @@ func (c *CobraCompleter) ClearCache() {
 	c.cacheMu.Unlock()
 
 	c.prefetchMu.Lock()
-	c.prefetched = make(map[string]bool)
+	c.prefetched = make(map[string]time.Time)
 	c.prefetchMu.Unlock()
 
 	c.lookPathCacheMu.Lock()
