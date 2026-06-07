@@ -1,6 +1,7 @@
 package completion
 
 import (
+	"strconv"
 	"testing"
 )
 
@@ -75,6 +76,23 @@ func TestFuzzyMatch_EmptyQuery(t *testing.T) {
 
 	if len(result) != 2 {
 		t.Errorf("Count = %d, want 2", len(result))
+	}
+}
+
+func TestFuzzyMatch_LimitsLargeResultSet(t *testing.T) {
+	items := make([]Item, 5000)
+	for i := range items {
+		items[i] = Item{Value: "item-" + strconv.Itoa(i)}
+	}
+	items[len(items)-1] = Item{Value: "item"}
+
+	result := FuzzyFilter(items, "item")
+
+	if len(result) > completionItemLimit {
+		t.Fatalf("FuzzyFilter returned %d items, want at most %d", len(result), completionItemLimit)
+	}
+	if len(result) == 0 || result[0].Value != "item" {
+		t.Fatalf("best fuzzy match should be preserved at the front, got %#v", result[:min(len(result), 3)])
 	}
 }
 

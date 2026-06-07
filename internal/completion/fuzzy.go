@@ -8,26 +8,59 @@ import (
 // FuzzyFilter filters and sorts items by fuzzy match score.
 func FuzzyFilter(items []Item, query string) []Item {
 	if query == "" {
-		return items
+		return limitCompletionItems(items)
 	}
 
 	query = strings.ToLower(query)
-	var scored []Item
+	scored := make([]scoredFuzzyItem, 0, min(len(items), completionItemLimit))
 
-	for _, item := range items {
+	for i, item := range items {
 		score := fuzzyScore(strings.ToLower(item.Value), query)
 		if score > 0 {
 			item.Score = score
-			scored = append(scored, item)
+			candidate := scoredFuzzyItem{item: item, index: i}
+			if len(scored) < completionItemLimit {
+				scored = append(scored, candidate)
+				continue
+			}
+			if worst := worstFuzzyItemIndex(scored); fuzzyCandidateLess(scored[worst], candidate) {
+				scored[worst] = candidate
+			}
 		}
 	}
 
 	// Sort by score descending
 	sort.Slice(scored, func(i, j int) bool {
-		return scored[i].Score > scored[j].Score
+		return fuzzyCandidateLess(scored[j], scored[i])
 	})
 
-	return scored
+	result := make([]Item, len(scored))
+	for i := range scored {
+		result[i] = scored[i].item
+	}
+	return result
+}
+
+type scoredFuzzyItem struct {
+	item  Item
+	index int
+}
+
+func worstFuzzyItemIndex(items []scoredFuzzyItem) int {
+	worst := 0
+	for i := 1; i < len(items); i++ {
+		if fuzzyCandidateLess(items[i], items[worst]) {
+			worst = i
+		}
+	}
+	return worst
+}
+
+func fuzzyCandidateLess(a, b scoredFuzzyItem) bool {
+	if a.item.Score != b.item.Score {
+		return a.item.Score < b.item.Score
+	}
+	return a.index > b.index
 }
 
 // fuzzyScore calculates how well target matches query.
