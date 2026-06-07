@@ -59,6 +59,9 @@ func (h *NPMHandler) Complete(ctx context.Context, args []string, current string
 				Display:     name,
 				Description: script,
 			})
+			if len(items) >= completionItemLimit {
+				break
+			}
 		}
 	}
 	return Result{Items: items}

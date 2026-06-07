@@ -4,6 +4,8 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -44,6 +46,35 @@ func TestNPMHandler_PrefixFilter(t *testing.T) {
 	result := h.Complete(context.Background(), []string{"run"}, "build")
 	if len(result.Items) != 2 {
 		t.Fatalf("expected 2 items matching 'build', got %d", len(result.Items))
+	}
+}
+
+func TestNPMHandler_LimitsLargeScriptList(t *testing.T) {
+	var b strings.Builder
+	b.WriteString(`{"scripts":{`)
+	for i := 0; i < 5000; i++ {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		name := "script-" + strconv.Itoa(i)
+		b.WriteString(strconv.Quote(name))
+		b.WriteByte(':')
+		b.WriteString(strconv.Quote("echo " + name))
+	}
+	b.WriteString(`}}`)
+
+	h := &NPMHandler{
+		readFile: func(path string) ([]byte, error) {
+			return []byte(b.String()), nil
+		},
+	}
+
+	result := h.Complete(context.Background(), []string{"run"}, "script-")
+	if len(result.Items) > completionItemLimit {
+		t.Fatalf("npm completion returned %d items, want at most %d", len(result.Items), completionItemLimit)
+	}
+	if len(result.Items) != completionItemLimit {
+		t.Fatalf("npm completion returned %d items, want %d", len(result.Items), completionItemLimit)
 	}
 }
 
