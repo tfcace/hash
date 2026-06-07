@@ -27,6 +27,16 @@ type VCSCompleter struct {
 	listGitStashes  func(context.Context) ([]string, error)
 	listGitRemotes  func(context.Context) ([]string, error)
 	listJJChangeIDs func(context.Context) ([]string, error)
+
+	cache    map[string]cachedStringList
+	cacheMu  sync.Mutex
+	cacheTTL time.Duration
+	now      func() time.Time
+}
+
+type cachedStringList struct {
+	values    []string
+	expiresAt time.Time
 }
 
 // NewVCSCompleter creates a new VCS completer.
@@ -38,6 +48,9 @@ func NewVCSCompleter() *VCSCompleter {
 		listGitStashes:  defaultListGitStashes,
 		listGitRemotes:  defaultListGitRemotes,
 		listJJChangeIDs: defaultListJJChangeIDs,
+		cache:           make(map[string]cachedStringList),
+		cacheTTL:        2 * time.Second,
+		now:             time.Now,
 	}
 }
 
@@ -79,13 +92,13 @@ func (c *VCSCompleter) completeGit(ctx context.Context, parts []string, trailing
 		if !shouldCompleteGitRef(subcommand, current, before) {
 			return Result{}
 		}
-		return lookupAndFilter(ctx, "git_refs", c.listGitRefs, current)
+		return c.lookupAndFilter(ctx, "git_refs", c.listGitRefs, current)
 
 	case "add":
 		if strings.HasPrefix(current, "-") {
 			return Result{}
 		}
-		return lookupAndFilter(ctx, "git_modified", c.listGitModified, current)
+		return c.lookupAndFilter(ctx, "git_modified", c.listGitModified, current)
 
 	case "branch":
 		return c.completeGitBranch(ctx, current, before)
@@ -103,7 +116,7 @@ func (c *VCSCompleter) completeGit(ctx context.Context, parts []string, trailing
 
 func (c *VCSCompleter) completeGitBranch(ctx context.Context, current string, before []string) Result {
 	if containsToken(before, "-d") || containsToken(before, "-D") {
-		return lookupAndFilter(ctx, "git_refs", c.listGitRefs, current)
+		return c.lookupAndFilter(ctx, "git_refs", c.listGitRefs, current)
 	}
 	return Result{}
 }
@@ -114,7 +127,7 @@ func (c *VCSCompleter) completeGitStash(ctx context.Context, current string, bef
 	}
 	switch before[0] {
 	case "pop", "apply", "drop", "show":
-		return lookupAndFilter(ctx, "git_stashes", c.listGitStashes, current)
+		return c.lookupAndFilter(ctx, "git_stashes", c.listGitStashes, current)
 	default:
 		return Result{}
 	}
@@ -126,14 +139,14 @@ func (c *VCSCompleter) completeGitRemote(ctx context.Context, current string, be
 	}
 	switch before[0] {
 	case "remove", "rename", "show", "prune":
-		return lookupAndFilter(ctx, "git_remotes", c.listGitRemotes, current)
+		return c.lookupAndFilter(ctx, "git_remotes", c.listGitRemotes, current)
 	default:
 		return Result{}
 	}
 }
 
 // lookupAndFilter calls a list function and prefix-filters the results.
-func lookupAndFilter(ctx context.Context, kind string, listFn func(context.Context) ([]string, error), prefix string) Result {
+func (c *VCSCompleter) lookupAndFilter(ctx context.Context, kind string, listFn func(context.Context) ([]string, error), prefix string) Result {
 	start := time.Now()
 	traceEnabled := trace.Enabled("completion")
 	if traceEnabled {
@@ -143,7 +156,7 @@ func lookupAndFilter(ctx context.Context, kind string, listFn func(context.Conte
 		})
 	}
 
-	values, err := listFn(ctx)
+	values, cached, err := c.lookupValues(ctx, kind, listFn)
 	result := Result{}
 	if err == nil {
 		result = prefixFilterItems(values, prefix)
@@ -158,6 +171,7 @@ func lookupAndFilter(ctx context.Context, kind string, listFn func(context.Conte
 			"prefix":      prefix,
 			"values":      len(values),
 			"items":       len(result.Items),
+			"cached":      cached,
 			"error":       errText,
 			"duration_ms": float64(time.Since(start).Microseconds()) / 1000.0,
 		})
@@ -166,6 +180,61 @@ func lookupAndFilter(ctx context.Context, kind string, listFn func(context.Conte
 		return Result{}
 	}
 	return result
+}
+
+func (c *VCSCompleter) lookupValues(ctx context.Context, kind string, listFn func(context.Context) ([]string, error)) ([]string, bool, error) {
+	cacheKey := c.cacheKey(kind)
+	if c.cacheTTL > 0 {
+		now := c.timeNow()
+		c.cacheMu.Lock()
+		if c.cache != nil {
+			if cached, ok := c.cache[cacheKey]; ok && now.Before(cached.expiresAt) {
+				values := append([]string(nil), cached.values...)
+				c.cacheMu.Unlock()
+				return values, true, nil
+			}
+		}
+		c.cacheMu.Unlock()
+	}
+
+	values, err := listFn(ctx)
+	cacheValues := values
+	if err != nil {
+		cacheValues = nil
+	}
+	c.storeCachedValues(cacheKey, cacheValues)
+	return values, false, err
+}
+
+func (c *VCSCompleter) storeCachedValues(cacheKey string, values []string) {
+	if c.cacheTTL <= 0 {
+		return
+	}
+
+	c.cacheMu.Lock()
+	defer c.cacheMu.Unlock()
+	if c.cache == nil {
+		c.cache = make(map[string]cachedStringList)
+	}
+	c.cache[cacheKey] = cachedStringList{
+		values:    append([]string(nil), values...),
+		expiresAt: c.timeNow().Add(c.cacheTTL),
+	}
+}
+
+func (c *VCSCompleter) cacheKey(kind string) string {
+	cwd, err := os.Getwd()
+	if err != nil {
+		cwd = ""
+	}
+	return kind + "\x00" + cwd
+}
+
+func (c *VCSCompleter) timeNow() time.Time {
+	if c.now != nil {
+		return c.now()
+	}
+	return time.Now()
 }
 
 func (c *VCSCompleter) completeJJ(ctx context.Context, parts []string, trailingSpace bool) Result {
@@ -190,7 +259,7 @@ func (c *VCSCompleter) completeJJ(ctx context.Context, parts []string, trailingS
 		if !shouldCompleteJJRev(current, before) {
 			return Result{}
 		}
-		return lookupAndFilter(ctx, "jj_change_ids", c.listJJChangeIDs, current)
+		return c.lookupAndFilter(ctx, "jj_change_ids", c.listJJChangeIDs, current)
 
 	default:
 		return Result{}
@@ -204,11 +273,11 @@ func (c *VCSCompleter) completeJJRevision(ctx context.Context, current string) R
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		revs, _ = c.listJJRevs(ctx)
+		revs, _, _ = c.lookupValues(ctx, "jj_revs", c.listJJRevs)
 	}()
 	go func() {
 		defer wg.Done()
-		ids, _ = c.listJJChangeIDs(ctx)
+		ids, _, _ = c.lookupValues(ctx, "jj_change_ids", c.listJJChangeIDs)
 	}()
 	wg.Wait()
 
@@ -243,7 +312,7 @@ func (c *VCSCompleter) completeJJBookmark(ctx context.Context, current string, b
 		return Result{}
 	}
 
-	revs, err := c.listJJRevs(ctx)
+	revs, _, err := c.lookupValues(ctx, "jj_revs", c.listJJRevs)
 	if err != nil {
 		return Result{}
 	}

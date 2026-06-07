@@ -3,16 +3,25 @@ package completion
 import (
 	"context"
 	"strings"
+	"sync"
+	"time"
 )
 
 // BrewHandler provides completions for brew commands.
 type BrewHandler struct {
 	runCommand func(ctx context.Context, name string, args ...string) ([]string, error)
+	cache      stringListCache
+	cacheTTL   time.Duration
+	now        func() time.Time
 }
 
 // NewBrewHandler creates a brew completion handler.
 func NewBrewHandler() *BrewHandler {
-	return &BrewHandler{runCommand: runIsolatedCommand}
+	return &BrewHandler{
+		runCommand: runIsolatedCommand,
+		cacheTTL:   10 * time.Second,
+		now:        time.Now,
+	}
 }
 
 // Commands returns the commands this handler supports.
@@ -39,19 +48,34 @@ func (h *BrewHandler) Complete(ctx context.Context, args []string, current strin
 }
 
 func (h *BrewHandler) listInstalled(ctx context.Context) []string {
+	if h.cacheTTL > 0 {
+		if packages, ok := h.cache.get("installed", h.timeNow()); ok {
+			return packages
+		}
+	}
+
 	queryCtx, cancel := context.WithTimeout(ctx, vcsQueryTimeout)
 	defer cancel()
 
 	// List both formulae and casks
-	formulae, err := h.runCommand(queryCtx, "brew", "list", "--formula", "-1")
-	if err != nil {
-		formulae = nil
-	}
-
-	casks, err := h.runCommand(queryCtx, "brew", "list", "--cask", "-1")
-	if err != nil {
-		casks = nil
-	}
+	var formulae, casks []string
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		lines, err := h.runCommand(queryCtx, "brew", "list", "--formula", "-1")
+		if err == nil {
+			formulae = lines
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		lines, err := h.runCommand(queryCtx, "brew", "list", "--cask", "-1")
+		if err == nil {
+			casks = lines
+		}
+	}()
+	wg.Wait()
 
 	seen := make(map[string]bool)
 	var packages []string
@@ -64,5 +88,15 @@ func (h *BrewHandler) listInstalled(ctx context.Context) []string {
 			}
 		}
 	}
+	if h.cacheTTL > 0 {
+		h.cache.set("installed", packages, h.timeNow().Add(h.cacheTTL))
+	}
 	return packages
+}
+
+func (h *BrewHandler) timeNow() time.Time {
+	if h.now != nil {
+		return h.now()
+	}
+	return time.Now()
 }

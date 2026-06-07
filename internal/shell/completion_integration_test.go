@@ -1,14 +1,31 @@
 package shell
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/tfcace/hash/internal/completion"
 	"github.com/tfcace/hash/internal/editor"
 )
+
+type slowCompletionProvider struct {
+	delay time.Duration
+}
+
+func (s slowCompletionProvider) Name() string { return "slow" }
+
+func (s slowCompletionProvider) Complete(ctx context.Context, line string, pos int) (completion.Result, error) {
+	select {
+	case <-time.After(s.delay):
+		return completion.Result{Items: []completion.Item{{Value: "late-result"}}}, nil
+	case <-ctx.Done():
+		return completion.Result{}, nil
+	}
+}
 
 // createTestDirStructure creates a temp directory with:
 //
@@ -49,6 +66,23 @@ func createTestDirStructure(t *testing.T) string {
 	}
 
 	return tmpDir
+}
+
+func TestCompletionIntegration_AdapterCutsOffSlowCompleter(t *testing.T) {
+	router := completion.NewRouter()
+	router.Register(slowCompletionProvider{delay: 300 * time.Millisecond}, completion.PriorityFilesystem)
+	completeFunc := makeEditorCompleteFunc(router)
+
+	start := time.Now()
+	items := completeFunc("slow ", len("slow "))
+	elapsed := time.Since(start)
+
+	if elapsed > 250*time.Millisecond {
+		t.Fatalf("completion adapter took %s, want under 250ms", elapsed)
+	}
+	if len(items) != 0 {
+		t.Fatalf("slow completion should be cut off, got %#v", items)
+	}
 }
 
 // TestCompletionIntegration_BasicTabFromEmpty verifies that completing after

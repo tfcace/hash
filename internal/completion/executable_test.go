@@ -2,7 +2,9 @@ package completion
 
 import (
 	"context"
+	"os"
 	"testing"
+	"time"
 )
 
 func TestExecutableCompleter_Name(t *testing.T) {
@@ -92,6 +94,56 @@ func TestExecutableCompleter_PathPrefix(t *testing.T) {
 	}
 	if len(result.Items) != 0 {
 		t.Errorf("expected no completions for path prefix, got %d", len(result.Items))
+	}
+}
+
+func TestExecutableCompleter_ReturnsPromptlyWhenColdScanIsSlow(t *testing.T) {
+	c := NewExecutableCompleter()
+	scanStarted := make(chan struct{})
+	releaseScan := make(chan struct{})
+	c.coldScanWait = 5 * time.Millisecond
+	c.scanExecutables = func() []string {
+		close(scanStarted)
+		<-releaseScan
+		return []string{"slowcmd"}
+	}
+	defer close(releaseScan)
+
+	start := time.Now()
+	result, err := c.Complete(context.Background(), "sl", len("sl"))
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	select {
+	case <-scanStarted:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("expected executable cache refresh to start")
+	}
+	if elapsed > 100*time.Millisecond {
+		t.Fatalf("Complete() took %s with a slow cold scan, want under 100ms", elapsed)
+	}
+	if len(result.Items) != 0 {
+		t.Fatalf("cold slow scan should not return speculative items, got %#v", result.Items)
+	}
+}
+
+func TestExecutableCompleter_ScanDoesNotStatPathEntries(t *testing.T) {
+	c := NewExecutableCompleter()
+	t.Setenv("PATH", "/slow-bin")
+	c.readDir = func(dir string) ([]os.DirEntry, error) {
+		if dir != "/slow-bin" {
+			t.Fatalf("readDir dir = %q, want /slow-bin", dir)
+		}
+		return []os.DirEntry{
+			panicInfoDirEntry{name: "slow-tool"},
+		}, nil
+	}
+
+	executables := c.scanPATHExecutables()
+	if len(executables) != 1 || executables[0] != "slow-tool" {
+		t.Fatalf("scanPATHExecutables() = %#v, want slow-tool", executables)
 	}
 }
 

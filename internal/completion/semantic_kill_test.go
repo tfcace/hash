@@ -3,6 +3,7 @@ package completion
 import (
 	"context"
 	"testing"
+	"time"
 )
 
 func TestKillHandler_PrefixFilter(t *testing.T) {
@@ -97,5 +98,33 @@ func TestKillHandler_KillallSkipsNumericInput(t *testing.T) {
 	result := h.Complete(context.Background(), nil, "12")
 	if len(result.Items) != 0 {
 		t.Fatalf("expected no PID suggestions for killall, got %+v", result.Items)
+	}
+}
+
+func TestKillHandler_CachesProcessList(t *testing.T) {
+	calls := 0
+	h := &KillHandler{
+		command:  "kill",
+		cacheTTL: time.Second,
+		listProcesses: func(ctx context.Context) ([]processInfo, error) {
+			calls++
+			return []processInfo{
+				{PID: "123", Name: "bash"},
+				{PID: "456", Name: "node"},
+			}, nil
+		},
+	}
+
+	first := h.Complete(context.Background(), nil, "1")
+	second := h.Complete(context.Background(), nil, "4")
+
+	if calls != 1 {
+		t.Fatalf("expected one process lookup across repeated completions, got %d", calls)
+	}
+	if len(first.Items) != 1 || first.Items[0].Value != "123" {
+		t.Fatalf("unexpected first result: %#v", first.Items)
+	}
+	if len(second.Items) != 1 || second.Items[0].Value != "456" {
+		t.Fatalf("unexpected cached second result: %#v", second.Items)
 	}
 }

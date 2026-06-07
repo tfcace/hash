@@ -3,6 +3,7 @@ package readline
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/tfcace/hash/internal/completion"
 )
@@ -26,6 +27,37 @@ type mockCompleter struct {
 func (m *mockCompleter) Name() string { return "mock" }
 func (m *mockCompleter) Complete(ctx context.Context, line string, pos int) (completion.Result, error) {
 	return completion.Result{Items: m.items, Prefix: ""}, nil
+}
+
+type slowCompleter struct {
+	delay time.Duration
+}
+
+func (m slowCompleter) Name() string { return "slow" }
+func (m slowCompleter) Complete(ctx context.Context, line string, pos int) (completion.Result, error) {
+	select {
+	case <-time.After(m.delay):
+		return completion.Result{Items: []completion.Item{{Value: "late-result"}}}, nil
+	case <-ctx.Done():
+		return completion.Result{}, nil
+	}
+}
+
+func TestCompleterAdapter_CutsOffSlowCompleter(t *testing.T) {
+	router := completion.NewRouter()
+	router.Register(slowCompleter{delay: 300 * time.Millisecond}, completion.PriorityFilesystem)
+	adapter := NewCompleterAdapter(router)
+
+	start := time.Now()
+	candidates, length := adapter.Do([]rune("slow "), len("slow "))
+	elapsed := time.Since(start)
+
+	if elapsed > 250*time.Millisecond {
+		t.Fatalf("CompleterAdapter.Do() took %s, want under 250ms", elapsed)
+	}
+	if len(candidates) != 0 || length != 0 {
+		t.Fatalf("slow completion should be cut off, got candidates=%q length=%d", candidates, length)
+	}
 }
 
 func TestCompleterAdapter_ReturnsSuffix(t *testing.T) {

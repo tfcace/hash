@@ -9,12 +9,16 @@ import (
 
 // AgentCompleter provides AI-assisted completions via ??.
 type AgentCompleter struct {
-	client *agent.Client
+	client       *agent.Client
+	buildContext func(context.Context) agent.Context
 }
 
 // NewAgentCompleter creates a new agent completer.
 func NewAgentCompleter(client *agent.Client) *AgentCompleter {
-	return &AgentCompleter{client: client}
+	return &AgentCompleter{
+		client:       client,
+		buildContext: buildInlineAgentContext,
+	}
 }
 
 // Name returns the completer name.
@@ -41,11 +45,16 @@ func (c *AgentCompleter) Complete(ctx context.Context, line string, pos int) (Re
 		return Result{}, nil // No client configured
 	}
 
+	agentCtx, err := c.contextForRequest(ctx)
+	if err != nil {
+		return Result{}, err
+	}
+
 	// Build request
 	req := agent.Request{
 		Prompt:      "Complete this command argument: " + promptPart,
 		CommandLine: cmdPart,
-		Context:     agent.NewContextBuilder().DetectGitBranch().Build(),
+		Context:     agentCtx,
 	}
 
 	resp, err := c.client.Ask(ctx, req)
@@ -68,4 +77,33 @@ func (c *AgentCompleter) Complete(ctx context.Context, line string, pos int) (Re
 			},
 		},
 	}, nil
+}
+
+func (c *AgentCompleter) contextForRequest(ctx context.Context) (agent.Context, error) {
+	buildContext := c.buildContext
+	if buildContext == nil {
+		buildContext = buildInlineAgentContext
+	}
+
+	ch := make(chan agent.Context, 1)
+	go func() {
+		ch <- buildContext(ctx)
+	}()
+
+	select {
+	case <-ctx.Done():
+		return agent.Context{}, ctx.Err()
+	case agentCtx := <-ch:
+		if err := ctx.Err(); err != nil {
+			return agent.Context{}, err
+		}
+		return agentCtx, nil
+	}
+}
+
+func buildInlineAgentContext(ctx context.Context) agent.Context {
+	if ctx.Err() != nil {
+		return agent.Context{}
+	}
+	return agent.NewContextBuilder().Build()
 }

@@ -2,10 +2,10 @@ package completion
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/tfcace/hash/internal/trace"
@@ -13,15 +13,37 @@ import (
 
 // FileCompleter completes filesystem paths.
 type FileCompleter struct {
-	showHidden bool
-	fuzzyMode  bool
+	showHidden   bool
+	fuzzyMode    bool
+	readDir      func(string) ([]os.DirEntry, error)
+	readCacheTTL time.Duration
+	readMu       sync.Mutex
+	readInflight map[string]*fileReadCall
+	readCache    map[string]fileReadCacheEntry
+}
+
+type fileReadResult struct {
+	entries []os.DirEntry
+	err     error
+}
+
+type fileReadCall struct {
+	done   chan struct{}
+	result fileReadResult
+}
+
+type fileReadCacheEntry struct {
+	result    fileReadResult
+	expiresAt time.Time
 }
 
 // NewFileCompleter creates a new filesystem completer.
 func NewFileCompleter() *FileCompleter {
 	return &FileCompleter{
-		showHidden: false,
-		fuzzyMode:  false,
+		showHidden:   false,
+		fuzzyMode:    false,
+		readDir:      os.ReadDir,
+		readCacheTTL: 500 * time.Millisecond,
 	}
 }
 
@@ -87,21 +109,9 @@ func (c *FileCompleter) Complete(ctx context.Context, line string, pos int) (Res
 		})
 	}
 
-	// Read directory (in a goroutine so context cancellation is respected)
-	type readDirResult struct {
-		entries []os.DirEntry
-		err     error
-	}
-	ch := make(chan readDirResult, 1)
 	readStart := time.Now()
-	go func() {
-		entries, err := os.ReadDir(dir)
-		ch <- readDirResult{entries, err}
-	}()
-
-	var entries []os.DirEntry
-	select {
-	case <-ctx.Done():
+	readResult, cached, ok := c.readDirectory(ctx, dir)
+	if !ok {
 		if traceEnabled {
 			trace.Emit("completion", "file_readdir_canceled", trace.LevelDetailed, map[string]any{
 				"dir":         dir,
@@ -109,24 +119,24 @@ func (c *FileCompleter) Complete(ctx context.Context, line string, pos int) (Res
 			})
 		}
 		return Result{}, nil
-	case res := <-ch:
-		if traceEnabled {
-			errText := ""
-			if res.err != nil {
-				errText = res.err.Error()
-			}
-			trace.Emit("completion", "file_readdir_done", trace.LevelDetailed, map[string]any{
-				"dir":         dir,
-				"entries":     len(res.entries),
-				"error":       errText,
-				"duration_ms": float64(time.Since(readStart).Microseconds()) / 1000.0,
-			})
-		}
-		if res.err != nil {
-			return Result{}, nil //nolint:nilerr // graceful degradation: return empty on unreadable dir
-		}
-		entries = res.entries
 	}
+	if traceEnabled {
+		errText := ""
+		if readResult.err != nil {
+			errText = readResult.err.Error()
+		}
+		trace.Emit("completion", "file_readdir_done", trace.LevelDetailed, map[string]any{
+			"dir":         dir,
+			"entries":     len(readResult.entries),
+			"cached":      cached,
+			"error":       errText,
+			"duration_ms": float64(time.Since(readStart).Microseconds()) / 1000.0,
+		})
+	}
+	if readResult.err != nil {
+		return Result{}, nil //nolint:nilerr // graceful degradation: return empty on unreadable dir
+	}
+	entries := readResult.entries
 
 	// Show hidden files if user is explicitly typing a dot prefix
 	// Use originalWord to avoid false positive when word defaults to "."
@@ -171,10 +181,6 @@ func (c *FileCompleter) Complete(ctx context.Context, line string, pos int) (Res
 		if dirsOnly && isSymlink {
 			isDir = true
 			symlinkAssumed++
-		} else if isSymlink {
-			if target, err := os.Stat(filepath.Join(dir, name)); err == nil {
-				isDir = target.IsDir()
-			}
 		}
 		if isDir {
 			value += "/"
@@ -190,7 +196,7 @@ func (c *FileCompleter) Complete(ctx context.Context, line string, pos int) (Res
 			Value:       value,
 			Display:     name,
 			Icon:        getFileIcon(entry),
-			Description: fileDescription(filepath.Join(dir, name), entry, isDir),
+			Description: fileDescription(entry, isDir),
 		})
 	}
 
@@ -215,6 +221,88 @@ func (c *FileCompleter) Complete(ctx context.Context, line string, pos int) (Res
 		Items:  items,
 		Prefix: EscapeShellWord(rawPrefix),
 	}, nil
+}
+
+func (c *FileCompleter) readDirectory(ctx context.Context, dir string) (fileReadResult, bool, bool) {
+	cacheKey := fileReadCacheKey(dir)
+	now := time.Now()
+
+	c.readMu.Lock()
+	if c.readCacheTTL > 0 && c.readCache != nil {
+		if cached, ok := c.readCache[cacheKey]; ok && now.Before(cached.expiresAt) {
+			result := cloneFileReadResult(cached.result)
+			c.readMu.Unlock()
+			return result, true, true
+		}
+	}
+	if call, ok := c.readInflight[cacheKey]; ok {
+		c.readMu.Unlock()
+		select {
+		case <-ctx.Done():
+			return fileReadResult{}, false, false
+		case <-call.done:
+			return cloneFileReadResult(call.result), false, true
+		}
+	}
+
+	call := &fileReadCall{done: make(chan struct{})}
+	if c.readInflight == nil {
+		c.readInflight = make(map[string]*fileReadCall)
+	}
+	c.readInflight[cacheKey] = call
+	readDir := c.readDir
+	if readDir == nil {
+		readDir = os.ReadDir
+	}
+	c.readMu.Unlock()
+
+	go c.finishDirectoryRead(cacheKey, dir, readDir, call)
+
+	select {
+	case <-ctx.Done():
+		return fileReadResult{}, false, false
+	case <-call.done:
+		return cloneFileReadResult(call.result), false, true
+	}
+}
+
+func (c *FileCompleter) finishDirectoryRead(
+	cacheKey string,
+	dir string,
+	readDir func(string) ([]os.DirEntry, error),
+	call *fileReadCall,
+) {
+	entries, err := readDir(dir)
+	result := fileReadResult{entries: entries, err: err}
+
+	c.readMu.Lock()
+	call.result = result
+	if err == nil && c.readCacheTTL > 0 {
+		if c.readCache == nil {
+			c.readCache = make(map[string]fileReadCacheEntry)
+		}
+		c.readCache[cacheKey] = fileReadCacheEntry{
+			result:    cloneFileReadResult(result),
+			expiresAt: time.Now().Add(c.readCacheTTL),
+		}
+	}
+	delete(c.readInflight, cacheKey)
+	c.readMu.Unlock()
+	close(call.done)
+}
+
+func fileReadCacheKey(dir string) string {
+	if abs, err := filepath.Abs(dir); err == nil {
+		return abs
+	}
+	return dir
+}
+
+func cloneFileReadResult(result fileReadResult) fileReadResult {
+	return fileReadResult{
+		entries: append([]os.DirEntry(nil), result.entries...),
+		err:     result.err,
+	}
 }
 
 // isDirOnlyCommand checks if the command on the line only accepts directories.
@@ -268,17 +356,12 @@ func getCompletionPrefix(original, matched string) string {
 	return dir + "/"
 }
 
-// fileDescription returns a short description for a file entry (type + size).
-func fileDescription(path string, entry os.DirEntry, isDir bool) string {
+// fileDescription returns a short description for a file entry.
+func fileDescription(entry os.DirEntry, isDir bool) string {
 	if isDir {
 		return "directory"
 	}
-
-	info, err := entry.Info()
-	if err != nil {
-		return fileTypeName(entry.Name())
-	}
-	return fileTypeName(entry.Name()) + "  " + formatSize(info.Size())
+	return fileTypeName(entry.Name())
 }
 
 // fileTypeName returns a human-readable file type from the extension.
@@ -314,18 +397,6 @@ func fileTypeName(name string) string {
 			return ext[1:] // strip dot
 		}
 		return "file"
-	}
-}
-
-// formatSize returns a human-readable file size.
-func formatSize(bytes int64) string {
-	switch {
-	case bytes < 1024:
-		return fmt.Sprintf("%d B", bytes)
-	case bytes < 1024*1024:
-		return fmt.Sprintf("%.1f KB", float64(bytes)/1024)
-	default:
-		return fmt.Sprintf("%.1f MB", float64(bytes)/(1024*1024))
 	}
 }
 

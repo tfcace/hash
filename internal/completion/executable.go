@@ -12,17 +12,27 @@ import (
 // ExecutableCompleter completes executable names from PATH.
 // It is triggered when completing the first word of a command (or after a pipe).
 type ExecutableCompleter struct {
-	cache     []string
-	cacheTime time.Time
-	cacheMu   sync.RWMutex
-	cacheTTL  time.Duration
+	cache           []string
+	cacheTime       time.Time
+	cacheMu         sync.RWMutex
+	cacheTTL        time.Duration
+	refreshMu       sync.Mutex
+	refreshing      bool
+	refreshDone     chan struct{}
+	coldScanWait    time.Duration
+	scanExecutables func() []string
+	readDir         func(string) ([]os.DirEntry, error)
 }
 
 // NewExecutableCompleter creates a new executable completer.
 func NewExecutableCompleter() *ExecutableCompleter {
-	return &ExecutableCompleter{
-		cacheTTL: 30 * time.Second,
+	c := &ExecutableCompleter{
+		cacheTTL:     30 * time.Second,
+		coldScanWait: 50 * time.Millisecond,
+		readDir:      os.ReadDir,
 	}
+	c.scanExecutables = c.scanPATHExecutables
+	return c
 }
 
 // Name returns the completer name.
@@ -61,7 +71,7 @@ func (c *ExecutableCompleter) Complete(ctx context.Context, line string, pos int
 	}
 
 	// Get executables from PATH
-	executables := c.getExecutables()
+	executables := c.getExecutables(ctx)
 
 	var items []Item
 	lowerPrefix := strings.ToLower(prefix)
@@ -84,34 +94,89 @@ func (c *ExecutableCompleter) Complete(ctx context.Context, line string, pos int
 }
 
 // getExecutables returns all executables in PATH, using a cache.
-func (c *ExecutableCompleter) getExecutables() []string {
+func (c *ExecutableCompleter) getExecutables(ctx context.Context) []string {
+	executables, fresh := c.cacheSnapshot()
+	if fresh {
+		return executables
+	}
+
+	done := c.refreshAsync()
+	if len(executables) > 0 || c.coldScanWait <= 0 {
+		return executables
+	}
+
+	timer := time.NewTimer(c.coldScanWait)
+	defer timer.Stop()
+
+	select {
+	case <-done:
+		executables, _ = c.cacheSnapshot()
+		return executables
+	case <-ctx.Done():
+		executables, _ = c.cacheSnapshot()
+		return executables
+	case <-timer.C:
+		executables, _ = c.cacheSnapshot()
+		return executables
+	}
+}
+
+func (c *ExecutableCompleter) cacheSnapshot() ([]string, bool) {
 	c.cacheMu.RLock()
-	if c.cache != nil && time.Since(c.cacheTime) < c.cacheTTL {
-		result := c.cache
-		c.cacheMu.RUnlock()
-		return result
-	}
-	c.cacheMu.RUnlock()
+	defer c.cacheMu.RUnlock()
+	return c.cache, c.cache != nil && time.Since(c.cacheTime) < c.cacheTTL
+}
 
-	// Rebuild cache
-	c.cacheMu.Lock()
-	defer c.cacheMu.Unlock()
-
-	// Double-check after acquiring write lock
-	if c.cache != nil && time.Since(c.cacheTime) < c.cacheTTL {
-		return c.cache
+func (c *ExecutableCompleter) refreshAsync() <-chan struct{} {
+	c.refreshMu.Lock()
+	if c.refreshing {
+		done := c.refreshDone
+		c.refreshMu.Unlock()
+		return done
 	}
 
+	done := make(chan struct{})
+	c.refreshing = true
+	c.refreshDone = done
+	scan := c.scanExecutables
+	if scan == nil {
+		scan = c.scanPATHExecutables
+	}
+	c.refreshMu.Unlock()
+
+	go func() {
+		executables := scan()
+
+		c.cacheMu.Lock()
+		c.cache = executables
+		c.cacheTime = time.Now()
+		c.cacheMu.Unlock()
+
+		c.refreshMu.Lock()
+		c.refreshing = false
+		close(done)
+		c.refreshMu.Unlock()
+	}()
+
+	return done
+}
+
+func (c *ExecutableCompleter) scanPATHExecutables() []string {
 	seen := make(map[string]bool)
 	var executables []string
 
 	pathEnv := os.Getenv("PATH")
+	readDir := c.readDir
+	if readDir == nil {
+		readDir = os.ReadDir
+	}
+
 	for _, dir := range filepath.SplitList(pathEnv) {
 		if dir == "" {
 			dir = "."
 		}
 
-		entries, err := os.ReadDir(dir)
+		entries, err := readDir(dir)
 		if err != nil {
 			continue
 		}
@@ -126,25 +191,18 @@ func (c *ExecutableCompleter) getExecutables() []string {
 				continue
 			}
 
-			// Skip non-regular files (but allow symlinks — they need Info())
+			// Stay syscall-light: avoid Info/Stat here because PATH entries may
+			// live on slow mounts. PATH directories are expected to contain
+			// commands, so type filtering is enough for interactive completion.
 			typ := entry.Type()
 			if typ&^(os.ModeSymlink) != 0 {
 				continue
 			}
 
-			// Check if executable
-			info, err := entry.Info()
-			if err != nil {
-				continue
-			}
-			if info.Mode()&0o111 != 0 {
-				seen[name] = true
-				executables = append(executables, name)
-			}
+			seen[name] = true
+			executables = append(executables, name)
 		}
 	}
 
-	c.cache = executables
-	c.cacheTime = time.Now()
 	return executables
 }

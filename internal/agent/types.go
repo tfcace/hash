@@ -81,13 +81,26 @@ func (c *Client) Ask(ctx context.Context, req Request) (Response, error) {
 	textCh, errCh := c.transport.SendStreaming(ctx, req)
 
 	collector := NewStreamCollector()
-	for chunk := range textCh {
-		collector.Append(chunk)
-	}
-
-	// Check for errors after text channel is drained
-	if err, ok := <-errCh; ok && err != nil {
-		return Response{Type: ResponseTypeError, Error: err.Error()}, err
+	for textCh != nil || errCh != nil {
+		select {
+		case chunk, ok := <-textCh:
+			if !ok {
+				textCh = nil
+				continue
+			}
+			collector.Append(chunk)
+		case err, ok := <-errCh:
+			if !ok {
+				errCh = nil
+				continue
+			}
+			if err != nil {
+				return Response{Type: ResponseTypeError, Error: err.Error()}, err
+			}
+		case <-ctx.Done():
+			err := ctx.Err()
+			return Response{Type: ResponseTypeError, Error: err.Error()}, err
+		}
 	}
 
 	return collector.Response(), nil

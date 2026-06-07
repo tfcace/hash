@@ -23,6 +23,47 @@ func (m *MockCompleter) Complete(ctx context.Context, line string, pos int) (Res
 	return Result{Items: m.items}, nil
 }
 
+type cancelingCompleter struct {
+	name   string
+	cancel func()
+	called bool
+}
+
+func (m *cancelingCompleter) Name() string { return m.name }
+func (m *cancelingCompleter) Complete(ctx context.Context, line string, pos int) (Result, error) {
+	m.called = true
+	m.cancel()
+	return Result{}, nil
+}
+
+func TestRouter_StopsWhenContextCanceled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	first := &cancelingCompleter{name: "canceling", cancel: cancel}
+	fallback := &MockCompleter{
+		name:  "fallback",
+		items: []Item{{Value: "late-result"}},
+	}
+
+	router := NewRouter()
+	router.Register(first, 100)
+	router.Register(fallback, 200)
+
+	result, err := router.Complete(ctx, "test ", 5)
+	if err != nil {
+		t.Fatalf("Complete() error = %v", err)
+	}
+
+	if !first.called {
+		t.Fatal("canceling completer was not called")
+	}
+	if fallback.called {
+		t.Fatal("router should not call lower-priority completers after context cancellation")
+	}
+	if len(result.Items) != 0 {
+		t.Fatalf("expected no completions after cancellation, got %#v", result.Items)
+	}
+}
+
 func TestRouter_FirstCompleterWins(t *testing.T) {
 	mock1 := &MockCompleter{
 		name:  "first",

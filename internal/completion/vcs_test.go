@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/tfcace/hash/internal/trace"
 )
@@ -33,6 +34,35 @@ func TestVCSCompleter_GitCheckout(t *testing.T) {
 	}
 	if result.Items[0].Value != "feature/api" {
 		t.Fatalf("expected feature/api, got %q", result.Items[0].Value)
+	}
+}
+
+func TestVCSCompleter_CachesGitRefsForRepeatedCompletion(t *testing.T) {
+	c := NewVCSCompleter()
+	c.cacheTTL = time.Minute
+	calls := 0
+	c.listGitRefs = func(ctx context.Context) ([]string, error) {
+		calls++
+		return []string{"main", "feature/api", "feature/ui"}, nil
+	}
+
+	first, err := c.Complete(context.Background(), "git checkout fea", len("git checkout fea"))
+	if err != nil {
+		t.Fatalf("first Complete() error = %v", err)
+	}
+	second, err := c.Complete(context.Background(), "git checkout feature/u", len("git checkout feature/u"))
+	if err != nil {
+		t.Fatalf("second Complete() error = %v", err)
+	}
+
+	if calls != 1 {
+		t.Fatalf("expected one git ref lookup for repeated completions, got %d", calls)
+	}
+	if len(first.Items) != 2 {
+		t.Fatalf("expected 2 first completions, got %#v", first.Items)
+	}
+	if len(second.Items) != 1 || second.Items[0].Value != "feature/ui" {
+		t.Fatalf("expected cached feature/ui completion, got %#v", second.Items)
 	}
 }
 

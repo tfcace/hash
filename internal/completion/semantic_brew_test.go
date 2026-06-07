@@ -2,7 +2,9 @@ package completion
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestBrewHandler_Uninstall(t *testing.T) {
@@ -40,6 +42,66 @@ func TestBrewHandler_PrefixFilter(t *testing.T) {
 	}
 	if found != 2 {
 		t.Errorf("expected 2 items matching 'g', got %d from %+v", found, result.Items)
+	}
+}
+
+func TestBrewHandler_ListsFormulaeAndCasksInParallel(t *testing.T) {
+	h := &BrewHandler{
+		runCommand: func(ctx context.Context, name string, args ...string) ([]string, error) {
+			select {
+			case <-time.After(80 * time.Millisecond):
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+			if len(args) > 1 && args[1] == "--formula" {
+				return []string{"git"}, nil
+			}
+			if len(args) > 1 && args[1] == "--cask" {
+				return []string{"firefox"}, nil
+			}
+			return nil, nil
+		},
+	}
+
+	start := time.Now()
+	result := h.Complete(context.Background(), []string{"upgrade"}, "")
+	elapsed := time.Since(start)
+
+	if elapsed > 130*time.Millisecond {
+		t.Fatalf("brew completion took %s, want formula and cask queries in parallel", elapsed)
+	}
+	if len(result.Items) != 2 {
+		t.Fatalf("expected formula and cask items, got %#v", result.Items)
+	}
+}
+
+func TestBrewHandler_CachesInstalledPackages(t *testing.T) {
+	var calls atomic.Int32
+	h := &BrewHandler{
+		cacheTTL: time.Minute,
+		runCommand: func(ctx context.Context, name string, args ...string) ([]string, error) {
+			calls.Add(1)
+			if len(args) > 1 && args[1] == "--formula" {
+				return []string{"git"}, nil
+			}
+			if len(args) > 1 && args[1] == "--cask" {
+				return []string{"firefox"}, nil
+			}
+			return nil, nil
+		},
+	}
+
+	first := h.Complete(context.Background(), []string{"upgrade"}, "g")
+	second := h.Complete(context.Background(), []string{"upgrade"}, "f")
+
+	if calls.Load() != 2 {
+		t.Fatalf("expected one formula and one cask query across repeated completions, got %d calls", calls.Load())
+	}
+	if len(first.Items) != 1 || first.Items[0].Value != "git" {
+		t.Fatalf("unexpected first result: %#v", first.Items)
+	}
+	if len(second.Items) != 1 || second.Items[0].Value != "firefox" {
+		t.Fatalf("unexpected cached second result: %#v", second.Items)
 	}
 }
 

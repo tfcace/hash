@@ -3,10 +3,13 @@ package readline
 import (
 	"context"
 	"strings"
+	"time"
 
 	"github.com/chzyer/readline"
 	"github.com/tfcace/hash/internal/completion"
 )
+
+const adapterCompletionTimeout = 150 * time.Millisecond
 
 // CompleterAdapter adapts our completion system to chzyer/readline.
 type CompleterAdapter struct {
@@ -24,7 +27,9 @@ func (c *CompleterAdapter) Do(line []rune, pos int) (candidates [][]rune, length
 		return nil, 0
 	}
 
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), adapterCompletionTimeout)
+	defer cancel()
+
 	result, err := c.router.Complete(ctx, string(line), pos)
 	if err != nil || len(result.Items) == 0 {
 		return nil, 0

@@ -67,6 +67,17 @@ func (r *Router) Complete(ctx context.Context, line string, pos int) (Result, er
 	}
 
 	for _, rc := range r.completers {
+		select {
+		case <-ctx.Done():
+			if traceEnabled {
+				trace.Emit("completion", "router_canceled", trace.LevelDetailed, map[string]any{
+					"duration_ms": float64(time.Since(start).Microseconds()) / 1000.0,
+				})
+			}
+			return Result{}, nil
+		default:
+		}
+
 		completerStart := time.Now()
 		if traceEnabled {
 			trace.Emit("completion", "completer_start", trace.LevelDetailed, map[string]any{

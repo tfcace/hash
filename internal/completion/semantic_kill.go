@@ -3,12 +3,19 @@ package completion
 import (
 	"context"
 	"strings"
+	"sync"
+	"time"
 )
 
 // KillHandler provides completions for kill and killall commands.
 type KillHandler struct {
 	command       string
 	listProcesses func(ctx context.Context) ([]processInfo, error)
+	cacheMu       sync.Mutex
+	cacheTTL      time.Duration
+	cacheExpires  time.Time
+	cached        []processInfo
+	now           func() time.Time
 }
 
 type processInfo struct {
@@ -18,7 +25,12 @@ type processInfo struct {
 
 // NewKillHandler creates a kill/killall completion handler.
 func NewKillHandler(command string) *KillHandler {
-	return &KillHandler{command: command, listProcesses: defaultListProcesses}
+	return &KillHandler{
+		command:       command,
+		listProcesses: defaultListProcesses,
+		cacheTTL:      time.Second,
+		now:           time.Now,
+	}
 }
 
 // Commands returns the commands this handler supports.
@@ -35,7 +47,7 @@ func (h *KillHandler) Complete(ctx context.Context, args []string, current strin
 		return Result{}
 	}
 
-	processes, err := h.listProcesses(ctx)
+	processes, err := h.cachedProcesses(ctx)
 	if err != nil {
 		return Result{}
 	}
@@ -64,6 +76,37 @@ func (h *KillHandler) Complete(ctx context.Context, args []string, current strin
 		}
 	}
 	return Result{Items: items}
+}
+
+func (h *KillHandler) cachedProcesses(ctx context.Context) ([]processInfo, error) {
+	if h.cacheTTL > 0 {
+		h.cacheMu.Lock()
+		if h.timeNow().Before(h.cacheExpires) {
+			processes := append([]processInfo(nil), h.cached...)
+			h.cacheMu.Unlock()
+			return processes, nil
+		}
+		h.cacheMu.Unlock()
+	}
+
+	processes, err := h.listProcesses(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if h.cacheTTL > 0 {
+		h.cacheMu.Lock()
+		h.cached = append([]processInfo(nil), processes...)
+		h.cacheExpires = h.timeNow().Add(h.cacheTTL)
+		h.cacheMu.Unlock()
+	}
+	return processes, nil
+}
+
+func (h *KillHandler) timeNow() time.Time {
+	if h.now != nil {
+		return h.now()
+	}
+	return time.Now()
 }
 
 func defaultListProcesses(ctx context.Context) ([]processInfo, error) {

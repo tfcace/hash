@@ -34,6 +34,8 @@ import (
 	"github.com/tfcace/hash/internal/trace"
 )
 
+const editorCompletionTimeout = 150 * time.Millisecond
+
 // Mode represents the shell's startup mode.
 type Mode struct {
 	Login       bool // Login shell (sources profile files)
@@ -1548,7 +1550,7 @@ func trimSpace(s string) string {
 // makeEditorCompleteFunc adapts the completion router to editor's CompleteFunc.
 func makeEditorCompleteFunc(router *completion.Router) func(string, int) []editor.Completion {
 	return func(line string, pos int) []editor.Completion {
-		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		ctx, cancel := context.WithTimeout(context.Background(), editorCompletionTimeout)
 		defer cancel()
 
 		result, err := router.Complete(ctx, line, pos)

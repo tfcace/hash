@@ -2,7 +2,9 @@ package completion
 
 import (
 	"context"
+	"errors"
 	"testing"
+	"time"
 )
 
 func TestPipHandler_Uninstall(t *testing.T) {
@@ -93,5 +95,52 @@ func TestPipHandler_UsesConfiguredCommand(t *testing.T) {
 	}
 	if gotName != "pip" {
 		t.Fatalf("expected pip command, got %q", gotName)
+	}
+}
+
+func TestPipHandler_CachesInstalledPackages(t *testing.T) {
+	calls := 0
+	h := &PipHandler{
+		command:  "pip3",
+		cacheTTL: time.Minute,
+		runCommand: func(ctx context.Context, name string, args ...string) ([]string, error) {
+			calls++
+			return []string{"requests==2.28.0", "flask==2.2.0"}, nil
+		},
+	}
+
+	first := h.Complete(context.Background(), []string{"uninstall"}, "req")
+	second := h.Complete(context.Background(), []string{"uninstall"}, "fla")
+
+	if calls != 1 {
+		t.Fatalf("expected one pip freeze query across repeated completions, got %d", calls)
+	}
+	if len(first.Items) != 1 || first.Items[0].Value != "requests" {
+		t.Fatalf("unexpected first result: %#v", first.Items)
+	}
+	if len(second.Items) != 1 || second.Items[0].Value != "flask" {
+		t.Fatalf("unexpected cached second result: %#v", second.Items)
+	}
+}
+
+func TestPipHandler_CachesFailedPackageLookup(t *testing.T) {
+	calls := 0
+	h := &PipHandler{
+		command:  "pip3",
+		cacheTTL: time.Minute,
+		runCommand: func(ctx context.Context, name string, args ...string) ([]string, error) {
+			calls++
+			return nil, errors.New("pip unavailable")
+		},
+	}
+
+	first := h.Complete(context.Background(), []string{"uninstall"}, "")
+	second := h.Complete(context.Background(), []string{"uninstall"}, "")
+
+	if calls != 1 {
+		t.Fatalf("expected failed pip lookup to be cached, got %d calls", calls)
+	}
+	if len(first.Items) != 0 || len(second.Items) != 0 {
+		t.Fatalf("expected no completions, got first=%#v second=%#v", first.Items, second.Items)
 	}
 }
