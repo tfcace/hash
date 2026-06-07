@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -64,6 +65,26 @@ func TestFileCompleter_CurrentDir(t *testing.T) {
 	}
 	if !values["bar.txt"] {
 		t.Error("Missing bar.txt in completions")
+	}
+}
+
+func TestFileCompleter_LimitsHugeDirectoryResults(t *testing.T) {
+	entries := make([]os.DirEntry, 5000)
+	for i := range entries {
+		entries[i] = panicInfoDirEntry{name: "file-" + strconv.Itoa(i) + ".txt"}
+	}
+
+	completer := NewFileCompleter()
+	completer.readDir = func(dir string) ([]os.DirEntry, error) {
+		return entries, nil
+	}
+
+	result, err := completer.Complete(context.Background(), "cat ", len("cat "))
+	if err != nil {
+		t.Fatalf("Complete() error = %v", err)
+	}
+	if len(result.Items) > 200 {
+		t.Fatalf("expected huge directory completions to be capped, got %d items", len(result.Items))
 	}
 }
 

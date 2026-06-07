@@ -11,6 +11,8 @@ import (
 	"github.com/tfcace/hash/internal/trace"
 )
 
+const fileCompletionItemLimit = 200
+
 // FileCompleter completes filesystem paths.
 type FileCompleter struct {
 	showHidden         bool
@@ -201,6 +203,9 @@ func (c *FileCompleter) Complete(ctx context.Context, line string, pos int) (Res
 			Icon:        getFileIcon(entry),
 			Description: fileDescription(entry, isDir),
 		})
+		if len(items) >= fileCompletionItemLimit {
+			break
+		}
 	}
 
 	rawPrefix := getCompletionPrefix(originalWord, prefix)
