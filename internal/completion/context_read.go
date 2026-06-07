@@ -4,17 +4,22 @@ import (
 	"context"
 	"path/filepath"
 	"sync"
+	"time"
 )
 
+const contextReadInflightMaxWaitAge = 75 * time.Millisecond
+
 type contextLinesReader struct {
-	mu       sync.Mutex
-	inflight map[string]*contextLinesReadCall
+	mu                 sync.Mutex
+	inflight           map[string]*contextLinesReadCall
+	inflightMaxWaitAge time.Duration
 }
 
 type contextLinesReadCall struct {
-	done  chan struct{}
-	lines []string
-	err   error
+	done    chan struct{}
+	started time.Time
+	lines   []string
+	err     error
 }
 
 func (r *contextLinesReader) read(
@@ -27,13 +32,17 @@ func (r *contextLinesReader) read(
 	}
 	key := contextReadKey(path)
 
+	now := time.Now()
 	r.mu.Lock()
 	if call, ok := r.inflight[key]; ok {
-		r.mu.Unlock()
-		return waitForLinesRead(ctx, call)
+		if !contextReadCallIsStale(call.started, now, r.inflightMaxWaitAge) {
+			r.mu.Unlock()
+			return waitForLinesRead(ctx, call)
+		}
+		delete(r.inflight, key)
 	}
 
-	call := &contextLinesReadCall{done: make(chan struct{})}
+	call := &contextLinesReadCall{done: make(chan struct{}), started: now}
 	if r.inflight == nil {
 		r.inflight = make(map[string]*contextLinesReadCall)
 	}
@@ -55,7 +64,9 @@ func (r *contextLinesReader) finishLinesRead(
 	r.mu.Lock()
 	call.lines = lines
 	call.err = err
-	delete(r.inflight, key)
+	if r.inflight[key] == call {
+		delete(r.inflight, key)
+	}
 	r.mu.Unlock()
 	close(call.done)
 }
@@ -70,14 +81,16 @@ func waitForLinesRead(ctx context.Context, call *contextLinesReadCall) ([]string
 }
 
 type contextBytesReader struct {
-	mu       sync.Mutex
-	inflight map[string]*contextBytesReadCall
+	mu                 sync.Mutex
+	inflight           map[string]*contextBytesReadCall
+	inflightMaxWaitAge time.Duration
 }
 
 type contextBytesReadCall struct {
-	done chan struct{}
-	data []byte
-	err  error
+	done    chan struct{}
+	started time.Time
+	data    []byte
+	err     error
 }
 
 func (r *contextBytesReader) read(
@@ -90,13 +103,17 @@ func (r *contextBytesReader) read(
 	}
 	key := contextReadKey(path)
 
+	now := time.Now()
 	r.mu.Lock()
 	if call, ok := r.inflight[key]; ok {
-		r.mu.Unlock()
-		return waitForBytesRead(ctx, call)
+		if !contextReadCallIsStale(call.started, now, r.inflightMaxWaitAge) {
+			r.mu.Unlock()
+			return waitForBytesRead(ctx, call)
+		}
+		delete(r.inflight, key)
 	}
 
-	call := &contextBytesReadCall{done: make(chan struct{})}
+	call := &contextBytesReadCall{done: make(chan struct{}), started: now}
 	if r.inflight == nil {
 		r.inflight = make(map[string]*contextBytesReadCall)
 	}
@@ -118,7 +135,9 @@ func (r *contextBytesReader) finishBytesRead(
 	r.mu.Lock()
 	call.data = data
 	call.err = err
-	delete(r.inflight, key)
+	if r.inflight[key] == call {
+		delete(r.inflight, key)
+	}
 	r.mu.Unlock()
 	close(call.done)
 }
@@ -140,4 +159,11 @@ func contextReadKey(path string) string {
 		return abs
 	}
 	return path
+}
+
+func contextReadCallIsStale(started, now time.Time, maxWaitAge time.Duration) bool {
+	if maxWaitAge == 0 {
+		maxWaitAge = contextReadInflightMaxWaitAge
+	}
+	return maxWaitAge > 0 && now.Sub(started) >= maxWaitAge
 }
