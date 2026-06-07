@@ -2,10 +2,12 @@ package completion
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -156,4 +158,81 @@ func TestCobraCompleter_NeverBlocks(t *testing.T) {
 	if len(result.Items) != 0 {
 		t.Errorf("Expected 0 items without prefetch, got %d", len(result.Items))
 	}
+}
+
+func TestCobraCompleter_PrefetchCoalescesCommandPathLookup(t *testing.T) {
+	completer := NewCobraCompleter()
+	release := make(chan struct{})
+	defer close(release)
+	started := make(chan struct{}, 4)
+	var calls atomic.Int32
+	completer.resolvePath = func(name string) (string, error) {
+		calls.Add(1)
+		started <- struct{}{}
+		<-release
+		return "", errors.New("not found")
+	}
+
+	completer.Prefetch("kubectl get ", len("kubectl get "))
+	select {
+	case <-started:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("first command path lookup did not start")
+	}
+
+	for _, line := range []string{
+		"kubectl describe ",
+		"kubectl logs ",
+		"kubectl apply ",
+	} {
+		completer.Prefetch(line, len(line))
+	}
+	time.Sleep(20 * time.Millisecond)
+
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("expected one in-flight path lookup for kubectl, got %d", got)
+	}
+}
+
+func TestCobraCompleter_PrefetchRetryAfterBusyCommandLookup(t *testing.T) {
+	completer := NewCobraCompleter()
+	release := make(chan struct{})
+	defer close(release)
+	started := make(chan struct{}, 4)
+	var calls atomic.Int32
+	completer.resolvePath = func(name string) (string, error) {
+		calls.Add(1)
+		started <- struct{}{}
+		<-release
+		return "", errors.New("not found")
+	}
+
+	const first = "kubectl get "
+	const second = "kubectl describe "
+	completer.Prefetch(first, len(first))
+	select {
+	case <-started:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("first command path lookup did not start")
+	}
+
+	completer.Prefetch(second, len(second))
+	if !eventually(100*time.Millisecond, func() bool {
+		completer.prefetchMu.RLock()
+		defer completer.prefetchMu.RUnlock()
+		return !completer.prefetched["kubectl:__complete describe "]
+	}) {
+		t.Fatal("prefetch skipped by busy command lookup should be retryable")
+	}
+}
+
+func eventually(timeout time.Duration, fn func() bool) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if fn() {
+			return true
+		}
+		time.Sleep(time.Millisecond)
+	}
+	return fn()
 }

@@ -3,6 +3,7 @@ package completion
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"strings"
@@ -20,8 +21,10 @@ type CobraCompleter struct {
 	prefetched map[string]bool // tracks prefetch attempts (including failures)
 	prefetchMu sync.RWMutex
 
-	lookPathCache   map[string]string // command name → resolved path
-	lookPathCacheMu sync.RWMutex
+	resolvePath      func(string) (string, error)
+	lookPathCache    map[string]string // command name → resolved path
+	lookPathInFlight map[string]bool
+	lookPathCacheMu  sync.RWMutex
 }
 
 type cachedResult struct {
@@ -29,13 +32,17 @@ type cachedResult struct {
 	expiresAt time.Time
 }
 
+var errCobraLookPathBusy = errors.New("cobra command path lookup already in progress")
+
 // NewCobraCompleter creates a new Cobra completer.
 func NewCobraCompleter() *CobraCompleter {
 	return &CobraCompleter{
-		cache:         make(map[string]cachedResult),
-		cacheTTL:      5 * time.Minute,
-		prefetched:    make(map[string]bool),
-		lookPathCache: make(map[string]string),
+		cache:            make(map[string]cachedResult),
+		cacheTTL:         5 * time.Minute,
+		prefetched:       make(map[string]bool),
+		resolvePath:      exec.LookPath,
+		lookPathCache:    make(map[string]string),
+		lookPathInFlight: make(map[string]bool),
 	}
 }
 
@@ -54,12 +61,33 @@ func (c *CobraCompleter) lookPath(name string) (string, error) {
 	}
 	c.lookPathCacheMu.RUnlock()
 
-	p, err := exec.LookPath(name)
-	if err != nil {
-		return "", err
+	c.lookPathCacheMu.Lock()
+	if p, ok := c.lookPathCache[name]; ok {
+		c.lookPathCacheMu.Unlock()
+		return p, nil
 	}
+	if c.lookPathInFlight == nil {
+		c.lookPathInFlight = make(map[string]bool)
+	}
+	if c.lookPathInFlight[name] {
+		c.lookPathCacheMu.Unlock()
+		return "", errCobraLookPathBusy
+	}
+	c.lookPathInFlight[name] = true
+	c.lookPathCacheMu.Unlock()
+
+	resolve := c.resolvePath
+	if resolve == nil {
+		resolve = exec.LookPath
+	}
+	p, err := resolve(name)
 
 	c.lookPathCacheMu.Lock()
+	delete(c.lookPathInFlight, name)
+	if err != nil {
+		c.lookPathCacheMu.Unlock()
+		return "", err
+	}
 	c.lookPathCache[name] = p
 	c.lookPathCacheMu.Unlock()
 	return p, nil
@@ -148,12 +176,15 @@ func (c *CobraCompleter) Prefetch(line string, pos int) {
 	c.prefetchMu.Unlock()
 
 	// Run prefetch in background
-	go c.prefetchCommand(cmdName, args)
+	go c.prefetchCommand(prefetchKey, cmdName, args)
 }
 
-func (c *CobraCompleter) prefetchCommand(cmdName string, args []string) {
+func (c *CobraCompleter) prefetchCommand(prefetchKey string, cmdName string, args []string) {
 	cmdPath, err := c.lookPath(cmdName)
 	if err != nil {
+		if errors.Is(err, errCobraLookPathBusy) {
+			c.forgetPrefetch(prefetchKey)
+		}
 		return
 	}
 
@@ -168,6 +199,12 @@ func (c *CobraCompleter) prefetchCommand(cmdName string, args []string) {
 	c.cacheMu.RUnlock()
 
 	c.doPrefetch(cmdPath, args, cacheKey)
+}
+
+func (c *CobraCompleter) forgetPrefetch(prefetchKey string) {
+	c.prefetchMu.Lock()
+	delete(c.prefetched, prefetchKey)
+	c.prefetchMu.Unlock()
 }
 
 // doPrefetch runs the actual Cobra completion in the background.
