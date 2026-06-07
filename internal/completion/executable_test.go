@@ -3,6 +3,7 @@ package completion
 import (
 	"context"
 	"os"
+	"strconv"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -127,6 +128,28 @@ func TestExecutableCompleter_ReturnsPromptlyWhenColdScanIsSlow(t *testing.T) {
 	}
 	if len(result.Items) != 0 {
 		t.Fatalf("cold slow scan should not return speculative items, got %#v", result.Items)
+	}
+}
+
+func TestExecutableCompleter_ReturnsEmptyWhenContextCanceledBeforeFiltering(t *testing.T) {
+	c := NewExecutableCompleter()
+	c.cacheTTL = time.Minute
+	executables := make([]string, 5000)
+	for i := range executables {
+		executables[i] = "cmd-" + strconv.Itoa(i)
+	}
+	c.cache = executables
+	c.cacheTime = time.Now()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	result, err := c.Complete(ctx, "cmd-", len("cmd-"))
+	if err != nil {
+		t.Fatalf("Complete() error = %v", err)
+	}
+	if len(result.Items) != 0 {
+		t.Fatalf("expected no executable completions after context cancellation, got %d", len(result.Items))
 	}
 }
 
