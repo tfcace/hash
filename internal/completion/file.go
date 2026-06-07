@@ -243,15 +243,15 @@ func (c *FileCompleter) readDirectory(ctx context.Context, dir string) (fileRead
 	}
 	if call, ok := c.readInflight[cacheKey]; ok {
 		if c.inflightMaxWaitAge > 0 && now.Sub(call.started) >= c.inflightMaxWaitAge {
+			delete(c.readInflight, cacheKey)
+		} else {
 			c.readMu.Unlock()
-			return fileReadResult{}, false, false
-		}
-		c.readMu.Unlock()
-		select {
-		case <-ctx.Done():
-			return fileReadResult{}, false, false
-		case <-call.done:
-			return cloneFileReadResult(call.result), false, true
+			select {
+			case <-ctx.Done():
+				return fileReadResult{}, false, false
+			case <-call.done:
+				return cloneFileReadResult(call.result), false, true
+			}
 		}
 	}
 
@@ -287,16 +287,18 @@ func (c *FileCompleter) finishDirectoryRead(
 
 	c.readMu.Lock()
 	call.result = result
-	if err == nil && c.readCacheTTL > 0 {
-		if c.readCache == nil {
-			c.readCache = make(map[string]fileReadCacheEntry)
+	if c.readInflight[cacheKey] == call {
+		if err == nil && c.readCacheTTL > 0 {
+			if c.readCache == nil {
+				c.readCache = make(map[string]fileReadCacheEntry)
+			}
+			c.readCache[cacheKey] = fileReadCacheEntry{
+				result:    cloneFileReadResult(result),
+				expiresAt: time.Now().Add(c.readCacheTTL),
+			}
 		}
-		c.readCache[cacheKey] = fileReadCacheEntry{
-			result:    cloneFileReadResult(result),
-			expiresAt: time.Now().Add(c.readCacheTTL),
-		}
+		delete(c.readInflight, cacheKey)
 	}
-	delete(c.readInflight, cacheKey)
 	c.readMu.Unlock()
 	close(call.done)
 }

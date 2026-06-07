@@ -298,7 +298,7 @@ func TestFileCompleter_CoalescesSlowDirectoryReads(t *testing.T) {
 	}
 }
 
-func TestFileCompleter_ReturnsPromptlyForStaleInflightDirectoryRead(t *testing.T) {
+func TestFileCompleter_RetriesStaleInflightDirectoryRead(t *testing.T) {
 	completer := NewFileCompleter()
 	completer.inflightMaxWaitAge = time.Millisecond
 	started := make(chan struct{}, 1)
@@ -306,10 +306,13 @@ func TestFileCompleter_ReturnsPromptlyForStaleInflightDirectoryRead(t *testing.T
 	defer close(release)
 	var calls atomic.Int32
 	completer.readDir = func(dir string) ([]os.DirEntry, error) {
-		calls.Add(1)
-		started <- struct{}{}
-		<-release
-		return nil, nil
+		call := calls.Add(1)
+		if call == 1 {
+			started <- struct{}{}
+			<-release
+			return nil, nil
+		}
+		return []os.DirEntry{panicInfoDirEntry{name: "fresh.txt"}}, nil
 	}
 
 	ctx1, cancel1 := context.WithTimeout(context.Background(), 10*time.Millisecond)
@@ -328,16 +331,19 @@ func TestFileCompleter_ReturnsPromptlyForStaleInflightDirectoryRead(t *testing.T
 	ctx2, cancel2 := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel2()
 	start := time.Now()
-	_, err = completer.Complete(ctx2, "cat ", len("cat "))
+	result, err := completer.Complete(ctx2, "cat ", len("cat "))
 	elapsed := time.Since(start)
 	if err != nil {
 		t.Fatalf("second Complete() error = %v", err)
 	}
 	if elapsed > 30*time.Millisecond {
-		t.Fatalf("stale in-flight directory read waited %s, want under 30ms", elapsed)
+		t.Fatalf("stale in-flight directory read retry took %s, want under 30ms", elapsed)
 	}
-	if got := calls.Load(); got != 1 {
-		t.Fatalf("expected stale in-flight read to avoid a second read, got %d", got)
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("expected stale in-flight read to retry, got %d reads", got)
+	}
+	if len(result.Items) != 1 || result.Items[0].Value != "fresh.txt" {
+		t.Fatalf("expected fresh retry result, got %#v", result.Items)
 	}
 }
 
