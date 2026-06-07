@@ -20,7 +20,7 @@ type Router struct {
 	boundedMu         sync.Mutex
 	boundedInFlight   bool
 	prefetchMu        sync.Mutex
-	prefetchInFlight  bool
+	prefetchInFlight  map[uint64]bool
 }
 
 type registeredCompleter struct {
@@ -315,27 +315,36 @@ func (r *Router) Prefetch(line string, pos int) {
 
 // PrefetchBounded runs prefetch work in the background and coalesces stuck prefetchers.
 func (r *Router) PrefetchBounded(line string, pos int) {
-	if !r.beginPrefetch() {
-		return
+	for _, rc := range r.completers {
+		p, ok := rc.completer.(Prefetcher)
+		if !ok {
+			continue
+		}
+		if !r.beginPrefetch(rc.id) {
+			continue
+		}
+		go func(id uint64, prefetcher Prefetcher) {
+			defer r.endPrefetch(id)
+			prefetcher.Prefetch(line, pos)
+		}(rc.id, p)
 	}
-	go func() {
-		defer r.endPrefetch()
-		r.Prefetch(line, pos)
-	}()
 }
 
-func (r *Router) beginPrefetch() bool {
+func (r *Router) beginPrefetch(key uint64) bool {
 	r.prefetchMu.Lock()
 	defer r.prefetchMu.Unlock()
-	if r.prefetchInFlight {
+	if r.prefetchInFlight == nil {
+		r.prefetchInFlight = make(map[uint64]bool)
+	}
+	if r.prefetchInFlight[key] {
 		return false
 	}
-	r.prefetchInFlight = true
+	r.prefetchInFlight[key] = true
 	return true
 }
 
-func (r *Router) endPrefetch() {
+func (r *Router) endPrefetch(key uint64) {
 	r.prefetchMu.Lock()
-	r.prefetchInFlight = false
+	delete(r.prefetchInFlight, key)
 	r.prefetchMu.Unlock()
 }

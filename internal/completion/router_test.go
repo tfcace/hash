@@ -78,6 +78,18 @@ func (m *blockingPrefetchCompleter) Prefetch(line string, pos int) {
 	<-m.release
 }
 
+type countingPrefetchCompleter struct {
+	calls atomic.Int32
+}
+
+func (m *countingPrefetchCompleter) Name() string { return "counting-prefetch" }
+func (m *countingPrefetchCompleter) Complete(ctx context.Context, line string, pos int) (Result, error) {
+	return Result{}, nil
+}
+func (m *countingPrefetchCompleter) Prefetch(line string, pos int) {
+	m.calls.Add(1)
+}
+
 func TestRouter_StopsWhenContextCanceled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	first := &cancelingCompleter{name: "canceling", cancel: cancel}
@@ -268,6 +280,29 @@ func TestRouter_PrefetchBoundedDoesNotPileUpStuckWorkers(t *testing.T) {
 	router.PrefetchBounded("kubectl get ", len("kubectl get "))
 	if got := blocking.calls.Load(); got != 1 {
 		t.Fatalf("expected second bounded prefetch not to start duplicate stuck worker, got %d calls", got)
+	}
+}
+
+func TestRouter_PrefetchBoundedDoesNotStarveLaterPrefetchers(t *testing.T) {
+	release := make(chan struct{})
+	defer close(release)
+	blocking := &blockingPrefetchCompleter{release: release}
+	later := &countingPrefetchCompleter{}
+
+	router := NewRouter()
+	router.Register(blocking, PriorityToolNative)
+	router.Register(later, PriorityFilesystem)
+
+	router.PrefetchBounded("kubectl ", len("kubectl "))
+	if !eventuallyTrue(100*time.Millisecond, func() bool {
+		return blocking.calls.Load() == 1
+	}) {
+		t.Fatalf("expected blocking prefetcher to start once, got %d", blocking.calls.Load())
+	}
+	if !eventuallyTrue(100*time.Millisecond, func() bool {
+		return later.calls.Load() == 1
+	}) {
+		t.Fatalf("expected later prefetcher to run despite stuck earlier prefetcher, got %d", later.calls.Load())
 	}
 }
 
