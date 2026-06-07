@@ -226,6 +226,23 @@ func TestCobraCompleter_PrefetchRetryAfterBusyCommandLookup(t *testing.T) {
 	}
 }
 
+func TestCobraCompleter_PrefetchReturnsWhenChildKeepsStdoutOpen(t *testing.T) {
+	tmpDir := t.TempDir()
+	cmdPath := filepath.Join(tmpDir, "fakecobra")
+	if err := os.WriteFile(cmdPath, []byte("#!/bin/sh\nprintf 'pods\\tpod resources\\n'\nsleep 0.25 &\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile(%q): %v", cmdPath, err)
+	}
+
+	completer := NewCobraCompleter()
+	start := time.Now()
+	completer.doPrefetch(cmdPath, []string{"__complete"}, cmdPath+":__complete")
+	elapsed := time.Since(start)
+
+	if elapsed > 150*time.Millisecond {
+		t.Fatalf("cobra prefetch waited %s for child-held stdout pipe, want under 150ms", elapsed)
+	}
+}
+
 func eventually(timeout time.Duration, fn func() bool) bool {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {

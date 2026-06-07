@@ -9,7 +9,6 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/tfcace/hash/internal/trace"
@@ -605,9 +604,7 @@ func runIsolatedCommand(ctx context.Context, command string, args ...string) ([]
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = io.Discard
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Setsid: true,
-	}
+	configureIsolatedCompletionCommand(cmd)
 
 	devNull, err := os.Open(os.DevNull)
 	if err == nil {

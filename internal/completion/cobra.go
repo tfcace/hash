@@ -8,7 +8,6 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 )
 
@@ -31,6 +30,8 @@ type cachedResult struct {
 	result    Result
 	expiresAt time.Time
 }
+
+const cobraPrefetchTimeout = 100 * time.Millisecond
 
 var errCobraLookPathBusy = errors.New("cobra command path lookup already in progress")
 
@@ -210,7 +211,7 @@ func (c *CobraCompleter) forgetPrefetch(prefetchKey string) {
 // doPrefetch runs the actual Cobra completion in the background.
 func (c *CobraCompleter) doPrefetch(cmdPath string, args []string, cacheKey string) {
 	// Use short timeout - Cobra completions should be fast
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), cobraPrefetchTimeout)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, cmdPath, args...)
@@ -222,9 +223,7 @@ func (c *CobraCompleter) doPrefetch(cmdPath string, args []string, cacheKey stri
 	// - Setsid creates a new session, detaching from controlling terminal
 	// - Stdin from /dev/null prevents reading
 	// This prevents TUI apps (vim, helix) from taking over or corrupting our terminal
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Setsid: true,
-	}
+	configureIsolatedCompletionCommand(cmd)
 	devNull, err := os.Open(os.DevNull)
 	if err == nil {
 		cmd.Stdin = devNull
