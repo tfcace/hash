@@ -13,13 +13,14 @@ import (
 
 // FileCompleter completes filesystem paths.
 type FileCompleter struct {
-	showHidden   bool
-	fuzzyMode    bool
-	readDir      func(string) ([]os.DirEntry, error)
-	readCacheTTL time.Duration
-	readMu       sync.Mutex
-	readInflight map[string]*fileReadCall
-	readCache    map[string]fileReadCacheEntry
+	showHidden         bool
+	fuzzyMode          bool
+	readDir            func(string) ([]os.DirEntry, error)
+	readCacheTTL       time.Duration
+	inflightMaxWaitAge time.Duration
+	readMu             sync.Mutex
+	readInflight       map[string]*fileReadCall
+	readCache          map[string]fileReadCacheEntry
 }
 
 type fileReadResult struct {
@@ -28,8 +29,9 @@ type fileReadResult struct {
 }
 
 type fileReadCall struct {
-	done   chan struct{}
-	result fileReadResult
+	done    chan struct{}
+	started time.Time
+	result  fileReadResult
 }
 
 type fileReadCacheEntry struct {
@@ -40,10 +42,11 @@ type fileReadCacheEntry struct {
 // NewFileCompleter creates a new filesystem completer.
 func NewFileCompleter() *FileCompleter {
 	return &FileCompleter{
-		showHidden:   false,
-		fuzzyMode:    false,
-		readDir:      os.ReadDir,
-		readCacheTTL: 500 * time.Millisecond,
+		showHidden:         false,
+		fuzzyMode:          false,
+		readDir:            os.ReadDir,
+		readCacheTTL:       500 * time.Millisecond,
+		inflightMaxWaitAge: 75 * time.Millisecond,
 	}
 }
 
@@ -236,6 +239,10 @@ func (c *FileCompleter) readDirectory(ctx context.Context, dir string) (fileRead
 		}
 	}
 	if call, ok := c.readInflight[cacheKey]; ok {
+		if c.inflightMaxWaitAge > 0 && now.Sub(call.started) >= c.inflightMaxWaitAge {
+			c.readMu.Unlock()
+			return fileReadResult{}, false, false
+		}
 		c.readMu.Unlock()
 		select {
 		case <-ctx.Done():
@@ -245,7 +252,7 @@ func (c *FileCompleter) readDirectory(ctx context.Context, dir string) (fileRead
 		}
 	}
 
-	call := &fileReadCall{done: make(chan struct{})}
+	call := &fileReadCall{done: make(chan struct{}), started: now}
 	if c.readInflight == nil {
 		c.readInflight = make(map[string]*fileReadCall)
 	}

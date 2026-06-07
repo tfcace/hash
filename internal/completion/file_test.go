@@ -277,6 +277,49 @@ func TestFileCompleter_CoalescesSlowDirectoryReads(t *testing.T) {
 	}
 }
 
+func TestFileCompleter_ReturnsPromptlyForStaleInflightDirectoryRead(t *testing.T) {
+	completer := NewFileCompleter()
+	completer.inflightMaxWaitAge = time.Millisecond
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	defer close(release)
+	var calls atomic.Int32
+	completer.readDir = func(dir string) ([]os.DirEntry, error) {
+		calls.Add(1)
+		started <- struct{}{}
+		<-release
+		return nil, nil
+	}
+
+	ctx1, cancel1 := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel1()
+	_, err := completer.Complete(ctx1, "cat ", len("cat "))
+	if err != nil {
+		t.Fatalf("first Complete() error = %v", err)
+	}
+	select {
+	case <-started:
+	default:
+		t.Fatal("first completion did not start a directory read")
+	}
+	time.Sleep(2 * time.Millisecond)
+
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel2()
+	start := time.Now()
+	_, err = completer.Complete(ctx2, "cat ", len("cat "))
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("second Complete() error = %v", err)
+	}
+	if elapsed > 30*time.Millisecond {
+		t.Fatalf("stale in-flight directory read waited %s, want under 30ms", elapsed)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("expected stale in-flight read to avoid a second read, got %d", got)
+	}
+}
+
 func TestFileCompleter_CdIncludesBrokenSymlinkWithoutFollowingTarget(t *testing.T) {
 	tmpDir := t.TempDir()
 	if err := os.Symlink(filepath.Join(tmpDir, "missing"), filepath.Join(tmpDir, "broken_link")); err != nil {
