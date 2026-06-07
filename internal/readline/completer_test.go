@@ -30,6 +30,17 @@ func (m *mockCompleter) Complete(ctx context.Context, line string, pos int) (com
 	return completion.Result{Items: m.items, Prefix: ""}, nil
 }
 
+type recordingCompleter struct {
+	pos   int
+	items []completion.Item
+}
+
+func (m *recordingCompleter) Name() string { return "recording" }
+func (m *recordingCompleter) Complete(ctx context.Context, line string, pos int) (completion.Result, error) {
+	m.pos = pos
+	return completion.Result{Items: m.items, Prefix: ""}, nil
+}
+
 type slowCompleter struct {
 	delay time.Duration
 }
@@ -157,5 +168,21 @@ func TestCompleterAdapter_CaseInsensitive(t *testing.T) {
 	// Should strip the 5-char prefix case-insensitively
 	if string(candidates[0]) != "nal/" {
 		t.Errorf("expected suffix 'nal/', got '%s'", string(candidates[0]))
+	}
+}
+
+func TestCompleterAdapter_ConvertsRuneCursorToByteOffset(t *testing.T) {
+	recorder := &recordingCompleter{
+		items: []completion.Item{{Value: "שלום.txt"}},
+	}
+	router := completion.NewRouter()
+	router.Register(recorder, completion.PriorityFilesystem)
+	adapter := NewCompleterAdapter(router)
+
+	line := []rune("cat שלום")
+	adapter.Do(line, len(line))
+
+	if recorder.pos != len(string(line)) {
+		t.Fatalf("router cursor pos = %d, want byte offset %d", recorder.pos, len(string(line)))
 	}
 }
