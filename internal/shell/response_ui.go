@@ -51,15 +51,15 @@ const (
 func (s AgentState) String() string {
 	switch s {
 	case AgentStateConnecting:
-		return "Connecting to agent..."
+		return "agent · connecting"
 	case AgentStateSending:
-		return "Sending context..."
+		return "agent · sending context"
 	case AgentStateThinking:
-		return "Agent thinking..."
+		return "agent · thinking"
 	case AgentStateReceiving:
-		return "Receiving response..."
+		return "agent · receiving"
 	default:
-		return "Processing..."
+		return "agent · processing"
 	}
 }
 

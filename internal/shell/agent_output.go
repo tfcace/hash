@@ -321,17 +321,20 @@ func (aoc *AgentOutputCoordinator) ShowHints(ct ConfirmationType) {
 		return // Don't show hints unless in confirming state
 	}
 
-	var hint string
+	var scope, hint string
 	switch ct {
 	case ConfirmTypeCommand:
+		scope = "cmd"
 		hint = "[Enter: run] [Tab: edit] [Esc: cancel]"
 	case ConfirmTypeExplanation:
+		scope = "agent"
 		hint = "[Enter: done] [Tab: copy] [r: reply] [Esc: cancel]"
 	case ConfirmTypeError:
+		scope = "error"
 		hint = "[Enter: retry] [Esc: cancel]"
 	}
 
-	fmt.Fprintf(aoc.out, "  \x1b[90m%s\x1b[0m\n", hint)
+	fmt.Fprintf(aoc.out, "  \x1b[90m%s · %s\x1b[0m\n", scope, hint)
 }
 
 // ExitConfirming returns to idle state.

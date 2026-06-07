@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"github.com/tfcace/hash/internal/agent"
+	"github.com/tfcace/hash/internal/editor"
 	"github.com/tfcace/hash/internal/parser"
 )
 
@@ -13,12 +14,71 @@ type agentConversationMessage struct {
 }
 
 const (
-	agentConversationReplyPrompt = "you> "
-	emptyAgentResponseMessage    = "empty agent response"
-	legacyAwaitingInputMarker    = "[AWAITING_INPUT]"
-	legacyConversationMarker     = "[CONVERSATION]"
-	legacyMarkerTailBytes        = len(legacyAwaitingInputMarker) - 1
+	agentConversationReplyPrompt       = "\x1b[38;2;94;234;212m│\x1b[0m \x1b[1;38;2;94;234;212myou\x1b[0m › "
+	agentConversationLiveRailLine      = "\x1b[1;38;2;255;209;102m┆\x1b[0m"
+	agentConversationLiveReplyPrompt   = "\x1b[1;38;2;255;209;102m┆\x1b[0m \x1b[1;38;2;94;234;212myou\x1b[0m › "
+	agentConversationReplyPromptWidth  = 8
+	agentConversationAgentPrefix       = "│ agent › "
+	agentConversationAgentContinuation = "│         "
+	emptyAgentResponseMessage          = "empty agent response"
+	legacyAwaitingInputMarker          = "[AWAITING_INPUT]"
+	legacyConversationMarker           = "[CONVERSATION]"
+	legacyMarkerTailBytes              = len(legacyAwaitingInputMarker) - 1
 )
+
+func agentConversationInputFrame(openRail bool) *editor.InputFrame {
+	frame := &editor.InputFrame{
+		Prefix:      agentConversationReplyPrompt,
+		LiveTopLine: agentConversationLiveRailLine,
+		LivePrefix:  agentConversationLiveReplyPrompt,
+		PrefixWidth: agentConversationReplyPromptWidth,
+	}
+	if openRail {
+		frame.TopLine = "\x1b[38;2;94;234;212m╭─ conversation\x1b[0m \x1b[90mEnter sends · Esc/Ctrl+C leaves · /exit ends\x1b[0m"
+	}
+	return frame
+}
+
+type agentConversationRailPrefixer struct {
+	write       func(string)
+	atLineStart bool
+	started     bool
+}
+
+func newAgentConversationRailPrefixer(write func(string)) *agentConversationRailPrefixer {
+	return &agentConversationRailPrefixer{
+		write:       write,
+		atLineStart: true,
+	}
+}
+
+func (p *agentConversationRailPrefixer) Write(text string) {
+	if text == "" || p.write == nil {
+		return
+	}
+
+	for text != "" {
+		if p.atLineStart {
+			if p.started {
+				p.write(agentConversationAgentContinuation)
+			} else {
+				p.write(agentConversationAgentPrefix)
+				p.started = true
+			}
+			p.atLineStart = false
+		}
+
+		newline := strings.IndexByte(text, '\n')
+		if newline < 0 {
+			p.write(text)
+			return
+		}
+
+		p.write(text[:newline+1])
+		text = text[newline+1:]
+		p.atLineStart = true
+	}
+}
 
 type legacyAgentMarkerSanitizer struct {
 	pending string
@@ -103,7 +163,66 @@ func agentTurnAllowsReply(commandType parser.CommandType, resp agent.Response) b
 }
 
 func agentTurnShouldPromptForReply(commandType parser.CommandType, resp agent.Response, responseText string) bool {
-	return agentTurnAllowsReply(commandType, resp) && agentResponseWantsReply(responseText)
+	if commandType != parser.CommandTypeAgent || !agentResponseWantsReply(responseText) {
+		return false
+	}
+	if resp.Type == agent.ResponseTypeExplanation {
+		return true
+	}
+	return resp.Type == agent.ResponseTypeCommand && agentConversationLooksLikeQuestion(responseText)
+}
+
+func agentTurnResponseForConfirmation(commandType parser.CommandType, resp agent.Response, responseText string) agent.Response {
+	if commandType == parser.CommandTypeAgent &&
+		resp.Type == agent.ResponseTypeCommand &&
+		agentResponseWantsReply(responseText) &&
+		agentConversationLooksLikeQuestion(responseText) {
+		return agent.Response{
+			Type:        agent.ResponseTypeExplanation,
+			Explanation: responseText,
+		}
+	}
+	return resp
+}
+
+func agentConversationLooksLikeQuestion(text string) bool {
+	line := strings.ToLower(lastNonEmptyLine(stripLegacyAgentMarkers(text)))
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return false
+	}
+
+	questionPrefixes := []string{
+		"question ",
+		"question:",
+		"go ahead",
+		"please ",
+		"tell me",
+		"is ",
+		"are ",
+		"am ",
+		"do ",
+		"does ",
+		"did ",
+		"can ",
+		"could ",
+		"would ",
+		"should ",
+		"will ",
+		"which ",
+		"what ",
+		"where ",
+		"when ",
+		"why ",
+		"how ",
+	}
+	for _, prefix := range questionPrefixes {
+		if strings.HasPrefix(line, prefix) {
+			return true
+		}
+	}
+
+	return strings.Contains(line, " question ")
 }
 
 func agentConversationReplyEndsConversation(reply string) bool {

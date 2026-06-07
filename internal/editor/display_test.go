@@ -229,6 +229,49 @@ func TestDisplay_FinalizeWithFrame_FillsLineBgToEOL(t *testing.T) {
 	}
 }
 
+func TestDisplay_RenderWithFrame_UsesLivePrefixOnlyUntilFinalize(t *testing.T) {
+	var out bytes.Buffer
+	d := NewDisplay(&out, 40, 24)
+	d.SetFrame(&InputFrame{
+		Prefix:      "│ you › ",
+		LiveTopLine: "╎",
+		LivePrefix:  "╎ you › ",
+		PrefixWidth: 8,
+	})
+
+	buf := NewBufferFromString("yes")
+	cur := NewCursor()
+	cur.MoveTo(0, 3)
+
+	d.Render(buf, cur, false)
+	renderOutput := out.String()
+	if !strings.Contains(renderOutput, "╎ you › yes") {
+		t.Fatalf("active render should use live prefix, got %q", renderOutput)
+	}
+	if !strings.Contains(renderOutput, "╎\r\n") {
+		t.Fatalf("active render should show live connector line, got %q", renderOutput)
+	}
+	if strings.Contains(renderOutput, "│ you › yes") {
+		t.Fatalf("active render should not commit solid prefix, got %q", renderOutput)
+	}
+
+	out.Reset()
+	d.Finalize(buf)
+	finalOutput := out.String()
+	if !strings.Contains(finalOutput, "│ you › yes") {
+		t.Fatalf("finalized input should use committed prefix, got %q", finalOutput)
+	}
+	if strings.Count(finalOutput, ansiClearLine) < 2 {
+		t.Fatalf("finalize should clear the stale live connector row, got %q", finalOutput)
+	}
+	if strings.Contains(finalOutput, "╎ you › yes") {
+		t.Fatalf("finalized input should not keep live prefix, got %q", finalOutput)
+	}
+	if strings.Contains(finalOutput, "╎") {
+		t.Fatalf("finalized input should not keep live connector line, got %q", finalOutput)
+	}
+}
+
 func TestDisplay_RenderWithFrame_ClearsFromLineEnd(t *testing.T) {
 	var out bytes.Buffer
 	d := NewDisplay(&out, 20, 24)

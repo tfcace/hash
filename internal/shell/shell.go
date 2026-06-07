@@ -1101,14 +1101,10 @@ func (s *Shell) handleAgentFullStreaming(ctx context.Context, parsed parser.Pars
 	collector := agent.NewStreamCollector()
 	collector.Append(responseText)
 	resp := collector.Response()
+	resp = agentTurnResponseForConfirmation(parsed.Type, resp, responseText)
 
 	allowReply := agentTurnAllowsReply(parsed.Type, resp)
 	transcript := s.initialAgentConversationTranscript(parsed, responseText)
-	if agentTurnShouldPromptForReply(parsed.Type, resp, responseText) {
-		s.responseUI.StopProgress()
-		s.runAgentConversationLoop(ctx, modelName, transcript)
-		return
-	}
 
 	confirmType, needsConfirmation := confirmationTypeForAgentResponse(resp, allowReply)
 	if !needsConfirmation {
@@ -1154,11 +1150,13 @@ func (s *Shell) initialAgentConversationTranscript(parsed parser.ParseResult, re
 }
 
 func (s *Shell) runAgentConversationLoop(ctx context.Context, modelName string, transcript []agentConversationMessage) {
+	openRail := true
 	for {
-		reply, ok := s.readAgentConversationReply(ctx)
+		reply, ok := s.readAgentConversationReply(ctx, openRail)
 		if !ok {
 			return
 		}
+		openRail = false
 		if agentConversationReplyEndsConversation(reply) {
 			return
 		}
@@ -1199,7 +1197,7 @@ func (s *Shell) runAgentConversationLoop(ctx context.Context, modelName string, 
 	}
 }
 
-func (s *Shell) readAgentConversationReply(ctx context.Context) (string, bool) {
+func (s *Shell) readAgentConversationReply(ctx context.Context, openRail bool) (string, bool) {
 	if s.agentReplyInputHook != nil {
 		reply, err := s.agentReplyInputHook(ctx)
 		if err != nil {
@@ -1214,6 +1212,8 @@ func (s *Shell) readAgentConversationReply(ctx context.Context) (string, bool) {
 	cfg.CompleteFunc = nil
 	cfg.PrefetchFunc = nil
 	cfg.SuggestionFunc = nil
+	cfg.Gutter = false
+	cfg.InputFrame = agentConversationInputFrame(openRail)
 	cfg.DisableHistorySearch = true
 	cfg.DisableContextPicker = true
 	cfg.DisableLineContinuation = true
@@ -1238,6 +1238,9 @@ func (s *Shell) streamAgentFollowUpTurn(
 
 	s.responseUI.ShowState(AgentStateThinking)
 	textCh, errCh := s.agentHandler.StreamFollowUp(requestCtx, reply, transcript)
+	railPrefixer := newAgentConversationRailPrefixer(func(rendered string) {
+		s.agentOutput.WriteStream(rendered)
+	})
 
 	streamResult := s.collectAgentStream(ctx, textCh, errCh, agentStreamCollectionOptions{
 		onFirstChunk: func() {
@@ -1246,7 +1249,7 @@ func (s *Shell) streamAgentFollowUpTurn(
 			s.responseUI.ClearLine()
 		},
 		writeRendered: func(rendered string) {
-			s.agentOutput.WriteStream(rendered)
+			railPrefixer.Write(rendered)
 		},
 		flushDelay: 50 * time.Millisecond,
 	})

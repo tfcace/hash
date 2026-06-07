@@ -265,11 +265,11 @@ func TestAgentOutputCoordinator_ShowHints(t *testing.T) {
 	tests := []struct {
 		name     string
 		hintType ConfirmationType
-		expected string
+		expected []string
 	}{
-		{"command", ConfirmTypeCommand, "[Enter: run]"},
-		{"explanation", ConfirmTypeExplanation, "[r: reply]"},
-		{"error", ConfirmTypeError, "[Enter: retry]"},
+		{"command", ConfirmTypeCommand, []string{"cmd ·", "[Enter: run]"}},
+		{"explanation", ConfirmTypeExplanation, []string{"agent ·", "[r: reply]"}},
+		{"error", ConfirmTypeError, []string{"error ·", "[Enter: retry]"}},
 	}
 
 	for _, tt := range tests {
@@ -281,8 +281,10 @@ func TestAgentOutputCoordinator_ShowHints(t *testing.T) {
 			aoc.ShowHints(tt.hintType)
 
 			output := buf.String()
-			if !strings.Contains(output, tt.expected) {
-				t.Errorf("expected %q in output, got: %q", tt.expected, output)
+			for _, expected := range tt.expected {
+				if !strings.Contains(output, expected) {
+					t.Errorf("expected %q in output, got: %q", expected, output)
+				}
 			}
 		})
 	}

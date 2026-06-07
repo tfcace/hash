@@ -55,8 +55,92 @@ func TestAgentResponseWantsReply(t *testing.T) {
 }
 
 func TestAgentConversationReplyPromptLabelsUser(t *testing.T) {
-	if agentConversationReplyPrompt != "you> " {
+	if !strings.Contains(agentConversationReplyPrompt, "you") {
 		t.Fatalf("agentConversationReplyPrompt = %q, want user-labeled prompt", agentConversationReplyPrompt)
+	}
+	if !strings.Contains(agentConversationReplyPrompt, "›") {
+		t.Fatalf("agentConversationReplyPrompt = %q, want polished reply marker", agentConversationReplyPrompt)
+	}
+}
+
+func TestAgentConversationInputFrame(t *testing.T) {
+	frame := agentConversationInputFrame(true)
+	if frame == nil {
+		t.Fatal("agentConversationInputFrame returned nil")
+	}
+	if frame.Prefix != agentConversationReplyPrompt {
+		t.Fatalf("frame prefix = %q, want reply prompt %q", frame.Prefix, agentConversationReplyPrompt)
+	}
+	if frame.LivePrefix != agentConversationLiveReplyPrompt {
+		t.Fatalf("frame live prefix = %q, want %q", frame.LivePrefix, agentConversationLiveReplyPrompt)
+	}
+	if frame.LiveTopLine != agentConversationLiveRailLine {
+		t.Fatalf("frame live top line = %q, want %q", frame.LiveTopLine, agentConversationLiveRailLine)
+	}
+	if frame.PrefixWidth != agentConversationReplyPromptWidth {
+		t.Fatalf("frame prefix width = %d, want %d", frame.PrefixWidth, agentConversationReplyPromptWidth)
+	}
+	if !strings.Contains(frame.Prefix, "│") || strings.Contains(frame.Prefix, "╎") || strings.Contains(frame.Prefix, "┆") {
+		t.Fatalf("committed prompt should use solid rail, got %q", frame.Prefix)
+	}
+	if !strings.Contains(frame.LivePrefix, "┆") {
+		t.Fatalf("live prompt should use dashed rail, got %q", frame.LivePrefix)
+	}
+	if !strings.Contains(frame.LiveTopLine, "┆") {
+		t.Fatalf("live connector should use dashed rail, got %q", frame.LiveTopLine)
+	}
+	if !strings.Contains(frame.TopLine, "conversation") {
+		t.Fatalf("frame top line should label conversation mode, got %q", frame.TopLine)
+	}
+	if !strings.Contains(frame.TopLine, "/exit") {
+		t.Fatalf("frame top line should show exit affordance, got %q", frame.TopLine)
+	}
+	if frame.LineBg != "" || frame.BottomLineBg != "" || frame.BottomExtraLineBg != "" {
+		t.Fatalf("conversation frame should avoid background fills in terminals, got line=%q bottom=%q extra=%q",
+			frame.LineBg, frame.BottomLineBg, frame.BottomExtraLineBg)
+	}
+	if frame.BottomLine != "" || frame.BottomExtraLine != "" {
+		t.Fatalf("conversation frame should stay open across turns, got bottom=%q extra=%q",
+			frame.BottomLine, frame.BottomExtraLine)
+	}
+}
+
+func TestAgentConversationInputFrame_ContinuationDoesNotReopenRail(t *testing.T) {
+	frame := agentConversationInputFrame(false)
+	if frame.TopLine != "" {
+		t.Fatalf("continuation frame should not repeat top line, got %q", frame.TopLine)
+	}
+	if !strings.Contains(frame.Prefix, "│") {
+		t.Fatalf("continuation prompt should keep conversation rail, got %q", frame.Prefix)
+	}
+}
+
+func TestAgentConversationRailPrefixer_ThreadsAgentOutput(t *testing.T) {
+	var buf strings.Builder
+	prefixer := newAgentConversationRailPrefixer(func(text string) {
+		buf.WriteString(text)
+	})
+
+	prefixer.Write("Question 1:")
+	prefixer.Write(" Is it physical?\nYes or no?")
+	prefixer.Write("\n")
+	prefixer.Write("Answer yes/no.")
+
+	output := buf.String()
+	for _, expected := range []string{
+		"│ agent › Question 1:",
+		"\n│         Yes or no?",
+		"\n│         Answer yes/no.",
+	} {
+		if !strings.Contains(output, expected) {
+			t.Fatalf("expected %q in threaded output, got %q", expected, output)
+		}
+	}
+	if strings.Contains(output, "\n│ agent › Yes or no?") {
+		t.Fatalf("continuation lines should align under the agent message, got %q", output)
+	}
+	if strings.Contains(output, "\n│ agent › Answer yes/no.") {
+		t.Fatalf("new chunks after a newline should stay under the same agent turn, got %q", output)
 	}
 }
 
@@ -102,6 +186,10 @@ func TestLegacyAgentMarkerSanitizer_StripsSplitMarkers(t *testing.T) {
 func TestAgentTurnReplyDecisions(t *testing.T) {
 	explanation := agent.Response{Type: agent.ResponseTypeExplanation, Explanation: "Which directory?"}
 	command := agent.Response{Type: agent.ResponseTypeCommand, Command: "ls"}
+	commandLikeQuestion := agent.Response{
+		Type:    agent.ResponseTypeCommand,
+		Command: "Go ahead and answer Question 1: Is it a physical object you could touch?",
+	}
 
 	if !agentTurnAllowsReply(parser.CommandTypeAgent, explanation) {
 		t.Fatal("full agent explanations should allow explicit reply")
@@ -117,6 +205,12 @@ func TestAgentTurnReplyDecisions(t *testing.T) {
 	}
 	if agentTurnShouldPromptForReply(parser.CommandTypeAgent, explanation, "The config is in ./internal.") {
 		t.Fatal("plain explanations should not prompt automatically")
+	}
+	if !agentTurnShouldPromptForReply(parser.CommandTypeAgent, commandLikeQuestion, commandLikeQuestion.Command) {
+		t.Fatal("natural-language questions misclassified as commands should keep the conversation prompt")
+	}
+	if agentTurnShouldPromptForReply(parser.CommandTypeAgent, command, "ls ?") {
+		t.Fatal("command-shaped responses ending with ? should keep command confirmation")
 	}
 }
 
@@ -182,6 +276,137 @@ func TestRunAgentConversationLoop_ExitReplyDoesNotCallAgent(t *testing.T) {
 
 	if got := len(mock.Requests()); got != 0 {
 		t.Fatalf("mock recorded %d requests, want none", got)
+	}
+}
+
+func TestRunAgentConversationLoop_CommandClassifiedQuestionKeepsReplyPrompt(t *testing.T) {
+	var out strings.Builder
+	replies := []string{"you ask the questions", "yes"}
+	mock := agent.NewMockTransport(agent.Response{
+		Type:    agent.ResponseTypeCommand,
+		Command: "Question --answer?",
+	})
+	sh := &Shell{
+		config:       config.Default(),
+		agentHandler: NewAgentHandler(agent.NewClient(mock)),
+		responseUI:   NewResponseUI(&out),
+		agentOutput:  NewAgentOutputCoordinator(&out),
+		agentReplyInputHook: func(ctx context.Context) (string, error) {
+			if len(replies) == 0 {
+				return "", context.Canceled
+			}
+			reply := replies[0]
+			replies = replies[1:]
+			return reply, nil
+		},
+	}
+	transcript := []agentConversationMessage{
+		{Role: "user", Text: "play twenty questions"},
+		{Role: "assistant", Text: "Ready."},
+	}
+
+	sh.runAgentConversationLoop(context.Background(), "test-model", transcript)
+
+	if got := len(mock.Requests()); got != 2 {
+		t.Fatalf("mock recorded %d requests, want 2 follow-up turns", got)
+	}
+	if strings.Contains(out.String(), "cmd ·") {
+		t.Fatalf("conversation question should not render command confirmation, got:\n%s", out.String())
+	}
+}
+
+func TestHandleAgentFullStreaming_QuestionShowsReplyHintWithoutAutoStartingConversation(t *testing.T) {
+	var out strings.Builder
+	replyCalled := false
+	mock := agent.NewMockTransport(agent.Response{
+		Type:        agent.ResponseTypeExplanation,
+		Explanation: "Which directory should I inspect?",
+	})
+	sh := &Shell{
+		config:       config.Default(),
+		agentHandler: NewAgentHandler(agent.NewClient(mock)),
+		responseUI:   NewResponseUI(&out),
+		agentOutput:  NewAgentOutputCoordinator(&out),
+		agentReplyInputHook: func(ctx context.Context) (string, error) {
+			replyCalled = true
+			return "internal/shell", nil
+		},
+	}
+
+	sh.handleAgentFullStreaming(context.Background(), parser.ParseResult{
+		Type:        parser.CommandTypeAgent,
+		AgentPrompt: "help me choose a file",
+	}, "test-model")
+
+	if replyCalled {
+		t.Fatal("plain agent questions should not automatically enter conversation mode")
+	}
+	if got := len(mock.Requests()); got != 1 {
+		t.Fatalf("mock recorded %d requests, want only the initial request", got)
+	}
+	if !strings.Contains(out.String(), "[r: reply]") {
+		t.Fatalf("question response should show reply hint, got:\n%s", out.String())
+	}
+}
+
+func TestHandleAgentFullStreaming_ExplicitConversationPromptStillWaitsForReplyAction(t *testing.T) {
+	var out strings.Builder
+	replyCalled := false
+	mock := agent.NewMockTransport(agent.Response{
+		Type:        agent.ResponseTypeExplanation,
+		Explanation: "Question 1: Is it a physical object?",
+	})
+	sh := &Shell{
+		config:       config.Default(),
+		agentHandler: NewAgentHandler(agent.NewClient(mock)),
+		responseUI:   NewResponseUI(&out),
+		agentOutput:  NewAgentOutputCoordinator(&out),
+		agentReplyInputHook: func(ctx context.Context) (string, error) {
+			replyCalled = true
+			return "", context.Canceled
+		},
+	}
+
+	sh.handleAgentFullStreaming(context.Background(), parser.ParseResult{
+		Type:        parser.CommandTypeAgent,
+		AgentPrompt: "Let's play twenty questions. Ask one question at a time.",
+	}, "test-model")
+
+	if replyCalled {
+		t.Fatal("conversation prompt text should not bypass the r: reply action")
+	}
+	if got := len(mock.Requests()); got != 1 {
+		t.Fatalf("mock recorded %d requests, want only the initial request", got)
+	}
+	if !strings.Contains(out.String(), "[r: reply]") {
+		t.Fatalf("explicit conversation prompt should still show reply hint first, got:\n%s", out.String())
+	}
+}
+
+func TestHandleAgentFullStreaming_CommandClassifiedQuestionShowsReplyHint(t *testing.T) {
+	var out strings.Builder
+	mock := agent.NewMockTransport(agent.Response{
+		Type:    agent.ResponseTypeCommand,
+		Command: "Go ahead and answer Question 1: Is it a physical object you could touch?",
+	})
+	sh := &Shell{
+		config:       config.Default(),
+		agentHandler: NewAgentHandler(agent.NewClient(mock)),
+		responseUI:   NewResponseUI(&out),
+		agentOutput:  NewAgentOutputCoordinator(&out),
+	}
+
+	sh.handleAgentFullStreaming(context.Background(), parser.ParseResult{
+		Type:        parser.CommandTypeAgent,
+		AgentPrompt: "I'll think of something, and you ask up to 20 yes/no questions to guess it.",
+	}, "test-model")
+
+	output := out.String()
+	if strings.Contains(output, "cmd ·") {
+		t.Fatalf("natural-language question should not show command confirmation, got:\n%s", output)
+	}
+	if !strings.Contains(output, "[r: reply]") {
+		t.Fatalf("natural-language question should show reply hint, got:\n%s", output)
 	}
 }
 

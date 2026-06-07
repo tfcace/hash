@@ -73,14 +73,14 @@ func TestResponseUI_LoadingStates(t *testing.T) {
 	// Test different states
 	ui.ShowState(AgentStateConnecting)
 	waitForSpinner()
-	if !bytes.Contains(buf.Bytes(), []byte("Connecting")) {
+	if !bytes.Contains(buf.Bytes(), []byte("agent · connecting")) {
 		t.Errorf("Should show Connecting state, got: %s", buf.String())
 	}
 
 	buf.Reset()
 	ui.ShowState(AgentStateSending)
 	waitForSpinner()
-	if !bytes.Contains(buf.Bytes(), []byte("Sending")) {
+	if !bytes.Contains(buf.Bytes(), []byte("agent · sending context")) {
 		t.Errorf("Should show Sending state, got: %s", buf.String())
 	}
 
@@ -94,7 +94,17 @@ func TestResponseUI_LoadingStates(t *testing.T) {
 	buf.Reset()
 	ui.ShowState(AgentStateReceiving)
 	waitForSpinner()
-	if !bytes.Contains(buf.Bytes(), []byte("Receiving")) {
+	if !bytes.Contains(buf.Bytes(), []byte("agent · receiving")) {
 		t.Errorf("Should show Receiving state, got: %s", buf.String())
+	}
+}
+
+func TestAgentStateStringUsesScopedConversationStyle(t *testing.T) {
+	got := AgentStateThinking.String()
+	if !bytes.Contains([]byte(got), []byte("agent ·")) {
+		t.Fatalf("thinking state should include scoped agent label, got %q", got)
+	}
+	if !bytes.Contains([]byte(got), []byte("thinking")) {
+		t.Fatalf("thinking state should use lower-case status copy, got %q", got)
 	}
 }

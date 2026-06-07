@@ -49,9 +49,11 @@ type Display struct {
 // PrefixWidth is the visible width of Prefix (ANSI excluded).
 type InputFrame struct {
 	TopLine           string // Rendered above input lines (no trailing newline)
+	LiveTopLine       string // Optional line rendered above input only while editing
 	BottomLine        string // Rendered below input lines (no trailing newline)
 	BottomExtraLine   string // Optional line rendered below BottomLine
 	Prefix            string // Rendered before each input line
+	LivePrefix        string // Optional Prefix override used only while editing
 	PrefixWidth       int
 	LineBg            string // Optional ANSI background code for line padding
 	BottomLineBg      string // Optional ANSI background override for BottomLine
@@ -284,6 +286,9 @@ func (d *Display) layoutForFrameRender(buf *Buffer, cur *Cursor, frame *InputFra
 
 	if frame.TopLine != "" {
 		totalRows += d.visualRowsForChars(visibleWidth(frame.TopLine))
+	}
+	if frame.LiveTopLine != "" {
+		totalRows += d.visualRowsForChars(visibleWidth(frame.LiveTopLine))
 	}
 
 	cursorVisualRow = totalRows
@@ -540,6 +545,10 @@ func (d *Display) renderWithFrame(buf *Buffer, cur *Cursor, hasSelection bool, g
 		d.renderFrameLine(&sb, frame.TopLine, frame.LineBg)
 		sb.WriteString("\r\n")
 	}
+	if frame.LiveTopLine != "" {
+		d.renderFrameLine(&sb, frame.LiveTopLine, frame.LineBg)
+		sb.WriteString("\r\n")
+	}
 
 	cursorRow := cur.Pos.Row
 	cursorCol := cur.Pos.Col
@@ -562,7 +571,7 @@ func (d *Display) renderWithFrame(buf *Buffer, cur *Cursor, hasSelection bool, g
 			sb.WriteString("\r\n")
 		}
 		sb.WriteString(ansiClearLine)
-		sb.WriteString(frame.Prefix)
+		sb.WriteString(frameRenderPrefix(frame))
 
 		line := buf.Line(i)
 		if hasSelection && cur.HasSelection() {
@@ -651,6 +660,13 @@ func (d *Display) renderWithFrame(buf *Buffer, cur *Cursor, hasSelection bool, g
 	d.lastLines = totalRows
 
 	d.out.Write([]byte(sb.String()))
+}
+
+func frameRenderPrefix(frame *InputFrame) string {
+	if frame.LivePrefix != "" {
+		return frame.LivePrefix
+	}
+	return frame.Prefix
 }
 
 func (d *Display) renderLineWithSelection(sb *strings.Builder, line string, row int, cur *Cursor) {
@@ -772,6 +788,7 @@ func (d *Display) Finalize(buf *Buffer) {
 func (d *Display) finalizeWithFrame(buf *Buffer) {
 	frame := d.frame
 	var sb strings.Builder
+	previousLines := d.lastLines
 
 	// Move cursor to beginning of the displayed content
 	if d.lastCursorRow > 0 {
@@ -816,6 +833,13 @@ func (d *Display) finalizeWithFrame(buf *Buffer) {
 		d.renderFrameLine(&sb, frame.BottomExtraLine, extraLineBg)
 		sb.WriteString("\r\n")
 		linesWritten++
+	}
+
+	for i := linesWritten; i < previousLines; i++ {
+		sb.WriteString(ansiClearLine)
+		if i < previousLines-1 {
+			sb.WriteString("\r\n")
+		}
 	}
 
 	d.out.Write([]byte(sb.String()))
