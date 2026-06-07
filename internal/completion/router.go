@@ -16,7 +16,7 @@ type Router struct {
 	nextCompleterID   uint64
 	fuzzy             bool
 	completerMu       sync.Mutex
-	completerInFlight map[uint64]bool
+	completerInFlight map[uint64]completerInFlightCall
 	prefetchMu        sync.Mutex
 	prefetchInFlight  map[uint64]bool
 }
@@ -35,6 +35,10 @@ type boundedCompletionResult struct {
 type completerCallResult struct {
 	result Result
 	err    error
+}
+
+type completerInFlightCall struct {
+	started time.Time
 }
 
 // NewRouter creates a new completion router.
@@ -191,12 +195,15 @@ func (r *Router) beginCompleterCall(key uint64) bool {
 	r.completerMu.Lock()
 	defer r.completerMu.Unlock()
 	if r.completerInFlight == nil {
-		r.completerInFlight = make(map[uint64]bool)
+		r.completerInFlight = make(map[uint64]completerInFlightCall)
 	}
-	if r.completerInFlight[key] {
-		return false
+	now := time.Now()
+	if call, ok := r.completerInFlight[key]; ok {
+		if !contextReadCallIsStale(call.started, now, 0) {
+			return false
+		}
 	}
-	r.completerInFlight[key] = true
+	r.completerInFlight[key] = completerInFlightCall{started: now}
 	return true
 }
 

@@ -141,6 +141,31 @@ func TestRouter_CompleteBoundedDoesNotPileUpStuckWorkers(t *testing.T) {
 	}
 }
 
+func TestRouter_CompleteBoundedRetriesStaleStuckWorker(t *testing.T) {
+	release := make(chan struct{})
+	defer close(release)
+	blocking := &blockingCountingCompleter{release: release}
+
+	router := NewRouter()
+	router.Register(blocking, PriorityFilesystem)
+
+	ctx1, cancel1 := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	_, _ = router.CompleteBounded(ctx1, "cat ", len("cat "))
+	cancel1()
+	if got := blocking.calls.Load(); got != 1 {
+		t.Fatalf("expected first bounded completion to start one worker, got %d", got)
+	}
+
+	time.Sleep(90 * time.Millisecond)
+
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	_, _ = router.CompleteBounded(ctx2, "cat ", len("cat "))
+	cancel2()
+	if got := blocking.calls.Load(); got != 2 {
+		t.Fatalf("expected stale stuck worker to be retried, got %d calls", got)
+	}
+}
+
 func TestRouter_CompleteBoundedUsesFallbackWhileEarlierCompleterIsStuck(t *testing.T) {
 	release := make(chan struct{})
 	defer close(release)
