@@ -99,6 +99,48 @@ func TestVCSCompleter_ReturnsWhenGitRefLookupIgnoresContext(t *testing.T) {
 	}
 }
 
+func TestVCSCompleter_CoalescesFreshBlockedGitRefLookupAndRetriesWhenStale(t *testing.T) {
+	c := NewVCSCompleter()
+	release := make(chan struct{})
+	defer close(release)
+	var calls atomic.Int32
+	c.listGitRefs = func(ctx context.Context) ([]string, error) {
+		call := calls.Add(1)
+		if call == 1 {
+			<-release
+			return []string{"stale"}, nil
+		}
+		return []string{"main"}, nil
+	}
+
+	for i := 0; i < 2; i++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+		result, err := c.Complete(ctx, "git checkout ", len("git checkout "))
+		cancel()
+		if err != nil {
+			t.Fatalf("Complete() error = %v", err)
+		}
+		if len(result.Items) != 0 {
+			t.Fatalf("expected no items from blocked git ref lookup, got %#v", result.Items)
+		}
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("expected second blocked git ref completion to coalesce, got %d lookups", got)
+	}
+
+	time.Sleep(90 * time.Millisecond)
+	result, err := c.Complete(context.Background(), "git checkout m", len("git checkout m"))
+	if err != nil {
+		t.Fatalf("Complete() error = %v", err)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("expected stale git ref lookup to retry, got %d lookups", got)
+	}
+	if len(result.Items) != 1 || result.Items[0].Value != "main" {
+		t.Fatalf("expected fresh git ref completion after stale retry, got %#v", result.Items)
+	}
+}
+
 func TestVCSCompleter_JJRevisionReturnsWhenLookupIgnoresContext(t *testing.T) {
 	c := NewVCSCompleter()
 	release := make(chan struct{})

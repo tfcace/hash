@@ -31,11 +31,22 @@ type VCSCompleter struct {
 	cacheMu  sync.Mutex
 	cacheTTL time.Duration
 	now      func() time.Time
+
+	inflightMu         sync.Mutex
+	inflight           map[string]*vcsLookupCall
+	inflightMaxWaitAge time.Duration
 }
 
 type cachedStringList struct {
 	values    []string
 	expiresAt time.Time
+}
+
+type vcsLookupCall struct {
+	done    chan struct{}
+	started time.Time
+	values  []string
+	err     error
 }
 
 // NewVCSCompleter creates a new VCS completer.
@@ -196,7 +207,7 @@ func (c *VCSCompleter) lookupValues(ctx context.Context, kind string, listFn fun
 		c.cacheMu.Unlock()
 	}
 
-	values, err := listStringsUntilContext(ctx, listFn)
+	values, err := c.lookupStringValues(ctx, cacheKey, listFn)
 	if err != nil {
 		if ctx.Err() == nil {
 			c.storeCachedValues(cacheKey, nil)
@@ -205,6 +216,63 @@ func (c *VCSCompleter) lookupValues(ctx context.Context, kind string, listFn fun
 	}
 	c.storeCachedValues(cacheKey, values)
 	return values, false, err
+}
+
+func (c *VCSCompleter) lookupStringValues(
+	ctx context.Context,
+	cacheKey string,
+	listFn func(context.Context) ([]string, error),
+) ([]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	now := time.Now()
+	c.inflightMu.Lock()
+	if call, ok := c.inflight[cacheKey]; ok {
+		if !contextReadCallIsStale(call.started, now, c.inflightMaxWaitAge) {
+			c.inflightMu.Unlock()
+			return waitForVCSLookup(ctx, call)
+		}
+		delete(c.inflight, cacheKey)
+	}
+
+	call := &vcsLookupCall{done: make(chan struct{}), started: now}
+	if c.inflight == nil {
+		c.inflight = make(map[string]*vcsLookupCall)
+	}
+	c.inflight[cacheKey] = call
+	c.inflightMu.Unlock()
+
+	go c.finishStringLookup(ctx, cacheKey, listFn, call)
+	return waitForVCSLookup(ctx, call)
+}
+
+func (c *VCSCompleter) finishStringLookup(
+	ctx context.Context,
+	cacheKey string,
+	listFn func(context.Context) ([]string, error),
+	call *vcsLookupCall,
+) {
+	values, err := listFn(ctx)
+
+	c.inflightMu.Lock()
+	call.values = values
+	call.err = err
+	if c.inflight[cacheKey] == call {
+		delete(c.inflight, cacheKey)
+	}
+	c.inflightMu.Unlock()
+	close(call.done)
+}
+
+func waitForVCSLookup(ctx context.Context, call *vcsLookupCall) ([]string, error) {
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-call.done:
+		return append([]string(nil), call.values...), call.err
+	}
 }
 
 func (c *VCSCompleter) storeCachedValues(cacheKey string, values []string) {
