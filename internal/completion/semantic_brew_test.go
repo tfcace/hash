@@ -107,6 +107,49 @@ func TestBrewHandler_ReturnsWhenListCommandIgnoresContext(t *testing.T) {
 	}
 }
 
+func TestBrewHandler_CoalescesFreshBlockedLookupAndRetriesWhenStale(t *testing.T) {
+	release := make(chan struct{})
+	defer close(release)
+	var calls atomic.Int32
+	h := &BrewHandler{
+		runCommand: func(ctx context.Context, name string, args ...string) ([]string, error) {
+			call := calls.Add(1)
+			if call <= 2 {
+				<-release
+				return []string{"stale"}, nil
+			}
+			if len(args) > 1 && args[1] == "--formula" {
+				return []string{"git"}, nil
+			}
+			if len(args) > 1 && args[1] == "--cask" {
+				return []string{"firefox"}, nil
+			}
+			return nil, nil
+		},
+	}
+
+	for i := 0; i < 2; i++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+		result := h.Complete(ctx, []string{"upgrade"}, "")
+		cancel()
+		if len(result.Items) != 0 {
+			t.Fatalf("expected no items from blocked brew lookup, got %#v", result.Items)
+		}
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("expected second blocked brew completion to coalesce, got %d command calls", got)
+	}
+
+	time.Sleep(90 * time.Millisecond)
+	result := h.Complete(context.Background(), []string{"upgrade"}, "")
+	if got := calls.Load(); got != 4 {
+		t.Fatalf("expected stale brew lookup to retry formula and cask queries, got %d calls", got)
+	}
+	if len(result.Items) != 2 {
+		t.Fatalf("expected fresh brew formula and cask packages after stale retry, got %#v", result.Items)
+	}
+}
+
 func TestBrewHandler_CachesInstalledPackages(t *testing.T) {
 	var calls atomic.Int32
 	h := &BrewHandler{
