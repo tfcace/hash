@@ -6,7 +6,9 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/tfcace/hash/internal/trace"
 )
@@ -37,6 +39,18 @@ func (m *cancelingCompleter) Complete(ctx context.Context, line string, pos int)
 	return Result{}, nil
 }
 
+type blockingCountingCompleter struct {
+	release <-chan struct{}
+	calls   atomic.Int32
+}
+
+func (m *blockingCountingCompleter) Name() string { return "blocking-counting" }
+func (m *blockingCountingCompleter) Complete(ctx context.Context, line string, pos int) (Result, error) {
+	m.calls.Add(1)
+	<-m.release
+	return Result{Items: []Item{{Value: "late-result"}}}, nil
+}
+
 func TestRouter_StopsWhenContextCanceled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	first := &cancelingCompleter{name: "canceling", cancel: cancel}
@@ -62,6 +76,29 @@ func TestRouter_StopsWhenContextCanceled(t *testing.T) {
 	}
 	if len(result.Items) != 0 {
 		t.Fatalf("expected no completions after cancellation, got %#v", result.Items)
+	}
+}
+
+func TestRouter_CompleteBoundedDoesNotPileUpStuckWorkers(t *testing.T) {
+	release := make(chan struct{})
+	defer close(release)
+	blocking := &blockingCountingCompleter{release: release}
+
+	router := NewRouter()
+	router.Register(blocking, PriorityFilesystem)
+
+	ctx1, cancel1 := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	_, _ = router.CompleteBounded(ctx1, "cat ", len("cat "))
+	cancel1()
+	if got := blocking.calls.Load(); got != 1 {
+		t.Fatalf("expected first bounded completion to start one worker, got %d", got)
+	}
+
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	_, _ = router.CompleteBounded(ctx2, "cat ", len("cat "))
+	cancel2()
+	if got := blocking.calls.Load(); got != 1 {
+		t.Fatalf("expected second bounded completion not to start duplicate stuck worker, got %d calls", got)
 	}
 }
 

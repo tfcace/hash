@@ -4,6 +4,7 @@ import (
 	"context"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/tfcace/hash/internal/trace"
@@ -11,8 +12,10 @@ import (
 
 // Router dispatches completion requests to registered completers.
 type Router struct {
-	completers []registeredCompleter
-	fuzzy      bool
+	completers      []registeredCompleter
+	fuzzy           bool
+	boundedMu       sync.Mutex
+	boundedInFlight bool
 }
 
 type registeredCompleter struct {
@@ -151,9 +154,13 @@ func (r *Router) CompleteBounded(ctx context.Context, line string, pos int) (Res
 	if err := ctx.Err(); err != nil {
 		return Result{}, err
 	}
+	if !r.beginBoundedCompletion() {
+		return Result{}, nil
+	}
 
 	done := make(chan boundedCompletionResult, 1)
 	go func() {
+		defer r.endBoundedCompletion()
 		result, err := r.Complete(ctx, line, pos)
 		done <- boundedCompletionResult{result: result, err: err}
 	}()
@@ -164,6 +171,22 @@ func (r *Router) CompleteBounded(ctx context.Context, line string, pos int) (Res
 	case result := <-done:
 		return result.result, result.err
 	}
+}
+
+func (r *Router) beginBoundedCompletion() bool {
+	r.boundedMu.Lock()
+	defer r.boundedMu.Unlock()
+	if r.boundedInFlight {
+		return false
+	}
+	r.boundedInFlight = true
+	return true
+}
+
+func (r *Router) endBoundedCompletion() {
+	r.boundedMu.Lock()
+	r.boundedInFlight = false
+	r.boundedMu.Unlock()
 }
 
 // extractCompletionQuery extracts the word being completed.
