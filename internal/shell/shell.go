@@ -1571,7 +1571,7 @@ func makeEditorCompleteFunc(router *completion.Router) func(string, int) []edito
 
 func makeEditorPrefetchFunc(router *completion.Router) func(string, int) {
 	return func(line string, pos int) {
-		router.Prefetch(line, pos)
+		router.PrefetchBounded(line, pos)
 	}
 }
 

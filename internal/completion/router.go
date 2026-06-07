@@ -12,10 +12,12 @@ import (
 
 // Router dispatches completion requests to registered completers.
 type Router struct {
-	completers      []registeredCompleter
-	fuzzy           bool
-	boundedMu       sync.Mutex
-	boundedInFlight bool
+	completers       []registeredCompleter
+	fuzzy            bool
+	boundedMu        sync.Mutex
+	boundedInFlight  bool
+	prefetchMu       sync.Mutex
+	prefetchInFlight bool
 }
 
 type registeredCompleter struct {
@@ -251,4 +253,31 @@ func (r *Router) Prefetch(line string, pos int) {
 			p.Prefetch(line, pos)
 		}
 	}
+}
+
+// PrefetchBounded runs prefetch work in the background and coalesces stuck prefetchers.
+func (r *Router) PrefetchBounded(line string, pos int) {
+	if !r.beginPrefetch() {
+		return
+	}
+	go func() {
+		defer r.endPrefetch()
+		r.Prefetch(line, pos)
+	}()
+}
+
+func (r *Router) beginPrefetch() bool {
+	r.prefetchMu.Lock()
+	defer r.prefetchMu.Unlock()
+	if r.prefetchInFlight {
+		return false
+	}
+	r.prefetchInFlight = true
+	return true
+}
+
+func (r *Router) endPrefetch() {
+	r.prefetchMu.Lock()
+	r.prefetchInFlight = false
+	r.prefetchMu.Unlock()
 }

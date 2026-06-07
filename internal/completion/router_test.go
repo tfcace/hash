@@ -51,6 +51,20 @@ func (m *blockingCountingCompleter) Complete(ctx context.Context, line string, p
 	return Result{Items: []Item{{Value: "late-result"}}}, nil
 }
 
+type blockingPrefetchCompleter struct {
+	release <-chan struct{}
+	calls   atomic.Int32
+}
+
+func (m *blockingPrefetchCompleter) Name() string { return "blocking-prefetch" }
+func (m *blockingPrefetchCompleter) Complete(ctx context.Context, line string, pos int) (Result, error) {
+	return Result{}, nil
+}
+func (m *blockingPrefetchCompleter) Prefetch(line string, pos int) {
+	m.calls.Add(1)
+	<-m.release
+}
+
 func TestRouter_StopsWhenContextCanceled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	first := &cancelingCompleter{name: "canceling", cancel: cancel}
@@ -99,6 +113,47 @@ func TestRouter_CompleteBoundedDoesNotPileUpStuckWorkers(t *testing.T) {
 	cancel2()
 	if got := blocking.calls.Load(); got != 1 {
 		t.Fatalf("expected second bounded completion not to start duplicate stuck worker, got %d calls", got)
+	}
+}
+
+func TestRouter_PrefetchBoundedDoesNotBlock(t *testing.T) {
+	release := make(chan struct{})
+	defer close(release)
+	blocking := &blockingPrefetchCompleter{release: release}
+
+	router := NewRouter()
+	router.Register(blocking, PriorityToolNative)
+
+	start := time.Now()
+	router.PrefetchBounded("kubectl ", len("kubectl "))
+	elapsed := time.Since(start)
+	if elapsed > 50*time.Millisecond {
+		t.Fatalf("PrefetchBounded took %s with blocking prefetcher, want under 50ms", elapsed)
+	}
+	if !eventuallyTrue(100*time.Millisecond, func() bool {
+		return blocking.calls.Load() == 1
+	}) {
+		t.Fatalf("expected bounded prefetch to start one background prefetch, got %d", blocking.calls.Load())
+	}
+}
+
+func TestRouter_PrefetchBoundedDoesNotPileUpStuckWorkers(t *testing.T) {
+	release := make(chan struct{})
+	defer close(release)
+	blocking := &blockingPrefetchCompleter{release: release}
+
+	router := NewRouter()
+	router.Register(blocking, PriorityToolNative)
+
+	router.PrefetchBounded("kubectl ", len("kubectl "))
+	if !eventuallyTrue(100*time.Millisecond, func() bool {
+		return blocking.calls.Load() == 1
+	}) {
+		t.Fatalf("expected first bounded prefetch to start one worker, got %d", blocking.calls.Load())
+	}
+	router.PrefetchBounded("kubectl get ", len("kubectl get "))
+	if got := blocking.calls.Load(); got != 1 {
+		t.Fatalf("expected second bounded prefetch not to start duplicate stuck worker, got %d calls", got)
 	}
 }
 
@@ -421,6 +476,17 @@ func TestRouter_FuzzyGetter(t *testing.T) {
 	if router.Fuzzy() {
 		t.Error("Fuzzy should be false after SetFuzzy(false)")
 	}
+}
+
+func eventuallyTrue(timeout time.Duration, fn func() bool) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if fn() {
+			return true
+		}
+		time.Sleep(time.Millisecond)
+	}
+	return fn()
 }
 
 // mockEnvProvider implements EnvProvider for testing
