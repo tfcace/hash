@@ -342,6 +342,31 @@ func TestRouter_PrefetchBoundedDoesNotPileUpStuckWorkers(t *testing.T) {
 	}
 }
 
+func TestRouter_PrefetchBoundedRetriesStaleStuckWorker(t *testing.T) {
+	release := make(chan struct{})
+	defer close(release)
+	blocking := &blockingPrefetchCompleter{release: release}
+
+	router := NewRouter()
+	router.Register(blocking, PriorityToolNative)
+
+	router.PrefetchBounded("kubectl ", len("kubectl "))
+	if !eventuallyTrue(100*time.Millisecond, func() bool {
+		return blocking.calls.Load() == 1
+	}) {
+		t.Fatalf("expected first bounded prefetch to start one worker, got %d", blocking.calls.Load())
+	}
+
+	time.Sleep(90 * time.Millisecond)
+
+	router.PrefetchBounded("kubectl get ", len("kubectl get "))
+	if !eventuallyTrue(100*time.Millisecond, func() bool {
+		return blocking.calls.Load() == 2
+	}) {
+		t.Fatalf("expected stale stuck prefetch worker to be retried, got %d calls", blocking.calls.Load())
+	}
+}
+
 func TestRouter_PrefetchBoundedDoesNotStarveLaterPrefetchers(t *testing.T) {
 	release := make(chan struct{})
 	defer close(release)

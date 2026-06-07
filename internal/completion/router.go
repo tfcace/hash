@@ -18,7 +18,7 @@ type Router struct {
 	completerMu       sync.Mutex
 	completerInFlight map[uint64]completerInFlightCall
 	prefetchMu        sync.Mutex
-	prefetchInFlight  map[uint64]bool
+	prefetchInFlight  map[uint64]prefetchInFlightCall
 }
 
 type registeredCompleter struct {
@@ -38,6 +38,10 @@ type completerCallResult struct {
 }
 
 type completerInFlightCall struct {
+	started time.Time
+}
+
+type prefetchInFlightCall struct {
 	started time.Time
 }
 
@@ -317,12 +321,15 @@ func (r *Router) beginPrefetch(key uint64) bool {
 	r.prefetchMu.Lock()
 	defer r.prefetchMu.Unlock()
 	if r.prefetchInFlight == nil {
-		r.prefetchInFlight = make(map[uint64]bool)
+		r.prefetchInFlight = make(map[uint64]prefetchInFlightCall)
 	}
-	if r.prefetchInFlight[key] {
-		return false
+	now := time.Now()
+	if call, ok := r.prefetchInFlight[key]; ok {
+		if !contextReadCallIsStale(call.started, now, 0) {
+			return false
+		}
 	}
-	r.prefetchInFlight[key] = true
+	r.prefetchInFlight[key] = prefetchInFlightCall{started: now}
 	return true
 }
 
