@@ -106,12 +106,13 @@ func (r *InputReader) DrainPending() {
 
 		// Parse and queue the key
 		var key Key
-		if r.buf[0] == 0x1b {
+		switch {
+		case r.buf[0] == 0x1b:
 			// Might be start of escape sequence - try to read more
 			key = r.drainEscapeSequence(fd)
-		} else if r.buf[0] >= utf8.RuneSelf {
+		case r.buf[0] >= utf8.RuneSelf:
 			key = r.drainUTF8Rune(fd)
-		} else {
+		default:
 			key = ParseKey(r.buf[:1])
 		}
 

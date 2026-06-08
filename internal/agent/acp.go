@@ -781,11 +781,11 @@ func promptStopReason(result json.RawMessage) string {
 	if rawIsEmpty(result) {
 		return "unknown"
 	}
-	var promptResult promptResult
-	if err := json.Unmarshal(result, &promptResult); err != nil || promptResult.StopReason == "" {
+	var parsedPromptResult promptResult
+	if err := json.Unmarshal(result, &parsedPromptResult); err != nil || parsedPromptResult.StopReason == "" {
 		return "unknown"
 	}
-	return promptResult.StopReason
+	return parsedPromptResult.StopReason
 }
 
 // handleIncomingRequest processes requests from the agent (like session/request_permission).

@@ -66,9 +66,6 @@ func TestAgentConversationReplyPromptLabelsUser(t *testing.T) {
 
 func TestAgentConversationInputFrame(t *testing.T) {
 	frame := agentConversationInputFrame(true)
-	if frame == nil {
-		t.Fatal("agentConversationInputFrame returned nil")
-	}
 	if frame.Prefix != agentConversationReplyPrompt {
 		t.Fatalf("frame prefix = %q, want reply prompt %q", frame.Prefix, agentConversationReplyPrompt)
 	}

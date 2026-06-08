@@ -205,7 +205,7 @@ func (c *CobraCompleter) Prefetch(line string, pos int) {
 	go c.prefetchCommand(prefetchKey, cmdName, args)
 }
 
-func (c *CobraCompleter) prefetchCommand(prefetchKey string, cmdName string, args []string) {
+func (c *CobraCompleter) prefetchCommand(prefetchKey, cmdName string, args []string) {
 	cmdPath, err := c.lookPath(cmdName)
 	if err != nil {
 		if errors.Is(err, errCobraLookPathBusy) {

@@ -1225,7 +1225,7 @@ func (s *Shell) streamAgentFollowUpTurn(
 	ctx context.Context,
 	reply string,
 	transcript []agentConversationMessage,
-) (agent.Response, string, int, bool) {
+) (response agent.Response, responseText string, lineCount int, ok bool) {
 	requestCtx, timeoutCancel := context.WithTimeout(ctx, s.agentRequestTimeout())
 	defer timeoutCancel()
 
@@ -1263,7 +1263,7 @@ func (s *Shell) streamAgentFollowUpTurn(
 		return agent.Response{}, "", 0, false
 	}
 
-	responseText := strings.TrimSpace(streamResult.responseText)
+	responseText = strings.TrimSpace(streamResult.responseText)
 	if responseText == "" {
 		s.responseUI.ClearLine()
 		s.responseUI.ShowError(emptyAgentResponseMessage)

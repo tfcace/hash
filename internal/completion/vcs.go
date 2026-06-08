@@ -192,22 +192,22 @@ func (c *VCSCompleter) lookupAndFilter(ctx context.Context, kind string, listFn 
 	return result
 }
 
-func (c *VCSCompleter) lookupValues(ctx context.Context, kind string, listFn func(context.Context) ([]string, error)) ([]string, bool, error) {
+func (c *VCSCompleter) lookupValues(ctx context.Context, kind string, listFn func(context.Context) ([]string, error)) (values []string, fresh bool, err error) {
 	cacheKey := c.cacheKey(kind)
 	if c.cacheTTL > 0 {
 		now := c.timeNow()
 		c.cacheMu.Lock()
 		if c.cache != nil {
 			if cached, ok := c.cache[cacheKey]; ok && now.Before(cached.expiresAt) {
-				values := append([]string(nil), cached.values...)
+				cachedValues := append([]string(nil), cached.values...)
 				c.cacheMu.Unlock()
-				return values, true, nil
+				return cachedValues, true, nil
 			}
 		}
 		c.cacheMu.Unlock()
 	}
 
-	values, err := c.lookupStringValues(ctx, cacheKey, listFn)
+	values, err = c.lookupStringValues(ctx, cacheKey, listFn)
 	if err != nil {
 		if ctx.Err() == nil {
 			c.storeCachedValues(cacheKey, nil)

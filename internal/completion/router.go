@@ -97,15 +97,13 @@ func (r *Router) Complete(ctx context.Context, line string, pos int) (Result, er
 	}
 
 	for _, rc := range r.completers {
-		select {
-		case <-ctx.Done():
+		if ctx.Err() != nil {
 			if traceEnabled {
 				trace.Emit("completion", "router_canceled", trace.LevelDetailed, map[string]any{
 					"duration_ms": float64(time.Since(start).Microseconds()) / 1000.0,
 				})
 			}
 			return Result{}, nil
-		default:
 		}
 
 		completerStart := time.Now()
@@ -135,20 +133,7 @@ func (r *Router) Complete(ctx context.Context, line string, pos int) (Result, er
 		}
 
 		if len(result.Items) > 0 {
-			// Apply fuzzy filtering if enabled
-			// Skip if query ends with "/" - we're listing directory contents, not filtering
-			if r.fuzzy && query != "" && !strings.HasSuffix(query, "/") {
-				// For paths like "~/Go", only filter on the basename "Go"
-				// The prefix (directory path) is handled by the completer
-				filterQuery := query
-				if lastSlash := strings.LastIndex(query, "/"); lastSlash >= 0 {
-					filterQuery = query[lastSlash+1:]
-				}
-				if filterQuery != "" {
-					result.Items = FuzzyFilter(result.Items, filterQuery)
-				}
-			}
-			result.Items = limitCompletionItems(result.Items)
+			result = r.finalizeResult(result, query)
 			if traceEnabled {
 				trace.Emit("completion", "router_done", trace.LevelDetailed, map[string]any{
 					"winner":      rc.completer.Name(),
@@ -168,6 +153,24 @@ func (r *Router) Complete(ctx context.Context, line string, pos int) (Result, er
 		})
 	}
 	return Result{}, nil
+}
+
+func (r *Router) finalizeResult(result Result, query string) Result {
+	if r.fuzzy && query != "" && !strings.HasSuffix(query, "/") {
+		filterQuery := basenameCompletionQuery(query)
+		if filterQuery != "" {
+			result.Items = FuzzyFilter(result.Items, filterQuery)
+		}
+	}
+	result.Items = limitCompletionItems(result.Items)
+	return result
+}
+
+func basenameCompletionQuery(query string) string {
+	if lastSlash := strings.LastIndex(query, "/"); lastSlash >= 0 {
+		return query[lastSlash+1:]
+	}
+	return query
 }
 
 func (r *Router) completeWithBoundary(ctx context.Context, rc registeredCompleter, line string, pos int) (Result, error) {

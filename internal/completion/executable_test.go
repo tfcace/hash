@@ -145,8 +145,8 @@ func TestExecutableCompleter_ReturnsEmptyWhenContextCanceledBeforeFiltering(t *t
 	cancel()
 
 	result, err := c.Complete(ctx, "cmd-", len("cmd-"))
-	if err != nil {
-		t.Fatalf("Complete() error = %v", err)
+	if err == nil {
+		t.Fatal("expected context cancellation error")
 	}
 	if len(result.Items) != 0 {
 		t.Fatalf("expected no executable completions after context cancellation, got %d", len(result.Items))

@@ -75,15 +75,15 @@ func (c *ExecutableCompleter) Complete(ctx context.Context, line string, pos int
 
 	// Get executables from PATH
 	executables := c.getExecutables(ctx)
-	if ctx.Err() != nil {
-		return Result{}, nil
+	if err := ctx.Err(); err != nil {
+		return Result{}, err
 	}
 
 	items := make([]Item, 0, min(len(executables), 50))
 	lowerPrefix := strings.ToLower(prefix)
 	for _, exe := range executables {
-		if ctx.Err() != nil {
-			return Result{}, nil
+		if err := ctx.Err(); err != nil {
+			return Result{}, err
 		}
 		if prefix == "" || strings.HasPrefix(strings.ToLower(exe), lowerPrefix) {
 			items = append(items, Item{

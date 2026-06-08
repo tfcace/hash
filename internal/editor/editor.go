@@ -420,25 +420,12 @@ func (e *Editor) handleKeyEvent(key Key) (Result, bool) {
 		"mode":              e.mode.Name(),
 	})
 
-	// Handle Ctrl+C
-	if key.Ctrl && key.Rune == 'c' {
-		return e.handleCtrlC()
-	}
-
-	// Handle Ctrl+D - exit shell (EOF)
-	if key.Ctrl && key.Rune == 'd' {
-		if e.state.Buffer.Content() == "" {
-			return Result{EOF: true}, true
-		}
-		return Result{}, false
+	if result, done, handled := e.handleControlKey(key); handled {
+		return result, done
 	}
 
 	if e.config.CancelOnEscape && key.Special == KeyEscape {
-		e.dismissCompletion()
-		e.ghost.Clear()
-		e.ghostTextChan = nil
-		e.ghostErrChan = nil
-		return Result{Canceled: true}, true
+		return e.cancelInput(), true
 	}
 
 	// Handle ghost text interception
@@ -466,6 +453,33 @@ func (e *Editor) handleKeyEvent(key Key) (Result, bool) {
 	e.state.Cursor.Clamp(e.state.Buffer)
 	e.render()
 	return Result{}, false
+}
+
+func (e *Editor) handleControlKey(key Key) (Result, bool, bool) {
+	if !key.Ctrl {
+		return Result{}, false, false
+	}
+
+	switch key.Rune {
+	case 'c':
+		result, done := e.handleCtrlC()
+		return result, done, true
+	case 'd':
+		if e.state.Buffer.Content() == "" {
+			return Result{EOF: true}, true, true
+		}
+		return Result{}, false, true
+	default:
+		return Result{}, false, false
+	}
+}
+
+func (e *Editor) cancelInput() Result {
+	e.dismissCompletion()
+	e.ghost.Clear()
+	e.ghostTextChan = nil
+	e.ghostErrChan = nil
+	return Result{Canceled: true}
 }
 
 // handleCtrlC handles Ctrl+C key press.

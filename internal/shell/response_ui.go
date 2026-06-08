@@ -105,7 +105,7 @@ func NewResponseUI(out io.Writer) *ResponseUI {
 		out:         out,
 		in:          os.Stdin,
 		progress:    progress.NewOSC(out),
-		spinnerRand: rand.New(rand.NewSource(time.Now().UnixNano())),
+		spinnerRand: rand.New(rand.NewSource(time.Now().UnixNano())), //nolint:gosec // UI animation jitter does not require crypto randomness.
 	}
 }
 
@@ -206,7 +206,7 @@ func selectAgentStatusMotion(frame int, rng agentStatusRandom) string {
 	return agentStatusReplacementPool[frame%len(agentStatusReplacementPool)]
 }
 
-func formatAgentStatusMotion(text string, motion string) string {
+func formatAgentStatusMotion(text, motion string) string {
 	if motion == "" {
 		return fmt.Sprintf(" \033[90m%s\033[0m", text)
 	}

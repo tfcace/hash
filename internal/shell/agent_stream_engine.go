@@ -40,7 +40,6 @@ func (s *Shell) collectAgentStream(
 
 	firstChunkSeen := false
 	trimLeadingResponse := opts.trimLeadingNewline
-	trimLeadingRender := opts.trimLeadingNewline
 
 	var flushTimer *time.Timer
 	var flushTimerC <-chan time.Time
@@ -106,12 +105,6 @@ collectLoop:
 			}
 
 			responseText := trimLeadingSingleNewline(text, &trimLeadingResponse)
-			renderText := trimLeadingSingleNewline(text, &trimLeadingRender)
-			if responseText != renderText {
-				// Leading-newline trimming is configured the same way for both paths,
-				// but keep response/render text coherent if that ever changes.
-				renderText = responseText
-			}
 			cleanText := sanitizer.Write(responseText)
 			appendResponse(cleanText)
 			writeRendered(renderer.Write(cleanText))
