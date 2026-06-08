@@ -780,6 +780,8 @@ const zoxideQueryCompatPattern = "result=\"$(\\command zoxide query --exclude \"
 const zoxideInteractiveStrictPattern = `result="$(\command zoxide query --interactive -- "$@")" && __zoxide_cd "${result}"`
 const zoxideInteractiveCompatPattern = "result=\"$(\\command zoxide query --interactive -- \"$@\" || \\builtin true)\"\n    result=\"${result%$'\\r'}\"\n    [[ -n \"${result}\" ]] && __zoxide_cd \"${result}\""
 const zoxideQueryStrictLine = `result="$(\command zoxide query --exclude "$(__zoxide_pwd)" -- "$@")"`
+const escapedBuiltinLocal = `\builtin local `
+const builtinLocal = `builtin local `
 
 // sanitizeUnsupportedExpansions rewrites bash expansions that currently panic in
 // mvdan/sh. Keep transformations minimal and syntax-preserving.
@@ -787,6 +789,14 @@ func sanitizeUnsupportedExpansions(src string) (sanitized string, changed bool) 
 	sanitized = src
 	if strings.Contains(sanitized, unsupportedPromptCommandTrim) {
 		sanitized = strings.ReplaceAll(sanitized, unsupportedPromptCommandTrim, `${PROMPT_COMMAND}`)
+		changed = true
+	}
+	if strings.Contains(sanitized, escapedBuiltinLocal) {
+		sanitized = strings.ReplaceAll(sanitized, escapedBuiltinLocal, `local `)
+		changed = true
+	}
+	if strings.Contains(sanitized, builtinLocal) {
+		sanitized = strings.ReplaceAll(sanitized, builtinLocal, `local `)
 		changed = true
 	}
 	if strings.Contains(sanitized, zoxideQueryStrictPattern) {

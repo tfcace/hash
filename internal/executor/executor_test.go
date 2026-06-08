@@ -1336,6 +1336,9 @@ function z() { __zoxide_z "$@"; }
 	if err != nil {
 		t.Fatalf("eval+z failed: %v, stderr: %s", err, stderr.String())
 	}
+	if strings.Contains(stderr.String(), "unsupported builtin") {
+		t.Fatalf("zoxide shim should not emit unsupported builtin noise, stderr: %q", stderr.String())
+	}
 
 	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
 	if len(lines) < 2 {
