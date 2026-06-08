@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/creack/pty"
+	"mvdan.cc/sh/v3/syntax"
 )
 
 func TestExecute_SimpleCommand(t *testing.T) {
@@ -1254,6 +1255,23 @@ fi
 	}
 	if !strings.Contains(stdout.String(), "__zoxide_hook") {
 		t.Fatalf("PROMPT_COMMAND should include __zoxide_hook, got %q", stdout.String())
+	}
+}
+
+func TestExecutor_StatementRecoveryDoesNotPrintUnsupportedNoise(t *testing.T) {
+	exec := New()
+	var stderr bytes.Buffer
+	exec.switchStderr.Set(&stderr)
+	if err := exec.initRunner(); err != nil {
+		t.Fatalf("initRunner error = %v", err)
+	}
+
+	prog := &syntax.File{Stmts: []*syntax.Stmt{nil}}
+	if err := exec.runStatementsWithRecovery(context.Background(), prog, "test.zsh"); err != nil {
+		t.Fatalf("runStatementsWithRecovery error = %v", err)
+	}
+	if strings.Contains(stderr.String(), "unsupported") || strings.Contains(stderr.String(), "skipping statement") {
+		t.Fatalf("statement recovery should stay quiet, stderr: %q", stderr.String())
 	}
 }
 

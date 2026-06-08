@@ -99,19 +99,36 @@ func (s *Shell) sourceFile(ctx context.Context, path string) error {
 		return fmt.Errorf("is a directory")
 	}
 
-	// Read file content
-	content, err := os.ReadFile(path)
+	filtered, _, err := compat.FilterWithDialect(path, sourceShellForPath(path), s.shellDialect())
 	if err != nil {
 		return err
 	}
 
 	// Execute as shell commands
-	_, err = s.executor.Execute(ctx, string(content), os.Stdout, os.Stderr)
+	_, err = s.executor.Execute(ctx, filtered, os.Stdout, os.Stderr)
 	trace.Emit("compat", "source_file_done", trace.LevelVerbose, map[string]any{
 		"path":  path,
 		"error": fmt.Sprintf("%v", err),
 	})
 	return err
+}
+
+func sourceShellForPath(path string) string {
+	base := filepath.Base(path)
+	switch base {
+	case ".zshrc", ".zprofile", ".zshenv", ".zlogin", ".zlogout":
+		return "zsh"
+	case ".bashrc", ".bash_profile", ".bash_login", ".profile":
+		return "bash"
+	}
+	switch filepath.Ext(base) {
+	case ".zsh":
+		return "zsh"
+	case ".bash", ".sh":
+		return "bash"
+	default:
+		return ""
+	}
 }
 
 // runStartupCommand executes a single startup command.

@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"mvdan.cc/sh/v3/syntax"
 )
 
 func TestSourceWithCompat_Aliases(t *testing.T) {
@@ -162,6 +164,31 @@ setopt AUTO_CD
 	}
 	if report.Summary.Skipped != 1 {
 		t.Fatalf("Skipped = %d, want 1 for setopt only", report.Summary.Skipped)
+	}
+}
+
+func TestFilterWithDialect_SkippedLineInsideIfLeavesStatement(t *testing.T) {
+	tmpDir := t.TempDir()
+	rcFile := filepath.Join(tmpDir, ".zshrc")
+	content := `if [[ "${TERM:-}" != "dumb" ]]; then
+  _cached_eval starship starship init zsh
+fi
+`
+	if err := os.WriteFile(rcFile, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	filtered, report, err := FilterWithDialect(rcFile, "zsh", "bash")
+	if err != nil {
+		t.Fatalf("FilterWithDialect error = %v", err)
+	}
+	if report.Summary.Skipped != 1 {
+		t.Fatalf("Skipped = %d, want 1", report.Summary.Skipped)
+	}
+
+	parser := syntax.NewParser(syntax.Variant(syntax.LangBash))
+	if _, err := parser.Parse(strings.NewReader(filtered), rcFile); err != nil {
+		t.Fatalf("filtered startup file should parse, got %v\nfiltered:\n%s", err, filtered)
 	}
 }
 

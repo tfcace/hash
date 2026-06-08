@@ -60,7 +60,7 @@ func FilterWithDialect(path, shell, targetDialect string) (string, *Report, erro
 		// Check for shell-specific tool initializations that Hash handles natively.
 		if reason := shouldSkipLine(trimmed, targetDialect); reason != "" {
 			report.AddSkipped(i+1, trimmed, reason)
-			filteredLines = append(filteredLines, "# [hash-compat] "+line)
+			filteredLines = append(filteredLines, hashCompatNoop(line))
 			continue
 		}
 
@@ -70,8 +70,7 @@ func FilterWithDialect(path, shell, targetDialect string) (string, *Report, erro
 			// Execute no-op and log
 			args := strings.Fields(trimmed)[1:]
 			fn(args, report) //nolint:errcheck // no-op functions don't fail
-			// Replace with comment to preserve line numbers
-			filteredLines = append(filteredLines, "# [hash-compat] "+line)
+			filteredLines = append(filteredLines, hashCompatNoop(line))
 			// Update line number in last skipped item
 			if len(report.SkippedItems) > 0 {
 				report.SkippedItems[len(report.SkippedItems)-1].Line = i + 1
@@ -107,6 +106,12 @@ func FilterWithDialect(path, shell, targetDialect string) (string, *Report, erro
 	})
 
 	return strings.Join(filteredLines, "\n"), report, nil
+}
+
+func hashCompatNoop(line string) string {
+	trimmedLeft := strings.TrimLeft(line, " \t")
+	indent := line[:len(line)-len(trimmedLeft)]
+	return indent + ": # [hash-compat] " + strings.TrimSpace(line)
 }
 
 // SourceWithCompat sources a shell rc file with graceful error handling.
@@ -153,7 +158,7 @@ func SourceWithDialect(ctx context.Context, path, shell, targetDialect string, s
 		// Check for shell-specific tool initializations that Hash handles natively.
 		if reason := shouldSkipLine(trimmed, targetDialect); reason != "" {
 			report.AddSkipped(i+1, trimmed, reason)
-			filteredLines = append(filteredLines, "# [hash-compat] "+line)
+			filteredLines = append(filteredLines, hashCompatNoop(line))
 			continue
 		}
 
@@ -163,8 +168,7 @@ func SourceWithDialect(ctx context.Context, path, shell, targetDialect string, s
 			// Execute no-op and log
 			args := strings.Fields(trimmed)[1:]
 			fn(args, report) //nolint:errcheck // no-op functions don't fail
-			// Replace with comment to preserve line numbers
-			filteredLines = append(filteredLines, "# [hash-compat] "+line)
+			filteredLines = append(filteredLines, hashCompatNoop(line))
 			// Update line number in last skipped item
 			if len(report.SkippedItems) > 0 {
 				report.SkippedItems[len(report.SkippedItems)-1].Line = i + 1

@@ -863,7 +863,7 @@ func (e *Executor) handleSourceWithDialect(ctx context.Context, path string) err
 				"path":  path,
 				"error": err.Error(),
 			})
-			return e.runStatementsWithRecovery(ctx, prog, path, hc.Stderr)
+			return e.runStatementsWithRecovery(ctx, prog, path)
 		}
 		return err
 	}
@@ -872,7 +872,6 @@ func (e *Executor) handleSourceWithDialect(ctx context.Context, path string) err
 
 // handleEvalWithDialect parses and executes args with the configured parser dialect.
 func (e *Executor) handleEvalWithDialect(ctx context.Context, args []string) error {
-	hc := interp.HandlerCtx(ctx)
 	src := strings.Join(args, " ")
 	parsedSrc, sanitized := sanitizeUnsupportedExpansions(src)
 	if sanitized {
@@ -904,7 +903,7 @@ func (e *Executor) handleEvalWithDialect(ctx context.Context, args []string) err
 				"src_preview": truncateForTrace(src, 200),
 				"error":       err.Error(),
 			})
-			return e.runStatementsWithRecovery(ctx, prog, "eval", hc.Stderr)
+			return e.runStatementsWithRecovery(ctx, prog, "eval")
 		}
 		return err
 	}
@@ -914,14 +913,13 @@ func (e *Executor) handleEvalWithDialect(ctx context.Context, args []string) err
 // runStatementsWithRecovery executes a program's statements one at a time,
 // skipping any that panic. This allows function definitions to survive even
 // when other statements (like zoxide's PROMPT_COMMAND manipulation) crash.
-func (e *Executor) runStatementsWithRecovery(ctx context.Context, prog *syntax.File, source string, stderr io.Writer) error {
+func (e *Executor) runStatementsWithRecovery(ctx context.Context, prog *syntax.File, source string) error {
 	var lastErr error
 	for i, stmt := range prog.Stmts {
 		// Wrap each statement in a File node for runner.Run()
 		single := &syntax.File{Stmts: []*syntax.Stmt{stmt}}
 		if err := e.safeRunNode(ctx, single); err != nil {
 			if strings.HasPrefix(err.Error(), "interpreter panic:") {
-				fmt.Fprintf(stderr, "hash: %s: skipping statement %d (unsupported syntax)\n", source, i+1)
 				trace.Emit("compat", "stmt_panic_skip", trace.LevelVerbose, map[string]any{
 					"source":    source,
 					"statement": i + 1,
