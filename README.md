@@ -143,7 +143,7 @@ This project uses [jj (Jujutsu)](https://github.com/martinvonz/jj) for version c
 
 ## See also
 
-**[Warp](https://www.warp.dev/)** pioneered the modern terminal experience. Hash borrows ideas but takes a different path: Hash is a shell that runs in any terminal (not a macOS app), works with any agent (not a built-in one), and keeps everything local and open source. If you want a polished, integrated product, Warp is excellent. If you want hackability and agent choice, that's Hash.
+**[Warp](https://www.warp.dev/)** pioneered the modern AI terminal, and since April 2026 its client is open source (AGPL). The differences are architectural: Warp is a terminal emulator you switch to, with AI that runs through Warp's cloud behind an account and metered credits. Hash is a shell that runs inside the terminal you already use, talks to any agent over an open protocol (ACP), and keeps everything local. If you want a polished, integrated product, Warp is excellent. If you want hackability and agent choice, that's Hash.
 
 **[Butterfish](https://butterfi.sh)** wraps your existing shell with OpenAI-powered help; Hash replaces the shell, is agent-agnostic, and learns from your error fixes locally. Choose Butterfish for a quick overlay without switching shells; choose Hash for deeper integration and local-first data.
 
