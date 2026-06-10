@@ -21,8 +21,14 @@ func main() {
 	args := os.Args[1:]
 
 	// Handle subcommands before flag parsing
-	if len(args) > 0 && args[0] == "migrate" {
-		os.Exit(runMigrate(args[1:]))
+	if len(args) > 0 {
+		switch args[0] {
+		case "migrate":
+			os.Exit(runMigrate(args[1:]))
+		case "version":
+			printVersion()
+			os.Exit(0)
+		}
 	}
 
 	// Parse flags manually (order-independent)
@@ -92,6 +98,7 @@ Options:
   -h, --help      Show this help
 
 Subcommands:
+  version         Show version
   migrate         Import compatible bash/zsh settings
 
 Interactive builtins:

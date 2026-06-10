@@ -19,6 +19,7 @@ import (
 	"github.com/creack/pty"
 	"github.com/tfcace/hash/internal/progress"
 	"github.com/tfcace/hash/internal/trace"
+	"github.com/tfcace/hash/internal/version"
 	"golang.org/x/sys/unix"
 	"golang.org/x/term"
 	"mvdan.cc/sh/v3/expand"
@@ -655,6 +656,21 @@ func (e *Executor) initRunner() error {
 	return nil
 }
 
+// hashHelpText is shown for `hash --help` / `hash -h` from within the Hash
+// shell. It is intentionally concise; the full launch-time flag help lives in
+// cmd/hash (package main) and is reached via `/usr/local/bin/hash --help`.
+const hashHelpText = `Hash (Harness Assisted SHell)
+
+You are already running inside Hash.
+
+  hash version        Show the Hash version
+  tips                Show common shortcuts and AI (??) syntax
+  status              Show subsystem status
+
+Invoke the agent with ?? (e.g. '?? find large files').
+Run '/usr/local/bin/hash --help' for launch flags.
+`
+
 // shellBuiltinHandler intercepts source/. and eval commands to parse with the configured dialect.
 // This uses CallHandler which runs for ALL commands including builtins, unlike
 // ExecHandler which only runs for external commands.
@@ -686,9 +702,34 @@ func (e *Executor) shellBuiltinHandler(ctx context.Context, args []string) ([]st
 		e.trackUnsetFunctions(args)
 		return args, nil
 
+	case "hash":
+		return e.handleHashCall(ctx, args)
+
 	default:
 		return args, nil
 	}
+}
+
+// handleHashCall lets `hash version` / `hash --version` / `hash -v` (and
+// --help/-h) report Hash's own version/help from within the Hash shell.
+// The command name "hash" collides with the POSIX hash builtin, which mvdan/sh
+// stubs as a no-op; without this override these would print nothing. Genuine
+// POSIX hash usage (`hash`, `hash -r`, `hash name`, ...) falls through to that
+// no-op unchanged, since none of those forms use these arguments.
+func (e *Executor) handleHashCall(ctx context.Context, args []string) ([]string, error) {
+	if len(args) >= 2 {
+		switch args[1] {
+		case "version", "--version", "-v":
+			hc := interp.HandlerCtx(ctx)
+			fmt.Fprintf(hc.Stdout, "hash %s\n", version.String())
+			return []string{":"}, nil
+		case "--help", "-h":
+			hc := interp.HandlerCtx(ctx)
+			fmt.Fprint(hc.Stdout, hashHelpText)
+			return []string{":"}, nil
+		}
+	}
+	return args, nil
 }
 
 // handleCdDoubleDash strips "--" from cd arguments.

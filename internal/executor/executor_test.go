@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/creack/pty"
+	"github.com/tfcace/hash/internal/version"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -136,6 +137,57 @@ func TestExecute_ExitCode(t *testing.T) {
 
 	if result.ExitCode != 42 {
 		t.Errorf("ExitCode = %d, want 42", result.ExitCode)
+	}
+}
+
+// `hash` collides with the POSIX no-op builtin in mvdan/sh, which would
+// otherwise swallow these args and print nothing. Hash overrides the version
+// and help forms so they report Hash's own info from within the Hash shell.
+func TestExecute_HashVersionReachesBinary(t *testing.T) {
+	want := "hash " + version.String() + "\n"
+
+	for _, cmd := range []string{"hash version", "hash --version", "hash -v"} {
+		t.Run(cmd, func(t *testing.T) {
+			exec := New()
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+
+			var stdout bytes.Buffer
+			result, err := exec.Execute(ctx, cmd, &stdout, nil)
+			if err != nil {
+				t.Fatalf("Execute(%q) error = %v", cmd, err)
+			}
+			if result.ExitCode != 0 {
+				t.Errorf("ExitCode = %d, want 0", result.ExitCode)
+			}
+			if stdout.String() != want {
+				t.Errorf("stdout = %q, want %q", stdout.String(), want)
+			}
+		})
+	}
+}
+
+// Genuine POSIX hash usage must keep falling through to the no-op builtin:
+// it should produce no output and succeed, exactly as before.
+func TestExecute_HashPosixUsagePreserved(t *testing.T) {
+	for _, cmd := range []string{"hash", "hash -r", "hash ls"} {
+		t.Run(cmd, func(t *testing.T) {
+			exec := New()
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+
+			var stdout bytes.Buffer
+			result, err := exec.Execute(ctx, cmd, &stdout, nil)
+			if err != nil {
+				t.Fatalf("Execute(%q) error = %v", cmd, err)
+			}
+			if result.ExitCode != 0 {
+				t.Errorf("ExitCode = %d, want 0", result.ExitCode)
+			}
+			if stdout.String() != "" {
+				t.Errorf("stdout = %q, want empty", stdout.String())
+			}
+		})
 	}
 }
 
