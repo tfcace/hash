@@ -9,10 +9,16 @@ func TestAgentStateLabel(t *testing.T) {
 		model string
 		want  string
 	}{
-		{"thinking with model", AgentStateThinking, "Sonnet", "agent · thinking [Sonnet]"},
+		{"thinking with model", AgentStateThinking, "Sonnet", "agent · thinking · Sonnet"},
 		{"thinking no model", AgentStateThinking, "", "agent · thinking"},
-		{"connecting with model", AgentStateConnecting, "Haiku", "agent · connecting [Haiku]"},
+		{"connecting with model", AgentStateConnecting, "Haiku", "agent · connecting · Haiku"},
 		{"receiving no model", AgentStateReceiving, "", "agent · receiving"},
+		// The agent appends " (recommended)" to its default model name; drop it.
+		{"strips recommended", AgentStateThinking, "Default (recommended)", "agent · thinking · Default"},
+		// Model names can contain brackets (e.g. value "sonnet[1m]"), which is
+		// why the label uses "·" instead of wrapping the name in [ ].
+		{"name with brackets", AgentStateThinking, "Sonnet (1M context)", "agent · thinking · Sonnet (1M context)"},
+		{"only whitespace model", AgentStateThinking, "   ", "agent · thinking"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

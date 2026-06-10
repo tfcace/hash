@@ -6,6 +6,7 @@ import (
 	"io"
 	"math/rand"
 	"os"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -84,15 +85,30 @@ func (s AgentState) String() string {
 	}
 }
 
-// agentStateLabel renders the spinner label, appending the active model in
-// square brackets (e.g. "agent · thinking [Sonnet]"). An empty model omits the
-// brackets entirely.
+// agentStateLabel renders the spinner label, appending the active model after a
+// "·" separator (e.g. "agent · thinking · Sonnet"). An empty model omits it.
+//
+// We use "·" rather than wrapping the name in [ ] because model names can
+// themselves contain brackets (the agent advertises values like "sonnet[1m]"
+// and names like "Sonnet (1M context)"), which would otherwise nest awkwardly.
 func agentStateLabel(state AgentState, model string) string {
 	label := state.String()
-	if model != "" {
-		label += " [" + model + "]"
+	if m := cleanModelLabel(model); m != "" {
+		label += " · " + m
 	}
 	return label
+}
+
+// cleanModelLabel tidies an agent-advertised model name for display: it trims
+// surrounding whitespace and drops the trailing " (recommended)" tag the agent
+// appends to its default model.
+func cleanModelLabel(model string) string {
+	model = strings.TrimSpace(model)
+	const tag = " (recommended)"
+	if len(model) >= len(tag) && strings.EqualFold(model[len(model)-len(tag):], tag) {
+		model = strings.TrimSpace(model[:len(model)-len(tag)])
+	}
+	return model
 }
 
 // ResponseUI handles displaying agent responses.
