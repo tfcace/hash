@@ -259,7 +259,7 @@ func TestShell_HandleToolPermission_RefreshesProjectAllowlist(t *testing.T) {
 		agentOutput:  NewAgentOutputCoordinator(io.Discard),
 		responseUI:   NewResponseUI(io.Discard),
 		colorPalette: prompt.DefaultPalette(),
-		readKey: func() byte {
+		readKey: func(context.Context) byte {
 			return 'n'
 		},
 	}
@@ -268,12 +268,12 @@ func TestShell_HandleToolPermission_RefreshesProjectAllowlist(t *testing.T) {
 		t.Fatalf("chdir(projectB): %v", err)
 	}
 
-	allow, always := sh.handleToolPermission(agent.ToolPermissionRequest{Command: "git status", ToolName: "Bash"})
+	allow, always := sh.handleToolPermission(context.Background(), agent.ToolPermissionRequest{Command: "git status", ToolName: "Bash"})
 	if allow || always {
 		t.Fatalf("projectA approval should not be reused in projectB, got allow=%v always=%v", allow, always)
 	}
 
-	allow, always = sh.handleToolPermission(agent.ToolPermissionRequest{Command: "npm test", ToolName: "Bash"})
+	allow, always = sh.handleToolPermission(context.Background(), agent.ToolPermissionRequest{Command: "npm test", ToolName: "Bash"})
 	if !allow || always {
 		t.Fatalf("projectB allowlist should be loaded after chdir, got allow=%v always=%v", allow, always)
 	}

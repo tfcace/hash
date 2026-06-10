@@ -70,7 +70,7 @@ type ACPTransport struct {
 	done     chan struct{}
 
 	// Permission handler callback
-	permissionHandler  func(req ToolPermissionRequest) (allow bool, always bool)
+	permissionHandler  func(ctx context.Context, req ToolPermissionRequest) (allow bool, always bool)
 	permissionPromptMu sync.Mutex
 }
 
@@ -260,7 +260,9 @@ func NewACPTransport(cfg ACPConfig) *ACPTransport {
 // SetPermissionHandler sets the callback for handling permission requests.
 // The callback receives a ToolPermissionRequest and returns (allow, always).
 // If always is true, the command should be added to the allowlist.
-func (t *ACPTransport) SetPermissionHandler(handler func(req ToolPermissionRequest) (allow bool, always bool)) {
+// The context is the prompt turn's context: when the turn is canceled the
+// handler must stop waiting for user input and return (deny).
+func (t *ACPTransport) SetPermissionHandler(handler func(ctx context.Context, req ToolPermissionRequest) (allow bool, always bool)) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.permissionHandler = handler
@@ -789,10 +791,12 @@ func promptStopReason(result json.RawMessage) string {
 }
 
 // handleIncomingRequest processes requests from the agent (like session/request_permission).
-func (t *ACPTransport) handleIncomingRequest(id int64, method string, params json.RawMessage) {
+// ctx is the prompt turn's context; cancellation propagates to handlers that
+// wait on user input.
+func (t *ACPTransport) handleIncomingRequest(ctx context.Context, id int64, method string, params json.RawMessage) {
 	switch method {
 	case "session/request_permission":
-		t.handleRequestPermission(id, params)
+		t.handleRequestPermission(ctx, id, params)
 	default:
 		// Unknown method - send error response
 		t.sendResponse(id, nil, &jsonRPCError{
@@ -803,7 +807,7 @@ func (t *ACPTransport) handleIncomingRequest(id int64, method string, params jso
 }
 
 // handleRequestPermission handles permission requests from the agent.
-func (t *ACPTransport) handleRequestPermission(id int64, params json.RawMessage) {
+func (t *ACPTransport) handleRequestPermission(ctx context.Context, id int64, params json.RawMessage) {
 	var p requestPermissionParams
 	if err := json.Unmarshal(params, &p); err != nil {
 		t.sendResponse(id, nil, &jsonRPCError{
@@ -858,8 +862,11 @@ func (t *ACPTransport) handleRequestPermission(id int64, params json.RawMessage)
 			OptionID: resolveOptionID(p.Options, "reject_once", "reject"),
 		}
 	} else {
+		if ctx == nil {
+			ctx = context.Background()
+		}
 		t.permissionPromptMu.Lock()
-		allow, always := handler(req)
+		allow, always := handler(ctx, req)
 		t.permissionPromptMu.Unlock()
 		if allow {
 			if always {
@@ -1260,7 +1267,7 @@ func (t *ACPTransport) sendStreamingAttempt( //nolint:gocyclo // streaming proto
 				permissionRequestsInFlight.Add(1)
 				go func(id int64, method string, params json.RawMessage) {
 					defer permissionRequestsInFlight.Add(-1)
-					t.handleIncomingRequest(id, method, params)
+					t.handleIncomingRequest(ctx, id, method, params)
 				}(*msg.ID, msg.Method, msg.Params)
 				continue
 			}

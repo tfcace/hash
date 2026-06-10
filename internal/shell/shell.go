@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"golang.org/x/sys/unix"
 	"golang.org/x/term"
 
 	"github.com/tfcace/hash/internal/agent"
@@ -62,7 +63,7 @@ type Shell struct {
 	colorPalette        prompt.Palette
 	allowlist           *allowlist.Manager
 	agentOutput         *AgentOutputCoordinator
-	readKey             func() byte
+	readKey             func(ctx context.Context) byte
 	agentReplyInputHook func(context.Context) (string, error)
 	lastExitCode        int
 	lastDuration        time.Duration
@@ -1054,9 +1055,12 @@ func (s *Shell) handleAgentFullStreaming(ctx context.Context, parsed parser.Pars
 
 	streamResult := s.collectAgentStream(ctx, textCh, errCh, agentStreamCollectionOptions{
 		onFirstChunk: func() {
+			// Stop the spinner before claiming the line. ClearActiveLine
+			// (not ClearLine) so an active permission prompt keeps its
+			// last line intact; StartStreaming defers to the prompt too.
+			s.responseUI.StopSpinner()
 			s.agentOutput.StartStreaming()
-			s.responseUI.ShowState(AgentStateReceiving)
-			s.responseUI.ClearLine()
+			s.agentOutput.ClearActiveLine()
 		},
 		writeRendered: func(rendered string) {
 			s.agentOutput.WriteStream(rendered)
@@ -1237,9 +1241,10 @@ func (s *Shell) streamAgentFollowUpTurn(
 
 	streamResult := s.collectAgentStream(ctx, textCh, errCh, agentStreamCollectionOptions{
 		onFirstChunk: func() {
+			// Same permission-aware sequence as handleAgentFullStreaming.
+			s.responseUI.StopSpinner()
 			s.agentOutput.StartStreaming()
-			s.responseUI.ShowState(AgentStateReceiving)
-			s.responseUI.ClearLine()
+			s.agentOutput.ClearActiveLine()
 		},
 		writeRendered: func(rendered string) {
 			railPrefixer.Write(rendered)
@@ -1721,7 +1726,10 @@ func (s *Shell) runChpwdHook(ctx context.Context) {
 	}
 }
 
-func (s *Shell) handleToolPermission(req agent.ToolPermissionRequest) (allow, always bool) {
+// handleToolPermission prompts the user to approve an agent tool call.
+// Runs on the agent's permission goroutine; ctx is the prompt turn's
+// context, and cancellation aborts the prompt with a deny.
+func (s *Shell) handleToolPermission(ctx context.Context, req agent.ToolPermissionRequest) (allow, always bool) {
 	s.refreshProjectAllowlist()
 	if s.allowlist != nil && s.allowlist.IsAllowed(req.Command) {
 		trace.AgentHigh("tool_permission", map[string]any{
@@ -1749,7 +1757,7 @@ func (s *Shell) handleToolPermission(req agent.ToolPermissionRequest) (allow, al
 	if readKey == nil {
 		readKey = readSingleKey
 	}
-	key := readKey()
+	key := readKey(ctx)
 	allow, always = permissionDecisionForKey(key)
 
 	if always && s.allowlist != nil {
@@ -1812,11 +1820,21 @@ func permissionDecisionForKey(key byte) (allow, always bool) {
 	}
 }
 
-const permissionPromptInputSettleDelay = 10 * time.Millisecond
+const (
+	permissionPromptInputSettleDelay = 10 * time.Millisecond
+	permissionPromptPollInterval     = 50 * time.Millisecond
+)
 
-// readSingleKey reads a single keypress from stdin.
-// Returns the key byte (handles escape sequences for special keys).
-func readSingleKey() byte {
+// readSingleKey reads a single keypress from stdin while the given context
+// is alive. Returns the key byte (handles escape sequences for special keys),
+// or 'n' (deny) when ctx is canceled before a key arrives.
+//
+// The read must be cancellable: it runs on the agent's permission goroutine
+// with the terminal in raw mode. A non-cancellable read would outlive a
+// canceled turn, steal the next keystroke, and restore the terminal state
+// underneath the line editor, leaving the shell in raw mode (which renders
+// subsequent streamed output diagonally).
+func readSingleKey(ctx context.Context) byte {
 	fd := int(os.Stdin.Fd())
 
 	// Put terminal in raw mode to read single character
@@ -1826,11 +1844,13 @@ func readSingleKey() byte {
 	}
 	defer term.Restore(fd, oldState)
 
-	return readSingleKeyWithHooks(fd, os.Stdin.Read, drainStdin, time.Sleep)
+	return readSingleKeyWithHooks(ctx, fd, pollStdin, os.Stdin.Read, drainStdin, time.Sleep)
 }
 
 func readSingleKeyWithHooks(
+	ctx context.Context,
 	fd int,
+	poll func(fd int, timeout time.Duration) (bool, error),
 	read func([]byte) (int, error),
 	drain func(int),
 	sleep func(time.Duration),
@@ -1855,6 +1875,18 @@ func readSingleKeyWithHooks(
 	// This is a defense-in-depth measure — permissionDecisionForKey also
 	// rejects these, but discarding them here avoids a spurious "deny".
 	for {
+		if ctx != nil && ctx.Err() != nil {
+			return 'n' // Turn canceled - deny and release the terminal
+		}
+
+		ready, err := poll(fd, permissionPromptPollInterval)
+		if err != nil {
+			return 'n'
+		}
+		if !ready {
+			continue // Timeout - re-check cancellation
+		}
+
 		n, err := read(buf)
 		if err != nil || n < 1 {
 			return 'n'
@@ -1868,6 +1900,22 @@ func readSingleKeyWithHooks(
 		}
 		// Discard stale newline, read again
 	}
+}
+
+// pollStdin waits up to timeout for input to become readable on fd.
+func pollStdin(fd int, timeout time.Duration) (bool, error) {
+	var readSet unix.FdSet
+	readSet.Set(fd)
+	tv := unix.NsecToTimeval(timeout.Nanoseconds())
+
+	n, err := unix.Select(fd+1, &readSet, nil, nil, &tv)
+	if err != nil {
+		if err == unix.EINTR {
+			return false, nil // Interrupted by signal - treat as timeout
+		}
+		return false, err
+	}
+	return n > 0, nil
 }
 
 // drainStdinBriefly waits briefly for terminal responses to arrive, then drains stdin.

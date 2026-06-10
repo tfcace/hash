@@ -77,9 +77,16 @@ func (aoc *AgentOutputCoordinator) State() AgentOutputState {
 }
 
 // StartStreaming transitions to streaming state.
+// If a permission prompt is active, the prompt keeps ownership of the
+// terminal: the state stays PERMISSION (so chunks buffer) and streaming
+// resumes when the prompt is cleared.
 func (aoc *AgentOutputCoordinator) StartStreaming() {
 	aoc.mu.Lock()
 	defer aoc.mu.Unlock()
+	if aoc.state == AgentOutputStatePermission {
+		aoc.wasStreaming = true
+		return
+	}
 	aoc.state = AgentOutputStateStreaming
 	aoc.streamBuffer.Reset()
 }
@@ -150,6 +157,19 @@ func (aoc *AgentOutputCoordinator) Write(p []byte) (n int, err error) {
 func (aoc *AgentOutputCoordinator) ClearLine() {
 	aoc.mu.Lock()
 	defer aoc.mu.Unlock()
+	fmt.Fprint(aoc.out, "\r\x1b[K")
+}
+
+// ClearActiveLine clears the current terminal line unless a permission
+// prompt owns the screen, in which case clearing would erase the prompt's
+// last line. Checking the state and writing under one lock closes the race
+// against RenderPermissionPrompt.
+func (aoc *AgentOutputCoordinator) ClearActiveLine() {
+	aoc.mu.Lock()
+	defer aoc.mu.Unlock()
+	if aoc.state == AgentOutputStatePermission {
+		return
+	}
 	fmt.Fprint(aoc.out, "\r\x1b[K")
 }
 
@@ -250,8 +270,17 @@ func sanitizeTerminalText(text string) string {
 
 // ClearPermissionPrompt removes the permission prompt and resumes streaming.
 // Shows feedback with the command that was allowed/denied.
+// No-op when the prompt no longer owns the screen (e.g. the turn was
+// canceled and Cancel already cleared it): clearing lines here would erase
+// unrelated output.
 func (aoc *AgentOutputCoordinator) ClearPermissionPrompt(allowed bool) {
 	aoc.mu.Lock()
+
+	if aoc.state != AgentOutputStatePermission {
+		aoc.pendingCommand = ""
+		aoc.mu.Unlock()
+		return
+	}
 
 	// Truncate command if too long
 	cmd := aoc.pendingCommand

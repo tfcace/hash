@@ -300,6 +300,42 @@ func TestRunAgentConversationLoop_SendsFollowUpReply(t *testing.T) {
 	}
 }
 
+func TestStreamAgentFollowUpTurn_FirstChunkDuringPermissionPrompt(t *testing.T) {
+	var out strings.Builder
+	mock := agent.NewMockTransport(agent.Response{
+		Type:        agent.ResponseTypeExplanation,
+		Explanation: "All done.",
+	})
+	aoc := NewAgentOutputCoordinator(&out)
+	sh := &Shell{
+		config:       config.Default(),
+		agentHandler: NewAgentHandler(agent.NewClient(mock)),
+		responseUI:   NewResponseUI(&out),
+		agentOutput:  aoc,
+	}
+
+	// A tool permission prompt is pending (terminal in raw mode) when the
+	// first text chunk arrives. The chunk must be buffered, not written.
+	aoc.EnterPermission()
+
+	_, text, _, ok := sh.streamAgentFollowUpTurn(context.Background(), "go ahead", nil)
+	if !ok {
+		t.Fatal("streamAgentFollowUpTurn failed")
+	}
+	if !strings.Contains(text, "All done.") {
+		t.Fatalf("response text not collected, got %q", text)
+	}
+	if strings.Contains(out.String(), "All done.") {
+		t.Fatalf("chunk written to terminal while permission prompt active:\n%q", out.String())
+	}
+	// Exactly one clear-line: the post-stream spinner cleanup. The
+	// first-chunk clear must be skipped while the prompt is up, or it
+	// erases the prompt's keybinding line.
+	if got := strings.Count(out.String(), "\r\x1b[K"); got != 1 {
+		t.Fatalf("expected 1 clear-line sequence, got %d in %q", got, out.String())
+	}
+}
+
 func TestRunAgentConversationLoop_ExitReplyDoesNotCallAgent(t *testing.T) {
 	mock := agent.NewMockTransport(agent.Response{
 		Type:        agent.ResponseTypeExplanation,
