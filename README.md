@@ -4,19 +4,17 @@
 [![Go Reference](https://pkg.go.dev/badge/github.com/tfcace/hash.svg)](https://pkg.go.dev/github.com/tfcace/hash)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-**Harness Assisted SHell** — A Go-based shell with editor-style input, Helix keybindings, and agent-agnostic AI integration.
+**Harness Assisted SHell** — a Go shell with editor-style input, Helix keybindings, and agent-agnostic AI integration.
 
 > **⚠️ Early Stage Project**
 >
-> Hash is under active development. Expect bugs and breaking changes before 1.0. The 0.5.x line is the tool-calling release line, with safer agent permissions and daily-driver polish around setup, configuration, and shell compatibility.
+> Hash is under active development. Expect bugs and breaking changes before 1.0.
+> The 0.6 line adds turn-by-turn agent conversations, experimental zsh dialect
+> support, and a refreshed Claude ACP adapter setup.
 
 ## What is Hash?
 
 Hash is a shell that treats AI as a first-class citizen without locking you into any particular model or vendor. Drop `??` anywhere in a command to get help:
-
-<p align="center">
-  <img src="demos/hero.gif" alt="Hash demo showing ?? agent invocation" width="800">
-</p>
 
 ```bash
 # Generate a command from natural language
@@ -33,204 +31,22 @@ git log --format=?? oneline with hash
 → git log --format="%h %s"
 ```
 
-No mode switching. No special commands. Just `??` where you need help.
+No mode switching. No special commands. Just `??` where you need help. And when the agent answers with a question, Hash opens a conversation prompt so you can reply turn by turn in the same session.
 
-## Features
+## Highlights
 
-### Agent Agnostic
+- **Agent-agnostic** — any ACP agent (Claude, Gemini CLI) over stdio, or Ollama-style HTTP model servers.
+- **Explicit permissions** — agent tool calls prompt allow/deny/always, with approvals scoped per project, globally, or per session.
+- **Turn-by-turn conversations** *(new in 0.6)* — follow-up questions continue in the same agent session; leave with Esc, `/exit`, or just "done".
+- **Context you control** — the Ctrl+P picker decides exactly what is sent to the agent.
+- **Learns locally** — repeated error fixes are suggested instantly, no agent call, nothing leaves your machine.
+- **Editor-style input** — multiline editing, visual selection, Helix/Vim/Emacs keybindings.
+- **Smart completion** — tool-native (Cobra), aliases and functions, env vars, files, agent fallback.
+- **Rich history** — SQLite with full-text search, sudo tracking, and agent-interaction recall.
+- **Plays nice** — Starship prompts, shell-integration escapes (OSC 133), zoxide/direnv/fzf setup, configurable builtins.
+- **Experimental zsh dialect** *(new in 0.6)* — parse commands and startup files as zsh via `shell.dialect`.
 
-Use any AI that speaks ACP or HTTP. For Claude, install the current ACP adapter:
-
-```bash
-npm install -g @agentclientprotocol/claude-agent-acp
-```
-
-Then configure one agent directly:
-
-```toml
-[agent]
-transport = "stdio"
-command = "claude-agent-acp"
-```
-
-Or define named agents and select one with `default`:
-
-```toml
-[agent]
-default = "ollama"
-
-[agent.claude]
-transport = "stdio"
-command = "claude-agent-acp"
-
-[agent.ollama]
-transport = "http"
-url = "http://localhost:11434/api/generate"
-model = "codellama:13b"
-```
-
-### Agent Permissions
-
-When the agent wants to run a command, Hash asks for permission:
-
-```
-▌ Agent wants to run:
-▌ kubectl get pods
-▌
-▌ [y]allow  [n]deny  [a]always allow this command
-```
-
-- Press **y** or **Enter** to allow once
-- Press **n** or **Esc** to deny
-- Press **a** to allow and remember (won't ask again for this exact command)
-
-Configure where "always allowed" commands are stored:
-
-```toml
-[agent]
-allowed_commands_scope = "project"  # or "global" or "session"
-```
-
-- **project** — Per-directory under `~/.config/hash/project_allowlists/`
-- **global** — Shared across all projects in `~/.config/hash/allowed_commands.json`
-- **session** — In memory only, cleared when shell exits
-
-### Adaptive Learning
-
-Hash learns from how you fix errors. After seeing you run `chmod +x` a few times after "Permission denied", it suggests the fix instantly — no agent call needed:
-
-<p align="center">
-  <img src="demos/learning.gif" alt="Hash learning from error fixes" width="800">
-</p>
-
-```
-$ ./deploy.sh
-bash: ./deploy.sh: Permission denied
-
-✗ Exit 126 │ Learned fix available
-
-→ chmod +x ./deploy.sh    (worked 12 times)
-  [Enter: run] [Tab: edit] [?: ask agent] [Esc: dismiss]
-```
-
-### Context Picker (Ctrl+P)
-
-Control exactly what context goes to the agent with an interactive TUI:
-- Press **Ctrl+P** to open the context picker
-- Toggle items with **Space**, select all with **a**, none with **n**
-- Auto-detected context (cwd, git branch, kube context) is pre-selected
-- Add history commands, environment variables, or last output as needed
-- Your selections persist for the shell session
-- Press **Enter** to confirm, **Esc** to cancel
-
-<p align="center">
-  <img src="demos/context-picker.gif" alt="Context picker TUI" width="800">
-</p>
-
-```
-┌─ Context for Agent ─────────────────────────────────────┐
-│ ▸ History                                    [3 items]  │
-│   [✓] kubectl get pods -n staging                       │
-│   [✓] docker ps --format "{{.Names}}"                   │
-│   [ ] cd ~/projects/hash                                │
-│                                                         │
-│ ▸ Environment                                [2 items]  │
-│   [✓] KUBECONFIG=/Users/me/.kube/config                 │
-│   [ ] AWS_PROFILE=production                            │
-├─────────────────────────────────────────────────────────┤
-│  Context: ████████░░░░░░  2.1 KB / ~8 KB recommended    │
-└─────────────────────────────────────────────────────────┘
-```
-
-### Editor-Style Input
-
-The prompt behaves like a code editor, not a line input. Multiline editing, visual selection, and full keyboard navigation — just like Warp:
-
-```
-$ docker run -d \
-    --name myapp \
-    -p 8080:80 \
-    -v $(pwd):/app \
-    myimage:latest
-│ ← visual gutter shows editable area
-```
-
-- **Multiline native** — Enter inserts newlines, Escape → Enter submits (in Helix mode)
-- **Visual selection** — Select text with keyboard, yank/paste with system clipboard
-- **Helix keybindings** — Selection-first editing: `x` selects line, `w` extends to word, `d` deletes selection
-- **Universal shortcuts** — Ctrl+A/E, Alt+arrows work everywhere
-- **Sub-millisecond latency** — Raw terminal I/O, feels identical to readline
-
-```toml
-[input]
-keybindings = "helix"  # or "emacs"
-gutter = true          # show visual indicator
-```
-
-### Tab Completion
-
-Smart completions with intelligent fallback:
-
-1. **Tool-native** (10-200ms) — Cobra `__complete` for kubectl, docker, helm, etc.
-2. **Aliases & functions** (<5ms) — Your defined aliases and shell functions (ƒ icon)
-3. **Environment variables** — `$VAR` and `${VAR}` expansion with value preview (sensitive values like `API_KEY` are masked)
-4. **Executables** — Commands from your PATH
-5. **Filesystem** (<10ms) — Paths, globs, hidden file toggle
-6. **Agent-assisted** (200-800ms) — When you need AI help mid-command
-
-### Rich History with Full-Text Search
-
-SQLite-backed history with sudo tracking, agent interaction recall, and FTS5 search:
-
-```bash
-$ history search "kubectl delete"
-$ history failed                    # commands that failed
-$ history sudo                      # privileged commands
-$ history asked "docker"            # what you asked the AI
-```
-
-### Starship Prompt Support
-
-Use your existing [Starship](https://starship.rs) configuration, or Hash's built-in Lipgloss-powered engine with Powerline support:
-
-```toml
-[prompt]
-mode = "starship"  # or "built-in"
-```
-
-### Clipboard Integration
-
-Copy commands and output without reaching for the mouse:
-
-| Key | Action |
-|-----|--------|
-| `Alt+c` | Copy last command |
-| `Alt+o` | Copy last output |
-| `Alt+Shift+c` | Copy command + output |
-
-### Progress Bars for Long Commands
-
-Hash shows progress indication (OSC 9;4) in supporting terminals when commands run longer than 2 seconds. Works with Windows Terminal, ConEmu, and iTerm2.
-
-### Shell Integration
-
-Hash emits standard shell integration escape sequences (OSC 133) supported by modern terminals. This enables:
-
-- **Prompt navigation** — Jump between commands with Cmd+Up/Down (iTerm2) or Ctrl+Shift+Z/X (Kitty/Ghostty)
-- **Output selection** — Triple-click or Cmd+click to select entire command output
-- **Directory inheritance** — New tabs/panes open in the current working directory
-- **Smart resizing** — Prompts redraw cleanly when terminal is resized
-
-Shell integration works automatically with no configuration required. Supported terminals include iTerm2, Ghostty, Kitty, WezTerm, and Windows Terminal.
-
-### Configurable Builtins
-
-Disable built-in commands to use external alternatives like [zoxide](https://github.com/ajeetdsouza/zoxide) or [eza](https://github.com/eza-community/eza):
-
-```toml
-[shell]
-disable_builtins = ["cd"]  # Let zoxide handle cd
-```
+Full guides, tutorials, and troubleshooting live at **[runhash.dev](https://runhash.dev/)**.
 
 ## Installation
 
@@ -241,9 +57,9 @@ brew tap tfcace/hash
 brew install hash
 ```
 
-### From Source
+### From source
 
-Requires Go 1.25+.
+Requires Go 1.25+ and a C compiler (for SQLite).
 
 ```bash
 git clone https://github.com/tfcace/hash.git
@@ -251,147 +67,51 @@ cd hash
 go build -o /usr/local/bin/hash ./cmd/hash
 ```
 
-For development builds with version info:
+## Configure an agent
+
+For Claude over ACP, install the adapter:
 
 ```bash
-./scripts/build.sh            # Builds to ./hash
-./scripts/build.sh --install  # Builds to /usr/local/bin/hash
+npm install -g @agentclientprotocol/claude-agent-acp
 ```
 
-### Development Setup
-
-If you're developing Hash from source, you can optionally add these helper functions to `~/.hashrc`:
-
-```bash
-# Point to your hash source directory
-export HASH_SRC="$HOME/path/to/hash"
-
-# Quick rebuild for testing (runs from working tree)
-hash-rebuild() {
-    [[ -z "$HASH_SRC" ]] && echo "Set HASH_SRC to your hash source directory" && return 1
-    (cd "$HASH_SRC" && ./scripts/build.sh)
-    "$HASH_SRC/hash" --version
-}
-
-# Build and install to /usr/local/bin (stable location)
-hash-upgrade() {
-    [[ -z "$HASH_SRC" ]] && echo "Set HASH_SRC to your hash source directory" && return 1
-    (cd "$HASH_SRC" && ./scripts/build.sh --install)
-    /usr/local/bin/hash --version
-}
-```
-
-This lets you run `hash-rebuild` to quickly test changes, or `hash-upgrade` to install a new version system-wide.
-
-## Configuration
-
-Hash uses TOML configuration at `~/.config/hash/config.toml`:
+Then point Hash at it in `~/.config/hash/config.toml`:
 
 ```toml
-[shell]
-editor = "hx"
-keybindings = "helix"
-
 [agent]
 transport = "stdio"
 command = "claude-agent-acp"
-timeout = "120s"
-
-[completions]
-fuzzy = true
-file_icons = true
-
-[history]
-enabled = true
 ```
 
-See [docs/config-reference.md](docs/config-reference.md) for the complete reference.
+Authenticate with `ANTHROPIC_API_KEY`, or with your Claude subscription: on macOS, the adapter reuses the OAuth credentials from your Claude Code CLI login automatically.
 
-## Using as Login Shell
+Hash also supports named agent profiles and Ollama-style HTTP servers. See [docs/config-reference.md](docs/config-reference.md) for every option, or the [agents guide](https://runhash.dev/docs/agents) on the website.
 
-After installing Hash (see Installation above), set it as your login shell:
+## Using as login shell
 
 ```bash
-# Add to /etc/shells
 sudo sh -c 'echo $(which hash) >> /etc/shells'
-
-# Change your login shell
 chsh -s $(which hash)
 ```
 
-### Startup Files
+Login shells source `/etc/profile`, `~/.profile`, and `~/.hash_profile`; interactive shells source `~/.hashrc`. Hash parses shell code as bash by default — set `shell.dialect = "zsh"` (experimental) to parse zsh syntax and source your zsh startup files directly. See the [config reference](docs/config-reference.md) for details.
 
-Hash uses its own startup files by default:
+On first launch, Hash detects your previous shell and asks before loading compatible settings. Run `hash migrate` to re-run migration, or `hash migrate status` to see what was imported and skipped.
 
-| Mode | Environment | Files Sourced |
-|------|-------------|---------------|
-| Login | `HASH_LOGIN=1` | `/etc/profile`, `~/.profile`, `~/.hash_profile` |
-| Interactive | `HASH_INTERACTIVE=1` | `~/.hashrc` |
-| Login+Interactive | Both | All of the above, in order |
-| Non-interactive | Neither | `init_commands` only |
+## Documentation
 
-Hash parses shell code as bash by default. To opt into zsh parsing for commands,
-`source`, `eval`, configured startup files, and migrated zsh files:
+- **[runhash.dev](https://runhash.dev/)** — guides for syntax, agents, context, completion, learning, keybindings, integrations, migration, and advanced debugging (tracing, PTY logs, debug env vars).
+- **[docs/config-reference.md](docs/config-reference.md)** — the complete configuration reference.
 
-```toml
-[shell]
-dialect = "zsh"
-```
-
-Then configure zsh startup files explicitly if you want Hash to source them
-directly:
-
-```toml
-[shell.startup_files]
-login = ["/etc/zprofile", "~/.zprofile", "~/.hash_profile"]
-interactive = ["~/.zshrc", "~/.hashrc"]
-```
-
-Zsh parsing is experimental upstream. Hash still no-ops unsupported zsh
-integration builtins such as `bindkey`, `setopt`, and `compdef`, while bash mode
-continues to filter zsh-only migration lines for compatibility.
-
-**Recommended setup:**
+## Development
 
 ```bash
-# ~/.hash_profile - login shell setup (PATH, env vars)
-export PATH="$HOME/.local/bin:$PATH"
-export EDITOR=hx
-
-# ~/.hashrc - interactive shell setup (aliases, functions)
-alias ll='ls -la'
-alias g='git'
+go build -o hash ./cmd/hash    # Build
+./scripts/build.sh             # Build with version info (--install for /usr/local/bin)
+go test ./...                   # Run all tests
+go vet ./...                    # Lint
+go test -fuzz=Fuzz -fuzztime=30s ./internal/...   # Fuzz parser and learning
 ```
-
-### Session Markers
-
-Hash sets these environment variables:
-- `HASH_SHELL=1` — Always set
-- `HASH_LOGIN=1` — Set for login shells
-- `HASH_INTERACTIVE=1` — Set for interactive shells
-
-Use these in your scripts to detect Hash:
-
-```bash
-# In ~/.profile
-if [ "$HASH_SHELL" = "1" ]; then
-    # Hash-specific setup
-fi
-```
-
-### Migration from Bash/Zsh
-
-When you first launch Hash, it detects your previous shell and asks before
-loading compatible settings. Migration uses your configured `shell.dialect`:
-bash mode filters zsh-only init/eval lines, while zsh mode preserves zsh syntax
-where possible. Unsupported zsh shell/editor integration builtins such as
-`bindkey`, `setopt`, and `compdef` remain compatibility no-ops.
-
-**Aliases are converted to functions:** Hash converts `alias foo='cmd1 && cmd2'` to `foo() { cmd1 && cmd2; }` internally. This is transparent — you use the alias name normally, and it works as expected.
-
-Run `hash migrate` to re-run migration or `hash migrate status` to see what was imported/skipped.
-
-## Architecture
 
 ```
 hash/
@@ -409,138 +129,23 @@ hash/
 └── go.mod
 ```
 
-### Key Dependencies
-
-- **mvdan.cc/sh** — POSIX shell parser/interpreter
-- **charmbracelet/bubbletea** — TUI framework
-- **charmbracelet/lipgloss** — Styling
-- **creack/pty** — PTY handling
-- **mattn/go-sqlite3** — History storage
-
-## Development
-
-```bash
-go build -o hash ./cmd/hash    # Build
-go test ./...                   # Run all tests
-go vet ./...                    # Lint
-```
-
-### Fuzz Testing
-
-The parser and learning system have fuzz tests to catch edge cases:
-
-```bash
-# Run fuzz tests (30 seconds each)
-go test -fuzz=FuzzParse -fuzztime=30s ./internal/parser/...
-go test -fuzz=FuzzNormalizeError -fuzztime=30s ./internal/learning/...
-
-# Run all fuzz targets
-go test -fuzz=Fuzz -fuzztime=30s ./internal/...
-```
-
-Fuzz tests run automatically in CI on PRs that modify parser or learning code.
-
-### Demo Recordings
-
-Demo GIFs are generated using [VHS](https://github.com/charmbracelet/vhs):
-
-```bash
-# Install VHS
-brew install vhs  # or: go install github.com/charmbracelet/vhs@latest
-
-# Generate all demos
-for tape in demos/*.tape; do vhs "$tape"; done
-```
-
-See [`demos/README.md`](demos/README.md) for available demos.
+Key dependencies: `mvdan.cc/sh` (POSIX/zsh parsing and interpretation), `charmbracelet/bubbletea` and `lipgloss` (TUI), `creack/pty`, `mattn/go-sqlite3`.
 
 This project uses [jj (Jujutsu)](https://github.com/martinvonz/jj) for version control.
 
-## Advanced
+## Status & limitations
 
-### Debug Environment Variables
-
-These environment variables are for debugging and advanced use cases:
-
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `HASH_TRACE` | Enable shell tracing. Comma-separated subsystems: `editor`, `shell`, `agent`, `parser`, or `all`. | Disabled |
-| `HASH_TRACE_PATH` | Path for trace log file (JSONL format). | `./hash-trace.jsonl` |
-| `HASH_TRACE_LEVEL` | Trace verbosity: `verbose`, `detailed`, or `high`. | `verbose` |
-| `HASH_CLIPBOARD_MAX_OUTPUT_SIZE` | Maximum output capture per command. Accepts sizes like `1MB`, `512KB`, `unlimited`, or `0` to disable capture. | `1MB` |
-| `HASH_PTY_TRACE` | Enable PTY I/O tracing for debugging hangs. Set to `1` or `true` to enable. | Disabled |
-| `HASH_PTY_TRACE_PATH` | Path for PTY trace log file when tracing is enabled. | `./hash-pty-trace.log` |
-
-**Example: Shell tracing**
-
-```bash
-# Trace all subsystems
-HASH_TRACE=all HASH_TRACE_PATH=/tmp/hash-trace.jsonl ./hash
-
-# Trace only editor and shell with high-level events
-HASH_TRACE=editor,shell HASH_TRACE_LEVEL=high ./hash
-
-# View trace in real-time
-tail -f /tmp/hash-trace.jsonl | jq .
-```
-
-**Example: Debugging PTY issues**
-
-```bash
-# Enable PTY tracing to diagnose hangs
-export HASH_PTY_TRACE=1
-export HASH_PTY_TRACE_PATH=/tmp/hash-pty.log
-./hash
-
-# After reproducing the issue, check the log
-cat /tmp/hash-pty.log
-```
-
-**Example: Adjust output capture**
-
-```bash
-# Disable output capture entirely
-export HASH_CLIPBOARD_MAX_OUTPUT_SIZE=0
-
-# Capture unlimited output (use with caution)
-export HASH_CLIPBOARD_MAX_OUTPUT_SIZE=unlimited
-```
-
-## Status & Limitations
-
-Hash is under active development. Here's what to expect:
-
-- **Tested on** — macOS + Ghostty + Claude Code (with ACP) only. Other platforms, terminals, and agents may work but are untested.
+- **Tested on** — macOS + Ghostty + Claude (ACP via `claude-agent-acp`) only. Other platforms, terminals, and agents may work but are untested.
 - **Stability** — There will be bugs. Lots of them. File issues for anything broken.
 - **Performance** — Built for responsiveness, not raw throughput. Go is fast enough for a shell, but this isn't a Rust rewrite of bash.
 - **Scope** — This is shaped around my preferences (Helix keybindings, local-first, agent-agnostic). It may not fit yours.
 - **SSH** — Not supported. Hash is designed for local terminal use only.
 
-## See Also
+## See also
 
-### Warp
+**[Warp](https://www.warp.dev/)** pioneered the modern terminal experience. Hash borrows ideas but takes a different path: Hash is a shell that runs in any terminal (not a macOS app), works with any agent (not a built-in one), and keeps everything local and open source. If you want a polished, integrated product, Warp is excellent. If you want hackability and agent choice, that's Hash.
 
-[Warp](https://www.warp.dev/) pioneered the modern terminal experience with blocks, AI, and editor-style input. Hash borrows ideas from Warp but takes a different path:
-
-- Warp is a macOS app; Hash is a cross-platform shell that runs in any terminal
-- Warp has its own AI; Hash works with any agent (Claude, Ollama, Gemini, local models)
-- Warp syncs to the cloud; Hash keeps everything local
-- Warp is proprietary; Hash is open source
-
-If you want a polished, integrated experience and don't mind the lock-in, Warp is excellent. If you want hackability and agent choice, that's what Hash is for.
-
-### Butterfish
-
-[Butterfish](https://butterfi.sh) is an AI shell wrapper worth considering:
-
-- Butterfish wraps your existing shell; Hash replaces it
-- Butterfish uses OpenAI; Hash is agent-agnostic
-- Butterfish has a "goal mode" for autonomous execution; Hash requires explicit confirmation
-- Butterfish has no local learning; Hash learns from your error fixes over time
-
-**Choose Butterfish** if you want a quick overlay without switching shells, or prefer autonomous AI execution.
-
-**Choose Hash** if you want deeper integration, agent flexibility, or local-first data.
+**[Butterfish](https://butterfi.sh)** wraps your existing shell with OpenAI-powered help; Hash replaces the shell, is agent-agnostic, and learns from your error fixes locally. Choose Butterfish for a quick overlay without switching shells; choose Hash for deeper integration and local-first data.
 
 ## License
 

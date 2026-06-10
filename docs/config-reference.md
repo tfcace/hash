@@ -161,7 +161,7 @@ Prompt generation.
 | `starship_path` | string | auto-detected | Explicit path to the Starship binary. |
 | `alignment` | `"left"` \| `"right"` | `"left"` | Prompt alignment hint for the built-in prompt. |
 
-The built-in prompt is intentionally minimal in 0.5.x; advanced prompt theme and
+The built-in prompt is intentionally minimal in 0.6.x; advanced prompt theme and
 format tables are not currently supported.
 
 ## `[agent]`
@@ -223,7 +223,7 @@ Command history storage.
 | `enabled` | boolean | `true` | Enable SQLite-backed command history. |
 | `path` | string | `"~/.local/share/hash/history.db"` | History database path. |
 
-Retention limits are not implemented in 0.5.x.
+Retention limits are not implemented in 0.6.x.
 
 ## `[completions]`
 
@@ -236,7 +236,7 @@ Tab completion behavior.
 | `cobra_enabled` | boolean | `true` | Enable Cobra `__complete` integration. |
 | `mask_sensitive_env` | boolean | `true` | Mask sensitive environment variable values in previews. |
 
-Per-tool completion cache settings are not implemented in 0.5.x.
+Per-tool completion cache settings are not implemented in 0.6.x.
 
 ## `[clipboard]`
 
