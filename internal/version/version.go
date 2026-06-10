@@ -1,5 +1,7 @@
 package version
 
+import "runtime/debug"
+
 var (
 	Version   = "dev"
 	GitCommit = "unknown"
@@ -7,32 +9,60 @@ var (
 	BuildDate = "unknown"
 )
 
-func String() string {
-	v := Version
+// buildString formats the version string, falling back to Go build info
+// for values not injected via ldflags (e.g. go install or plain go build).
+func buildString(version, gitCommit, jjChange, buildDate string, info *debug.BuildInfo) string {
+	if info != nil {
+		if version == "dev" && info.Main.Version != "" && info.Main.Version != "(devel)" {
+			version = info.Main.Version
+		}
+		for _, s := range info.Settings {
+			switch s.Key {
+			case "vcs.revision":
+				if gitCommit == "unknown" || gitCommit == "" {
+					gitCommit = s.Value
+					if len(gitCommit) > 12 {
+						gitCommit = gitCommit[:12]
+					}
+				}
+			case "vcs.time":
+				if buildDate == "unknown" || buildDate == "" {
+					buildDate = s.Value
+				}
+			}
+		}
+	}
+
+	v := version
 
 	var vcsInfo []string
-	if JjChange != "unknown" && JjChange != "" {
-		vcsInfo = append(vcsInfo, "jj:"+JjChange)
+	if jjChange != "unknown" && jjChange != "" {
+		vcsInfo = append(vcsInfo, "jj:"+jjChange)
 	}
-	if GitCommit != "unknown" && GitCommit != "" {
-		vcsInfo = append(vcsInfo, "git:"+GitCommit)
+	if gitCommit != "unknown" && gitCommit != "" {
+		vcsInfo = append(vcsInfo, "git:"+gitCommit)
 	}
 
-	if len(vcsInfo) > 0 || (BuildDate != "unknown" && BuildDate != "") {
+	if len(vcsInfo) > 0 || (buildDate != "unknown" && buildDate != "") {
 		v += " ("
 		if len(vcsInfo) > 0 {
 			v += joinStrings(vcsInfo, " ")
 		}
-		if BuildDate != "unknown" && BuildDate != "" {
+		if buildDate != "unknown" && buildDate != "" {
 			if len(vcsInfo) > 0 {
 				v += " "
 			}
-			v += BuildDate
+			v += buildDate
 		}
 		v += ")"
 	}
 
 	return v
+}
+
+func String() string {
+	info, _ := debug.ReadBuildInfo()
+	return buildString(Version, GitCommit, JjChange, BuildDate, info)
 }
 
 func joinStrings(strs []string, sep string) string {
