@@ -33,6 +33,11 @@ func (t namedTestTransport) Name() string {
 	return t.name
 }
 
+func (t namedTestTransport) CurrentModel() string                   { return "" }
+func (t namedTestTransport) AvailableModels() []agent.ModelOption   { return nil }
+func (t namedTestTransport) SetModel(context.Context, string) error { return nil }
+func (t namedTestTransport) EnsureModelInfo(context.Context) error  { return nil }
+
 func TestAgentHandler_HandleRequest(t *testing.T) {
 	mockResp := agent.Response{
 		Type:    agent.ResponseTypeCommand,

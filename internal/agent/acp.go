@@ -65,6 +65,12 @@ type ACPTransport struct {
 	resumeSessionID  string
 	resumeSessionCWD string
 
+	// Model selection (ACP session config option with category "model").
+	modelConfigID   string        // option id, "" when the agent exposes no model option
+	currentModelVal string        // the currently selected option value
+	availableModels []ModelOption // resolved choices the agent advertises
+	preferredModel  string        // sticky user choice (a value), re-applied across reconnects
+
 	// Channel for incoming messages
 	messages chan []byte
 	done     chan struct{}
@@ -164,7 +170,44 @@ type newSessionParams struct {
 }
 
 type newSessionResult struct {
+	SessionID     string         `json:"sessionId"`
+	ConfigOptions []configOption `json:"configOptions"`
+}
+
+// configOption mirrors an entry of the ACP session "configOptions" array.
+// We only act on the entry whose category is "model", but decode the shared shape.
+type configOption struct {
+	ID           string              `json:"id"`
+	Name         string              `json:"name"`
+	Description  string              `json:"description"`
+	Category     string              `json:"category"`
+	Type         string              `json:"type"`
+	CurrentValue string              `json:"currentValue"`
+	Options      []configOptionValue `json:"options"`
+}
+
+type configOptionValue struct {
+	Value       string `json:"value"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+}
+
+// setConfigOptionParams is the request body for session/set_config_option.
+type setConfigOptionParams struct {
 	SessionID string `json:"sessionId"`
+	ConfigID  string `json:"configId"`
+	Value     string `json:"value"`
+}
+
+// setConfigOptionResult is the response: the full updated config option set.
+type setConfigOptionResult struct {
+	ConfigOptions []configOption `json:"configOptions"`
+}
+
+// configOptionUpdate is the payload of a session/update with
+// sessionUpdate == "config_option_update".
+type configOptionUpdate struct {
+	ConfigOptions []configOption `json:"configOptions"`
 }
 
 type resumeSessionParams struct {
@@ -197,6 +240,7 @@ type sessionUpdate struct {
 	Content       json.RawMessage `json:"content,omitempty"`
 	ToolCallID    string          `json:"toolCallId,omitempty"`
 	Status        string          `json:"status,omitempty"`
+	ConfigOptions []configOption  `json:"configOptions,omitempty"`
 }
 
 type contentBlock struct {
@@ -570,6 +614,7 @@ func (t *ACPTransport) newSession(ctx context.Context, cwd string) (string, erro
 		return "", fmt.Errorf("parse session result: %w", err)
 	}
 
+	t.storeModelConfig(sessionResult.ConfigOptions)
 	return sessionResult.SessionID, nil
 }
 
@@ -609,6 +654,7 @@ func (t *ACPTransport) ensureSession(ctx context.Context, cwd string) (string, e
 			t.resumeSessionID = ""
 			t.resumeSessionCWD = ""
 			t.mu.Unlock()
+			t.reapplyPreferredModel(ctx)
 			return resumeID, nil
 		} else if IsRetryableError(err) {
 			return "", err
@@ -632,7 +678,178 @@ func (t *ACPTransport) ensureSession(ctx context.Context, cwd string) (string, e
 	t.resumeSessionID = ""
 	t.resumeSessionCWD = ""
 	t.mu.Unlock()
+	t.reapplyPreferredModel(ctx)
 	return newSessionID, nil
+}
+
+// storeModelConfig extracts the option with category "model" from the agent's
+// config options and caches the current value and available choices. When no
+// such option is present, model selection is treated as unsupported.
+func (t *ACPTransport) storeModelConfig(opts []configOption) {
+	// Guard against a malformed/empty notification wiping known state. ACP sends
+	// the complete configOptions array, so a real "no model option" agent still
+	// carries its other options here and is handled correctly below.
+	if len(opts) == 0 {
+		return
+	}
+
+	var (
+		id      string
+		current string
+		models  []ModelOption
+	)
+	for _, opt := range opts {
+		if opt.Category != "model" {
+			continue
+		}
+		id = opt.ID
+		current = opt.CurrentValue
+		for _, v := range opt.Options {
+			models = append(models, ModelOption{
+				Value:       v.Value,
+				Name:        v.Name,
+				Description: v.Description,
+			})
+		}
+		break
+	}
+
+	t.mu.Lock()
+	t.modelConfigID = id
+	t.currentModelVal = current
+	t.availableModels = models
+	t.mu.Unlock()
+}
+
+// CurrentModel returns the display name of the active model, or "" when the
+// agent exposes no model option.
+func (t *ACPTransport) CurrentModel() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.modelConfigID == "" {
+		return ""
+	}
+	for _, m := range t.availableModels {
+		if m.Value == t.currentModelVal {
+			return m.Name
+		}
+	}
+	return t.currentModelVal
+}
+
+// AvailableModels returns a copy of the advertised model choices, or nil.
+func (t *ACPTransport) AvailableModels() []ModelOption {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if len(t.availableModels) == 0 {
+		return nil
+	}
+	return append([]ModelOption(nil), t.availableModels...)
+}
+
+// EnsureModelInfo connects and establishes a session so the cached model
+// information reflects what the agent advertises.
+func (t *ACPTransport) EnsureModelInfo(ctx context.Context) error {
+	t.mu.Lock()
+	if t.stdin == nil {
+		if err := t.connectLocked(ctx); err != nil {
+			t.mu.Unlock()
+			return err
+		}
+	}
+	t.mu.Unlock()
+
+	_, err := t.ensureSession(ctx, "")
+	return err
+}
+
+// SetModel selects a model by value and remembers it as the session preference
+// so it survives transparent reconnects.
+func (t *ACPTransport) SetModel(ctx context.Context, value string) error {
+	if err := t.EnsureModelInfo(ctx); err != nil {
+		return err
+	}
+
+	t.mu.Lock()
+	configID := t.modelConfigID
+	t.mu.Unlock()
+	if configID == "" {
+		return fmt.Errorf("agent does not expose model selection")
+	}
+
+	if err := t.setModel(ctx, value); err != nil {
+		return err
+	}
+
+	t.mu.Lock()
+	t.preferredModel = value
+	t.mu.Unlock()
+	return nil
+}
+
+// setModel sends session/set_config_option for the model option and updates the
+// cached state from the agent's response.
+func (t *ACPTransport) setModel(ctx context.Context, value string) error {
+	t.mu.Lock()
+	sessionID := t.sessionID
+	configID := t.modelConfigID
+	t.mu.Unlock()
+	if configID == "" {
+		return fmt.Errorf("agent does not expose model selection")
+	}
+	if sessionID == "" {
+		return fmt.Errorf("no active agent session")
+	}
+
+	result, err := t.sendRequest(ctx, "session/set_config_option", setConfigOptionParams{
+		SessionID: sessionID,
+		ConfigID:  configID,
+		Value:     value,
+	})
+	if err != nil {
+		return err
+	}
+
+	var res setConfigOptionResult
+	if jsonErr := json.Unmarshal(result, &res); jsonErr == nil && len(res.ConfigOptions) > 0 {
+		t.storeModelConfig(res.ConfigOptions)
+	} else {
+		// Agent returned no config snapshot; trust the value we just set.
+		t.mu.Lock()
+		t.currentModelVal = value
+		t.mu.Unlock()
+	}
+	return nil
+}
+
+// reapplyPreferredModel re-selects the user's sticky model choice after a fresh
+// session reverts to the agent default. No-op when nothing is pinned, the choice
+// already matches, or the model is no longer advertised (the stale pin is dropped).
+func (t *ACPTransport) reapplyPreferredModel(ctx context.Context) {
+	t.mu.Lock()
+	preferred := t.preferredModel
+	current := t.currentModelVal
+	configID := t.modelConfigID
+	stillOffered := false
+	for _, m := range t.availableModels {
+		if m.Value == preferred {
+			stillOffered = true
+			break
+		}
+	}
+	t.mu.Unlock()
+
+	if preferred == "" || configID == "" || preferred == current {
+		return
+	}
+	if !stillOffered {
+		t.mu.Lock()
+		t.preferredModel = ""
+		t.mu.Unlock()
+		return
+	}
+	// Best effort: a failure here just leaves the session on the default model.
+	_ = t.setModel(ctx, preferred)
 }
 
 func normalizeSessionCWD(cwd string) string {
@@ -1054,6 +1271,10 @@ func (t *ACPTransport) Close() error {
 	t.resumeSessionID = ""
 	t.resumeSessionCWD = ""
 	t.capabilities = acpCapabilities{}
+	t.modelConfigID = ""
+	t.currentModelVal = ""
+	t.availableModels = nil
+	t.preferredModel = ""
 	return nil
 }
 
@@ -1298,6 +1519,11 @@ func (t *ACPTransport) sendStreamingAttempt( //nolint:gocyclo // streaming proto
 				switch updateParams.Update.SessionUpdate {
 				case "tool_call", "tool_call_update":
 					toolUpdateCount++
+				case "config_option_update":
+					// The agent switched a config option on its own (e.g. model
+					// fallback on rate limit); refresh our cached model state.
+					t.storeModelConfig(updateParams.Update.ConfigOptions)
+					continue
 				}
 
 				if text, ok := agentMessageChunkText(updateParams.Update); ok {

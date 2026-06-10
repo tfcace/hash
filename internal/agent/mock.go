@@ -9,6 +9,12 @@ type MockTransport struct {
 	responses []Response
 	requests  []Request
 	connected bool
+
+	// Model selection (configurable for tests).
+	models       []ModelOption
+	currentModel string
+	setModels    []string // values passed to SetModel
+	setModelErr  error
 }
 
 // NewMockTransport creates a new mock transport with preset responses.
@@ -67,6 +73,32 @@ func (m *MockTransport) Close() error {
 // Requests returns the captured requests.
 func (m *MockTransport) Requests() []Request {
 	return m.requests
+}
+
+// CurrentModel returns the configured current model name.
+func (m *MockTransport) CurrentModel() string {
+	return m.currentModel
+}
+
+// AvailableModels returns the configured model list.
+func (m *MockTransport) AvailableModels() []ModelOption {
+	return m.models
+}
+
+// SetModel records the selection and updates the current model unless an error
+// is configured.
+func (m *MockTransport) SetModel(ctx context.Context, value string) error {
+	if m.setModelErr != nil {
+		return m.setModelErr
+	}
+	m.setModels = append(m.setModels, value)
+	m.currentModel = value
+	return nil
+}
+
+// EnsureModelInfo is a no-op for the mock.
+func (m *MockTransport) EnsureModelInfo(ctx context.Context) error {
+	return nil
 }
 
 // Compile-time check

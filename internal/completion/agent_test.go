@@ -14,8 +14,12 @@ func (blockingAgentTransport) Connect(ctx context.Context) error { return nil }
 func (blockingAgentTransport) SendStreaming(ctx context.Context, req agent.Request) (<-chan string, <-chan error) {
 	return make(chan string), make(chan error)
 }
-func (blockingAgentTransport) Close() error { return nil }
-func (blockingAgentTransport) Name() string { return "blocking" }
+func (blockingAgentTransport) Close() error                           { return nil }
+func (blockingAgentTransport) Name() string                           { return "blocking" }
+func (blockingAgentTransport) CurrentModel() string                   { return "" }
+func (blockingAgentTransport) AvailableModels() []agent.ModelOption   { return nil }
+func (blockingAgentTransport) SetModel(context.Context, string) error { return nil }
+func (blockingAgentTransport) EnsureModelInfo(context.Context) error  { return nil }
 
 func TestAgentCompleter_DetectsInlineAgent(t *testing.T) {
 	completer := NewAgentCompleter(nil) // No client for unit test

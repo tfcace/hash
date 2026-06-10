@@ -48,6 +48,38 @@ func (h *AgentHandler) SetLastError(le *LastError) {
 	h.lastError = le
 }
 
+// CurrentModel returns the active agent model's display name, or "" if none.
+func (h *AgentHandler) CurrentModel() string {
+	if h == nil || h.client == nil {
+		return ""
+	}
+	return h.client.CurrentModel()
+}
+
+// AvailableModels returns the models the agent advertises, or nil.
+func (h *AgentHandler) AvailableModels() []agent.ModelOption {
+	if h == nil || h.client == nil {
+		return nil
+	}
+	return h.client.AvailableModels()
+}
+
+// SetModel selects a model by value and remembers it for the session.
+func (h *AgentHandler) SetModel(ctx context.Context, value string) error {
+	if h == nil || h.client == nil {
+		return fmt.Errorf("no agent configured")
+	}
+	return h.client.SetModel(ctx, value)
+}
+
+// EnsureModelInfo populates the agent's cached model information.
+func (h *AgentHandler) EnsureModelInfo(ctx context.Context) error {
+	if h == nil || h.client == nil {
+		return fmt.Errorf("no agent configured")
+	}
+	return h.client.EnsureModelInfo(ctx)
+}
+
 // HandleRequest processes a parsed agent request and returns the response.
 func (h *AgentHandler) HandleRequest(ctx context.Context, parsed parser.ParseResult) (agent.Response, error) {
 	if h.client == nil {

@@ -9,9 +9,11 @@ import (
 	"strings"
 
 	"charm.land/lipgloss/v2"
+	"github.com/tfcace/hash/internal/agent"
 	"github.com/tfcace/hash/internal/clipboard"
 	"github.com/tfcace/hash/internal/config"
 	"github.com/tfcace/hash/internal/history"
+	"github.com/tfcace/hash/internal/modelpicker"
 	"github.com/tfcace/hash/internal/version"
 	sysClipboard "golang.design/x/clipboard"
 )
@@ -32,7 +34,7 @@ func isBuiltinEnabled(cfg *config.Config, name string) bool {
 // isBuiltin returns true if the command is a shell builtin.
 func isBuiltin(cmd string) bool {
 	switch cmd {
-	case "cd", "exit", "quit", "history", "copy", "issue", "status", "tips", "setup-zoxide":
+	case "cd", "exit", "quit", "history", "copy", "issue", "status", "tips", "setup-zoxide", "model":
 		return true
 	// Source builtin with executor dialect support
 	case "source", ".":
@@ -85,6 +87,8 @@ func (s *Shell) executeBuiltin(ctx context.Context, line string) (bool, error) {
 		return true, s.builtinTips(args)
 	case "setup-zoxide":
 		return true, s.builtinSetupZoxide(ctx, args)
+	case "model":
+		return true, s.builtinModel(ctx, args)
 	case "source", ".":
 		return true, s.builtinSource(ctx, args)
 	case "bindkey", "setopt", "unsetopt", "autoload", "compdef", "zstyle", "zmodload", "zle", "compinit", "promptinit":
@@ -322,6 +326,115 @@ func copyToSystemClipboard(text string) error {
 
 // ClipboardBuffer is a type alias for easier external access.
 type ClipboardBuffer = clipboard.Buffer
+
+// builtinModel lists/selects the agent model. With no args it opens a TUI
+// picker; `model <name>` selects directly; `model --list` prints the choices.
+// The selection persists for the duration of the shell session.
+func (s *Shell) builtinModel(ctx context.Context, args []string) error {
+	if s.agentHandler == nil {
+		return fmt.Errorf("no agent configured")
+	}
+
+	// Establish a session if needed so the agent reports its model options.
+	if err := s.agentHandler.EnsureModelInfo(ctx); err != nil {
+		return fmt.Errorf("agent unavailable: %w", err)
+	}
+
+	models := s.agentHandler.AvailableModels()
+	if len(models) == 0 {
+		fmt.Println("this agent doesn't expose model selection")
+		return nil
+	}
+
+	current := s.agentHandler.CurrentModel()
+
+	// `model --list` / `model list`: print non-interactively.
+	if len(args) > 0 && isListArg(args[0]) {
+		printModelList(models, current)
+		return nil
+	}
+
+	// `model <name>`: select directly by value or display name.
+	if len(args) > 0 {
+		target := strings.Join(args, " ")
+		value, ok := resolveModel(models, target)
+		if !ok {
+			return fmt.Errorf("unknown model %q; run `model --list` to see options", target)
+		}
+		return s.applyModel(ctx, models, value)
+	}
+
+	// No args: open the picker.
+	value, ok, err := modelpicker.NewPickerUI(models, current).Run()
+	if err != nil {
+		return fmt.Errorf("model picker: %w", err)
+	}
+	if !ok {
+		return nil // user canceled
+	}
+	return s.applyModel(ctx, models, value)
+}
+
+// applyModel sets the model and prints a confirmation using its display name.
+func (s *Shell) applyModel(ctx context.Context, models []agent.ModelOption, value string) error {
+	if err := s.agentHandler.SetModel(ctx, value); err != nil {
+		return err
+	}
+	fmt.Printf("agent model set to %s\n", modelDisplayName(models, value))
+	return nil
+}
+
+func isListArg(arg string) bool {
+	switch arg {
+	case "--list", "-l", "list":
+		return true
+	default:
+		return false
+	}
+}
+
+// resolveModel maps a user-typed name to a model value, matching the value or
+// display name case-insensitively.
+func resolveModel(models []agent.ModelOption, target string) (string, bool) {
+	target = strings.TrimSpace(target)
+	for _, m := range models {
+		if strings.EqualFold(m.Value, target) || strings.EqualFold(m.Name, target) {
+			return m.Value, true
+		}
+	}
+	return "", false
+}
+
+// modelDisplayName returns the display name for a model value, or the value.
+func modelDisplayName(models []agent.ModelOption, value string) string {
+	for _, m := range models {
+		if m.Value == value {
+			if m.Name != "" {
+				return m.Name
+			}
+			return m.Value
+		}
+	}
+	return value
+}
+
+func printModelList(models []agent.ModelOption, current string) {
+	for _, m := range models {
+		marker := "  "
+		if m.Value == current || m.Name == current {
+			marker = "* "
+		}
+		name := m.Name
+		if name == "" {
+			name = m.Value
+		}
+		if m.Description != "" {
+			fmt.Printf("%s%s  (%s)\n", marker, name, m.Description)
+		} else {
+			fmt.Printf("%s%s\n", marker, name)
+		}
+	}
+}
 
 // builtinStatus shows the current system status.
 func (s *Shell) builtinStatus() error {

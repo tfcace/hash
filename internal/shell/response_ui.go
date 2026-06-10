@@ -84,6 +84,17 @@ func (s AgentState) String() string {
 	}
 }
 
+// agentStateLabel renders the spinner label, appending the active model in
+// square brackets (e.g. "agent · thinking [Sonnet]"). An empty model omits the
+// brackets entirely.
+func agentStateLabel(state AgentState, model string) string {
+	label := state.String()
+	if model != "" {
+		label += " [" + model + "]"
+	}
+	return label
+}
+
 // ResponseUI handles displaying agent responses.
 type ResponseUI struct {
 	out      io.Writer
@@ -97,6 +108,15 @@ type ResponseUI struct {
 	spinnerDone    chan struct{} // signals when spinner goroutine has exited
 	spinnerText    string
 	spinnerRand    agentStatusRandom
+	agentModel     string // active model shown in spinner labels, "" hides it
+}
+
+// SetAgentModel sets the model name shown in agent spinner labels. Pass "" to
+// hide the bracketed model tag.
+func (u *ResponseUI) SetAgentModel(name string) {
+	u.spinnerMu.Lock()
+	u.agentModel = name
+	u.spinnerMu.Unlock()
 }
 
 // NewResponseUI creates a new response UI.
@@ -152,7 +172,7 @@ func (u *ResponseUI) ShowState(state AgentState) {
 	u.spinnerMu.Lock()
 	defer u.spinnerMu.Unlock()
 
-	text := state.String()
+	text := agentStateLabel(state, u.agentModel)
 
 	if u.spinnerRunning {
 		// Update the spinner text

@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"fmt"
 )
 
 // ResponseType indicates the kind of response from the agent.
@@ -39,6 +40,13 @@ type Response struct {
 	Error       string // Error message (if Type == ResponseTypeError)
 }
 
+// ModelOption is a model the agent advertises for selection.
+type ModelOption struct {
+	Value       string // identifier sent back to the agent
+	Name        string // human-friendly display label
+	Description string // optional longer description
+}
+
 // Transport defines the interface for agent communication.
 type Transport interface {
 	// Connect establishes connection to the agent.
@@ -56,6 +64,22 @@ type Transport interface {
 
 	// Name returns the transport name for logging.
 	Name() string
+
+	// CurrentModel returns the human-friendly name of the active model, or ""
+	// when the agent exposes no model selection. Cheap, cached, never blocks.
+	CurrentModel() string
+
+	// AvailableModels returns the models the agent advertises, or nil when it
+	// exposes none. Cheap, cached; call EnsureModelInfo first to populate it.
+	AvailableModels() []ModelOption
+
+	// SetModel selects a model by its value and remembers the choice for the
+	// session. Returns an error if the transport or agent doesn't support it.
+	SetModel(ctx context.Context, value string) error
+
+	// EnsureModelInfo establishes whatever connection/session is needed so that
+	// CurrentModel and AvailableModels report live data. No-op when not needed.
+	EnsureModelInfo(ctx context.Context) error
 }
 
 // Client wraps a transport with convenience methods.
@@ -109,4 +133,36 @@ func (c *Client) Ask(ctx context.Context, req Request) (Response, error) {
 // Close closes the underlying transport.
 func (c *Client) Close() error {
 	return c.transport.Close()
+}
+
+// CurrentModel returns the active model's display name, or "" if unavailable.
+func (c *Client) CurrentModel() string {
+	if c == nil || c.transport == nil {
+		return ""
+	}
+	return c.transport.CurrentModel()
+}
+
+// AvailableModels returns the models the agent advertises, or nil.
+func (c *Client) AvailableModels() []ModelOption {
+	if c == nil || c.transport == nil {
+		return nil
+	}
+	return c.transport.AvailableModels()
+}
+
+// SetModel selects a model by its value and remembers it for the session.
+func (c *Client) SetModel(ctx context.Context, value string) error {
+	if c == nil || c.transport == nil {
+		return fmt.Errorf("no agent configured")
+	}
+	return c.transport.SetModel(ctx, value)
+}
+
+// EnsureModelInfo populates the transport's cached model information.
+func (c *Client) EnsureModelInfo(ctx context.Context) error {
+	if c == nil || c.transport == nil {
+		return fmt.Errorf("no agent configured")
+	}
+	return c.transport.EnsureModelInfo(ctx)
 }

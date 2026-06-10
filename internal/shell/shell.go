@@ -1049,6 +1049,7 @@ func (s *Shell) handleAgentFullStreaming(ctx context.Context, parsed parser.Pars
 	defer timeoutCancel()
 
 	// Show thinking indicator (multi-stage: thinking -> receiving)
+	s.responseUI.SetAgentModel(s.agentHandler.CurrentModel())
 	s.responseUI.ShowState(AgentStateThinking)
 
 	textCh, errCh := s.agentHandler.StreamRequest(requestCtx, parsed)
@@ -1233,6 +1234,7 @@ func (s *Shell) streamAgentFollowUpTurn(
 	requestCtx, timeoutCancel := context.WithTimeout(ctx, s.agentRequestTimeout())
 	defer timeoutCancel()
 
+	s.responseUI.SetAgentModel(s.agentHandler.CurrentModel())
 	s.responseUI.ShowState(AgentStateThinking)
 	textCh, errCh := s.agentHandler.StreamFollowUp(requestCtx, reply, transcript)
 	railPrefixer := newAgentConversationRailPrefixer(func(rendered string) {
