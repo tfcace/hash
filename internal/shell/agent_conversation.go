@@ -14,13 +14,18 @@ type agentConversationMessage struct {
 }
 
 const (
-	agentConversationReplyPrompt       = "\x1b[38;2;94;234;212m│\x1b[0m \x1b[1;38;2;94;234;212myou\x1b[0m › "
 	agentConversationLiveRailStyle     = "\x1b[1;38;2;255;209;102m"
-	agentConversationLiveRailLine      = agentConversationLiveRailStyle + "┆\x1b[0m"
-	agentConversationLiveReplyPrompt   = agentConversationLiveRailStyle + "┆\x1b[0m \x1b[1;38;2;94;234;212myou\x1b[0m › "
+	agentConversationLabelStyle        = "\x1b[1;38;2;94;234;212m"
+	agentConversationSolidRail         = agentConversationLiveRailStyle + "│\x1b[0m"
+	agentConversationDashedRail        = agentConversationLiveRailStyle + "┆\x1b[0m"
+	agentConversationUserLabel         = agentConversationLabelStyle + "you\x1b[0m"
+	agentConversationAgentLabel        = agentConversationLabelStyle + "agent\x1b[0m"
+	agentConversationReplyPrompt       = agentConversationSolidRail + " " + agentConversationUserLabel + " › "
+	agentConversationLiveRailLine      = agentConversationDashedRail
+	agentConversationLiveReplyPrompt   = agentConversationDashedRail + " " + agentConversationUserLabel + " › "
 	agentConversationReplyPromptWidth  = 8
-	agentConversationAgentPrefix       = "│ agent › "
-	agentConversationAgentContinuation = "│         "
+	agentConversationAgentPrefix       = agentConversationSolidRail + " " + agentConversationAgentLabel + " › "
+	agentConversationAgentContinuation = agentConversationSolidRail + "         "
 	emptyAgentResponseMessage          = "agent ended the turn without text"
 	legacyAwaitingInputMarker          = "[AWAITING_INPUT]"
 	legacyConversationMarker           = "[CONVERSATION]"

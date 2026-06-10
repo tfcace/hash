@@ -64,6 +64,41 @@ func TestAgentConversationReplyPromptLabelsUser(t *testing.T) {
 	}
 }
 
+func TestAgentConversationRailsUseLiveRailColor(t *testing.T) {
+	goldSolidRail := agentConversationLiveRailStyle + "│\x1b[0m"
+	goldDashedRail := agentConversationLiveRailStyle + "┆\x1b[0m"
+	goldHeaderRail := agentConversationLiveRailStyle + "╭─ conversation\x1b[0m"
+
+	frame := agentConversationInputFrame(true)
+	for _, tt := range []struct {
+		name string
+		text string
+		want string
+	}{
+		{name: "committed user prompt", text: frame.Prefix, want: goldSolidRail},
+		{name: "live user prompt", text: frame.LivePrefix, want: goldDashedRail},
+		{name: "live top line", text: frame.LiveTopLine, want: goldDashedRail},
+		{name: "header rail", text: frame.TopLine, want: goldHeaderRail},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if !strings.Contains(tt.text, tt.want) {
+				t.Fatalf("%s = %q, want gold rail sequence %q", tt.name, tt.text, tt.want)
+			}
+		})
+	}
+
+	var buf strings.Builder
+	prefixer := newAgentConversationRailPrefixer(func(text string) {
+		buf.WriteString(text)
+	})
+	prefixer.Write("Question 1:\nYes or no?")
+
+	output := buf.String()
+	if got := strings.Count(output, goldSolidRail); got != 2 {
+		t.Fatalf("agent output should color every solid rail gold, got %d gold rails in %q", got, output)
+	}
+}
+
 func TestAgentConversationInputFrame(t *testing.T) {
 	frame := agentConversationInputFrame(true)
 	if frame.Prefix != agentConversationReplyPrompt {
@@ -140,18 +175,18 @@ func TestAgentConversationRailPrefixer_ThreadsAgentOutput(t *testing.T) {
 
 	output := buf.String()
 	for _, expected := range []string{
-		"│ agent › Question 1:",
-		"\n│         Yes or no?",
-		"\n│         Answer yes/no.",
+		agentConversationAgentPrefix + "Question 1:",
+		"\n" + agentConversationAgentContinuation + "Yes or no?",
+		"\n" + agentConversationAgentContinuation + "Answer yes/no.",
 	} {
 		if !strings.Contains(output, expected) {
 			t.Fatalf("expected %q in threaded output, got %q", expected, output)
 		}
 	}
-	if strings.Contains(output, "\n│ agent › Yes or no?") {
+	if strings.Contains(output, "\n"+agentConversationAgentPrefix+"Yes or no?") {
 		t.Fatalf("continuation lines should align under the agent message, got %q", output)
 	}
-	if strings.Contains(output, "\n│ agent › Answer yes/no.") {
+	if strings.Contains(output, "\n"+agentConversationAgentPrefix+"Answer yes/no.") {
 		t.Fatalf("new chunks after a newline should stay under the same agent turn, got %q", output)
 	}
 }
