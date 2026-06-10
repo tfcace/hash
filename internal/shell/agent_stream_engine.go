@@ -128,7 +128,7 @@ collectLoop:
 	default:
 	}
 
-	writeRendered(renderer.Flush())
+	writeRendered(renderer.Finish())
 	result.responseText = response.String()
 	return result
 }
