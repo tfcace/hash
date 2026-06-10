@@ -725,7 +725,32 @@ func (e *Editor) handleGhostTextKey(key Key) bool {
 		return true
 
 	case KeyEnter:
-		// Enter dismisses ghost and submits what's typed (fish-style)
+		if e.ghost.FromAgent {
+			// The [enter]run hint only appears once streaming is done;
+			// before that, Enter must not run a partial or bare command.
+			if e.ghost.Streaming {
+				trace.AgentHigh("ghost_accept", map[string]any{
+					"key":    "Enter",
+					"action": "ignored_streaming",
+				})
+				return true
+			}
+			// Agent suggestions: Enter accepts the fill, then submits.
+			text := e.ghost.AcceptAll()
+			trace.AgentHigh("ghost_accept", map[string]any{
+				"key":      "Enter",
+				"accepted": text,
+				"action":   "accept_and_run",
+			})
+			if text != "" {
+				e.insertText(text)
+			}
+			e.ghostTextChan = nil
+			e.ghostErrChan = nil
+			// Don't return true - let Enter propagate to submit
+			return false
+		}
+		// Predictions: Enter dismisses ghost and submits what's typed (fish-style)
 		trace.AgentHigh("ghost_accept", map[string]any{
 			"key":    "Enter",
 			"action": "dismiss_and_submit",
