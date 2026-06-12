@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.0](https://github.com/tfcace/hash/compare/v0.5.1...v0.6.0) (2026-06-12)
+
+
+### Features
+
+* turn-by-turn agent conversations, model selection, and zsh dialect ([#59](https://github.com/tfcace/hash/issues/59)) ([5d41fec](https://github.com/tfcace/hash/commit/5d41fec9290712cdfde0d0ab64e39852eef494b0))
+
 ## [0.5.1](https://github.com/tfcace/hash/compare/v0.5.0...v0.5.1) (2026-06-05)
 
 
