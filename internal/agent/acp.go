@@ -204,12 +204,6 @@ type setConfigOptionResult struct {
 	ConfigOptions []configOption `json:"configOptions"`
 }
 
-// configOptionUpdate is the payload of a session/update with
-// sessionUpdate == "config_option_update".
-type configOptionUpdate struct {
-	ConfigOptions []configOption `json:"configOptions"`
-}
-
 type resumeSessionParams struct {
 	SessionID  string        `json:"sessionId"`
 	Cwd        string        `json:"cwd"`
@@ -705,11 +699,7 @@ func (t *ACPTransport) storeModelConfig(opts []configOption) {
 		id = opt.ID
 		current = opt.CurrentValue
 		for _, v := range opt.Options {
-			models = append(models, ModelOption{
-				Value:       v.Value,
-				Name:        v.Name,
-				Description: v.Description,
-			})
+			models = append(models, ModelOption(v))
 		}
 		break
 	}
