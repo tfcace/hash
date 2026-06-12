@@ -19,9 +19,15 @@ import (
 // and a report of what was processed. The caller should execute the content
 // through their own executor/interpreter.
 func FilterWithCompat(path, shell string) (string, *Report, error) {
+	return FilterWithDialect(path, shell, "bash")
+}
+
+// FilterWithDialect pre-processes a shell config file for the target parser dialect.
+func FilterWithDialect(path, shell, targetDialect string) (string, *Report, error) {
 	trace.Emit("compat", "filter_start", trace.LevelVerbose, map[string]any{
-		"path":  path,
-		"shell": shell,
+		"path":           path,
+		"shell":          shell,
+		"target_dialect": targetDialect,
 	})
 
 	info, err := os.Stat(path)
@@ -37,7 +43,7 @@ func FilterWithCompat(path, shell string) (string, *Report, error) {
 		return "", nil, err
 	}
 
-	// Pre-process: identify and filter zsh-specific commands
+	// Pre-process: identify and filter shell-specific commands for the target dialect.
 	lines := strings.Split(string(content), "\n")
 	var filteredLines []string
 	noops := NoopBuiltins()
@@ -51,10 +57,10 @@ func FilterWithCompat(path, shell string) (string, *Report, error) {
 			continue
 		}
 
-		// Check for shell-specific tool initializations that Hash handles natively
-		if reason := shouldSkipLine(trimmed); reason != "" {
+		// Check for shell-specific tool initializations that Hash handles natively.
+		if reason := shouldSkipLine(trimmed, targetDialect); reason != "" {
 			report.AddSkipped(i+1, trimmed, reason)
-			filteredLines = append(filteredLines, "# [hash-compat] "+line)
+			filteredLines = append(filteredLines, hashCompatNoop(line))
 			continue
 		}
 
@@ -64,8 +70,7 @@ func FilterWithCompat(path, shell string) (string, *Report, error) {
 			// Execute no-op and log
 			args := strings.Fields(trimmed)[1:]
 			fn(args, report) //nolint:errcheck // no-op functions don't fail
-			// Replace with comment to preserve line numbers
-			filteredLines = append(filteredLines, "# [hash-compat] "+line)
+			filteredLines = append(filteredLines, hashCompatNoop(line))
 			// Update line number in last skipped item
 			if len(report.SkippedItems) > 0 {
 				report.SkippedItems[len(report.SkippedItems)-1].Line = i + 1
@@ -95,11 +100,18 @@ func FilterWithCompat(path, shell string) (string, *Report, error) {
 	}
 
 	trace.Emit("compat", "filter_done", trace.LevelVerbose, map[string]any{
-		"path":    path,
-		"skipped": report.Summary.Skipped,
+		"path":           path,
+		"target_dialect": targetDialect,
+		"skipped":        report.Summary.Skipped,
 	})
 
 	return strings.Join(filteredLines, "\n"), report, nil
+}
+
+func hashCompatNoop(line string) string {
+	trimmedLeft := strings.TrimLeft(line, " \t")
+	indent := line[:len(line)-len(trimmedLeft)]
+	return indent + ": # [hash-compat] " + strings.TrimSpace(line)
 }
 
 // SourceWithCompat sources a shell rc file with graceful error handling.
@@ -109,6 +121,13 @@ func FilterWithCompat(path, shell string) (string, *Report, error) {
 //
 //nolint:gocyclo // shell compatibility requires handling multiple file formats
 func SourceWithCompat(ctx context.Context, path, shell string, stdout io.Writer) (*Report, error) {
+	return SourceWithDialect(ctx, path, shell, "bash", stdout)
+}
+
+// SourceWithDialect sources a shell rc file with graceful error handling for the target dialect.
+//
+//nolint:gocyclo // shell compatibility requires handling multiple file formats
+func SourceWithDialect(ctx context.Context, path, shell, targetDialect string, stdout io.Writer) (*Report, error) {
 	info, err := os.Stat(path)
 	if err != nil {
 		return nil, err
@@ -122,7 +141,7 @@ func SourceWithCompat(ctx context.Context, path, shell string, stdout io.Writer)
 		return nil, err
 	}
 
-	// Pre-process: identify and filter zsh-specific commands
+	// Pre-process: identify and filter shell-specific commands for the target dialect.
 	lines := strings.Split(string(content), "\n")
 	var filteredLines []string
 	noops := NoopBuiltins()
@@ -136,10 +155,10 @@ func SourceWithCompat(ctx context.Context, path, shell string, stdout io.Writer)
 			continue
 		}
 
-		// Check for shell-specific tool initializations that Hash handles natively
-		if reason := shouldSkipLine(trimmed); reason != "" {
+		// Check for shell-specific tool initializations that Hash handles natively.
+		if reason := shouldSkipLine(trimmed, targetDialect); reason != "" {
 			report.AddSkipped(i+1, trimmed, reason)
-			filteredLines = append(filteredLines, "# [hash-compat] "+line)
+			filteredLines = append(filteredLines, hashCompatNoop(line))
 			continue
 		}
 
@@ -149,8 +168,7 @@ func SourceWithCompat(ctx context.Context, path, shell string, stdout io.Writer)
 			// Execute no-op and log
 			args := strings.Fields(trimmed)[1:]
 			fn(args, report) //nolint:errcheck // no-op functions don't fail
-			// Replace with comment to preserve line numbers
-			filteredLines = append(filteredLines, "# [hash-compat] "+line)
+			filteredLines = append(filteredLines, hashCompatNoop(line))
 			// Update line number in last skipped item
 			if len(report.SkippedItems) > 0 {
 				report.SkippedItems[len(report.SkippedItems)-1].Line = i + 1
@@ -179,10 +197,10 @@ func SourceWithCompat(ctx context.Context, path, shell string, stdout io.Writer)
 		filteredLines = append(filteredLines, line)
 	}
 
-	// Parse with error recovery and bash syntax support
+	// Parse with error recovery and the target dialect.
 	filtered := strings.Join(filteredLines, "\n")
 	parser := syntax.NewParser(
-		syntax.Variant(syntax.LangBash),
+		syntax.Variant(langVariantForDialect(targetDialect)),
 		syntax.RecoverErrors(100),
 	)
 	prog, err := parser.Parse(strings.NewReader(filtered), path)
@@ -223,12 +241,25 @@ func firstWord(line string) string {
 	return fields[0]
 }
 
+func langVariantForDialect(dialect string) syntax.LangVariant {
+	switch strings.ToLower(strings.TrimSpace(dialect)) {
+	case "zsh":
+		return syntax.LangZsh
+	default:
+		return syntax.LangBash
+	}
+}
+
 // shouldSkipLine checks if a line should be skipped due to shell-specific syntax.
 // Returns the reason to skip, or empty string if the line should be processed.
-func shouldSkipLine(line string) string {
+func shouldSkipLine(line, targetDialect string) string {
 	// Starship init - Hash has built-in Starship support
 	if strings.Contains(line, "starship init") {
 		return "starship init (use prompt.mode = \"starship\" in Hash config)"
+	}
+
+	if strings.EqualFold(strings.TrimSpace(targetDialect), "zsh") {
+		return ""
 	}
 
 	// Other common shell-specific inits that need native handling

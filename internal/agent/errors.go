@@ -16,6 +16,10 @@ var (
 	ErrACPConnectionClosed = errors.New("acp connection closed")
 	// ErrACPIdleTimeout indicates no ACP message was received before idle timeout.
 	ErrACPIdleTimeout = errors.New("acp idle timeout")
+	// ErrACPNoOutput indicates the ACP prompt completed without displayable text.
+	ErrACPNoOutput = errors.New("acp prompt completed without output")
+	// ErrACPUnsupportedAgent indicates the configured ACP adapter is known incompatible.
+	ErrACPUnsupportedAgent = errors.New("unsupported acp agent")
 )
 
 // IsStartupError reports whether the error indicates a startup/configuration issue.
@@ -23,7 +27,9 @@ func IsStartupError(err error) bool {
 	if err == nil {
 		return false
 	}
-	return errors.Is(err, ErrACPStartFailed) || errors.Is(err, exec.ErrNotFound)
+	return errors.Is(err, ErrACPStartFailed) ||
+		errors.Is(err, ErrACPUnsupportedAgent) ||
+		errors.Is(err, exec.ErrNotFound)
 }
 
 // IsTimeoutError reports whether the error indicates a request timeout.
@@ -45,7 +51,8 @@ func IsRetryableError(err error) bool {
 	if IsTimeoutError(err) {
 		return true
 	}
-	if errors.Is(err, ErrACPConnectionClosed) ||
+	if errors.Is(err, ErrACPNoOutput) ||
+		errors.Is(err, ErrACPConnectionClosed) ||
 		errors.Is(err, io.EOF) ||
 		errors.Is(err, io.ErrClosedPipe) ||
 		errors.Is(err, syscall.EPIPE) ||

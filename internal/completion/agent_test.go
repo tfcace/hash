@@ -3,7 +3,23 @@ package completion
 import (
 	"context"
 	"testing"
+	"time"
+
+	"github.com/tfcace/hash/internal/agent"
 )
+
+type blockingAgentTransport struct{}
+
+func (blockingAgentTransport) Connect(ctx context.Context) error { return nil }
+func (blockingAgentTransport) SendStreaming(ctx context.Context, req agent.Request) (<-chan string, <-chan error) {
+	return make(chan string), make(chan error)
+}
+func (blockingAgentTransport) Close() error                           { return nil }
+func (blockingAgentTransport) Name() string                           { return "blocking" }
+func (blockingAgentTransport) CurrentModel() string                   { return "" }
+func (blockingAgentTransport) AvailableModels() []agent.ModelOption   { return nil }
+func (blockingAgentTransport) SetModel(context.Context, string) error { return nil }
+func (blockingAgentTransport) EnsureModelInfo(context.Context) error  { return nil }
 
 func TestAgentCompleter_DetectsInlineAgent(t *testing.T) {
 	completer := NewAgentCompleter(nil) // No client for unit test
@@ -16,6 +32,61 @@ func TestAgentCompleter_DetectsInlineAgent(t *testing.T) {
 	// Without a client, should return empty (not error)
 	if err != nil {
 		t.Logf("Expected no error without client: %v", err)
+	}
+}
+
+func TestAgentCompleter_ClampsCursorBeforeSlicing(t *testing.T) {
+	completer := NewAgentCompleter(nil)
+
+	if _, err := completer.Complete(context.Background(), "echo ?? value", len("echo ?? value")+10); err != nil {
+		t.Fatalf("Complete() with oversized cursor error = %v", err)
+	}
+	if _, err := completer.Complete(context.Background(), "echo ?? value", -1); err != nil {
+		t.Fatalf("Complete() with negative cursor error = %v", err)
+	}
+}
+
+func TestAgentCompleter_ReturnsWhenAgentStreamIgnoresContext(t *testing.T) {
+	client := agent.NewClient(blockingAgentTransport{})
+	completer := NewAgentCompleter(client)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := completer.Complete(ctx, "echo ?? value", len("echo ?? value"))
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected context timeout error from blocked agent stream")
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("agent completer did not return after context cancellation")
+	}
+}
+
+func TestAgentCompleter_ReturnsWhenContextBuilderBlocks(t *testing.T) {
+	client := agent.NewClient(blockingAgentTransport{})
+	completer := NewAgentCompleter(client)
+	completer.buildContext = func(ctx context.Context) agent.Context {
+		<-ctx.Done()
+		return agent.Context{}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	_, err := completer.Complete(ctx, "echo ?? value", len("echo ?? value"))
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected context timeout error")
+	}
+	if elapsed > 100*time.Millisecond {
+		t.Fatalf("agent completer took %s after context cancellation, want under 100ms", elapsed)
 	}
 }
 

@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"mvdan.cc/sh/v3/syntax"
 )
 
 func TestSourceWithCompat_Aliases(t *testing.T) {
@@ -123,6 +125,70 @@ export EDITOR=vim
 	}
 	if report.Summary.Exports < 1 {
 		t.Errorf("Exports = %d, want >= 1", report.Summary.Exports)
+	}
+}
+
+func TestFilterWithDialect_ZshKeepsZshInitLines(t *testing.T) {
+	tmpDir := t.TempDir()
+	rcFile := filepath.Join(tmpDir, ".zshrc")
+
+	content := `# zsh mode should keep zsh eval/source lines
+eval "$(zoxide init zsh)"
+source ~/.zsh/zsh-autosuggestions/zsh-autosuggestions.zsh
+setopt AUTO_CD
+`
+	if err := os.WriteFile(rcFile, []byte(content), 0o644); err != nil {
+		t.Fatalf("failed to write rc file: %v", err)
+	}
+
+	bashFiltered, _, err := FilterWithCompat(rcFile, "zsh")
+	if err != nil {
+		t.Fatalf("FilterWithCompat() error = %v", err)
+	}
+	if !strings.Contains(bashFiltered, "# [hash-compat] eval \"$(zoxide init zsh)\"") {
+		t.Fatalf("bash compatibility should still comment zsh init lines, got:\n%s", bashFiltered)
+	}
+
+	zshFiltered, report, err := FilterWithDialect(rcFile, "zsh", "zsh")
+	if err != nil {
+		t.Fatalf("FilterWithDialect(zsh) error = %v", err)
+	}
+	if strings.Contains(zshFiltered, "# [hash-compat] eval \"$(zoxide init zsh)\"") {
+		t.Fatalf("zsh dialect should keep zsh init lines, got:\n%s", zshFiltered)
+	}
+	if strings.Contains(zshFiltered, "# [hash-compat] source ~/.zsh/zsh-autosuggestions") {
+		t.Fatalf("zsh dialect should keep zsh source lines, got:\n%s", zshFiltered)
+	}
+	if !strings.Contains(zshFiltered, "# [hash-compat] setopt AUTO_CD") {
+		t.Fatalf("zsh builtins without runtime support should still be no-oped, got:\n%s", zshFiltered)
+	}
+	if report.Summary.Skipped != 1 {
+		t.Fatalf("Skipped = %d, want 1 for setopt only", report.Summary.Skipped)
+	}
+}
+
+func TestFilterWithDialect_SkippedLineInsideIfLeavesStatement(t *testing.T) {
+	tmpDir := t.TempDir()
+	rcFile := filepath.Join(tmpDir, ".zshrc")
+	content := `if [[ "${TERM:-}" != "dumb" ]]; then
+  _cached_eval starship starship init zsh
+fi
+`
+	if err := os.WriteFile(rcFile, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	filtered, report, err := FilterWithDialect(rcFile, "zsh", "bash")
+	if err != nil {
+		t.Fatalf("FilterWithDialect error = %v", err)
+	}
+	if report.Summary.Skipped != 1 {
+		t.Fatalf("Skipped = %d, want 1", report.Summary.Skipped)
+	}
+
+	parser := syntax.NewParser(syntax.Variant(syntax.LangBash))
+	if _, err := parser.Parse(strings.NewReader(filtered), rcFile); err != nil {
+		t.Fatalf("filtered startup file should parse, got %v\nfiltered:\n%s", err, filtered)
 	}
 }
 

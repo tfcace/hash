@@ -30,6 +30,37 @@ func TestInsertMode_Backspace(t *testing.T) {
 	}
 }
 
+func TestInsertMode_UTF8InsertAdvancesByRuneBytes(t *testing.T) {
+	state := NewEditorState()
+	mode := NewInsertMode()
+
+	mode.HandleKey(Key{Rune: 'ש'}, state)
+	mode.HandleKey(Key{Rune: 'ל'}, state)
+
+	if state.Buffer.Content() != "של" {
+		t.Fatalf("Content = %q, want %q", state.Buffer.Content(), "של")
+	}
+	if state.Cursor.Pos.Col != len("של") {
+		t.Fatalf("Cursor col = %d, want byte offset %d", state.Cursor.Pos.Col, len("של"))
+	}
+}
+
+func TestInsertMode_UTF8BackspaceDeletesWholeRune(t *testing.T) {
+	state := NewEditorState()
+	state.Buffer = NewBufferFromString("של")
+	state.Cursor.MoveTo(0, len("של"))
+
+	mode := NewInsertMode()
+	mode.HandleKey(Key{Special: KeyBackspace}, state)
+
+	if state.Buffer.Content() != "ש" {
+		t.Fatalf("Content = %q, want %q", state.Buffer.Content(), "ש")
+	}
+	if state.Cursor.Pos.Col != len("ש") {
+		t.Fatalf("Cursor col = %d, want byte offset %d", state.Cursor.Pos.Col, len("ש"))
+	}
+}
+
 func TestInsertMode_Enter_Submits(t *testing.T) {
 	state := NewEditorState()
 	state.Buffer = NewBufferFromString("hello")

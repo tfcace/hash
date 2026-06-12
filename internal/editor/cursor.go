@@ -63,6 +63,7 @@ func (c *Cursor) Clamp(buf *Buffer) {
 	if c.Pos.Col > lineLen {
 		c.Pos.Col = lineLen
 	}
+	c.Pos.Col = clampByteIndexToRuneBoundary(buf.Line(c.Pos.Row), c.Pos.Col)
 }
 
 // Clone creates a deep copy of the cursor.

@@ -15,7 +15,7 @@ import (
 
 func runPipeTest(t *testing.T, name, input, pipeCmd, pipeOutput string) {
 	transport := agent.NewACPTransport(agent.ACPConfig{
-		Command: "claude-code-acp",
+		Command: "claude-agent-acp",
 		Args:    []string{},
 	})
 

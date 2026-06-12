@@ -12,17 +12,30 @@ import (
 // ExecutableCompleter completes executable names from PATH.
 // It is triggered when completing the first word of a command (or after a pipe).
 type ExecutableCompleter struct {
-	cache     []string
-	cacheTime time.Time
-	cacheMu   sync.RWMutex
-	cacheTTL  time.Duration
+	cache           []string
+	cacheTime       time.Time
+	cacheMu         sync.RWMutex
+	cacheTTL        time.Duration
+	refreshMu       sync.Mutex
+	refreshing      bool
+	refreshStarted  time.Time
+	refreshDone     chan struct{}
+	refreshMaxAge   time.Duration
+	coldScanWait    time.Duration
+	scanExecutables func() []string
+	readDir         func(string) ([]os.DirEntry, error)
 }
 
 // NewExecutableCompleter creates a new executable completer.
 func NewExecutableCompleter() *ExecutableCompleter {
-	return &ExecutableCompleter{
-		cacheTTL: 30 * time.Second,
+	c := &ExecutableCompleter{
+		cacheTTL:      30 * time.Second,
+		refreshMaxAge: contextReadInflightMaxWaitAge,
+		coldScanWait:  50 * time.Millisecond,
+		readDir:       os.ReadDir,
 	}
+	c.scanExecutables = c.scanPATHExecutables
+	return c
 }
 
 // Name returns the completer name.
@@ -61,57 +74,129 @@ func (c *ExecutableCompleter) Complete(ctx context.Context, line string, pos int
 	}
 
 	// Get executables from PATH
-	executables := c.getExecutables()
+	executables := c.getExecutables(ctx)
+	if err := ctx.Err(); err != nil {
+		return Result{}, err
+	}
 
-	var items []Item
+	items := make([]Item, 0, min(len(executables), 50))
 	lowerPrefix := strings.ToLower(prefix)
 	for _, exe := range executables {
+		if err := ctx.Err(); err != nil {
+			return Result{}, err
+		}
 		if prefix == "" || strings.HasPrefix(strings.ToLower(exe), lowerPrefix) {
 			items = append(items, Item{
 				Value:   exe,
 				Display: exe,
 				Icon:    "",
 			})
+			if len(items) >= 50 {
+				break
+			}
 		}
-	}
-
-	// Limit results to avoid overwhelming the UI
-	if len(items) > 50 {
-		items = items[:50]
 	}
 
 	return Result{Items: items}, nil
 }
 
 // getExecutables returns all executables in PATH, using a cache.
-func (c *ExecutableCompleter) getExecutables() []string {
+func (c *ExecutableCompleter) getExecutables(ctx context.Context) []string {
+	executables, fresh := c.cacheSnapshot()
+	if fresh {
+		return executables
+	}
+
+	done := c.refreshAsync()
+	if len(executables) > 0 || c.coldScanWait <= 0 {
+		return executables
+	}
+
+	timer := time.NewTimer(c.coldScanWait)
+	defer timer.Stop()
+
+	select {
+	case <-done:
+		executables, _ = c.cacheSnapshot()
+		return executables
+	case <-ctx.Done():
+		executables, _ = c.cacheSnapshot()
+		return executables
+	case <-timer.C:
+		executables, _ = c.cacheSnapshot()
+		return executables
+	}
+}
+
+func (c *ExecutableCompleter) cacheSnapshot() ([]string, bool) {
 	c.cacheMu.RLock()
-	if c.cache != nil && time.Since(c.cacheTime) < c.cacheTTL {
-		result := c.cache
-		c.cacheMu.RUnlock()
-		return result
+	defer c.cacheMu.RUnlock()
+	return c.cache, c.cache != nil && time.Since(c.cacheTime) < c.cacheTTL
+}
+
+func (c *ExecutableCompleter) refreshAsync() <-chan struct{} {
+	c.refreshMu.Lock()
+	if c.refreshing {
+		maxAge := c.refreshMaxAge
+		if maxAge == 0 {
+			maxAge = contextReadInflightMaxWaitAge
+		}
+		if maxAge < 0 || time.Since(c.refreshStarted) < maxAge {
+			done := c.refreshDone
+			c.refreshMu.Unlock()
+			return done
+		}
 	}
-	c.cacheMu.RUnlock()
 
-	// Rebuild cache
-	c.cacheMu.Lock()
-	defer c.cacheMu.Unlock()
-
-	// Double-check after acquiring write lock
-	if c.cache != nil && time.Since(c.cacheTime) < c.cacheTTL {
-		return c.cache
+	done := make(chan struct{})
+	c.refreshing = true
+	c.refreshStarted = time.Now()
+	c.refreshDone = done
+	scan := c.scanExecutables
+	if scan == nil {
+		scan = c.scanPATHExecutables
 	}
+	c.refreshMu.Unlock()
 
+	go func() {
+		executables := scan()
+
+		c.refreshMu.Lock()
+		if c.refreshDone != done {
+			c.refreshMu.Unlock()
+			close(done)
+			return
+		}
+
+		c.cacheMu.Lock()
+		c.cache = executables
+		c.cacheTime = time.Now()
+		c.cacheMu.Unlock()
+
+		c.refreshing = false
+		c.refreshMu.Unlock()
+		close(done)
+	}()
+
+	return done
+}
+
+func (c *ExecutableCompleter) scanPATHExecutables() []string {
 	seen := make(map[string]bool)
 	var executables []string
 
 	pathEnv := os.Getenv("PATH")
+	readDir := c.readDir
+	if readDir == nil {
+		readDir = os.ReadDir
+	}
+
 	for _, dir := range filepath.SplitList(pathEnv) {
 		if dir == "" {
 			dir = "."
 		}
 
-		entries, err := os.ReadDir(dir)
+		entries, err := readDir(dir)
 		if err != nil {
 			continue
 		}
@@ -126,25 +211,18 @@ func (c *ExecutableCompleter) getExecutables() []string {
 				continue
 			}
 
-			// Skip non-regular files (but allow symlinks — they need Info())
+			// Stay syscall-light: avoid Info/Stat here because PATH entries may
+			// live on slow mounts. PATH directories are expected to contain
+			// commands, so type filtering is enough for interactive completion.
 			typ := entry.Type()
 			if typ&^(os.ModeSymlink) != 0 {
 				continue
 			}
 
-			// Check if executable
-			info, err := entry.Info()
-			if err != nil {
-				continue
-			}
-			if info.Mode()&0o111 != 0 {
-				seen[name] = true
-				executables = append(executables, name)
-			}
+			seen[name] = true
+			executables = append(executables, name)
 		}
 	}
 
-	c.cache = executables
-	c.cacheTime = time.Now()
 	return executables
 }

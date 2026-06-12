@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/creack/pty"
+	"github.com/tfcace/hash/internal/version"
+	"mvdan.cc/sh/v3/syntax"
 )
 
 func TestExecute_SimpleCommand(t *testing.T) {
@@ -35,6 +37,93 @@ func TestExecute_SimpleCommand(t *testing.T) {
 	}
 }
 
+func TestExecute_DefaultBashDialectRejectsZshSyntax(t *testing.T) {
+	exec := New()
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, ": &!", nil, nil)
+	if err == nil {
+		t.Fatal("expected bash dialect to reject zsh disown syntax")
+	}
+}
+
+func TestExecute_ZshDialectAcceptsZshSyntax(t *testing.T) {
+	exec := New()
+	if err := exec.SetDialect("zsh"); err != nil {
+		t.Fatalf("SetDialect(zsh) error = %v", err)
+	}
+	ctx := context.Background()
+
+	if _, err := exec.Execute(ctx, ": &!", nil, nil); err != nil {
+		t.Fatalf("zsh dialect should accept zsh disown syntax: %v", err)
+	}
+}
+
+func TestExecutor_ZshDialectSourcesZshSyntaxBeforeExports(t *testing.T) {
+	const envName = "HASH_TEST_ZSH_SOURCE_MARKER"
+	t.Setenv(envName, "")
+
+	exec := New()
+	if err := exec.SetDialect("zsh"); err != nil {
+		t.Fatalf("SetDialect(zsh) error = %v", err)
+	}
+
+	tmpDir := t.TempDir()
+	scriptPath := filepath.Join(tmpDir, ".zshrc")
+	content := `: &!
+export ` + envName + `=loaded
+`
+	if err := os.WriteFile(scriptPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("failed to write zsh source file: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if _, err := exec.Execute(context.Background(), "source "+scriptPath, &stdout, &stderr); err != nil {
+		t.Fatalf("source failed: %v, stderr: %s", err, stderr.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if _, err := exec.Execute(context.Background(), `echo "$`+envName+`"`, &stdout, &stderr); err != nil {
+		t.Fatalf("echo failed: %v, stderr: %s", err, stderr.String())
+	}
+	if got := strings.TrimSpace(stdout.String()); got != "loaded" {
+		t.Fatalf("sourced export = %q, want loaded", got)
+	}
+}
+
+func TestExecutor_ZshDialectEvalParsesZshSyntax(t *testing.T) {
+	const envName = "HASH_TEST_ZSH_EVAL_MARKER"
+	t.Setenv(envName, "")
+
+	exec := New()
+	if err := exec.SetDialect("zsh"); err != nil {
+		t.Fatalf("SetDialect(zsh) error = %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	command := `eval ': &!'; export ` + envName + `=loaded`
+	if _, err := exec.Execute(context.Background(), command, &stdout, &stderr); err != nil {
+		t.Fatalf("eval failed: %v, stderr: %s", err, stderr.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if _, err := exec.Execute(context.Background(), `echo "$`+envName+`"`, &stdout, &stderr); err != nil {
+		t.Fatalf("echo failed: %v, stderr: %s", err, stderr.String())
+	}
+	if got := strings.TrimSpace(stdout.String()); got != "loaded" {
+		t.Fatalf("eval export = %q, want loaded", got)
+	}
+}
+
+func TestExecutor_SetDialectRejectsUnknownDialect(t *testing.T) {
+	exec := New()
+	if err := exec.SetDialect("fish"); err == nil {
+		t.Fatal("expected unknown dialect to be rejected")
+	}
+}
+
 func TestExecute_ExitCode(t *testing.T) {
 	exec := New()
 
@@ -48,6 +137,57 @@ func TestExecute_ExitCode(t *testing.T) {
 
 	if result.ExitCode != 42 {
 		t.Errorf("ExitCode = %d, want 42", result.ExitCode)
+	}
+}
+
+// `hash` collides with the POSIX no-op builtin in mvdan/sh, which would
+// otherwise swallow these args and print nothing. Hash overrides the version
+// and help forms so they report Hash's own info from within the Hash shell.
+func TestExecute_HashVersionReachesBinary(t *testing.T) {
+	want := "hash " + version.String() + "\n"
+
+	for _, cmd := range []string{"hash version", "hash --version", "hash -v"} {
+		t.Run(cmd, func(t *testing.T) {
+			exec := New()
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+
+			var stdout bytes.Buffer
+			result, err := exec.Execute(ctx, cmd, &stdout, nil)
+			if err != nil {
+				t.Fatalf("Execute(%q) error = %v", cmd, err)
+			}
+			if result.ExitCode != 0 {
+				t.Errorf("ExitCode = %d, want 0", result.ExitCode)
+			}
+			if stdout.String() != want {
+				t.Errorf("stdout = %q, want %q", stdout.String(), want)
+			}
+		})
+	}
+}
+
+// Genuine POSIX hash usage must keep falling through to the no-op builtin:
+// it should produce no output and succeed, exactly as before.
+func TestExecute_HashPosixUsagePreserved(t *testing.T) {
+	for _, cmd := range []string{"hash", "hash -r", "hash ls"} {
+		t.Run(cmd, func(t *testing.T) {
+			exec := New()
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+
+			var stdout bytes.Buffer
+			result, err := exec.Execute(ctx, cmd, &stdout, nil)
+			if err != nil {
+				t.Fatalf("Execute(%q) error = %v", cmd, err)
+			}
+			if result.ExitCode != 0 {
+				t.Errorf("ExitCode = %d, want 0", result.ExitCode)
+			}
+			if stdout.String() != "" {
+				t.Errorf("stdout = %q, want empty", stdout.String())
+			}
+		})
 	}
 }
 
@@ -559,7 +699,7 @@ fi
 		t.Fatalf("failed to create test script: %v", err)
 	}
 
-	// Source the file - should work with LangBash parsing
+	// Source the file - should work with the default bash dialect.
 	_, err := exec.Execute(ctx, "source "+scriptPath, &stdout, &stderr)
 	if err != nil {
 		t.Fatalf("source failed: %v, stderr: %s", err, stderr.String())
@@ -715,7 +855,7 @@ eval '[[ "$TEST_VAR" == "bar" ]] && echo "eval in script works"'
 	}
 }
 
-// Tests for graceful degradation - zsh-specific syntax should be silently skipped
+// Tests for graceful degradation in the default bash dialect: zsh-specific syntax should be silently skipped.
 
 func TestExecutor_SourceZshSpecificFile_GracefulSkip(t *testing.T) {
 	exec := New()
@@ -1170,6 +1310,23 @@ fi
 	}
 }
 
+func TestExecutor_StatementRecoveryDoesNotPrintUnsupportedNoise(t *testing.T) {
+	exec := New()
+	var stderr bytes.Buffer
+	exec.switchStderr.Set(&stderr)
+	if err := exec.initRunner(); err != nil {
+		t.Fatalf("initRunner error = %v", err)
+	}
+
+	prog := &syntax.File{Stmts: []*syntax.Stmt{nil}}
+	if err := exec.runStatementsWithRecovery(context.Background(), prog, "test.zsh"); err != nil {
+		t.Fatalf("runStatementsWithRecovery error = %v", err)
+	}
+	if strings.Contains(stderr.String(), "unsupported") || strings.Contains(stderr.String(), "skipping statement") {
+		t.Fatalf("statement recovery should stay quiet, stderr: %q", stderr.String())
+	}
+}
+
 func TestExecutor_ZoxideQueryNonZeroStillChangesDir(t *testing.T) {
 	origDir, err := os.Getwd()
 	if err != nil {
@@ -1230,6 +1387,9 @@ function z() { __zoxide_z "$@"; }
 	_, err = exec.Execute(ctx, `eval '`+zoxideSnippet+`'; pwd; z site; pwd`, &stdout, &stderr)
 	if err != nil {
 		t.Fatalf("eval+z failed: %v, stderr: %s", err, stderr.String())
+	}
+	if strings.Contains(stderr.String(), "unsupported builtin") {
+		t.Fatalf("zoxide shim should not emit unsupported builtin noise, stderr: %q", stderr.String())
 	}
 
 	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")

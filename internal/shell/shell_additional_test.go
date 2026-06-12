@@ -49,7 +49,7 @@ func TestFindSimilar_EdgeCases(t *testing.T) {
 		{"empty candidates", "ls", nil, 3, 0},
 		{"exact match excluded", "ls", []string{"ls"}, 3, 0},
 		{"max results limit", "g", []string{"a", "b", "c", "d", "e"}, 2, 2},
-		{"unicode", "猫", []string{"狗", "猫咪"}, 3, 0}, // No matches within distance
+		{"unicode", "猫", []string{"狗", "猫咪"}, 3, 2},
 	}
 
 	for _, tt := range tests {
@@ -71,7 +71,7 @@ func TestDamerauLevenshtein_EdgeCases(t *testing.T) {
 	}{
 		{"both empty", "", "", 0},
 		{"unicode same", "日本", "日本", 0},
-		{"unicode different", "日本", "中国", 6}, // bytes, not runes
+		{"unicode different", "日本", "中国", 2},
 		{"long strings", "abcdefghij", "abcdefghij", 0},
 		{"completely different", "abc", "xyz", 3},
 		{"case sensitive", "ABC", "abc", 3},

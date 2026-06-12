@@ -36,10 +36,10 @@ func (s *Shell) collectAgentStream(
 
 	var response strings.Builder
 	renderer := markdown.NewStreamingRenderer()
+	sanitizer := newLegacyAgentMarkerSanitizer()
 
 	firstChunkSeen := false
 	trimLeadingResponse := opts.trimLeadingNewline
-	trimLeadingRender := opts.trimLeadingNewline
 
 	var flushTimer *time.Timer
 	var flushTimerC <-chan time.Time
@@ -105,16 +105,19 @@ collectLoop:
 			}
 
 			responseText := trimLeadingSingleNewline(text, &trimLeadingResponse)
-			appendResponse(responseText)
-
-			renderText := trimLeadingSingleNewline(text, &trimLeadingRender)
-			writeRendered(renderer.Write(renderText))
+			cleanText := sanitizer.Write(responseText)
+			appendResponse(cleanText)
+			writeRendered(renderer.Write(cleanText))
 
 			if flushTimer != nil {
 				resetStreamFlushTimer(flushTimer, opts.flushDelay)
 			}
 		}
 	}
+
+	cleanTail := sanitizer.Flush()
+	appendResponse(cleanTail)
+	writeRendered(renderer.Write(cleanTail))
 
 	// Drain any pending error after text channel closed
 	select {
@@ -125,7 +128,7 @@ collectLoop:
 	default:
 	}
 
-	writeRendered(renderer.Flush())
+	writeRendered(renderer.Finish())
 	result.responseText = response.String()
 	return result
 }

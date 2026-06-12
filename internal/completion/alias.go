@@ -53,6 +53,9 @@ func (c *AliasCompleter) Complete(ctx context.Context, line string, pos int) (Re
 				Display: name,
 				Icon:    "ƒ",
 			})
+			if len(items) >= completionItemLimit {
+				break
+			}
 		}
 	}
 

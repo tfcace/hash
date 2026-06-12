@@ -6,38 +6,56 @@ func TestShellWordAt(t *testing.T) {
 	tests := []struct {
 		name string
 		line string
+		pos  int
 		want string
 	}{
 		{
 			name: "plain word",
 			line: "cp file",
+			pos:  len("cp file"),
 			want: "file",
 		},
 		{
 			name: "escaped space",
 			line: `cp My\ File`,
+			pos:  len(`cp My\ File`),
 			want: `My\ File`,
 		},
 		{
 			name: "single quoted space",
 			line: `cp 'My File`,
+			pos:  len(`cp 'My File`),
 			want: `'My File`,
 		},
 		{
 			name: "double quoted space",
 			line: `cp "My File`,
+			pos:  len(`cp "My File`),
 			want: `"My File`,
 		},
 		{
 			name: "space after completed escaped word",
 			line: `cp My\ File `,
+			pos:  len(`cp My\ File `),
 			want: "",
+		},
+		{
+			name: "negative cursor clamps to start",
+			line: "cp file",
+			pos:  -1,
+			want: "",
+		},
+		{
+			name: "oversized cursor clamps to end",
+			line: "cp file",
+			pos:  len("cp file") + 10,
+			want: "file",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := shellWordAt(tt.line, len(tt.line)); got != tt.want {
+			if got := shellWordAt(tt.line, tt.pos); got != tt.want {
 				t.Fatalf("shellWordAt() = %q, want %q", got, tt.want)
 			}
 		})

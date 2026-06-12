@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -13,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"golang.org/x/sys/unix"
 	"golang.org/x/term"
 
 	"github.com/tfcace/hash/internal/agent"
@@ -33,6 +35,8 @@ import (
 	"github.com/tfcace/hash/internal/trace"
 )
 
+const editorCompletionTimeout = 150 * time.Millisecond
+
 // Mode represents the shell's startup mode.
 type Mode struct {
 	Login       bool // Login shell (sources profile files)
@@ -41,30 +45,31 @@ type Mode struct {
 
 // Shell is the main Hash shell instance.
 type Shell struct {
-	mode         Mode // Startup mode
-	config       *config.Config
-	executor     *executor.Executor
-	prompt       *prompt.Prompt
-	readline     *readline.Readline
-	inputHandler *readline.InputHandler // For Ctrl+R search
-	editorCfg    editor.Config          // Editor configuration
-	agentHandler *AgentHandler
-	responseUI   *ResponseUI
-	history      *history.Store
-	historyPath  string
-	learning     *learning.FixStore
-	clipboard    *clipboard.Buffer
-	predictor    *prediction.Predictor
-	suggestor    *CommandSuggestor
-	colorPalette prompt.Palette
-	allowlist    *allowlist.Manager
-	agentOutput  *AgentOutputCoordinator
-	readKey      func() byte
-	lastExitCode int
-	lastDuration time.Duration
-	lastCommand  string // Last executed command
-	lastStderr   string // Stderr from last command (truncated)
-	lastCwd      string // Working directory of last command
+	mode                Mode // Startup mode
+	config              *config.Config
+	executor            *executor.Executor
+	prompt              *prompt.Prompt
+	readline            *readline.Readline
+	inputHandler        *readline.InputHandler // For Ctrl+R search
+	editorCfg           editor.Config          // Editor configuration
+	agentHandler        *AgentHandler
+	responseUI          *ResponseUI
+	history             *history.Store
+	historyPath         string
+	learning            *learning.FixStore
+	clipboard           *clipboard.Buffer
+	predictor           *prediction.Predictor
+	suggestor           *CommandSuggestor
+	colorPalette        prompt.Palette
+	allowlist           *allowlist.Manager
+	agentOutput         *AgentOutputCoordinator
+	readKey             func(ctx context.Context) byte
+	agentReplyInputHook func(context.Context) (string, error)
+	lastExitCode        int
+	lastDuration        time.Duration
+	lastCommand         string // Last executed command
+	lastStderr          string // Stderr from last command (truncated)
+	lastCwd             string // Working directory of last command
 
 	osc *integration.Emitter // OSC shell integration emitter
 
@@ -84,6 +89,9 @@ type Shell struct {
 //nolint:gocyclo // shell initialization wires up many subsystems sequentially
 func New(cfg *config.Config) (*Shell, error) {
 	e := executor.New()
+	if err := e.SetDialect(cfg.Shell.Dialect); err != nil {
+		fmt.Fprintf(os.Stderr, "hash: warning: %v; using bash dialect\n", err)
+	}
 	agentCfg := cfg.EffectiveAgent()
 
 	promptCfg := prompt.Config{
@@ -858,11 +866,7 @@ func (s *Shell) handleAgentRequest(ctx context.Context, parsed parser.ParseResul
 	fmt.Fprintf(os.Stdout, "\033[90m[agent: %s]\033[0m ", modeLabel)
 
 	if s.agentHandler == nil {
-		fmt.Fprintf(os.Stderr, "\n\033[31m✗ Agent not configured.\033[0m\n")
-		fmt.Fprintf(os.Stderr, "  Configure an agent in ~/.config/hash/config.toml:\n")
-		fmt.Fprintf(os.Stderr, "  [agent]\n")
-		fmt.Fprintf(os.Stderr, "  command = \"claude\"\n")
-		fmt.Fprintf(os.Stderr, "  See docs/config-reference.md for options.\n")
+		writeAgentNotConfiguredHint(os.Stderr)
 		s.lastExitCode = 1
 		return nil
 	}
@@ -907,6 +911,19 @@ func (s *Shell) handleAgentRequest(ctx context.Context, parsed parser.ParseResul
 
 	// Use unified streaming handler for all modes
 	return s.handleAgentRequestUnified(agentCtx, parsed)
+}
+
+// wireSpinnerGate keeps spinner frames off the screen while the output
+// coordinator has a permission prompt up. Wired lazily so any Shell,
+// including test fixtures built from struct literals, gets the guard.
+func (s *Shell) wireSpinnerGate() {
+	if s.responseUI == nil || s.agentOutput == nil {
+		return
+	}
+	aoc := s.agentOutput
+	s.responseUI.SetDrawGate(func() bool {
+		return aoc.State() != AgentOutputStatePermission
+	})
 }
 
 func (s *Shell) agentRequestTimeout() time.Duration {
@@ -1045,15 +1062,20 @@ func (s *Shell) handleAgentFullStreaming(ctx context.Context, parsed parser.Pars
 	defer timeoutCancel()
 
 	// Show thinking indicator (multi-stage: thinking -> receiving)
+	s.wireSpinnerGate()
+	s.responseUI.SetAgentModel(s.agentHandler.CurrentModel())
 	s.responseUI.ShowState(AgentStateThinking)
 
 	textCh, errCh := s.agentHandler.StreamRequest(requestCtx, parsed)
 
 	streamResult := s.collectAgentStream(ctx, textCh, errCh, agentStreamCollectionOptions{
 		onFirstChunk: func() {
+			// Stop the spinner before claiming the line. ClearActiveLine
+			// (not ClearLine) so an active permission prompt keeps its
+			// last line intact; StartStreaming defers to the prompt too.
+			s.responseUI.StopSpinner()
 			s.agentOutput.StartStreaming()
-			s.responseUI.ShowState(AgentStateReceiving)
-			s.responseUI.ClearLine()
+			s.agentOutput.ClearActiveLine()
 		},
 		writeRendered: func(rendered string) {
 			s.agentOutput.WriteStream(rendered)
@@ -1083,18 +1105,29 @@ func (s *Shell) handleAgentFullStreaming(ctx context.Context, parsed parser.Pars
 		}
 	}
 
+	responseText := strings.TrimSpace(streamResult.responseText)
+	if responseText == "" {
+		s.responseUI.ClearLine()
+		s.responseUI.ShowError(emptyAgentResponseMessage)
+		s.lastExitCode = 1
+		return
+	}
+
 	// Success path - add newline after response and clear spinner
 	fmt.Println()
 	s.responseUI.ClearLine()
-	responseText := strings.TrimSpace(streamResult.responseText)
 	lineCount := streamResult.lineCount + 1
 
 	// Determine response type (single-turn flow)
 	collector := agent.NewStreamCollector()
 	collector.Append(responseText)
 	resp := collector.Response()
+	resp = agentTurnResponseForConfirmation(parsed.Type, resp, responseText)
 
-	confirmType, needsConfirmation := confirmationTypeForAgentResponse(resp)
+	allowReply := agentTurnAllowsReply(parsed.Type, resp)
+	transcript := s.initialAgentConversationTranscript(parsed, responseText)
+
+	confirmType, needsConfirmation := confirmationTypeForAgentResponse(resp, allowReply)
 	if !needsConfirmation {
 		s.responseUI.StopProgress()
 		return
@@ -1109,20 +1142,179 @@ func (s *Shell) handleAgentFullStreaming(ctx context.Context, parsed parser.Pars
 	// Stop progress bar before any action
 	s.responseUI.StopProgress()
 
+	if action == ConfirmReply {
+		s.runAgentConversationLoop(ctx, modelName, transcript)
+		return
+	}
+
 	if s.handleAgentConfirmAction(ctx, action, confirmType, resp, responseText, lineCount) {
 		return
 	}
 }
 
-func confirmationTypeForAgentResponse(resp agent.Response) (ConfirmationType, bool) {
+func (s *Shell) initialAgentConversationTranscript(parsed parser.ParseResult, responseText string) []agentConversationMessage {
+	userPrompt := strings.TrimSpace(parsed.AgentPrompt)
+	if s.agentHandler != nil {
+		if req, err := s.agentHandler.buildRequest(parsed); err == nil {
+			userPrompt = strings.TrimSpace(req.Prompt)
+		}
+	}
+
+	transcript := make([]agentConversationMessage, 0, 2)
+	if userPrompt != "" {
+		transcript = append(transcript, agentConversationMessage{Role: "user", Text: userPrompt})
+	}
+	if responseText != "" {
+		transcript = append(transcript, agentConversationMessage{Role: "assistant", Text: responseText})
+	}
+	return transcript
+}
+
+func (s *Shell) runAgentConversationLoop(ctx context.Context, modelName string, transcript []agentConversationMessage) {
+	openRail := true
+	for {
+		reply, ok := s.readAgentConversationReply(ctx, openRail)
+		if !ok {
+			return
+		}
+		openRail = false
+		if agentConversationReplyEndsConversation(reply) {
+			return
+		}
+
+		priorTranscript := append([]agentConversationMessage(nil), transcript...)
+		resp, responseText, lineCount, ok := s.streamAgentFollowUpTurn(ctx, reply, priorTranscript)
+		transcript = append(transcript, agentConversationMessage{Role: "user", Text: reply})
+		if !ok {
+			return
+		}
+		transcript = append(transcript, agentConversationMessage{Role: "assistant", Text: responseText})
+
+		if agentTurnShouldPromptForReply(parser.CommandTypeAgent, resp, responseText) {
+			continue
+		}
+
+		confirmType, needsConfirmation := confirmationTypeForAgentResponse(
+			resp,
+			agentTurnAllowsReply(parser.CommandTypeAgent, resp),
+		)
+		if !needsConfirmation {
+			return
+		}
+
+		s.agentOutput.EnterConfirming()
+		s.agentOutput.ShowHints(confirmType)
+		action := s.responseUI.WaitForConfirmationByType(confirmType)
+		s.agentOutput.ExitConfirming()
+		fmt.Println()
+
+		s.responseUI.StopProgress()
+
+		if action == ConfirmReply {
+			continue
+		}
+		s.handleAgentConfirmAction(ctx, action, confirmType, resp, responseText, lineCount)
+		return
+	}
+}
+
+func (s *Shell) readAgentConversationReply(ctx context.Context, openRail bool) (string, bool) {
+	if s.agentReplyInputHook != nil {
+		reply, err := s.agentReplyInputHook(ctx)
+		if err != nil {
+			return "", false
+		}
+		reply = strings.TrimSpace(reply)
+		return reply, reply != ""
+	}
+
+	cfg := agentConversationEditorConfig(s.editorCfg, openRail)
+
+	ed := editor.New(cfg, os.Stdin, os.Stdout)
+	result, err := ed.Run(ctx)
+	if err != nil || result.Canceled || result.EOF {
+		return "", false
+	}
+
+	reply := strings.TrimSpace(result.Text)
+	return reply, reply != ""
+}
+
+func (s *Shell) streamAgentFollowUpTurn(
+	ctx context.Context,
+	reply string,
+	transcript []agentConversationMessage,
+) (response agent.Response, responseText string, lineCount int, ok bool) {
+	requestCtx, timeoutCancel := context.WithTimeout(ctx, s.agentRequestTimeout())
+	defer timeoutCancel()
+
+	s.wireSpinnerGate()
+	s.responseUI.SetAgentModel(s.agentHandler.CurrentModel())
+	s.responseUI.ShowState(AgentStateThinking)
+	textCh, errCh := s.agentHandler.StreamFollowUp(requestCtx, reply, transcript)
+	railPrefixer := newAgentConversationRailPrefixer(func(rendered string) {
+		s.agentOutput.WriteStream(rendered)
+	})
+
+	streamResult := s.collectAgentStream(ctx, textCh, errCh, agentStreamCollectionOptions{
+		onFirstChunk: func() {
+			// Same permission-aware sequence as handleAgentFullStreaming.
+			s.responseUI.StopSpinner()
+			s.agentOutput.StartStreaming()
+			s.agentOutput.ClearActiveLine()
+		},
+		writeRendered: func(rendered string) {
+			railPrefixer.Write(rendered)
+		},
+		flushDelay: 50 * time.Millisecond,
+	})
+
+	if streamResult.canceled {
+		s.responseUI.ClearLine()
+		fmt.Fprintln(os.Stderr, "hash: request canceled")
+		s.lastExitCode = 1
+		return agent.Response{}, "", 0, false
+	}
+
+	s.agentOutput.EndStreaming()
+
+	if streamResult.streamErr != nil {
+		s.responseUI.ClearLine()
+		s.responseUI.ShowError(agentStreamErrorMessage(streamResult.streamErr))
+		s.lastExitCode = 1
+		return agent.Response{}, "", 0, false
+	}
+
+	responseText = strings.TrimSpace(streamResult.responseText)
+	if responseText == "" {
+		s.responseUI.ClearLine()
+		s.responseUI.ShowError(emptyAgentResponseMessage)
+		s.lastExitCode = 1
+		return agent.Response{}, "", 0, false
+	}
+
+	fmt.Println()
+	s.responseUI.ClearLine()
+
+	collector := agent.NewStreamCollector()
+	collector.Append(responseText)
+	return collector.Response(), responseText, streamResult.lineCount + 1, true
+}
+
+func confirmationTypeForAgentResponse(resp agent.Response, allowExplanationReply bool) (ConfirmationType, bool) {
 	switch resp.Type {
 	case agent.ResponseTypeCommand:
 		return ConfirmTypeCommand, true
+	case agent.ResponseTypeExplanation:
+		if allowExplanationReply {
+			return ConfirmTypeExplanation, true
+		}
 	case agent.ResponseTypeError:
 		return ConfirmTypeError, true
 	default:
 		return 0, false
 	}
+	return 0, false
 }
 
 // handleAgentConfirmAction processes the user's confirmation choice.
@@ -1170,7 +1362,7 @@ func (s *Shell) executeAgentCommand(ctx context.Context, command string) {
 // Returns true if the caller should return (error was fully handled).
 func (s *Shell) handleAgentStreamError(ctx context.Context, parsed parser.ParseResult, modelName string, streamErr error, responseLen, lineCount int) bool {
 	s.responseUI.ClearLine() // Stop spinner and clear the line
-	s.responseUI.ShowError(streamErr.Error())
+	s.responseUI.ShowError(agentStreamErrorMessage(streamErr))
 
 	// If no response was received, classify the failure before showing hints.
 	// Startup errors get install/PATH hints; transient errors get retry.
@@ -1216,6 +1408,23 @@ func (s *Shell) handleAgentStreamError(ctx context.Context, parsed parser.ParseR
 	// lineCount + error line + confirmation line + blank line
 	s.responseUI.ClearLines(lineCount + 3)
 	return true
+}
+
+func agentStreamErrorMessage(err error) string {
+	if errors.Is(err, agent.ErrACPNoOutput) {
+		return emptyAgentResponseMessage
+	}
+	return err.Error()
+}
+
+func writeAgentNotConfiguredHint(w io.Writer) {
+	fmt.Fprintf(w, "\n\033[31m✗ Agent not configured.\033[0m\n")
+	fmt.Fprintf(w, "  Install the default ACP adapter:\n")
+	fmt.Fprintf(w, "  %s\n", claudeAgentACPInstallCommand)
+	fmt.Fprintf(w, "  Configure an agent in ~/.config/hash/config.toml:\n")
+	fmt.Fprintf(w, "  [agent]\n")
+	fmt.Fprintf(w, "  command = \"claude-agent-acp\"\n")
+	fmt.Fprintf(w, "  See docs/config-reference.md for options.\n")
 }
 
 // handleEditCommand opens editor with command for editing.
@@ -1363,10 +1572,10 @@ func trimSpace(s string) string {
 // makeEditorCompleteFunc adapts the completion router to editor's CompleteFunc.
 func makeEditorCompleteFunc(router *completion.Router) func(string, int) []editor.Completion {
 	return func(line string, pos int) []editor.Completion {
-		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		ctx, cancel := context.WithTimeout(context.Background(), editorCompletionTimeout)
 		defer cancel()
 
-		result, err := router.Complete(ctx, line, pos)
+		result, err := router.CompleteBounded(ctx, line, pos)
 		if err != nil || len(result.Items) == 0 {
 			return nil
 		}
@@ -1384,7 +1593,7 @@ func makeEditorCompleteFunc(router *completion.Router) func(string, int) []edito
 
 func makeEditorPrefetchFunc(router *completion.Router) func(string, int) {
 	return func(line string, pos int) {
-		router.Prefetch(line, pos)
+		router.PrefetchBounded(line, pos)
 	}
 }
 
@@ -1534,7 +1743,10 @@ func (s *Shell) runChpwdHook(ctx context.Context) {
 	}
 }
 
-func (s *Shell) handleToolPermission(req agent.ToolPermissionRequest) (allow, always bool) {
+// handleToolPermission prompts the user to approve an agent tool call.
+// Runs on the agent's permission goroutine; ctx is the prompt turn's
+// context, and cancellation aborts the prompt with a deny.
+func (s *Shell) handleToolPermission(ctx context.Context, req agent.ToolPermissionRequest) (allow, always bool) {
 	s.refreshProjectAllowlist()
 	if s.allowlist != nil && s.allowlist.IsAllowed(req.Command) {
 		trace.AgentHigh("tool_permission", map[string]any{
@@ -1562,7 +1774,7 @@ func (s *Shell) handleToolPermission(req agent.ToolPermissionRequest) (allow, al
 	if readKey == nil {
 		readKey = readSingleKey
 	}
-	key := readKey()
+	key := readKey(ctx)
 	allow, always = permissionDecisionForKey(key)
 
 	if always && s.allowlist != nil {
@@ -1625,11 +1837,21 @@ func permissionDecisionForKey(key byte) (allow, always bool) {
 	}
 }
 
-const permissionPromptInputSettleDelay = 10 * time.Millisecond
+const (
+	permissionPromptInputSettleDelay = 10 * time.Millisecond
+	permissionPromptPollInterval     = 50 * time.Millisecond
+)
 
-// readSingleKey reads a single keypress from stdin.
-// Returns the key byte (handles escape sequences for special keys).
-func readSingleKey() byte {
+// readSingleKey reads a single keypress from stdin while the given context
+// is alive. Returns the key byte (handles escape sequences for special keys),
+// or 'n' (deny) when ctx is canceled before a key arrives.
+//
+// The read must be cancellable: it runs on the agent's permission goroutine
+// with the terminal in raw mode. A non-cancellable read would outlive a
+// canceled turn, steal the next keystroke, and restore the terminal state
+// underneath the line editor, leaving the shell in raw mode (which renders
+// subsequent streamed output diagonally).
+func readSingleKey(ctx context.Context) byte {
 	fd := int(os.Stdin.Fd())
 
 	// Put terminal in raw mode to read single character
@@ -1639,11 +1861,13 @@ func readSingleKey() byte {
 	}
 	defer term.Restore(fd, oldState)
 
-	return readSingleKeyWithHooks(fd, os.Stdin.Read, drainStdin, time.Sleep)
+	return readSingleKeyWithHooks(ctx, fd, pollStdin, os.Stdin.Read, drainStdin, time.Sleep)
 }
 
 func readSingleKeyWithHooks(
+	ctx context.Context,
 	fd int,
+	poll func(fd int, timeout time.Duration) (bool, error),
 	read func([]byte) (int, error),
 	drain func(int),
 	sleep func(time.Duration),
@@ -1668,6 +1892,18 @@ func readSingleKeyWithHooks(
 	// This is a defense-in-depth measure — permissionDecisionForKey also
 	// rejects these, but discarding them here avoids a spurious "deny".
 	for {
+		if ctx != nil && ctx.Err() != nil {
+			return 'n' // Turn canceled - deny and release the terminal
+		}
+
+		ready, err := poll(fd, permissionPromptPollInterval)
+		if err != nil {
+			return 'n'
+		}
+		if !ready {
+			continue // Timeout - re-check cancellation
+		}
+
 		n, err := read(buf)
 		if err != nil || n < 1 {
 			return 'n'
@@ -1681,6 +1917,22 @@ func readSingleKeyWithHooks(
 		}
 		// Discard stale newline, read again
 	}
+}
+
+// pollStdin waits up to timeout for input to become readable on fd.
+func pollStdin(fd int, timeout time.Duration) (bool, error) {
+	var readSet unix.FdSet
+	readSet.Set(fd)
+	tv := unix.NsecToTimeval(timeout.Nanoseconds())
+
+	n, err := unix.Select(fd+1, &readSet, nil, nil, &tv)
+	if err != nil {
+		if err == unix.EINTR {
+			return false, nil // Interrupted by signal - treat as timeout
+		}
+		return false, err
+	}
+	return n > 0, nil
 }
 
 // drainStdinBriefly waits briefly for terminal responses to arrive, then drains stdin.

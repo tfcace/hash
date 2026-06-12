@@ -2,7 +2,9 @@ package readline
 
 import (
 	"context"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/tfcace/hash/internal/completion"
 )
@@ -26,6 +28,93 @@ type mockCompleter struct {
 func (m *mockCompleter) Name() string { return "mock" }
 func (m *mockCompleter) Complete(ctx context.Context, line string, pos int) (completion.Result, error) {
 	return completion.Result{Items: m.items, Prefix: ""}, nil
+}
+
+type recordingCompleter struct {
+	pos   int
+	items []completion.Item
+}
+
+func (m *recordingCompleter) Name() string { return "recording" }
+func (m *recordingCompleter) Complete(ctx context.Context, line string, pos int) (completion.Result, error) {
+	m.pos = pos
+	return completion.Result{Items: m.items, Prefix: ""}, nil
+}
+
+type slowCompleter struct {
+	delay time.Duration
+}
+
+func (m slowCompleter) Name() string { return "slow" }
+func (m slowCompleter) Complete(ctx context.Context, line string, pos int) (completion.Result, error) {
+	select {
+	case <-time.After(m.delay):
+		return completion.Result{Items: []completion.Item{{Value: "late-result"}}}, nil
+	case <-ctx.Done():
+		return completion.Result{}, nil
+	}
+}
+
+type contextIgnoringCompleter struct {
+	release <-chan struct{}
+}
+
+func (m contextIgnoringCompleter) Name() string { return "context-ignoring" }
+func (m contextIgnoringCompleter) Complete(ctx context.Context, line string, pos int) (completion.Result, error) {
+	<-m.release
+	return completion.Result{Items: []completion.Item{{Value: "late-result"}}}, nil
+}
+
+func TestCompleterAdapter_CutsOffSlowCompleter(t *testing.T) {
+	router := completion.NewRouter()
+	router.Register(slowCompleter{delay: 300 * time.Millisecond}, completion.PriorityFilesystem)
+	adapter := NewCompleterAdapter(router)
+
+	start := time.Now()
+	candidates, length := adapter.Do([]rune("slow "), len("slow "))
+	elapsed := time.Since(start)
+
+	if elapsed > 250*time.Millisecond {
+		t.Fatalf("CompleterAdapter.Do() took %s, want under 250ms", elapsed)
+	}
+	if len(candidates) != 0 || length != 0 {
+		t.Fatalf("slow completion should be cut off, got candidates=%q length=%d", candidates, length)
+	}
+}
+
+func TestCompleterAdapter_CutsOffContextIgnoringCompleter(t *testing.T) {
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	defer releaseOnce.Do(func() { close(release) })
+
+	router := completion.NewRouter()
+	router.Register(contextIgnoringCompleter{release: release}, completion.PriorityFilesystem)
+	adapter := NewCompleterAdapter(router)
+
+	done := make(chan struct{})
+	var candidates [][]rune
+	var length int
+	start := time.Now()
+	go func() {
+		candidates, length = adapter.Do([]rune("slow "), len("slow "))
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(250 * time.Millisecond):
+		releaseOnce.Do(func() { close(release) })
+		<-done
+		t.Fatal("CompleterAdapter.Do() did not return when completer ignored context")
+	}
+	releaseOnce.Do(func() { close(release) })
+	elapsed := time.Since(start)
+	if elapsed > 250*time.Millisecond {
+		t.Fatalf("CompleterAdapter.Do() took %s, want under 250ms", elapsed)
+	}
+	if len(candidates) != 0 || length != 0 {
+		t.Fatalf("context-ignoring completion should be cut off, got candidates=%q length=%d", candidates, length)
+	}
 }
 
 func TestCompleterAdapter_ReturnsSuffix(t *testing.T) {
@@ -79,5 +168,21 @@ func TestCompleterAdapter_CaseInsensitive(t *testing.T) {
 	// Should strip the 5-char prefix case-insensitively
 	if string(candidates[0]) != "nal/" {
 		t.Errorf("expected suffix 'nal/', got '%s'", string(candidates[0]))
+	}
+}
+
+func TestCompleterAdapter_ConvertsRuneCursorToByteOffset(t *testing.T) {
+	recorder := &recordingCompleter{
+		items: []completion.Item{{Value: "שלום.txt"}},
+	}
+	router := completion.NewRouter()
+	router.Register(recorder, completion.PriorityFilesystem)
+	adapter := NewCompleterAdapter(router)
+
+	line := []rune("cat שלום")
+	adapter.Do(line, len(line))
+
+	if recorder.pos != len(string(line)) {
+		t.Fatalf("router cursor pos = %d, want byte offset %d", recorder.pos, len(string(line)))
 	}
 }

@@ -3,10 +3,13 @@ package readline
 import (
 	"context"
 	"strings"
+	"time"
 
 	"github.com/chzyer/readline"
 	"github.com/tfcace/hash/internal/completion"
 )
+
+const adapterCompletionTimeout = 150 * time.Millisecond
 
 // CompleterAdapter adapts our completion system to chzyer/readline.
 type CompleterAdapter struct {
@@ -24,14 +27,26 @@ func (c *CompleterAdapter) Do(line []rune, pos int) (candidates [][]rune, length
 		return nil, 0
 	}
 
-	ctx := context.Background()
-	result, err := c.router.Complete(ctx, string(line), pos)
+	runePos := pos
+	if runePos < 0 {
+		runePos = 0
+	}
+	if runePos > len(line) {
+		runePos = len(line)
+	}
+	lineString := string(line)
+	bytePos := len(string(line[:runePos]))
+
+	ctx, cancel := context.WithTimeout(context.Background(), adapterCompletionTimeout)
+	defer cancel()
+
+	result, err := c.router.CompleteBounded(ctx, lineString, bytePos)
 	if err != nil || len(result.Items) == 0 {
 		return nil, 0
 	}
 
 	// Extract the word being completed to calculate replacement length
-	word := extractWordBeforePos(line, pos)
+	word := extractWordBeforePos(line, runePos)
 
 	// Convert to readline format
 	// chzyer/readline expects SUFFIXES (the part to append), not full words

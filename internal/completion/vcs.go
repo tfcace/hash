@@ -9,7 +9,6 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/tfcace/hash/internal/trace"
@@ -27,6 +26,27 @@ type VCSCompleter struct {
 	listGitStashes  func(context.Context) ([]string, error)
 	listGitRemotes  func(context.Context) ([]string, error)
 	listJJChangeIDs func(context.Context) ([]string, error)
+
+	cache    map[string]cachedStringList
+	cacheMu  sync.Mutex
+	cacheTTL time.Duration
+	now      func() time.Time
+
+	inflightMu         sync.Mutex
+	inflight           map[string]*vcsLookupCall
+	inflightMaxWaitAge time.Duration
+}
+
+type cachedStringList struct {
+	values    []string
+	expiresAt time.Time
+}
+
+type vcsLookupCall struct {
+	done    chan struct{}
+	started time.Time
+	values  []string
+	err     error
 }
 
 // NewVCSCompleter creates a new VCS completer.
@@ -38,6 +58,9 @@ func NewVCSCompleter() *VCSCompleter {
 		listGitStashes:  defaultListGitStashes,
 		listGitRemotes:  defaultListGitRemotes,
 		listJJChangeIDs: defaultListJJChangeIDs,
+		cache:           make(map[string]cachedStringList),
+		cacheTTL:        2 * time.Second,
+		now:             time.Now,
 	}
 }
 
@@ -79,13 +102,13 @@ func (c *VCSCompleter) completeGit(ctx context.Context, parts []string, trailing
 		if !shouldCompleteGitRef(subcommand, current, before) {
 			return Result{}
 		}
-		return lookupAndFilter(ctx, "git_refs", c.listGitRefs, current)
+		return c.lookupAndFilter(ctx, "git_refs", c.listGitRefs, current)
 
 	case "add":
 		if strings.HasPrefix(current, "-") {
 			return Result{}
 		}
-		return lookupAndFilter(ctx, "git_modified", c.listGitModified, current)
+		return c.lookupAndFilter(ctx, "git_modified", c.listGitModified, current)
 
 	case "branch":
 		return c.completeGitBranch(ctx, current, before)
@@ -103,7 +126,7 @@ func (c *VCSCompleter) completeGit(ctx context.Context, parts []string, trailing
 
 func (c *VCSCompleter) completeGitBranch(ctx context.Context, current string, before []string) Result {
 	if containsToken(before, "-d") || containsToken(before, "-D") {
-		return lookupAndFilter(ctx, "git_refs", c.listGitRefs, current)
+		return c.lookupAndFilter(ctx, "git_refs", c.listGitRefs, current)
 	}
 	return Result{}
 }
@@ -114,7 +137,7 @@ func (c *VCSCompleter) completeGitStash(ctx context.Context, current string, bef
 	}
 	switch before[0] {
 	case "pop", "apply", "drop", "show":
-		return lookupAndFilter(ctx, "git_stashes", c.listGitStashes, current)
+		return c.lookupAndFilter(ctx, "git_stashes", c.listGitStashes, current)
 	default:
 		return Result{}
 	}
@@ -126,14 +149,14 @@ func (c *VCSCompleter) completeGitRemote(ctx context.Context, current string, be
 	}
 	switch before[0] {
 	case "remove", "rename", "show", "prune":
-		return lookupAndFilter(ctx, "git_remotes", c.listGitRemotes, current)
+		return c.lookupAndFilter(ctx, "git_remotes", c.listGitRemotes, current)
 	default:
 		return Result{}
 	}
 }
 
 // lookupAndFilter calls a list function and prefix-filters the results.
-func lookupAndFilter(ctx context.Context, kind string, listFn func(context.Context) ([]string, error), prefix string) Result {
+func (c *VCSCompleter) lookupAndFilter(ctx context.Context, kind string, listFn func(context.Context) ([]string, error), prefix string) Result {
 	start := time.Now()
 	traceEnabled := trace.Enabled("completion")
 	if traceEnabled {
@@ -143,7 +166,7 @@ func lookupAndFilter(ctx context.Context, kind string, listFn func(context.Conte
 		})
 	}
 
-	values, err := listFn(ctx)
+	values, cached, err := c.lookupValues(ctx, kind, listFn)
 	result := Result{}
 	if err == nil {
 		result = prefixFilterItems(values, prefix)
@@ -158,6 +181,7 @@ func lookupAndFilter(ctx context.Context, kind string, listFn func(context.Conte
 			"prefix":      prefix,
 			"values":      len(values),
 			"items":       len(result.Items),
+			"cached":      cached,
 			"error":       errText,
 			"duration_ms": float64(time.Since(start).Microseconds()) / 1000.0,
 		})
@@ -166,6 +190,120 @@ func lookupAndFilter(ctx context.Context, kind string, listFn func(context.Conte
 		return Result{}
 	}
 	return result
+}
+
+func (c *VCSCompleter) lookupValues(ctx context.Context, kind string, listFn func(context.Context) ([]string, error)) (values []string, fresh bool, err error) {
+	cacheKey := c.cacheKey(kind)
+	if c.cacheTTL > 0 {
+		now := c.timeNow()
+		c.cacheMu.Lock()
+		if c.cache != nil {
+			if cached, ok := c.cache[cacheKey]; ok && now.Before(cached.expiresAt) {
+				cachedValues := append([]string(nil), cached.values...)
+				c.cacheMu.Unlock()
+				return cachedValues, true, nil
+			}
+		}
+		c.cacheMu.Unlock()
+	}
+
+	values, err = c.lookupStringValues(ctx, cacheKey, listFn)
+	if err != nil {
+		if ctx.Err() == nil {
+			c.storeCachedValues(cacheKey, nil)
+		}
+		return values, false, err
+	}
+	c.storeCachedValues(cacheKey, values)
+	return values, false, err
+}
+
+func (c *VCSCompleter) lookupStringValues(
+	ctx context.Context,
+	cacheKey string,
+	listFn func(context.Context) ([]string, error),
+) ([]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	now := time.Now()
+	c.inflightMu.Lock()
+	if call, ok := c.inflight[cacheKey]; ok {
+		if !contextReadCallIsStale(call.started, now, c.inflightMaxWaitAge) {
+			c.inflightMu.Unlock()
+			return waitForVCSLookup(ctx, call)
+		}
+		delete(c.inflight, cacheKey)
+	}
+
+	call := &vcsLookupCall{done: make(chan struct{}), started: now}
+	if c.inflight == nil {
+		c.inflight = make(map[string]*vcsLookupCall)
+	}
+	c.inflight[cacheKey] = call
+	c.inflightMu.Unlock()
+
+	go c.finishStringLookup(ctx, cacheKey, listFn, call)
+	return waitForVCSLookup(ctx, call)
+}
+
+func (c *VCSCompleter) finishStringLookup(
+	ctx context.Context,
+	cacheKey string,
+	listFn func(context.Context) ([]string, error),
+	call *vcsLookupCall,
+) {
+	values, err := listFn(ctx)
+
+	c.inflightMu.Lock()
+	call.values = values
+	call.err = err
+	if c.inflight[cacheKey] == call {
+		delete(c.inflight, cacheKey)
+	}
+	c.inflightMu.Unlock()
+	close(call.done)
+}
+
+func waitForVCSLookup(ctx context.Context, call *vcsLookupCall) ([]string, error) {
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-call.done:
+		return append([]string(nil), call.values...), call.err
+	}
+}
+
+func (c *VCSCompleter) storeCachedValues(cacheKey string, values []string) {
+	if c.cacheTTL <= 0 {
+		return
+	}
+
+	c.cacheMu.Lock()
+	defer c.cacheMu.Unlock()
+	if c.cache == nil {
+		c.cache = make(map[string]cachedStringList)
+	}
+	c.cache[cacheKey] = cachedStringList{
+		values:    append([]string(nil), values...),
+		expiresAt: c.timeNow().Add(c.cacheTTL),
+	}
+}
+
+func (c *VCSCompleter) cacheKey(kind string) string {
+	cwd, err := os.Getwd()
+	if err != nil {
+		cwd = ""
+	}
+	return kind + "\x00" + cwd
+}
+
+func (c *VCSCompleter) timeNow() time.Time {
+	if c.now != nil {
+		return c.now()
+	}
+	return time.Now()
 }
 
 func (c *VCSCompleter) completeJJ(ctx context.Context, parts []string, trailingSpace bool) Result {
@@ -190,7 +328,7 @@ func (c *VCSCompleter) completeJJ(ctx context.Context, parts []string, trailingS
 		if !shouldCompleteJJRev(current, before) {
 			return Result{}
 		}
-		return lookupAndFilter(ctx, "jj_change_ids", c.listJJChangeIDs, current)
+		return c.lookupAndFilter(ctx, "jj_change_ids", c.listJJChangeIDs, current)
 
 	default:
 		return Result{}
@@ -204,13 +342,16 @@ func (c *VCSCompleter) completeJJRevision(ctx context.Context, current string) R
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		revs, _ = c.listJJRevs(ctx)
+		revs, _, _ = c.lookupValues(ctx, "jj_revs", c.listJJRevs)
 	}()
 	go func() {
 		defer wg.Done()
-		ids, _ = c.listJJChangeIDs(ctx)
+		ids, _, _ = c.lookupValues(ctx, "jj_change_ids", c.listJJChangeIDs)
 	}()
 	wg.Wait()
+	if ctx.Err() != nil {
+		return Result{}
+	}
 
 	seen := make(map[string]bool)
 	var values []string
@@ -243,7 +384,7 @@ func (c *VCSCompleter) completeJJBookmark(ctx context.Context, current string, b
 		return Result{}
 	}
 
-	revs, err := c.listJJRevs(ctx)
+	revs, _, err := c.lookupValues(ctx, "jj_revs", c.listJJRevs)
 	if err != nil {
 		return Result{}
 	}
@@ -327,13 +468,16 @@ func containsToken(tokens []string, target string) bool {
 }
 
 func prefixFilterItems(values []string, prefix string) Result {
-	items := make([]Item, 0, len(values))
+	items := make([]Item, 0, min(len(values), completionItemLimit))
 	for _, value := range values {
 		if prefix == "" || strings.HasPrefix(value, prefix) {
 			items = append(items, Item{
 				Value:   value,
 				Display: value,
 			})
+			if len(items) >= completionItemLimit {
+				break
+			}
 		}
 	}
 	return Result{Items: items}
@@ -531,9 +675,7 @@ func runIsolatedCommand(ctx context.Context, command string, args ...string) ([]
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = io.Discard
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Setsid: true,
-	}
+	configureIsolatedCompletionCommand(cmd)
 
 	devNull, err := os.Open(os.DevNull)
 	if err == nil {

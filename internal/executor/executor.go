@@ -19,6 +19,7 @@ import (
 	"github.com/creack/pty"
 	"github.com/tfcace/hash/internal/progress"
 	"github.com/tfcace/hash/internal/trace"
+	"github.com/tfcace/hash/internal/version"
 	"golang.org/x/sys/unix"
 	"golang.org/x/term"
 	"mvdan.cc/sh/v3/expand"
@@ -545,6 +546,7 @@ type Result struct {
 type Executor struct {
 	shellName         string
 	shellPath         string
+	lang              syntax.LangVariant
 	progressOSC       *progress.OSC
 	progressThreshold time.Duration
 	env               *envStore
@@ -575,6 +577,7 @@ func New() *Executor {
 	e := &Executor{
 		shellName:         "hash",
 		shellPath:         execPath,
+		lang:              syntax.LangBash,
 		progressOSC:       progress.NewOSC(os.Stdout),
 		progressThreshold: 2 * time.Second,
 		env:               env,
@@ -589,13 +592,50 @@ func New() *Executor {
 	return e
 }
 
+func langVariantForDialect(dialect string) (syntax.LangVariant, error) {
+	switch strings.ToLower(strings.TrimSpace(dialect)) {
+	case "", "bash":
+		return syntax.LangBash, nil
+	case "zsh":
+		return syntax.LangZsh, nil
+	default:
+		return syntax.LangBash, fmt.Errorf("unsupported shell dialect %q (supported: bash, zsh)", dialect)
+	}
+}
+
+// SetDialect configures which shell dialect is used when parsing commands.
+func (e *Executor) SetDialect(dialect string) error {
+	lang, err := langVariantForDialect(dialect)
+	if err != nil {
+		return err
+	}
+	e.runnerMu.Lock()
+	defer e.runnerMu.Unlock()
+	e.lang = lang
+	return nil
+}
+
+// Dialect returns the configured parser dialect.
+func (e *Executor) Dialect() string {
+	if e == nil {
+		return "bash"
+	}
+	return e.lang.String()
+}
+
+func (e *Executor) newParser(opts ...syntax.ParserOption) *syntax.Parser {
+	parserOpts := []syntax.ParserOption{syntax.Variant(e.lang)}
+	parserOpts = append(parserOpts, opts...)
+	return syntax.NewParser(parserOpts...)
+}
+
 // initRunner creates the persistent interpreter runner.
 // Called lazily on first Execute() to allow configuration before first use.
 func (e *Executor) initRunner() error {
 	opts := []interp.RunnerOption{
 		interp.StdIO(os.Stdin, e.switchStdout, e.switchStderr),
 		interp.Env(e.env),
-		interp.CallHandler(e.bashBuiltinHandler),
+		interp.CallHandler(e.shellBuiltinHandler),
 		interp.ExecHandlers(e.execHandler),
 	}
 
@@ -616,12 +656,27 @@ func (e *Executor) initRunner() error {
 	return nil
 }
 
-// bashBuiltinHandler intercepts source/. and eval commands to parse with LangBash.
+// hashHelpText is shown for `hash --help` / `hash -h` from within the Hash
+// shell. It is intentionally concise; the full launch-time flag help lives in
+// cmd/hash (package main) and is reached via `/usr/local/bin/hash --help`.
+const hashHelpText = `Hash (Harness Assisted SHell)
+
+You are already running inside Hash.
+
+  hash version        Show the Hash version
+  tips                Show common shortcuts and AI (??) syntax
+  status              Show subsystem status
+
+Invoke the agent with ?? (e.g. '?? find large files').
+Run '/usr/local/bin/hash --help' for launch flags.
+`
+
+// shellBuiltinHandler intercepts source/. and eval commands to parse with the configured dialect.
 // This uses CallHandler which runs for ALL commands including builtins, unlike
 // ExecHandler which only runs for external commands.
 // We handle the command ourselves, then return ":" (no-op) so the Runner
 // doesn't also try to run the builtin.
-func (e *Executor) bashBuiltinHandler(ctx context.Context, args []string) ([]string, error) {
+func (e *Executor) shellBuiltinHandler(ctx context.Context, args []string) ([]string, error) {
 	if len(args) == 0 {
 		return args, nil
 	}
@@ -647,9 +702,34 @@ func (e *Executor) bashBuiltinHandler(ctx context.Context, args []string) ([]str
 		e.trackUnsetFunctions(args)
 		return args, nil
 
+	case "hash":
+		return e.handleHashCall(ctx, args)
+
 	default:
 		return args, nil
 	}
+}
+
+// handleHashCall lets `hash version` / `hash --version` / `hash -v` (and
+// --help/-h) report Hash's own version/help from within the Hash shell.
+// The command name "hash" collides with the POSIX hash builtin, which mvdan/sh
+// stubs as a no-op; without this override these would print nothing. Genuine
+// POSIX hash usage (`hash`, `hash -r`, `hash name`, ...) falls through to that
+// no-op unchanged, since none of those forms use these arguments.
+func (e *Executor) handleHashCall(ctx context.Context, args []string) ([]string, error) {
+	if len(args) >= 2 {
+		switch args[1] {
+		case "version", "--version", "-v":
+			hc := interp.HandlerCtx(ctx)
+			fmt.Fprintf(hc.Stdout, "hash %s\n", version.String())
+			return []string{":"}, nil
+		case "--help", "-h":
+			hc := interp.HandlerCtx(ctx)
+			fmt.Fprint(hc.Stdout, hashHelpText)
+			return []string{":"}, nil
+		}
+	}
+	return args, nil
 }
 
 // handleCdDoubleDash strips "--" from cd arguments.
@@ -679,7 +759,7 @@ func (e *Executor) handleCdDoubleDash(cmd string, args []string) ([]string, bool
 	return filtered, true
 }
 
-// handleSourceCall handles source/. commands with LangBash parsing.
+// handleSourceCall handles source/. commands with the configured parser dialect.
 func (e *Executor) handleSourceCall(ctx context.Context, args []string) ([]string, error) {
 	if len(args) < 2 {
 		hc := interp.HandlerCtx(ctx)
@@ -689,13 +769,13 @@ func (e *Executor) handleSourceCall(ctx context.Context, args []string) ([]strin
 	trace.Emit("compat", "source_intercept", trace.LevelVerbose, map[string]any{
 		"path": args[1],
 	})
-	if err := e.handleBashSource(ctx, args[1]); err != nil {
+	if err := e.handleSourceWithDialect(ctx, args[1]); err != nil {
 		return []string{"false"}, nil //nolint:nilerr // return "false" to shell, error handled internally
 	}
 	return []string{":"}, nil
 }
 
-// handleEvalCall handles eval commands with LangBash parsing.
+// handleEvalCall handles eval commands with the configured parser dialect.
 func (e *Executor) handleEvalCall(ctx context.Context, args []string) ([]string, error) {
 	if len(args) < 2 {
 		return []string{":"}, nil // eval with no args is a no-op
@@ -703,7 +783,7 @@ func (e *Executor) handleEvalCall(ctx context.Context, args []string) ([]string,
 	trace.Emit("compat", "eval_intercept", trace.LevelVerbose, map[string]any{
 		"src_preview": truncateForTrace(strings.Join(args[1:], " "), 200),
 	})
-	if err := e.handleBashEval(ctx, args[1:]); err != nil {
+	if err := e.handleEvalWithDialect(ctx, args[1:]); err != nil {
 		return []string{"false"}, nil //nolint:nilerr // return "false" to shell, error handled internally
 	}
 	return []string{":"}, nil
@@ -741,6 +821,8 @@ const zoxideQueryCompatPattern = "result=\"$(\\command zoxide query --exclude \"
 const zoxideInteractiveStrictPattern = `result="$(\command zoxide query --interactive -- "$@")" && __zoxide_cd "${result}"`
 const zoxideInteractiveCompatPattern = "result=\"$(\\command zoxide query --interactive -- \"$@\" || \\builtin true)\"\n    result=\"${result%$'\\r'}\"\n    [[ -n \"${result}\" ]] && __zoxide_cd \"${result}\""
 const zoxideQueryStrictLine = `result="$(\command zoxide query --exclude "$(__zoxide_pwd)" -- "$@")"`
+const escapedBuiltinLocal = `\builtin local `
+const builtinLocal = `builtin local `
 
 // sanitizeUnsupportedExpansions rewrites bash expansions that currently panic in
 // mvdan/sh. Keep transformations minimal and syntax-preserving.
@@ -748,6 +830,14 @@ func sanitizeUnsupportedExpansions(src string) (sanitized string, changed bool) 
 	sanitized = src
 	if strings.Contains(sanitized, unsupportedPromptCommandTrim) {
 		sanitized = strings.ReplaceAll(sanitized, unsupportedPromptCommandTrim, `${PROMPT_COMMAND}`)
+		changed = true
+	}
+	if strings.Contains(sanitized, escapedBuiltinLocal) {
+		sanitized = strings.ReplaceAll(sanitized, escapedBuiltinLocal, `local `)
+		changed = true
+	}
+	if strings.Contains(sanitized, builtinLocal) {
+		sanitized = strings.ReplaceAll(sanitized, builtinLocal, `local `)
 		changed = true
 	}
 	if strings.Contains(sanitized, zoxideQueryStrictPattern) {
@@ -768,8 +858,8 @@ func sanitizeUnsupportedExpansions(src string) (sanitized string, changed bool) 
 	return sanitized, changed
 }
 
-// handleBashSource reads a file and executes it with LangBash parsing.
-func (e *Executor) handleBashSource(ctx context.Context, path string) error {
+// handleSourceWithDialect reads a file and executes it with the configured parser dialect.
+func (e *Executor) handleSourceWithDialect(ctx context.Context, path string) error {
 	hc := interp.HandlerCtx(ctx)
 
 	// Expand tilde
@@ -798,8 +888,8 @@ func (e *Executor) handleBashSource(ctx context.Context, path string) error {
 		})
 	}
 
-	// Parse with LangBash - silently skip if it fails (likely zsh-specific syntax)
-	parser := syntax.NewParser(syntax.Variant(syntax.LangBash))
+	// Silently skip if parsing fails; this keeps startup compatibility graceful.
+	parser := e.newParser()
 	prog, err := parser.Parse(strings.NewReader(src), path)
 	if err != nil {
 		// Graceful degradation: skip unparseable files silently
@@ -824,16 +914,15 @@ func (e *Executor) handleBashSource(ctx context.Context, path string) error {
 				"path":  path,
 				"error": err.Error(),
 			})
-			return e.runStatementsWithRecovery(ctx, prog, path, hc.Stderr)
+			return e.runStatementsWithRecovery(ctx, prog, path)
 		}
 		return err
 	}
 	return nil
 }
 
-// handleBashEval parses and executes args as bash code.
-func (e *Executor) handleBashEval(ctx context.Context, args []string) error {
-	hc := interp.HandlerCtx(ctx)
+// handleEvalWithDialect parses and executes args with the configured parser dialect.
+func (e *Executor) handleEvalWithDialect(ctx context.Context, args []string) error {
 	src := strings.Join(args, " ")
 	parsedSrc, sanitized := sanitizeUnsupportedExpansions(src)
 	if sanitized {
@@ -842,8 +931,8 @@ func (e *Executor) handleBashEval(ctx context.Context, args []string) error {
 		})
 	}
 
-	// Parse with LangBash - silently skip if it fails (likely zsh-specific syntax)
-	parser := syntax.NewParser(syntax.Variant(syntax.LangBash))
+	// Silently skip if parsing fails; this keeps startup compatibility graceful.
+	parser := e.newParser()
 	prog, err := parser.Parse(strings.NewReader(parsedSrc), "eval")
 	if err != nil {
 		// Graceful degradation: skip unparseable eval content silently
@@ -865,7 +954,7 @@ func (e *Executor) handleBashEval(ctx context.Context, args []string) error {
 				"src_preview": truncateForTrace(src, 200),
 				"error":       err.Error(),
 			})
-			return e.runStatementsWithRecovery(ctx, prog, "eval", hc.Stderr)
+			return e.runStatementsWithRecovery(ctx, prog, "eval")
 		}
 		return err
 	}
@@ -875,14 +964,13 @@ func (e *Executor) handleBashEval(ctx context.Context, args []string) error {
 // runStatementsWithRecovery executes a program's statements one at a time,
 // skipping any that panic. This allows function definitions to survive even
 // when other statements (like zoxide's PROMPT_COMMAND manipulation) crash.
-func (e *Executor) runStatementsWithRecovery(ctx context.Context, prog *syntax.File, source string, stderr io.Writer) error {
+func (e *Executor) runStatementsWithRecovery(ctx context.Context, prog *syntax.File, source string) error {
 	var lastErr error
 	for i, stmt := range prog.Stmts {
 		// Wrap each statement in a File node for runner.Run()
 		single := &syntax.File{Stmts: []*syntax.Stmt{stmt}}
 		if err := e.safeRunNode(ctx, single); err != nil {
 			if strings.HasPrefix(err.Error(), "interpreter panic:") {
-				fmt.Fprintf(stderr, "hash: %s: skipping statement %d (unsupported syntax)\n", source, i+1)
 				trace.Emit("compat", "stmt_panic_skip", trace.LevelVerbose, map[string]any{
 					"source":    source,
 					"statement": i + 1,
@@ -951,7 +1039,7 @@ func (e *Executor) handleBashAlias(ctx context.Context, args []string) ([]string
 		})
 
 		funcDef := fmt.Sprintf("%s() { %s \"$@\"; }", name, value)
-		funcParser := syntax.NewParser(syntax.Variant(syntax.LangBash))
+		funcParser := e.newParser()
 		prog, err := funcParser.Parse(strings.NewReader(funcDef), "alias-func")
 		if err != nil {
 			// Function conversion failed, skip silently (graceful degradation)
@@ -1069,7 +1157,12 @@ func (e *Executor) trackFunctionsFromAST(prog *syntax.File) {
 	syntax.Walk(prog, func(node syntax.Node) bool {
 		if fn, ok := node.(*syntax.FuncDecl); ok {
 			e.functionsMu.Lock()
-			e.functions[fn.Name.Value] = struct{}{}
+			if fn.Name != nil {
+				e.functions[fn.Name.Value] = struct{}{}
+			}
+			for _, name := range fn.Names {
+				e.functions[name.Value] = struct{}{}
+			}
 			e.functionsMu.Unlock()
 		}
 		return true
@@ -1115,8 +1208,8 @@ func (e *Executor) Execute(ctx context.Context, command string, stdout, stderr i
 		shellName = e.positionalArgs[0]
 	}
 
-	// Parse the command with $0 name and bash syntax support
-	prog, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(command), shellName)
+	// Parse the command with $0 name and the configured shell dialect.
+	prog, err := e.newParser().Parse(strings.NewReader(command), shellName)
 	if err != nil {
 		return nil, err
 	}
@@ -1762,7 +1855,7 @@ func (e *Executor) SyncRunnerDir() {
 	}
 
 	// Parse and run cd to update runner's internal Dir
-	prog, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader("cd "+shellQuote(cwd)), "")
+	prog, err := e.newParser().Parse(strings.NewReader("cd "+shellQuote(cwd)), "")
 	if err != nil {
 		return
 	}

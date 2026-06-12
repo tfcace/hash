@@ -14,6 +14,7 @@ type StreamingRenderer struct {
 	inBold        bool
 	inCode        bool
 	pending       string // partial marker (e.g., single "*" or "`")
+	midLine       bool   // a partial fragment of the current line was already emitted
 }
 
 // NewStreamingRenderer creates a new streaming markdown renderer.
@@ -41,7 +42,8 @@ func (r *StreamingRenderer) Write(chunk string) string {
 }
 
 // Flush returns any remaining buffered content with appropriate styling.
-// Call this after all chunks have been written.
+// The line is incomplete: its continuation arrives in later Write calls,
+// so line-start decoration and inline state stay open for it.
 func (r *StreamingRenderer) Flush() string {
 	if r.lineBuffer.Len() == 0 {
 		return ""
@@ -50,8 +52,26 @@ func (r *StreamingRenderer) Flush() string {
 	line := r.lineBuffer.String()
 	r.lineBuffer.Reset()
 
-	// Process the incomplete line (no trailing newline)
-	return r.processLine(line)
+	out := r.processLine(line)
+	r.midLine = true
+	return out
+}
+
+// Finish flushes any remaining content and closes styling left open by a
+// line that never completed. Call once at end of stream instead of Flush.
+func (r *StreamingRenderer) Finish() string {
+	out := r.Flush()
+	if r.pending == "*" {
+		out += "*"
+		r.pending = ""
+	}
+	if r.inCode || r.inBold || (r.midLine && r.inCodeBlock) {
+		out += reset
+	}
+	r.inCode = false
+	r.inBold = false
+	r.midLine = false
+	return out
 }
 
 // Reset clears all state for reuse.
@@ -62,37 +82,67 @@ func (r *StreamingRenderer) Reset() {
 	r.inBold = false
 	r.inCode = false
 	r.pending = ""
+	r.midLine = false
 }
 
-// processLine handles a complete line (may or may not have trailing newline).
+// processLine handles a line or, after a Flush, a fragment of one.
+// Continuation fragments skip line-start decoration (indent, headers,
+// lists, fences): the first fragment already decided how the line opens.
 func (r *StreamingRenderer) processLine(line string) string {
 	// Preserve the newline if present
 	hasNewline := strings.HasSuffix(line, "\n")
 	content := strings.TrimSuffix(line, "\n")
+	continuation := r.midLine
+	if hasNewline {
+		r.midLine = false
+	}
 
 	var result string
 
 	// 1. Code block markers
-	if strings.HasPrefix(content, "```") {
+	if !continuation && strings.HasPrefix(content, "```") {
 		result = r.handleCodeBlockMarker(content)
 	} else if r.inCodeBlock {
 		// 2. Inside code block - just indent, no dim (dim causes visual artifacts)
-		result = gray + "  " + content + reset
-	} else if header := r.tryHeader(content); header != "" {
+		// Open the color and indent once per line; close at the real line end.
+		result = content
+		if !continuation {
+			result = gray + "  " + result
+		}
+		if hasNewline {
+			result += reset
+		}
+	} else if header := r.tryHeaderAt(content, continuation); header != "" {
 		// 3. Headers
 		result = header
-	} else if list := r.tryList(content); list != "" {
+	} else if list := r.tryListAt(content, continuation, hasNewline); list != "" {
 		// 4. Lists
 		result = list
 	} else {
 		// 5. Regular line - inline processing
-		result = r.processInline(content)
+		result = r.processInline(content, hasNewline)
 	}
 
 	if hasNewline {
 		return result + "\n"
 	}
 	return result
+}
+
+// tryHeaderAt suppresses header detection on continuation fragments.
+func (r *StreamingRenderer) tryHeaderAt(content string, continuation bool) string {
+	if continuation {
+		return ""
+	}
+	return r.tryHeader(content)
+}
+
+// tryListAt suppresses list detection on continuation fragments.
+func (r *StreamingRenderer) tryListAt(content string, continuation, complete bool) string {
+	if continuation {
+		return ""
+	}
+	return r.tryList(content, complete)
 }
 
 // handleCodeBlockMarker toggles code block state and returns styled output.
@@ -131,18 +181,18 @@ func (r *StreamingRenderer) tryHeader(line string) string {
 var listPrefixRegex = regexp.MustCompile(`^(\s*)(\d+)\. (.*)$`)
 
 // tryList checks if line is a list item and returns styled output, or empty string.
-func (r *StreamingRenderer) tryList(line string) string {
+func (r *StreamingRenderer) tryList(line string, complete bool) string {
 	// Check leading whitespace for indentation
 	trimmed := strings.TrimLeft(line, " \t")
 	indent := line[:len(line)-len(trimmed)]
 
 	// Unordered lists
 	if strings.HasPrefix(trimmed, "- ") {
-		content := r.processInline(trimmed[2:])
+		content := r.processInline(trimmed[2:], complete)
 		return indent + cyan + "•" + reset + " " + content
 	}
 	if strings.HasPrefix(trimmed, "* ") {
-		content := r.processInline(trimmed[2:])
+		content := r.processInline(trimmed[2:], complete)
 		return indent + cyan + "•" + reset + " " + content
 	}
 
@@ -151,7 +201,7 @@ func (r *StreamingRenderer) tryList(line string) string {
 		indent := matches[1]
 		num := matches[2]
 		text := matches[3]
-		content := r.processInline(text)
+		content := r.processInline(text, complete)
 		return indent + cyan + num + "." + reset + " " + content
 	}
 
@@ -159,7 +209,9 @@ func (r *StreamingRenderer) tryList(line string) string {
 }
 
 // processInline handles inline patterns: **bold** and `code`.
-func (r *StreamingRenderer) processInline(text string) string {
+// When complete is false the text is a mid-line fragment: pending markers
+// and open styling carry over to the fragment that continues the line.
+func (r *StreamingRenderer) processInline(text string, complete bool) string {
 	var result strings.Builder
 	runes := []rune(text)
 	i := 0
@@ -212,6 +264,12 @@ func (r *StreamingRenderer) processInline(text string) string {
 
 		result.WriteRune(char)
 		i++
+	}
+
+	// Mid-line fragment: leave pending markers and styling open for the
+	// continuation.
+	if !complete {
+		return result.String()
 	}
 
 	// Flush any remaining pending marker at end of line

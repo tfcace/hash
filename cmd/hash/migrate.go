@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/tfcace/hash/internal/compat"
+	"github.com/tfcace/hash/internal/config"
 )
 
 func printMigrateHelp() {
@@ -127,8 +128,12 @@ Hash will source your existing config with compatibility filtering:
   ✓ Functions (POSIX-compatible)
   ✓ PATH modifications (including Homebrew from .zprofile)
 
-Zsh-specific features like bindkey, setopt, compdef are silently
-skipped. Run 'hash migrate status' to see what was skipped.
+Hash filters using your configured shell.dialect. Bash mode skips
+common zsh-only init/eval lines; zsh mode preserves zsh syntax where
+possible. Unsupported shell/editor builtins such as bindkey, setopt,
+and compdef remain compatibility no-ops.
+
+Run 'hash migrate status' to see what was skipped.
 
 Your original config files are not modified - Hash sources them
 directly with a compatibility layer.`)
@@ -142,11 +147,12 @@ directly with a compatibility layer.`)
 func doMigrationFiles(shellFiles compat.ShellFiles) int {
 	files := shellFiles.Files()
 	fmt.Print("\nAnalyzing config files... ")
+	targetDialect := migrateShellDialect()
 
 	// Filter all files and merge reports (actual execution happens at shell startup)
 	var totalReport *compat.Report
 	for _, file := range files {
-		_, report, err := compat.FilterWithCompat(file, shellFiles.Shell)
+		_, report, err := compat.FilterWithDialect(file, shellFiles.Shell, targetDialect)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "\nhash migrate: %s: %v\n", file, err)
 			continue
@@ -219,7 +225,7 @@ func runMigrateFrom(shell string, args []string) int {
 		return 1
 	}
 
-	_, report, err := compat.FilterWithCompat(rcFile, shell)
+	_, report, err := compat.FilterWithDialect(rcFile, shell, migrateShellDialect())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "hash migrate: %v\n", err)
 		return 1
@@ -241,4 +247,15 @@ func runMigrateFrom(shell string, args []string) int {
 	}
 
 	return 0
+}
+
+func migrateShellDialect() string {
+	cfg, err := config.Load(getConfigDir())
+	if err != nil {
+		return "bash"
+	}
+	if strings.TrimSpace(cfg.Shell.Dialect) == "" {
+		return "bash"
+	}
+	return cfg.Shell.Dialect
 }

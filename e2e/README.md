@@ -16,7 +16,7 @@ go test -tags=e2e ./e2e/...
 
 ### Live Tests (`-tags=e2e_live`)
 
-Tests against the real `claude-code-acp` agent. Non-deterministic but validates actual ACP protocol behavior.
+Tests against the real `claude-agent-acp` agent. Non-deterministic but validates actual ACP protocol behavior.
 
 ```bash
 go test -tags=e2e_live ./e2e/...
@@ -24,7 +24,7 @@ go test -tags=e2e_live ./e2e/...
 
 **Use for:** Validating ACP reliability, debugging agent integration issues, testing protocol changes.
 
-**Requirements:** `claude-code-acp` must be installed and accessible in PATH.
+**Requirements:** `claude-agent-acp` must be installed and accessible in PATH.
 
 **Note:** Live tests are slower (2-3 min total) and require API quota. Agent responses vary between runs.
 
@@ -62,7 +62,7 @@ e2e/
 # Run all mock e2e tests (fast, deterministic)
 go test -tags=e2e ./e2e/...
 
-# Run all live agent tests (slow, requires claude-code-acp)
+# Run all live agent tests (slow, requires claude-agent-acp)
 go test -tags=e2e_live ./e2e/...
 
 # Run specific scenario
@@ -103,7 +103,7 @@ mock := NewScenarioMockWithSeed(42).
 
 ## Live Agent Tests
 
-Live tests validate the full ACP protocol stack against `claude-code-acp`:
+Live tests validate the full ACP protocol stack against `claude-agent-acp`:
 
 | Test | Purpose |
 |------|---------|

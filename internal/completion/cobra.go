@@ -3,11 +3,11 @@ package completion
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 )
 
@@ -17,11 +17,18 @@ type CobraCompleter struct {
 	cache      map[string]cachedResult
 	cacheMu    sync.RWMutex
 	cacheTTL   time.Duration
-	prefetched map[string]bool // tracks prefetch attempts (including failures)
+	prefetched map[string]time.Time // prefetch key -> next retry time
 	prefetchMu sync.RWMutex
 
-	lookPathCache   map[string]string // command name → resolved path
-	lookPathCacheMu sync.RWMutex
+	resolvePath      func(string) (string, error)
+	lookPathCache    map[string]string // command name → resolved path
+	lookPathInFlight map[string]*cobraLookPathCall
+	lookPathMaxAge   time.Duration
+	lookPathCacheMu  sync.RWMutex
+}
+
+type cobraLookPathCall struct {
+	started time.Time
 }
 
 type cachedResult struct {
@@ -29,13 +36,21 @@ type cachedResult struct {
 	expiresAt time.Time
 }
 
+const cobraPrefetchTimeout = 100 * time.Millisecond
+const cobraFailedPrefetchTTL = 2 * time.Second
+
+var errCobraLookPathBusy = errors.New("cobra command path lookup already in progress")
+
 // NewCobraCompleter creates a new Cobra completer.
 func NewCobraCompleter() *CobraCompleter {
 	return &CobraCompleter{
-		cache:         make(map[string]cachedResult),
-		cacheTTL:      5 * time.Minute,
-		prefetched:    make(map[string]bool),
-		lookPathCache: make(map[string]string),
+		cache:            make(map[string]cachedResult),
+		cacheTTL:         5 * time.Minute,
+		prefetched:       make(map[string]time.Time),
+		resolvePath:      exec.LookPath,
+		lookPathCache:    make(map[string]string),
+		lookPathInFlight: make(map[string]*cobraLookPathCall),
+		lookPathMaxAge:   contextReadInflightMaxWaitAge,
 	}
 }
 
@@ -54,12 +69,46 @@ func (c *CobraCompleter) lookPath(name string) (string, error) {
 	}
 	c.lookPathCacheMu.RUnlock()
 
-	p, err := exec.LookPath(name)
-	if err != nil {
-		return "", err
+	c.lookPathCacheMu.Lock()
+	if p, ok := c.lookPathCache[name]; ok {
+		c.lookPathCacheMu.Unlock()
+		return p, nil
 	}
+	if c.lookPathInFlight == nil {
+		c.lookPathInFlight = make(map[string]*cobraLookPathCall)
+	}
+	now := time.Now()
+	if call, ok := c.lookPathInFlight[name]; ok {
+		maxAge := c.lookPathMaxAge
+		if maxAge == 0 {
+			maxAge = contextReadInflightMaxWaitAge
+		}
+		if maxAge < 0 || now.Sub(call.started) < maxAge {
+			c.lookPathCacheMu.Unlock()
+			return "", errCobraLookPathBusy
+		}
+		delete(c.lookPathInFlight, name)
+	}
+	call := &cobraLookPathCall{started: now}
+	c.lookPathInFlight[name] = call
+	c.lookPathCacheMu.Unlock()
+
+	resolve := c.resolvePath
+	if resolve == nil {
+		resolve = exec.LookPath
+	}
+	p, err := resolve(name)
 
 	c.lookPathCacheMu.Lock()
+	if c.lookPathInFlight[name] != call {
+		c.lookPathCacheMu.Unlock()
+		return "", errCobraLookPathBusy
+	}
+	delete(c.lookPathInFlight, name)
+	if err != nil {
+		c.lookPathCacheMu.Unlock()
+		return "", err
+	}
 	c.lookPathCache[name] = p
 	c.lookPathCacheMu.Unlock()
 	return p, nil
@@ -75,6 +124,8 @@ func (c *CobraCompleter) cachedPath(name string) (string, bool) {
 // Complete returns completions from cache only.
 // Use Prefetch to populate the cache in the background.
 func (c *CobraCompleter) Complete(ctx context.Context, line string, pos int) (Result, error) {
+	pos = clampCursor(line, pos)
+
 	// Extract pipe context - get command segment after last pipe
 	pipeLine, pipePos := ExtractPipeContext(line, pos)
 
@@ -117,6 +168,8 @@ func (c *CobraCompleter) Complete(ctx context.Context, line string, pos int) (Re
 // Prefetch triggers background fetching of Cobra completions.
 // Call this when the user types a space after a command.
 func (c *CobraCompleter) Prefetch(line string, pos int) {
+	pos = clampCursor(line, pos)
+
 	// Extract pipe context - get command segment after last pipe
 	pipeLine, pipePos := ExtractPipeContext(line, pos)
 
@@ -139,21 +192,25 @@ func (c *CobraCompleter) Prefetch(line string, pos int) {
 
 	// Check if already prefetching or recently failed
 	prefetchKey := cmdName + ":" + strings.Join(args, " ")
+	now := time.Now()
 	c.prefetchMu.Lock()
-	if c.prefetched[prefetchKey] {
+	if retryAt, ok := c.prefetched[prefetchKey]; ok && now.Before(retryAt) {
 		c.prefetchMu.Unlock()
 		return
 	}
-	c.prefetched[prefetchKey] = true
+	c.prefetched[prefetchKey] = c.nextFailedPrefetchRetry(now)
 	c.prefetchMu.Unlock()
 
 	// Run prefetch in background
-	go c.prefetchCommand(cmdName, args)
+	go c.prefetchCommand(prefetchKey, cmdName, args)
 }
 
-func (c *CobraCompleter) prefetchCommand(cmdName string, args []string) {
+func (c *CobraCompleter) prefetchCommand(prefetchKey, cmdName string, args []string) {
 	cmdPath, err := c.lookPath(cmdName)
 	if err != nil {
+		if errors.Is(err, errCobraLookPathBusy) {
+			c.forgetPrefetch(prefetchKey)
+		}
 		return
 	}
 
@@ -163,6 +220,7 @@ func (c *CobraCompleter) prefetchCommand(cmdName string, args []string) {
 	c.cacheMu.RLock()
 	if cached, ok := c.cache[cacheKey]; ok && time.Now().Before(cached.expiresAt) {
 		c.cacheMu.RUnlock()
+		c.markPrefetchedUntil(prefetchKey, cached.expiresAt)
 		return
 	}
 	c.cacheMu.RUnlock()
@@ -170,10 +228,30 @@ func (c *CobraCompleter) prefetchCommand(cmdName string, args []string) {
 	c.doPrefetch(cmdPath, args, cacheKey)
 }
 
+func (c *CobraCompleter) forgetPrefetch(prefetchKey string) {
+	c.prefetchMu.Lock()
+	delete(c.prefetched, prefetchKey)
+	c.prefetchMu.Unlock()
+}
+
+func (c *CobraCompleter) markPrefetchedUntil(prefetchKey string, retryAt time.Time) {
+	c.prefetchMu.Lock()
+	c.prefetched[prefetchKey] = retryAt
+	c.prefetchMu.Unlock()
+}
+
+func (c *CobraCompleter) nextFailedPrefetchRetry(now time.Time) time.Time {
+	ttl := cobraFailedPrefetchTTL
+	if c.cacheTTL > 0 && c.cacheTTL < ttl {
+		ttl = c.cacheTTL
+	}
+	return now.Add(ttl)
+}
+
 // doPrefetch runs the actual Cobra completion in the background.
 func (c *CobraCompleter) doPrefetch(cmdPath string, args []string, cacheKey string) {
 	// Use short timeout - Cobra completions should be fast
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), cobraPrefetchTimeout)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, cmdPath, args...)
@@ -185,9 +263,7 @@ func (c *CobraCompleter) doPrefetch(cmdPath string, args []string, cacheKey stri
 	// - Setsid creates a new session, detaching from controlling terminal
 	// - Stdin from /dev/null prevents reading
 	// This prevents TUI apps (vim, helix) from taking over or corrupting our terminal
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Setsid: true,
-	}
+	configureIsolatedCompletionCommand(cmd)
 	devNull, err := os.Open(os.DevNull)
 	if err == nil {
 		cmd.Stdin = devNull
@@ -243,6 +319,9 @@ func (c *CobraCompleter) parseOutput(output string) Result {
 			Display:     value,
 			Description: desc,
 		})
+		if len(items) >= completionItemLimit {
+			break
+		}
 	}
 
 	return Result{Items: items}
@@ -271,7 +350,7 @@ func (c *CobraCompleter) ClearCache() {
 	c.cacheMu.Unlock()
 
 	c.prefetchMu.Lock()
-	c.prefetched = make(map[string]bool)
+	c.prefetched = make(map[string]time.Time)
 	c.prefetchMu.Unlock()
 
 	c.lookPathCacheMu.Lock()

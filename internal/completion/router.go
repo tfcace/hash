@@ -4,6 +4,7 @@ import (
 	"context"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/tfcace/hash/internal/trace"
@@ -11,13 +12,37 @@ import (
 
 // Router dispatches completion requests to registered completers.
 type Router struct {
-	completers []registeredCompleter
-	fuzzy      bool
+	completers        []registeredCompleter
+	nextCompleterID   uint64
+	fuzzy             bool
+	completerMu       sync.Mutex
+	completerInFlight map[uint64]completerInFlightCall
+	prefetchMu        sync.Mutex
+	prefetchInFlight  map[uint64]prefetchInFlightCall
 }
 
 type registeredCompleter struct {
 	completer Completer
 	priority  Priority
+	id        uint64
+}
+
+type boundedCompletionResult struct {
+	result Result
+	err    error
+}
+
+type completerCallResult struct {
+	result Result
+	err    error
+}
+
+type completerInFlightCall struct {
+	started time.Time
+}
+
+type prefetchInFlightCall struct {
+	started time.Time
 }
 
 // NewRouter creates a new completion router.
@@ -38,14 +63,19 @@ func (r *Router) Fuzzy() bool {
 // Register adds a completer with the given priority.
 // Lower priority values are tried first.
 func (r *Router) Register(c Completer, priority Priority) {
+	r.nextCompleterID++
 	r.completers = append(r.completers, registeredCompleter{
 		completer: c,
 		priority:  priority,
+		id:        r.nextCompleterID,
 	})
 
 	// Sort by priority (lower first)
 	sort.Slice(r.completers, func(i, j int) bool {
-		return r.completers[i].priority < r.completers[j].priority
+		if r.completers[i].priority != r.completers[j].priority {
+			return r.completers[i].priority < r.completers[j].priority
+		}
+		return r.completers[i].id < r.completers[j].id
 	})
 }
 
@@ -67,6 +97,15 @@ func (r *Router) Complete(ctx context.Context, line string, pos int) (Result, er
 	}
 
 	for _, rc := range r.completers {
+		if ctx.Err() != nil {
+			if traceEnabled {
+				trace.Emit("completion", "router_canceled", trace.LevelDetailed, map[string]any{
+					"duration_ms": float64(time.Since(start).Microseconds()) / 1000.0,
+				})
+			}
+			return Result{}, nil
+		}
+
 		completerStart := time.Now()
 		if traceEnabled {
 			trace.Emit("completion", "completer_start", trace.LevelDetailed, map[string]any{
@@ -75,7 +114,7 @@ func (r *Router) Complete(ctx context.Context, line string, pos int) (Result, er
 			})
 		}
 
-		result, err := rc.completer.Complete(ctx, line, pos)
+		result, err := r.completeWithBoundary(ctx, rc, line, pos)
 		if traceEnabled {
 			errText := ""
 			if err != nil {
@@ -94,19 +133,7 @@ func (r *Router) Complete(ctx context.Context, line string, pos int) (Result, er
 		}
 
 		if len(result.Items) > 0 {
-			// Apply fuzzy filtering if enabled
-			// Skip if query ends with "/" - we're listing directory contents, not filtering
-			if r.fuzzy && query != "" && !strings.HasSuffix(query, "/") {
-				// For paths like "~/Go", only filter on the basename "Go"
-				// The prefix (directory path) is handled by the completer
-				filterQuery := query
-				if lastSlash := strings.LastIndex(query, "/"); lastSlash >= 0 {
-					filterQuery = query[lastSlash+1:]
-				}
-				if filterQuery != "" {
-					result.Items = FuzzyFilter(result.Items, filterQuery)
-				}
-			}
+			result = r.finalizeResult(result, query)
 			if traceEnabled {
 				trace.Emit("completion", "router_done", trace.LevelDetailed, map[string]any{
 					"winner":      rc.completer.Name(),
@@ -128,6 +155,92 @@ func (r *Router) Complete(ctx context.Context, line string, pos int) (Result, er
 	return Result{}, nil
 }
 
+func (r *Router) finalizeResult(result Result, query string) Result {
+	if r.fuzzy && query != "" && !strings.HasSuffix(query, "/") {
+		filterQuery := basenameCompletionQuery(query)
+		if filterQuery != "" {
+			result.Items = FuzzyFilter(result.Items, filterQuery)
+		}
+	}
+	result.Items = limitCompletionItems(result.Items)
+	return result
+}
+
+func basenameCompletionQuery(query string) string {
+	if lastSlash := strings.LastIndex(query, "/"); lastSlash >= 0 {
+		return query[lastSlash+1:]
+	}
+	return query
+}
+
+func (r *Router) completeWithBoundary(ctx context.Context, rc registeredCompleter, line string, pos int) (Result, error) {
+	key := completerInFlightKey(rc)
+	if !r.beginCompleterCall(key) {
+		return Result{}, nil
+	}
+
+	done := make(chan completerCallResult, 1)
+	go func() {
+		defer r.endCompleterCall(key)
+		result, err := rc.completer.Complete(ctx, line, pos)
+		done <- completerCallResult{result: result, err: err}
+	}()
+
+	select {
+	case <-ctx.Done():
+		return Result{}, ctx.Err()
+	case result := <-done:
+		return result.result, result.err
+	}
+}
+
+func completerInFlightKey(rc registeredCompleter) uint64 {
+	return rc.id
+}
+
+func (r *Router) beginCompleterCall(key uint64) bool {
+	r.completerMu.Lock()
+	defer r.completerMu.Unlock()
+	if r.completerInFlight == nil {
+		r.completerInFlight = make(map[uint64]completerInFlightCall)
+	}
+	now := time.Now()
+	if call, ok := r.completerInFlight[key]; ok {
+		if !contextReadCallIsStale(call.started, now, 0) {
+			return false
+		}
+	}
+	r.completerInFlight[key] = completerInFlightCall{started: now}
+	return true
+}
+
+func (r *Router) endCompleterCall(key uint64) {
+	r.completerMu.Lock()
+	delete(r.completerInFlight, key)
+	r.completerMu.Unlock()
+}
+
+// CompleteBounded runs completion behind the provided context boundary.
+// This protects UI callers from completers that ignore context cancellation.
+func (r *Router) CompleteBounded(ctx context.Context, line string, pos int) (Result, error) {
+	if err := ctx.Err(); err != nil {
+		return Result{}, err
+	}
+
+	done := make(chan boundedCompletionResult, 1)
+	go func() {
+		result, err := r.Complete(ctx, line, pos)
+		done <- boundedCompletionResult{result: result, err: err}
+	}()
+
+	select {
+	case <-ctx.Done():
+		return Result{}, ctx.Err()
+	case result := <-done:
+		return result.result, result.err
+	}
+}
+
 // extractCompletionQuery extracts the word being completed.
 func extractCompletionQuery(line string, pos int) string {
 	return shellUnescapeWord(shellWordAt(line, pos))
@@ -138,9 +251,7 @@ func extractCompletionQuery(line string, pos int) string {
 // For "ls -la", returns ("ls -la", 5) unchanged.
 // This allows completers to work correctly with piped commands.
 func ExtractPipeContext(line string, pos int) (extracted string, newPos int) {
-	if pos > len(line) {
-		pos = len(line)
-	}
+	pos = clampCursor(line, pos)
 
 	// Find the last pipe character before pos
 	lastPipe := -1
@@ -190,4 +301,43 @@ func (r *Router) Prefetch(line string, pos int) {
 			p.Prefetch(line, pos)
 		}
 	}
+}
+
+// PrefetchBounded runs prefetch work in the background and coalesces stuck prefetchers.
+func (r *Router) PrefetchBounded(line string, pos int) {
+	for _, rc := range r.completers {
+		p, ok := rc.completer.(Prefetcher)
+		if !ok {
+			continue
+		}
+		if !r.beginPrefetch(rc.id) {
+			continue
+		}
+		go func(id uint64, prefetcher Prefetcher) {
+			defer r.endPrefetch(id)
+			prefetcher.Prefetch(line, pos)
+		}(rc.id, p)
+	}
+}
+
+func (r *Router) beginPrefetch(key uint64) bool {
+	r.prefetchMu.Lock()
+	defer r.prefetchMu.Unlock()
+	if r.prefetchInFlight == nil {
+		r.prefetchInFlight = make(map[uint64]prefetchInFlightCall)
+	}
+	now := time.Now()
+	if call, ok := r.prefetchInFlight[key]; ok {
+		if !contextReadCallIsStale(call.started, now, 0) {
+			return false
+		}
+	}
+	r.prefetchInFlight[key] = prefetchInFlightCall{started: now}
+	return true
+}
+
+func (r *Router) endPrefetch(key uint64) {
+	r.prefetchMu.Lock()
+	delete(r.prefetchInFlight, key)
+	r.prefetchMu.Unlock()
 }

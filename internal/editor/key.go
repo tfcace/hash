@@ -1,5 +1,6 @@
-// internal/editor/key.go
 package editor
+
+import "unicode/utf8"
 
 // KeyCode represents special keys.
 type KeyCode int
@@ -73,8 +74,7 @@ func ParseKey(b []byte) Key {
 		return parseEscapeSequence(b)
 	}
 
-	// UTF-8 multi-byte (simplified)
-	r := rune(b[0])
+	r, _ := utf8.DecodeRune(b)
 	return Key{Rune: r}
 }
 

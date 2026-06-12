@@ -4,7 +4,9 @@ import (
 	"bufio"
 	"fmt"
 	"io"
+	"math/rand"
 	"os"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -16,8 +18,28 @@ import (
 	"golang.org/x/term"
 )
 
-// Braille spinner frames for animation
-var spinnerFrames = []rune{'⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'}
+var agentStatusReplacementPool = []string{
+	"░",
+	"▒",
+	"▓",
+	"█",
+	"-",
+	"\\",
+	"|",
+	"/",
+	"+",
+	"*",
+	"h",
+	"a",
+	"s",
+	"h",
+	"$",
+	"#",
+}
+
+type agentStatusRandom interface {
+	Intn(n int) int
+}
 
 // ConfirmAction represents the user's response to a command suggestion.
 type ConfirmAction int
@@ -26,6 +48,7 @@ const (
 	ConfirmRun    ConfirmAction = iota // User pressed Enter - run the command
 	ConfirmEdit                        // User pressed Tab - edit the command
 	ConfirmCancel                      // User pressed Esc - cancel
+	ConfirmReply                       // User pressed r - continue the conversation
 )
 
 // ConfirmationType determines which confirmation options to show.
@@ -33,7 +56,7 @@ type ConfirmationType int
 
 const (
 	ConfirmTypeCommand     ConfirmationType = iota // [Enter: run] [Tab: edit] [Esc: cancel]
-	ConfirmTypeExplanation                         // [Enter: ok] [Tab: copy] [Esc: cancel]
+	ConfirmTypeExplanation                         // [Enter: done] [Tab: copy] [r: reply] [Esc: cancel]
 	ConfirmTypeError                               // [Enter: retry] [Esc: cancel]
 )
 
@@ -50,16 +73,42 @@ const (
 func (s AgentState) String() string {
 	switch s {
 	case AgentStateConnecting:
-		return "Connecting to agent..."
+		return "agent · connecting"
 	case AgentStateSending:
-		return "Sending context..."
+		return "agent · sending context"
 	case AgentStateThinking:
-		return "Agent thinking..."
+		return "agent · thinking"
 	case AgentStateReceiving:
-		return "Receiving response..."
+		return "agent · receiving"
 	default:
-		return "Processing..."
+		return "agent · processing"
 	}
+}
+
+// agentStateLabel renders the spinner label, appending the active model after a
+// "·" separator (e.g. "agent · thinking · Sonnet"). An empty model omits it.
+//
+// We use "·" rather than wrapping the name in [ ] because model names can
+// themselves contain brackets (the agent advertises values like "sonnet[1m]"
+// and names like "Sonnet (1M context)"), which would otherwise nest awkwardly.
+func agentStateLabel(state AgentState, model string) string {
+	label := state.String()
+	if m := cleanModelLabel(model); m != "" {
+		label += " · " + m
+	}
+	return label
+}
+
+// cleanModelLabel tidies an agent-advertised model name for display: it trims
+// surrounding whitespace and drops the trailing " (recommended)" tag the agent
+// appends to its default model.
+func cleanModelLabel(model string) string {
+	model = strings.TrimSpace(model)
+	const tag = " (recommended)"
+	if len(model) >= len(tag) && strings.EqualFold(model[len(model)-len(tag):], tag) {
+		model = strings.TrimSpace(model[:len(model)-len(tag)])
+	}
+	return model
 }
 
 // ResponseUI handles displaying agent responses.
@@ -74,14 +123,36 @@ type ResponseUI struct {
 	spinnerStop    chan struct{}
 	spinnerDone    chan struct{} // signals when spinner goroutine has exited
 	spinnerText    string
+	spinnerRand    agentStatusRandom
+	agentModel     string      // active model shown in spinner labels, "" hides it
+	drawGate       func() bool // nil = always draw; false = skip spinner frames
+}
+
+// SetDrawGate installs a predicate consulted before each spinner frame.
+// When it returns false the frame is skipped (the spinner keeps ticking),
+// so the spinner cannot overwrite output it does not own, such as an
+// active permission prompt.
+func (u *ResponseUI) SetDrawGate(gate func() bool) {
+	u.spinnerMu.Lock()
+	u.drawGate = gate
+	u.spinnerMu.Unlock()
+}
+
+// SetAgentModel sets the model name shown in agent spinner labels. Pass "" to
+// hide the bracketed model tag.
+func (u *ResponseUI) SetAgentModel(name string) {
+	u.spinnerMu.Lock()
+	u.agentModel = name
+	u.spinnerMu.Unlock()
 }
 
 // NewResponseUI creates a new response UI.
 func NewResponseUI(out io.Writer) *ResponseUI {
 	return &ResponseUI{
-		out:      out,
-		in:       os.Stdin,
-		progress: progress.NewOSC(out),
+		out:         out,
+		in:          os.Stdin,
+		progress:    progress.NewOSC(out),
+		spinnerRand: rand.New(rand.NewSource(time.Now().UnixNano())), //nolint:gosec // UI animation jitter does not require crypto randomness.
 	}
 }
 
@@ -128,7 +199,7 @@ func (u *ResponseUI) ShowState(state AgentState) {
 	u.spinnerMu.Lock()
 	defer u.spinnerMu.Unlock()
 
-	text := state.String()
+	text := agentStateLabel(state, u.agentModel)
 
 	if u.spinnerRunning {
 		// Update the spinner text
@@ -163,13 +234,35 @@ func (u *ResponseUI) runSpinner() {
 		case <-ticker.C:
 			u.spinnerMu.Lock()
 			text := u.spinnerText
+			gate := u.drawGate
 			u.spinnerMu.Unlock()
 
-			char := spinnerFrames[frame%len(spinnerFrames)]
-			fmt.Fprintf(u.out, "\r\033[K\033[90m%c %s\033[0m", char, text)
+			if gate != nil && !gate() {
+				continue // screen owned elsewhere (e.g. permission prompt)
+			}
+
+			motion := selectAgentStatusMotion(frame, u.spinnerRand)
+			fmt.Fprintf(u.out, "\r\033[K%s", formatAgentStatusMotion(text, motion))
 			frame++
 		}
 	}
+}
+
+func selectAgentStatusMotion(frame int, rng agentStatusRandom) string {
+	if len(agentStatusReplacementPool) == 0 {
+		return ""
+	}
+	if rng != nil {
+		return agentStatusReplacementPool[rng.Intn(len(agentStatusReplacementPool))]
+	}
+	return agentStatusReplacementPool[frame%len(agentStatusReplacementPool)]
+}
+
+func formatAgentStatusMotion(text, motion string) string {
+	if motion == "" {
+		return fmt.Sprintf(" \033[90m%s\033[0m", text)
+	}
+	return fmt.Sprintf(" %s%s\033[0m \033[90m%s\033[0m", agentConversationLiveRailStyle, motion, text)
 }
 
 // StopSpinner stops the animated spinner if running and waits for it to exit.
@@ -317,6 +410,8 @@ func (u *ResponseUI) ShowError(errMsg string) {
 	fmt.Fprintf(u.out, "\033[31m✗ %s\033[0m\n", errMsg)
 }
 
+const claudeAgentACPInstallCommand = "npm install -g @agentclientprotocol/claude-agent-acp"
+
 // ShowAgentHint displays troubleshooting hints for agent connection failures.
 func (u *ResponseUI) ShowAgentHint(transport, command, url string) {
 	fmt.Fprintln(u.out)
@@ -329,6 +424,9 @@ func (u *ResponseUI) ShowAgentHint(transport, command, url string) {
 	} else {
 		// stdio transport (default)
 		fmt.Fprintf(u.out, "\033[90m  • Is '%s' installed?\033[0m\n", command)
+		if command == "claude-agent-acp" {
+			fmt.Fprintf(u.out, "\033[90m  • Install it with: %s\033[0m\n", claudeAgentACPInstallCommand)
+		}
 		fmt.Fprintf(u.out, "\033[90m  • Is it in your PATH? (try: which %s)\033[0m\n", command)
 		fmt.Fprintf(u.out, "\033[90m  • Is it executable? (try: ls -la $(which %s))\033[0m\n", command)
 	}
@@ -345,7 +443,7 @@ func (u *ResponseUI) ShowConfirmation(ct ConfirmationType) {
 	case ConfirmTypeCommand:
 		hint = "[Enter: run] [Tab: edit] [Esc: cancel]"
 	case ConfirmTypeExplanation:
-		hint = "[Enter: ok] [Tab: copy] [Esc: cancel]"
+		hint = "[Enter: done] [Tab: copy] [r: reply] [Esc: cancel]"
 	case ConfirmTypeError:
 		hint = "[Enter: retry] [Esc: cancel]"
 	}
@@ -381,6 +479,11 @@ func (u *ResponseUI) WaitForConfirmationByType(ct ConfirmationType) ConfirmActio
 				continue // No Tab action for errors
 			}
 			return ConfirmEdit // ConfirmEdit means "secondary action" (edit/copy)
+		case 'r', 'R':
+			if ct == ConfirmTypeExplanation {
+				return ConfirmReply
+			}
+			continue
 		case 0x1b: // Escape - might be standalone or start of sequence
 			// Use channel-based timeout since SetReadDeadline doesn't work on terminals
 			if u.isStandaloneEscape(buf[1:]) {

@@ -1,7 +1,9 @@
-// internal/editor/buffer.go
 package editor
 
-import "strings"
+import (
+	"strings"
+	"unicode/utf8"
+)
 
 // Position represents a row/column position in the buffer.
 type Position struct {
@@ -51,12 +53,7 @@ func (b *Buffer) Insert(row, col int, text string) {
 	}
 
 	line := b.lines[row]
-	if col > len(line) {
-		col = len(line)
-	}
-	if col < 0 {
-		col = 0
-	}
+	col = clampByteIndexToRuneBoundary(line, col)
 
 	// Handle newlines in inserted text
 	parts := strings.Split(text, "\n")
@@ -89,13 +86,19 @@ func (b *Buffer) Delete(from, to Position) {
 
 	if from.Row == to.Row {
 		line := b.lines[from.Row]
+		from.Col = clampByteIndexToRuneBoundary(line, from.Col)
+		to.Col = clampByteIndexToRuneBoundary(line, to.Col)
 		b.lines[from.Row] = line[:from.Col] + line[to.Col:]
 		return
 	}
 
 	// Multi-line delete
-	startLine := b.lines[from.Row][:from.Col]
-	endLine := b.lines[to.Row][to.Col:]
+	start := b.lines[from.Row]
+	end := b.lines[to.Row]
+	from.Col = clampByteIndexToRuneBoundary(start, from.Col)
+	to.Col = clampByteIndexToRuneBoundary(end, to.Col)
+	startLine := start[:from.Col]
+	endLine := end[to.Col:]
 
 	newLines := make([]string, 0, len(b.lines)-(to.Row-from.Row))
 	newLines = append(newLines, b.lines[:from.Row]...)
@@ -117,4 +120,41 @@ func (b *Buffer) ReplaceLine(row int, content string) {
 		return
 	}
 	b.lines[row] = content
+}
+
+func clampByteIndexToRuneBoundary(s string, col int) int {
+	if col <= 0 {
+		return 0
+	}
+	if col >= len(s) {
+		return len(s)
+	}
+	for col > 0 && !utf8.RuneStart(s[col]) {
+		col--
+	}
+	return col
+}
+
+func previousRuneBoundary(s string, col int) int {
+	col = clampByteIndexToRuneBoundary(s, col)
+	if col <= 0 {
+		return 0
+	}
+	_, size := utf8.DecodeLastRuneInString(s[:col])
+	if size <= 0 {
+		return col - 1
+	}
+	return col - size
+}
+
+func nextRuneBoundary(s string, col int) int {
+	col = clampByteIndexToRuneBoundary(s, col)
+	if col >= len(s) {
+		return len(s)
+	}
+	_, size := utf8.DecodeRuneInString(s[col:])
+	if size <= 0 {
+		return col + 1
+	}
+	return col + size
 }

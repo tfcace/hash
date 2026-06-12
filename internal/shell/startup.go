@@ -71,6 +71,13 @@ func (s *Shell) runStartup(ctx context.Context) error {
 	return s.runInitCommands(ctx)
 }
 
+func (s *Shell) shellDialect() string {
+	if s == nil || s.config == nil || strings.TrimSpace(s.config.Shell.Dialect) == "" {
+		return "bash"
+	}
+	return s.config.Shell.Dialect
+}
+
 // sourceFile reads and executes a shell script file.
 func (s *Shell) sourceFile(ctx context.Context, path string) error {
 	// Expand ~ to home directory
@@ -92,19 +99,36 @@ func (s *Shell) sourceFile(ctx context.Context, path string) error {
 		return fmt.Errorf("is a directory")
 	}
 
-	// Read file content
-	content, err := os.ReadFile(path)
+	filtered, _, err := compat.FilterWithDialect(path, sourceShellForPath(path), s.shellDialect())
 	if err != nil {
 		return err
 	}
 
 	// Execute as shell commands
-	_, err = s.executor.Execute(ctx, string(content), os.Stdout, os.Stderr)
+	_, err = s.executor.Execute(ctx, filtered, os.Stdout, os.Stderr)
 	trace.Emit("compat", "source_file_done", trace.LevelVerbose, map[string]any{
 		"path":  path,
 		"error": fmt.Sprintf("%v", err),
 	})
 	return err
+}
+
+func sourceShellForPath(path string) string {
+	base := filepath.Base(path)
+	switch base {
+	case ".zshrc", ".zprofile", ".zshenv", ".zlogin", ".zlogout":
+		return "zsh"
+	case ".bashrc", ".bash_profile", ".bash_login", ".profile":
+		return "bash"
+	}
+	switch filepath.Ext(base) {
+	case ".zsh":
+		return "zsh"
+	case ".bash", ".sh":
+		return "bash"
+	default:
+		return ""
+	}
 }
 
 // runStartupCommand executes a single startup command.
@@ -184,14 +208,14 @@ func (s *Shell) importFirstRunMigration(ctx context.Context, shellFiles compat.S
 	// Filter and source all files, merge reports
 	var totalReport *compat.Report
 	for _, file := range files {
-		// Filter file content (skip zsh builtins, etc.)
-		filtered, report, err := compat.FilterWithCompat(file, shellFiles.Shell)
+		// Filter file content for the configured parser dialect.
+		filtered, report, err := compat.FilterWithDialect(file, shellFiles.Shell, s.shellDialect())
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "\nhash: %s: %v\n", file, err)
 			continue
 		}
 
-		// Execute through our executor (parses with LangBash, persists to shell)
+		// Execute through our executor (parses with configured dialect, persists to shell)
 		if s.executor != nil {
 			_, err = s.executor.Execute(ctx, filtered, os.Stdout, os.Stderr)
 			if err != nil {
@@ -264,7 +288,7 @@ func (s *Shell) checkSourceFileChanged() {
 }
 
 // sourceMigrationFiles sources files from migration state with compatibility filtering.
-// Uses FilterWithCompat for pre-processing and executes through the shell's executor
+// Uses FilterWithDialect for pre-processing and executes through the shell's executor
 // so that aliases, exports, and functions persist to the shell session.
 // Called on every startup for migrated shells.
 func (s *Shell) sourceMigrationFiles(ctx context.Context) {
@@ -279,8 +303,9 @@ func (s *Shell) sourceMigrationFiles(ctx context.Context) {
 	}
 
 	trace.Emit("compat", "migration_source_start", trace.LevelVerbose, map[string]any{
-		"files": state.SourceFiles,
-		"shell": state.SourceShell,
+		"files":          state.SourceFiles,
+		"shell":          state.SourceShell,
+		"target_dialect": s.shellDialect(),
 	})
 
 	// Source each migration file with compatibility layer
@@ -289,8 +314,8 @@ func (s *Shell) sourceMigrationFiles(ctx context.Context) {
 			continue
 		}
 
-		// Filter the file content (skip zsh builtins, etc.)
-		filtered, _, err := compat.FilterWithCompat(file, state.SourceShell)
+		// Filter the file content for the configured parser dialect.
+		filtered, _, err := compat.FilterWithDialect(file, state.SourceShell, s.shellDialect())
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "hash: %s: %v\n", file, err)
 			continue
@@ -298,10 +323,11 @@ func (s *Shell) sourceMigrationFiles(ctx context.Context) {
 
 		trace.Emit("compat", "migration_execute", trace.LevelVerbose, map[string]any{
 			"file":            file,
+			"target_dialect":  s.shellDialect(),
 			"filtered_length": len(filtered),
 		})
 
-		// Execute through our executor (parses with LangBash, persists to shell)
+		// Execute through our executor (parses with configured dialect, persists to shell)
 		if s.executor != nil {
 			_, err = s.executor.Execute(ctx, filtered, os.Stdout, os.Stderr)
 			if err != nil {

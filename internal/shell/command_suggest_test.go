@@ -21,6 +21,7 @@ func TestDamerauLevenshtein(t *testing.T) {
 		{"cat", "cats", 1}, // insertion
 		{"cats", "cat", 1}, // deletion
 		{"kitten", "sitting", 3},
+		{"日本", "中国", 2},
 	}
 
 	for _, tt := range tests {

@@ -6,16 +6,25 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // SSHHandler provides completions for ssh, scp, and sftp commands.
 type SSHHandler struct {
 	readFile func(path string) ([]string, error) // injectable for testing
+	reader   contextLinesReader
+	cache    stringListCache
+	cacheTTL time.Duration
+	now      func() time.Time
 }
 
 // NewSSHHandler creates an SSH completion handler.
 func NewSSHHandler() *SSHHandler {
-	return &SSHHandler{readFile: readLines}
+	return &SSHHandler{
+		readFile: readLines,
+		cacheTTL: 30 * time.Second,
+		now:      time.Now,
+	}
 }
 
 // Commands returns the commands this handler supports.
@@ -30,18 +39,24 @@ func (h *SSHHandler) Complete(ctx context.Context, args []string, current string
 		return Result{}
 	}
 
-	hosts := h.collectHosts()
+	hosts := h.collectHosts(ctx)
 	return prefixFilterItems(hosts, current)
 }
 
-func (h *SSHHandler) collectHosts() []string {
+func (h *SSHHandler) collectHosts(ctx context.Context) []string {
+	if h.cacheTTL > 0 {
+		if hosts, ok := h.cache.get("hosts", h.timeNow()); ok {
+			return hosts
+		}
+	}
+
 	seen := make(map[string]bool)
 	var hosts []string
 
 	// Parse ~/.ssh/config
 	home, err := os.UserHomeDir()
 	if err == nil {
-		configHosts := h.parseSSHConfig(filepath.Join(home, ".ssh", "config"))
+		configHosts := h.parseSSHConfigWithContext(ctx, filepath.Join(home, ".ssh", "config"))
 		for _, host := range configHosts {
 			if !seen[host] {
 				seen[host] = true
@@ -50,7 +65,7 @@ func (h *SSHHandler) collectHosts() []string {
 		}
 
 		// Parse ~/.ssh/known_hosts
-		knownHosts := h.parseKnownHosts(filepath.Join(home, ".ssh", "known_hosts"))
+		knownHosts := h.parseKnownHostsWithContext(ctx, filepath.Join(home, ".ssh", "known_hosts"))
 		for _, host := range knownHosts {
 			if !seen[host] {
 				seen[host] = true
@@ -59,7 +74,36 @@ func (h *SSHHandler) collectHosts() []string {
 		}
 	}
 
+	if ctx.Err() != nil {
+		return hosts
+	}
+	if h.cacheTTL > 0 {
+		h.cache.set("hosts", hosts, h.timeNow().Add(h.cacheTTL))
+	}
 	return hosts
+}
+
+func (h *SSHHandler) parseSSHConfigWithContext(ctx context.Context, path string) []string {
+	lines, err := h.reader.read(ctx, h.readFile, path)
+	if err != nil {
+		return nil
+	}
+	return parseSSHConfigLines(lines)
+}
+
+func (h *SSHHandler) parseKnownHostsWithContext(ctx context.Context, path string) []string {
+	lines, err := h.reader.read(ctx, h.readFile, path)
+	if err != nil {
+		return nil
+	}
+	return parseKnownHostsLines(lines)
+}
+
+func (h *SSHHandler) timeNow() time.Time {
+	if h.now != nil {
+		return h.now()
+	}
+	return time.Now()
 }
 
 func (h *SSHHandler) parseSSHConfig(path string) []string {
@@ -67,7 +111,10 @@ func (h *SSHHandler) parseSSHConfig(path string) []string {
 	if err != nil {
 		return nil
 	}
+	return parseSSHConfigLines(lines)
+}
 
+func parseSSHConfigLines(lines []string) []string {
 	var hosts []string
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
@@ -96,7 +143,10 @@ func (h *SSHHandler) parseKnownHosts(path string) []string {
 	if err != nil {
 		return nil
 	}
+	return parseKnownHostsLines(lines)
+}
 
+func parseKnownHostsLines(lines []string) []string {
 	var hosts []string
 	for _, line := range lines {
 		line = strings.TrimSpace(line)

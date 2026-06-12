@@ -7,6 +7,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/mattn/go-runewidth"
 	"github.com/tfcace/hash/internal/trace"
 )
 
@@ -49,9 +50,11 @@ type Display struct {
 // PrefixWidth is the visible width of Prefix (ANSI excluded).
 type InputFrame struct {
 	TopLine           string // Rendered above input lines (no trailing newline)
+	LiveTopLine       string // Optional line rendered above input only while editing
 	BottomLine        string // Rendered below input lines (no trailing newline)
 	BottomExtraLine   string // Optional line rendered below BottomLine
 	Prefix            string // Rendered before each input line
+	LivePrefix        string // Optional Prefix override used only while editing
 	PrefixWidth       int
 	LineBg            string // Optional ANSI background code for line padding
 	BottomLineBg      string // Optional ANSI background override for BottomLine
@@ -142,8 +145,19 @@ func (d *Display) calcPrefixWidth(row int) int {
 func visibleWidth(s string) int {
 	width := 0
 	inEscape := false
+	var text strings.Builder
+
+	flushText := func() {
+		if text.Len() == 0 {
+			return
+		}
+		width += runewidth.StringWidth(text.String())
+		text.Reset()
+	}
+
 	for _, r := range s {
 		if r == '\x1b' {
+			flushText()
 			inEscape = true
 			continue
 		}
@@ -153,8 +167,9 @@ func visibleWidth(s string) int {
 			}
 			continue
 		}
-		width++
+		text.WriteRune(r)
 	}
+	flushText()
 	return width
 }
 
@@ -212,8 +227,14 @@ func clampCursorToBuffer(buf *Buffer, cur *Cursor) (row, col int) {
 	} else if col > lineLen {
 		col = lineLen
 	}
+	col = clampByteIndexToRuneBoundary(buf.Line(row), col)
 
 	return row, col
+}
+
+func visibleWidthAtByteIndex(s string, col int) int {
+	col = clampByteIndexToRuneBoundary(s, col)
+	return visibleWidth(s[:col])
 }
 
 // renderedGhostSuffixWidth returns the visible width added by ghost rendering.
@@ -256,10 +277,11 @@ func (d *Display) layoutForStandardRender(buf *Buffer, cur *Cursor, cursorLineEx
 
 	for i := 0; i < lineCount; i++ {
 		prefixWidth := d.calcPrefixWidth(i)
-		lineWidth := prefixWidth + len(buf.Line(i))
+		line := buf.Line(i)
+		lineWidth := prefixWidth + visibleWidth(line)
 
 		if i == cursorRow {
-			cursorChars := prefixWidth + cursorCol
+			cursorChars := prefixWidth + visibleWidthAtByteIndex(line, cursorCol)
 			rowOffset, col := d.wrappedCursorForChars(cursorChars)
 			cursorVisualRow = totalRows + rowOffset
 			cursorVisualCol = col
@@ -285,15 +307,19 @@ func (d *Display) layoutForFrameRender(buf *Buffer, cur *Cursor, frame *InputFra
 	if frame.TopLine != "" {
 		totalRows += d.visualRowsForChars(visibleWidth(frame.TopLine))
 	}
+	if frame.LiveTopLine != "" {
+		totalRows += d.visualRowsForChars(visibleWidth(frame.LiveTopLine))
+	}
 
 	cursorVisualRow = totalRows
 	cursorVisualCol = 0
 
 	for i := 0; i < lineCount; i++ {
-		lineWidth := frame.PrefixWidth + len(buf.Line(i))
+		line := buf.Line(i)
+		lineWidth := frame.PrefixWidth + visibleWidth(line)
 
 		if i == cursorRow {
-			cursorChars := frame.PrefixWidth + cursorCol
+			cursorChars := frame.PrefixWidth + visibleWidthAtByteIndex(line, cursorCol)
 			rowOffset, col := d.wrappedCursorForChars(cursorChars)
 			cursorVisualRow = totalRows + rowOffset
 			cursorVisualCol = col
@@ -540,6 +566,10 @@ func (d *Display) renderWithFrame(buf *Buffer, cur *Cursor, hasSelection bool, g
 		d.renderFrameLine(&sb, frame.TopLine, frame.LineBg)
 		sb.WriteString("\r\n")
 	}
+	if frame.LiveTopLine != "" {
+		d.renderFrameLine(&sb, frame.LiveTopLine, frame.LineBg)
+		sb.WriteString("\r\n")
+	}
 
 	cursorRow := cur.Pos.Row
 	cursorCol := cur.Pos.Col
@@ -562,7 +592,7 @@ func (d *Display) renderWithFrame(buf *Buffer, cur *Cursor, hasSelection bool, g
 			sb.WriteString("\r\n")
 		}
 		sb.WriteString(ansiClearLine)
-		sb.WriteString(frame.Prefix)
+		sb.WriteString(frameRenderPrefix(frame))
 
 		line := buf.Line(i)
 		if hasSelection && cur.HasSelection() {
@@ -651,6 +681,13 @@ func (d *Display) renderWithFrame(buf *Buffer, cur *Cursor, hasSelection bool, g
 	d.lastLines = totalRows
 
 	d.out.Write([]byte(sb.String()))
+}
+
+func frameRenderPrefix(frame *InputFrame) string {
+	if frame.LivePrefix != "" {
+		return frame.LivePrefix
+	}
+	return frame.Prefix
 }
 
 func (d *Display) renderLineWithSelection(sb *strings.Builder, line string, row int, cur *Cursor) {
@@ -748,7 +785,7 @@ func (d *Display) Finalize(buf *Buffer) {
 		sb.WriteString(ansiBold)
 		sb.WriteString(buf.Line(i))
 		sb.WriteString(ansiReset)
-		contentWidth += len(buf.Line(i))
+		contentWidth += visibleWidth(buf.Line(i))
 
 		// Pad to full terminal width for clean block look
 		if d.inputBgCode != "" && d.width > contentWidth {
@@ -772,6 +809,7 @@ func (d *Display) Finalize(buf *Buffer) {
 func (d *Display) finalizeWithFrame(buf *Buffer) {
 	frame := d.frame
 	var sb strings.Builder
+	previousLines := d.lastLines
 
 	// Move cursor to beginning of the displayed content
 	if d.lastCursorRow > 0 {
@@ -816,6 +854,13 @@ func (d *Display) finalizeWithFrame(buf *Buffer) {
 		d.renderFrameLine(&sb, frame.BottomExtraLine, extraLineBg)
 		sb.WriteString("\r\n")
 		linesWritten++
+	}
+
+	for i := linesWritten; i < previousLines; i++ {
+		sb.WriteString(ansiClearLine)
+		if i < previousLines-1 {
+			sb.WriteString("\r\n")
+		}
 	}
 
 	d.out.Write([]byte(sb.String()))
@@ -880,7 +925,7 @@ func (d *Display) AnnotateDuration(outputLines int, durationMs int64) {
 	}
 
 	// Position at right side (column = width - text length)
-	col := d.width - len(text)
+	col := d.width - visibleWidth(text)
 	if col > 0 {
 		fmt.Fprintf(&sb, ansiCursorCol, col)
 	}
@@ -928,8 +973,8 @@ func (d *Display) RenderCompletionMenu(items []CompletionItem, selected, startCo
 	// Calculate max width for alignment
 	maxTextWidth := 0
 	for _, item := range items {
-		if len(item.Text) > maxTextWidth {
-			maxTextWidth = len(item.Text)
+		if itemWidth := visibleWidth(item.Text); itemWidth > maxTextWidth {
+			maxTextWidth = itemWidth
 		}
 	}
 
@@ -1000,7 +1045,7 @@ func (d *Display) RenderCompletionMenu(items []CompletionItem, selected, startCo
 		sb.WriteString(item.Text)
 
 		// Pad to align descriptions
-		padding := maxTextWidth - len(item.Text) + 2
+		padding := maxTextWidth - visibleWidth(item.Text) + 2
 		for j := 0; j < padding; j++ {
 			sb.WriteByte(' ')
 		}

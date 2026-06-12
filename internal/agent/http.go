@@ -51,6 +51,26 @@ func (t *HTTPTransport) Connect(ctx context.Context) error {
 	return nil
 }
 
+// CurrentModel returns the configured model name.
+func (t *HTTPTransport) CurrentModel() string {
+	return t.config.Model
+}
+
+// AvailableModels returns nil: model enumeration is ACP-only.
+func (t *HTTPTransport) AvailableModels() []ModelOption {
+	return nil
+}
+
+// SetModel is unsupported for the HTTP transport; the model is fixed by config.
+func (t *HTTPTransport) SetModel(ctx context.Context, value string) error {
+	return fmt.Errorf("model selection is not supported for the http transport (set [agent] model in config)")
+}
+
+// EnsureModelInfo is a no-op for the HTTP transport.
+func (t *HTTPTransport) EnsureModelInfo(ctx context.Context) error {
+	return nil
+}
+
 // ollamaRequest is the request format for Ollama API.
 type ollamaRequest struct {
 	Model  string `json:"model"`

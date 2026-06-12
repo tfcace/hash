@@ -1,6 +1,7 @@
 package completion
 
 import (
+	"strconv"
 	"testing"
 )
 
@@ -39,5 +40,26 @@ func TestKindAlias(t *testing.T) {
 	var k Kind = "alias"
 	if k != "alias" {
 		t.Errorf("expected 'alias', got %s", k)
+	}
+}
+
+func TestPrefixFilterItems_LimitsLargeResultSet(t *testing.T) {
+	values := make([]string, 5000)
+	for i := range values {
+		values[i] = "item-" + strconv.Itoa(i)
+	}
+
+	result := prefixFilterItems(values, "item-")
+	if len(result.Items) > completionItemLimit {
+		t.Fatalf("prefixFilterItems returned %d items, want at most %d", len(result.Items), completionItemLimit)
+	}
+	if len(result.Items) != completionItemLimit {
+		t.Fatalf("prefixFilterItems returned %d items, want %d", len(result.Items), completionItemLimit)
+	}
+	if result.Items[0].Value != "item-0" || result.Items[len(result.Items)-1].Value != "item-199" {
+		t.Fatalf("prefixFilterItems should preserve first matching values, got first=%q last=%q",
+			result.Items[0].Value,
+			result.Items[len(result.Items)-1].Value,
+		)
 	}
 }

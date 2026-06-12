@@ -242,7 +242,7 @@ func (m *NormalMode) handleAlt(key Key, state *EditorState) ModeResult {
 
 func (m *NormalMode) moveLeft(state *EditorState) {
 	if state.Cursor.Pos.Col > 0 {
-		state.Cursor.Pos.Col--
+		state.Cursor.Pos.Col = previousRuneBoundary(state.Buffer.Line(state.Cursor.Pos.Row), state.Cursor.Pos.Col)
 	} else if state.Cursor.Pos.Row > 0 {
 		// Wrap to end of previous line
 		state.Cursor.Pos.Row--
@@ -254,7 +254,7 @@ func (m *NormalMode) moveLeft(state *EditorState) {
 func (m *NormalMode) moveRight(state *EditorState) {
 	lineLen := len(state.Buffer.Line(state.Cursor.Pos.Row))
 	if state.Cursor.Pos.Col < lineLen {
-		state.Cursor.Pos.Col++
+		state.Cursor.Pos.Col = nextRuneBoundary(state.Buffer.Line(state.Cursor.Pos.Row), state.Cursor.Pos.Col)
 	} else if state.Cursor.Pos.Row < state.Buffer.LineCount()-1 {
 		// Wrap to start of next line
 		state.Cursor.Pos.Row++
@@ -270,6 +270,7 @@ func (m *NormalMode) moveUp(state *EditorState) {
 		if state.Cursor.Pos.Col > lineLen {
 			state.Cursor.Pos.Col = lineLen
 		}
+		state.Cursor.Pos.Col = clampByteIndexToRuneBoundary(state.Buffer.Line(state.Cursor.Pos.Row), state.Cursor.Pos.Col)
 	}
 }
 
@@ -280,6 +281,7 @@ func (m *NormalMode) moveDown(state *EditorState) {
 		if state.Cursor.Pos.Col > lineLen {
 			state.Cursor.Pos.Col = lineLen
 		}
+		state.Cursor.Pos.Col = clampByteIndexToRuneBoundary(state.Buffer.Line(state.Cursor.Pos.Row), state.Cursor.Pos.Col)
 	}
 }
 
@@ -339,7 +341,7 @@ func (m *NormalMode) moveWordEnd(state *EditorState) {
 	}
 	// Back one to be at last char
 	if col > 0 {
-		col--
+		col = previousRuneBoundary(line, col)
 	}
 	state.Cursor.Pos.Col = col
 }

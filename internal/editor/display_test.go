@@ -3,6 +3,7 @@ package editor
 
 import (
 	"bytes"
+	"io"
 	"strings"
 	"testing"
 )
@@ -120,6 +121,27 @@ func TestDisplay_RenderCompletionMenu(t *testing.T) {
 	}
 }
 
+func TestDisplay_VisibleWidthUsesTerminalCells(t *testing.T) {
+	tests := []struct {
+		name string
+		text string
+		want int
+	}{
+		{name: "ascii", text: "hash", want: 4},
+		{name: "ansi stripped", text: "\x1b[31mhash\x1b[0m", want: 4},
+		{name: "wide cjk", text: "語", want: 2},
+		{name: "combining mark", text: "e\u0301", want: 1},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := visibleWidth(tt.text); got != tt.want {
+				t.Fatalf("visibleWidth(%q) = %d, want %d", tt.text, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestDisplay_RenderCompletionMenu_WithGutter(t *testing.T) {
 	var buf bytes.Buffer
 	d := NewDisplay(&buf, 80, 24)
@@ -229,6 +251,49 @@ func TestDisplay_FinalizeWithFrame_FillsLineBgToEOL(t *testing.T) {
 	}
 }
 
+func TestDisplay_RenderWithFrame_UsesLivePrefixOnlyUntilFinalize(t *testing.T) {
+	var out bytes.Buffer
+	d := NewDisplay(&out, 40, 24)
+	d.SetFrame(&InputFrame{
+		Prefix:      "│ you › ",
+		LiveTopLine: "╎",
+		LivePrefix:  "╎ you › ",
+		PrefixWidth: 8,
+	})
+
+	buf := NewBufferFromString("yes")
+	cur := NewCursor()
+	cur.MoveTo(0, 3)
+
+	d.Render(buf, cur, false)
+	renderOutput := out.String()
+	if !strings.Contains(renderOutput, "╎ you › yes") {
+		t.Fatalf("active render should use live prefix, got %q", renderOutput)
+	}
+	if !strings.Contains(renderOutput, "╎\r\n") {
+		t.Fatalf("active render should show live connector line, got %q", renderOutput)
+	}
+	if strings.Contains(renderOutput, "│ you › yes") {
+		t.Fatalf("active render should not commit solid prefix, got %q", renderOutput)
+	}
+
+	out.Reset()
+	d.Finalize(buf)
+	finalOutput := out.String()
+	if !strings.Contains(finalOutput, "│ you › yes") {
+		t.Fatalf("finalized input should use committed prefix, got %q", finalOutput)
+	}
+	if strings.Count(finalOutput, ansiClearLine) < 2 {
+		t.Fatalf("finalize should clear the stale live connector row, got %q", finalOutput)
+	}
+	if strings.Contains(finalOutput, "╎ you › yes") {
+		t.Fatalf("finalized input should not keep live prefix, got %q", finalOutput)
+	}
+	if strings.Contains(finalOutput, "╎") {
+		t.Fatalf("finalized input should not keep live connector line, got %q", finalOutput)
+	}
+}
+
 func TestDisplay_RenderWithFrame_ClearsFromLineEnd(t *testing.T) {
 	var out bytes.Buffer
 	d := NewDisplay(&out, 20, 24)
@@ -295,6 +360,54 @@ func TestDisplay_Render_LongWrappedLineTracksVisualCursorRow(t *testing.T) {
 	output := out.String()
 	if !strings.Contains(output, "\x1b[1A") {
 		t.Fatalf("second render should move up one wrapped row, got %q", output)
+	}
+}
+
+func TestDisplay_LayoutUsesUTF8VisibleWidth(t *testing.T) {
+	d := NewDisplay(io.Discard, 80, 24)
+	d.SetPrompt("$ ")
+
+	buf := NewBufferFromString("שלום")
+	cur := NewCursor()
+	cur.MoveTo(0, len("שלום"))
+
+	_, _, cursorCol := d.layoutForStandardRender(buf, cur, 0)
+	if cursorCol != d.promptWidth+4 {
+		t.Fatalf("cursorCol = %d, want prompt width %d + 4 visible Hebrew runes", cursorCol, d.promptWidth)
+	}
+}
+
+func TestDisplay_LayoutUsesTerminalCellWidth(t *testing.T) {
+	d := NewDisplay(io.Discard, 80, 24)
+	d.SetPrompt("$ ")
+
+	buf := NewBufferFromString("語e\u0301")
+	cur := NewCursor()
+	cur.MoveTo(0, len("語e\u0301"))
+
+	_, _, cursorCol := d.layoutForStandardRender(buf, cur, 0)
+	if cursorCol != d.promptWidth+3 {
+		t.Fatalf("cursorCol = %d, want prompt width %d + 3 terminal cells", cursorCol, d.promptWidth)
+	}
+}
+
+func TestDisplay_RenderCompletionMenu_AlignsWideText(t *testing.T) {
+	var buf bytes.Buffer
+	d := NewDisplay(&buf, 80, 24)
+
+	items := []CompletionItem{
+		{Text: "語", Description: "wide"},
+		{Text: "ab", Description: "ascii"},
+	}
+
+	d.RenderCompletionMenu(items, 1, 0, 0, 0)
+	output := buf.String()
+
+	if !strings.Contains(output, "語  \x1b[2mwide") {
+		t.Fatalf("wide completion text should be padded by display width, got %q", output)
+	}
+	if !strings.Contains(output, "ab  ascii") {
+		t.Fatalf("ascii completion text should keep matching padding, got %q", output)
 	}
 }
 

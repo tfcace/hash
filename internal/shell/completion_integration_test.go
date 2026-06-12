@@ -1,14 +1,60 @@
 package shell
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/tfcace/hash/internal/completion"
 	"github.com/tfcace/hash/internal/editor"
 )
+
+type slowCompletionProvider struct {
+	delay time.Duration
+}
+
+func (s slowCompletionProvider) Name() string { return "slow" }
+
+func (s slowCompletionProvider) Complete(ctx context.Context, line string, pos int) (completion.Result, error) {
+	select {
+	case <-time.After(s.delay):
+		return completion.Result{Items: []completion.Item{{Value: "late-result"}}}, nil
+	case <-ctx.Done():
+		return completion.Result{}, nil
+	}
+}
+
+type contextIgnoringCompletionProvider struct {
+	release <-chan struct{}
+}
+
+func (s contextIgnoringCompletionProvider) Name() string { return "context-ignoring" }
+
+func (s contextIgnoringCompletionProvider) Complete(ctx context.Context, line string, pos int) (completion.Result, error) {
+	<-s.release
+	return completion.Result{Items: []completion.Item{{Value: "late-result"}}}, nil
+}
+
+type blockingPrefetchProvider struct {
+	release <-chan struct{}
+	calls   atomic.Int32
+}
+
+func (s *blockingPrefetchProvider) Name() string { return "blocking-prefetch" }
+
+func (s *blockingPrefetchProvider) Complete(ctx context.Context, line string, pos int) (completion.Result, error) {
+	return completion.Result{}, nil
+}
+
+func (s *blockingPrefetchProvider) Prefetch(line string, pos int) {
+	s.calls.Add(1)
+	<-s.release
+}
 
 // createTestDirStructure creates a temp directory with:
 //
@@ -49,6 +95,73 @@ func createTestDirStructure(t *testing.T) string {
 	}
 
 	return tmpDir
+}
+
+func TestCompletionIntegration_AdapterCutsOffSlowCompleter(t *testing.T) {
+	router := completion.NewRouter()
+	router.Register(slowCompletionProvider{delay: 300 * time.Millisecond}, completion.PriorityFilesystem)
+	completeFunc := makeEditorCompleteFunc(router)
+
+	start := time.Now()
+	items := completeFunc("slow ", len("slow "))
+	elapsed := time.Since(start)
+
+	if elapsed > 250*time.Millisecond {
+		t.Fatalf("completion adapter took %s, want under 250ms", elapsed)
+	}
+	if len(items) != 0 {
+		t.Fatalf("slow completion should be cut off, got %#v", items)
+	}
+}
+
+func TestCompletionIntegration_AdapterCutsOffContextIgnoringCompleter(t *testing.T) {
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	defer releaseOnce.Do(func() { close(release) })
+
+	router := completion.NewRouter()
+	router.Register(contextIgnoringCompletionProvider{release: release}, completion.PriorityFilesystem)
+	completeFunc := makeEditorCompleteFunc(router)
+
+	done := make(chan []editor.Completion, 1)
+	start := time.Now()
+	go func() {
+		done <- completeFunc("slow ", len("slow "))
+	}()
+
+	var items []editor.Completion
+	select {
+	case items = <-done:
+	case <-time.After(250 * time.Millisecond):
+		releaseOnce.Do(func() { close(release) })
+		<-done
+		t.Fatal("editor completion adapter did not return when completer ignored context")
+	}
+	releaseOnce.Do(func() { close(release) })
+	elapsed := time.Since(start)
+	if elapsed > 250*time.Millisecond {
+		t.Fatalf("completion adapter took %s, want under 250ms", elapsed)
+	}
+	if len(items) != 0 {
+		t.Fatalf("context-ignoring completion should be cut off, got %#v", items)
+	}
+}
+
+func TestCompletionIntegration_PrefetchDoesNotBlockOnPrefetcher(t *testing.T) {
+	release := make(chan struct{})
+	defer close(release)
+	blocking := &blockingPrefetchProvider{release: release}
+
+	router := completion.NewRouter()
+	router.Register(blocking, completion.PriorityToolNative)
+	prefetchFunc := makeEditorPrefetchFunc(router)
+
+	start := time.Now()
+	prefetchFunc("kubectl ", len("kubectl "))
+	elapsed := time.Since(start)
+	if elapsed > 50*time.Millisecond {
+		t.Fatalf("prefetch adapter took %s with blocking prefetcher, want under 50ms", elapsed)
+	}
 }
 
 // TestCompletionIntegration_BasicTabFromEmpty verifies that completing after

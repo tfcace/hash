@@ -50,6 +50,7 @@ type Config struct {
 	DisableHistorySearch    bool                                     // Disable Ctrl+R history search
 	DisableContextPicker    bool                                     // Disable Ctrl+P context picker
 	ClearOnCancel           bool                                     // Clear display when Ctrl+C cancels input
+	CancelOnEscape          bool                                     // Treat Escape as canceled input instead of mode/completion handling
 }
 
 // Result is returned when the editor exits.
@@ -419,17 +420,12 @@ func (e *Editor) handleKeyEvent(key Key) (Result, bool) {
 		"mode":              e.mode.Name(),
 	})
 
-	// Handle Ctrl+C
-	if key.Ctrl && key.Rune == 'c' {
-		return e.handleCtrlC()
+	if result, done, handled := e.handleControlKey(key); handled {
+		return result, done
 	}
 
-	// Handle Ctrl+D - exit shell (EOF)
-	if key.Ctrl && key.Rune == 'd' {
-		if e.state.Buffer.Content() == "" {
-			return Result{EOF: true}, true
-		}
-		return Result{}, false
+	if e.config.CancelOnEscape && key.Special == KeyEscape {
+		return e.cancelInput(), true
 	}
 
 	// Handle ghost text interception
@@ -457,6 +453,33 @@ func (e *Editor) handleKeyEvent(key Key) (Result, bool) {
 	e.state.Cursor.Clamp(e.state.Buffer)
 	e.render()
 	return Result{}, false
+}
+
+func (e *Editor) handleControlKey(key Key) (Result, bool, bool) {
+	if !key.Ctrl {
+		return Result{}, false, false
+	}
+
+	switch key.Rune {
+	case 'c':
+		result, done := e.handleCtrlC()
+		return result, done, true
+	case 'd':
+		if e.state.Buffer.Content() == "" {
+			return Result{EOF: true}, true, true
+		}
+		return Result{}, false, true
+	default:
+		return Result{}, false, false
+	}
+}
+
+func (e *Editor) cancelInput() Result {
+	e.dismissCompletion()
+	e.ghost.Clear()
+	e.ghostTextChan = nil
+	e.ghostErrChan = nil
+	return Result{Canceled: true}
 }
 
 // handleCtrlC handles Ctrl+C key press.
@@ -702,7 +725,32 @@ func (e *Editor) handleGhostTextKey(key Key) bool {
 		return true
 
 	case KeyEnter:
-		// Enter dismisses ghost and submits what's typed (fish-style)
+		if e.ghost.FromAgent {
+			// The [enter]run hint only appears once streaming is done;
+			// before that, Enter must not run a partial or bare command.
+			if e.ghost.Streaming {
+				trace.AgentHigh("ghost_accept", map[string]any{
+					"key":    "Enter",
+					"action": "ignored_streaming",
+				})
+				return true
+			}
+			// Agent suggestions: Enter accepts the fill, then submits.
+			text := e.ghost.AcceptAll()
+			trace.AgentHigh("ghost_accept", map[string]any{
+				"key":      "Enter",
+				"accepted": text,
+				"action":   "accept_and_run",
+			})
+			if text != "" {
+				e.insertText(text)
+			}
+			e.ghostTextChan = nil
+			e.ghostErrChan = nil
+			// Don't return true - let Enter propagate to submit
+			return false
+		}
+		// Predictions: Enter dismisses ghost and submits what's typed (fish-style)
 		trace.AgentHigh("ghost_accept", map[string]any{
 			"key":    "Enter",
 			"action": "dismiss_and_submit",
@@ -734,7 +782,7 @@ func (e *Editor) insertText(text string) {
 			row++
 			col = 0
 		} else {
-			col++
+			col += len(string(r))
 		}
 	}
 	e.state.Cursor.Pos.Row = row
@@ -812,9 +860,9 @@ func (e *Editor) paste(before bool) {
 
 	if !before {
 		// Move past current character for 'p' (paste after)
-		lineLen := len(e.state.Buffer.Line(row))
-		if col < lineLen {
-			col++
+		line := e.state.Buffer.Line(row)
+		if col < len(line) {
+			col = nextRuneBoundary(line, col)
 		}
 	}
 

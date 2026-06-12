@@ -2,6 +2,7 @@ package completion
 
 import (
 	"context"
+	"strconv"
 	"testing"
 )
 
@@ -46,6 +47,28 @@ func TestEnvCompleter_MatchesAllOnDollar(t *testing.T) {
 
 	if len(result.Items) != 2 {
 		t.Errorf("expected 2 completions, got %d", len(result.Items))
+	}
+}
+
+func TestEnvCompleter_LimitsLargeEnvironment(t *testing.T) {
+	c := NewEnvCompleter(nil)
+	environ := make([]string, 5000)
+	for i := range environ {
+		environ[i] = "HASH_VAR_" + strconv.Itoa(i) + "=value"
+	}
+	c.envFunc = func() []string {
+		return environ
+	}
+
+	result, err := c.Complete(context.Background(), "echo $HASH_", len("echo $HASH_"))
+	if err != nil {
+		t.Fatalf("Complete() error = %v", err)
+	}
+	if len(result.Items) > completionItemLimit {
+		t.Fatalf("env completion returned %d items, want at most %d", len(result.Items), completionItemLimit)
+	}
+	if len(result.Items) != completionItemLimit {
+		t.Fatalf("env completion returned %d items, want %d", len(result.Items), completionItemLimit)
 	}
 }
 

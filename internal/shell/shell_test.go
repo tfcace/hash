@@ -29,6 +29,23 @@ func TestNewShell(t *testing.T) {
 	}
 }
 
+func TestWriteAgentNotConfiguredHintUsesACPDefault(t *testing.T) {
+	var out strings.Builder
+
+	writeAgentNotConfiguredHint(&out)
+	output := out.String()
+
+	if !strings.Contains(output, "command = \"claude-agent-acp\"") {
+		t.Fatalf("expected claude-agent-acp config snippet, got:\n%s", output)
+	}
+	if strings.Contains(output, "command = \"claude\"") {
+		t.Fatalf("did not expect deprecated claude command snippet, got:\n%s", output)
+	}
+	if !strings.Contains(output, "npm install -g @agentclientprotocol/claude-agent-acp") {
+		t.Fatalf("expected install command in setup hint, got:\n%s", output)
+	}
+}
+
 func TestNewShell_HistoryDisabled(t *testing.T) {
 	cfg := config.Default()
 	cfg.History.Enabled = false
@@ -242,7 +259,7 @@ func TestShell_HandleToolPermission_RefreshesProjectAllowlist(t *testing.T) {
 		agentOutput:  NewAgentOutputCoordinator(io.Discard),
 		responseUI:   NewResponseUI(io.Discard),
 		colorPalette: prompt.DefaultPalette(),
-		readKey: func() byte {
+		readKey: func(context.Context) byte {
 			return 'n'
 		},
 	}
@@ -251,12 +268,12 @@ func TestShell_HandleToolPermission_RefreshesProjectAllowlist(t *testing.T) {
 		t.Fatalf("chdir(projectB): %v", err)
 	}
 
-	allow, always := sh.handleToolPermission(agent.ToolPermissionRequest{Command: "git status", ToolName: "Bash"})
+	allow, always := sh.handleToolPermission(context.Background(), agent.ToolPermissionRequest{Command: "git status", ToolName: "Bash"})
 	if allow || always {
 		t.Fatalf("projectA approval should not be reused in projectB, got allow=%v always=%v", allow, always)
 	}
 
-	allow, always = sh.handleToolPermission(agent.ToolPermissionRequest{Command: "npm test", ToolName: "Bash"})
+	allow, always = sh.handleToolPermission(context.Background(), agent.ToolPermissionRequest{Command: "npm test", ToolName: "Bash"})
 	if !allow || always {
 		t.Fatalf("projectB allowlist should be loaded after chdir, got allow=%v always=%v", allow, always)
 	}
@@ -306,7 +323,7 @@ func TestShell_ExecuteRegularCommand_BuiltinFailureUpdatesLastError(t *testing.T
 
 func TestConfirmationTypeForAgentResponse(t *testing.T) {
 	t.Run("command requires confirmation", func(t *testing.T) {
-		confirmType, ok := confirmationTypeForAgentResponse(agent.Response{Type: agent.ResponseTypeCommand})
+		confirmType, ok := confirmationTypeForAgentResponse(agent.Response{Type: agent.ResponseTypeCommand}, false)
 		if !ok {
 			t.Fatal("expected command response to require confirmation")
 		}
@@ -315,9 +332,19 @@ func TestConfirmationTypeForAgentResponse(t *testing.T) {
 		}
 	})
 
-	t.Run("explanation skips confirmation", func(t *testing.T) {
-		if _, ok := confirmationTypeForAgentResponse(agent.Response{Type: agent.ResponseTypeExplanation}); ok {
+	t.Run("explanation skips confirmation without reply", func(t *testing.T) {
+		if _, ok := confirmationTypeForAgentResponse(agent.Response{Type: agent.ResponseTypeExplanation}, false); ok {
 			t.Fatal("expected explanation response to skip confirmation")
+		}
+	})
+
+	t.Run("explanation can request reply confirmation", func(t *testing.T) {
+		confirmType, ok := confirmationTypeForAgentResponse(agent.Response{Type: agent.ResponseTypeExplanation}, true)
+		if !ok {
+			t.Fatal("expected explanation response to require confirmation when reply is allowed")
+		}
+		if confirmType != ConfirmTypeExplanation {
+			t.Fatalf("confirmType = %v, want %v", confirmType, ConfirmTypeExplanation)
 		}
 	})
 }

@@ -2,6 +2,7 @@ package agent
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"io"
 	"strings"
@@ -36,7 +37,7 @@ func TestACPTransport_HandleRequestPermission_Allow(t *testing.T) {
 	var handlerCalled bool
 	var handlerCommand string
 	var mu sync.Mutex
-	transport.SetPermissionHandler(func(req ToolPermissionRequest) (bool, bool) {
+	transport.SetPermissionHandler(func(_ context.Context, req ToolPermissionRequest) (bool, bool) {
 		mu.Lock()
 		handlerCalled = true
 		handlerCommand = req.Command
@@ -60,7 +61,7 @@ func TestACPTransport_HandleRequestPermission_Allow(t *testing.T) {
 	}()
 
 	// Call the handler
-	transport.handleRequestPermission(1, json.RawMessage(params))
+	transport.handleRequestPermission(context.Background(), 1, json.RawMessage(params))
 
 	// Wait for response with timeout
 	select {
@@ -94,6 +95,65 @@ func TestACPTransport_HandleRequestPermission_Allow(t *testing.T) {
 	_ = clientRead
 }
 
+func TestACPTransport_HandleRequestPermission_CancelUnblocksHandler(t *testing.T) {
+	_, agentWrite := io.Pipe()
+	agentRead, clientWrite := io.Pipe()
+	defer agentWrite.Close()  //nolint:errcheck
+	defer clientWrite.Close() //nolint:errcheck
+
+	transport := &ACPTransport{
+		stdin:    clientWrite,
+		messages: make(chan []byte, 100),
+		done:     make(chan struct{}),
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// The handler blocks like a real prompt waiting for a keypress.
+	// Canceling the turn must propagate through the handler's context so
+	// it can release the terminal instead of blocking forever.
+	handlerUnblocked := make(chan struct{})
+	transport.SetPermissionHandler(func(hctx context.Context, req ToolPermissionRequest) (bool, bool) {
+		select {
+		case <-hctx.Done():
+			close(handlerUnblocked)
+		case <-time.After(5 * time.Second):
+		}
+		return false, false
+	})
+
+	responseCh := make(chan string, 1)
+	go func() {
+		buf := make([]byte, 1024)
+		n, err := agentRead.Read(buf)
+		if err != nil {
+			responseCh <- ""
+			return
+		}
+		responseCh <- string(buf[:n])
+	}()
+
+	params := `{"sessionId":"test","toolCall":{"toolCallId":"123","title":"rm -rf /tmp/x","rawInput":{}}}`
+	go transport.handleRequestPermission(ctx, 1, json.RawMessage(params))
+	cancel()
+
+	select {
+	case <-handlerUnblocked:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler did not observe turn cancellation")
+	}
+
+	select {
+	case response := <-responseCh:
+		if !strings.Contains(response, `"optionId":"reject`) {
+			t.Errorf("expected reject response after cancellation, got: %s", response)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for deny response")
+	}
+}
+
 func TestACPTransport_HandleRequestPermission_AlwaysAllow(t *testing.T) {
 	// Create pipes for mock communication
 	_, agentWrite := io.Pipe()
@@ -106,7 +166,7 @@ func TestACPTransport_HandleRequestPermission_AlwaysAllow(t *testing.T) {
 	}
 
 	// Set up permission handler that returns "always allow"
-	transport.SetPermissionHandler(func(req ToolPermissionRequest) (bool, bool) {
+	transport.SetPermissionHandler(func(_ context.Context, req ToolPermissionRequest) (bool, bool) {
 		return true, true // allow always
 	})
 
@@ -125,7 +185,7 @@ func TestACPTransport_HandleRequestPermission_AlwaysAllow(t *testing.T) {
 	}()
 
 	// Call the handler
-	transport.handleRequestPermission(1, json.RawMessage(params))
+	transport.handleRequestPermission(context.Background(), 1, json.RawMessage(params))
 
 	// Wait for response with timeout
 	select {
@@ -154,7 +214,7 @@ func TestACPTransport_HandleRequestPermission_Deny(t *testing.T) {
 	}
 
 	// Set up permission handler that denies
-	transport.SetPermissionHandler(func(req ToolPermissionRequest) (bool, bool) {
+	transport.SetPermissionHandler(func(_ context.Context, req ToolPermissionRequest) (bool, bool) {
 		return false, false // deny
 	})
 
@@ -173,7 +233,7 @@ func TestACPTransport_HandleRequestPermission_Deny(t *testing.T) {
 	}()
 
 	// Call the handler
-	transport.handleRequestPermission(1, json.RawMessage(params))
+	transport.handleRequestPermission(context.Background(), 1, json.RawMessage(params))
 
 	// Wait for response with timeout
 	select {
@@ -218,7 +278,7 @@ func TestACPTransport_HandleRequestPermission_NoHandler(t *testing.T) {
 	}()
 
 	// Call the handler
-	transport.handleRequestPermission(1, json.RawMessage(params))
+	transport.handleRequestPermission(context.Background(), 1, json.RawMessage(params))
 
 	// Wait for response with timeout
 	select {
@@ -248,7 +308,7 @@ func TestACPTransport_HandleRequestPermission_ExtractFromRawInput(t *testing.T) 
 	}
 
 	var receivedCommand string
-	transport.SetPermissionHandler(func(req ToolPermissionRequest) (bool, bool) {
+	transport.SetPermissionHandler(func(_ context.Context, req ToolPermissionRequest) (bool, bool) {
 		receivedCommand = req.Command
 		return true, false
 	})
@@ -265,7 +325,7 @@ func TestACPTransport_HandleRequestPermission_ExtractFromRawInput(t *testing.T) 
 	}()
 
 	// Call the handler
-	transport.handleRequestPermission(1, json.RawMessage(params))
+	transport.handleRequestPermission(context.Background(), 1, json.RawMessage(params))
 
 	// Wait for response
 	select {
@@ -295,7 +355,7 @@ func TestACPTransport_HandleRequestPermission_UsesAgentOptionIDs(t *testing.T) {
 		done:     make(chan struct{}),
 	}
 
-	transport.SetPermissionHandler(func(req ToolPermissionRequest) (bool, bool) {
+	transport.SetPermissionHandler(func(_ context.Context, req ToolPermissionRequest) (bool, bool) {
 		return true, false // allow once
 	})
 
@@ -313,7 +373,7 @@ func TestACPTransport_HandleRequestPermission_UsesAgentOptionIDs(t *testing.T) {
 		}
 	}()
 
-	transport.handleRequestPermission(1, json.RawMessage(params))
+	transport.handleRequestPermission(context.Background(), 1, json.RawMessage(params))
 
 	select {
 	case response := <-done:
@@ -342,7 +402,7 @@ func TestACPTransport_HandleRequestPermission_EmptyCommandAutoRejects(t *testing
 	}
 
 	handlerCalled := false
-	transport.SetPermissionHandler(func(req ToolPermissionRequest) (bool, bool) {
+	transport.SetPermissionHandler(func(_ context.Context, req ToolPermissionRequest) (bool, bool) {
 		handlerCalled = true
 		return true, false
 	})
@@ -361,7 +421,7 @@ func TestACPTransport_HandleRequestPermission_EmptyCommandAutoRejects(t *testing
 		}
 	}()
 
-	transport.handleRequestPermission(1, json.RawMessage(params))
+	transport.handleRequestPermission(context.Background(), 1, json.RawMessage(params))
 
 	select {
 	case response := <-done:
@@ -392,7 +452,7 @@ func TestACPTransport_HandleRequestPermission_ExtractsToolName(t *testing.T) {
 	}
 
 	var receivedReq ToolPermissionRequest
-	transport.SetPermissionHandler(func(req ToolPermissionRequest) (bool, bool) {
+	transport.SetPermissionHandler(func(_ context.Context, req ToolPermissionRequest) (bool, bool) {
 		receivedReq = req
 		return true, false
 	})
@@ -407,7 +467,7 @@ func TestACPTransport_HandleRequestPermission_ExtractsToolName(t *testing.T) {
 		close(done)
 	}()
 
-	transport.handleRequestPermission(1, json.RawMessage(params))
+	transport.handleRequestPermission(context.Background(), 1, json.RawMessage(params))
 
 	select {
 	case <-done:
@@ -437,7 +497,7 @@ func TestACPTransport_HandleRequestPermission_SerializesPrompts(t *testing.T) {
 	var inFlight atomic.Int32
 	var maxInFlight atomic.Int32
 
-	transport.SetPermissionHandler(func(req ToolPermissionRequest) (bool, bool) {
+	transport.SetPermissionHandler(func(_ context.Context, req ToolPermissionRequest) (bool, bool) {
 		current := inFlight.Add(1)
 		for {
 			observed := maxInFlight.Load()
@@ -460,13 +520,13 @@ func TestACPTransport_HandleRequestPermission_SerializesPrompts(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		<-start
-		transport.handleRequestPermission(1, params1)
+		transport.handleRequestPermission(context.Background(), 1, params1)
 	}()
 
 	go func() {
 		defer wg.Done()
 		<-start
-		transport.handleRequestPermission(2, params2)
+		transport.handleRequestPermission(context.Background(), 2, params2)
 	}()
 
 	close(start)

@@ -162,7 +162,8 @@ func (s *CommandSuggestor) getHistoryCommands() []string {
 
 // damerauLevenshtein calculates the Damerau-Levenshtein distance between two strings.
 func damerauLevenshtein(a, b string) int {
-	la, lb := len(a), len(b)
+	ar, br := []rune(a), []rune(b)
+	la, lb := len(ar), len(br)
 	if la == 0 {
 		return lb
 	}
@@ -183,7 +184,7 @@ func damerauLevenshtein(a, b string) int {
 	for i := 1; i <= la; i++ {
 		for j := 1; j <= lb; j++ {
 			cost := 0
-			if a[i-1] != b[j-1] {
+			if ar[i-1] != br[j-1] {
 				cost = 1
 			}
 
@@ -194,7 +195,7 @@ func damerauLevenshtein(a, b string) int {
 			)
 
 			// Transposition
-			if i > 1 && j > 1 && a[i-1] == b[j-2] && a[i-2] == b[j-1] {
+			if i > 1 && j > 1 && ar[i-1] == br[j-2] && ar[i-2] == br[j-1] {
 				d[i][j] = min(d[i][j], d[i-2][j-2]+cost)
 			}
 		}
@@ -205,7 +206,7 @@ func damerauLevenshtein(a, b string) int {
 
 // maxDistance returns the maximum edit distance allowed for a command.
 func maxDistance(cmd string) int {
-	if len(cmd) <= 4 {
+	if len([]rune(cmd)) <= 4 {
 		return 1
 	}
 	return 2

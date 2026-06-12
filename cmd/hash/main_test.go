@@ -2,11 +2,13 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestMain_CFlag(t *testing.T) {
@@ -191,6 +193,39 @@ func TestMain_Argv0Login(t *testing.T) {
 	output := strings.TrimSpace(stdout.String())
 	if output != "1" {
 		t.Errorf("expected HASH_LOGIN=1 via argv[0], got '%s'", output)
+	}
+}
+
+func TestMain_VersionSubcommand(t *testing.T) {
+	tmpDir := t.TempDir()
+	binPath := filepath.Join(tmpDir, "hash_test")
+
+	cmd := exec.Command("go", "build", "-o", binPath, ".")
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("failed to build: %v", err)
+	}
+
+	// `hash version` (bare subcommand) must print the version and exit, like
+	// `git version` / `go version`, not fall through and start a shell.
+	for _, arg := range []string{"version", "--version", "-v"} {
+		t.Run(arg, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+
+			var stdout, stderr bytes.Buffer
+			cmd := exec.CommandContext(ctx, binPath, arg)
+			cmd.Stdout = &stdout
+			cmd.Stderr = &stderr
+
+			if err := cmd.Run(); err != nil {
+				t.Fatalf("hash %s failed: %v, stderr: %s", arg, err, stderr.String())
+			}
+
+			out := strings.TrimSpace(stdout.String())
+			if !strings.HasPrefix(out, "hash ") || out == "hash" {
+				t.Errorf("hash %s: expected non-empty 'hash <version>', got %q", arg, out)
+			}
+		})
 	}
 }
 

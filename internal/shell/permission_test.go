@@ -1,9 +1,13 @@
 package shell
 
 import (
+	"context"
 	"testing"
 	"time"
 )
+
+// alwaysReadyPoll reports input available immediately (legacy blocking-read behavior).
+func alwaysReadyPoll(int, time.Duration) (bool, error) { return true, nil }
 
 func TestPermissionDecisionForKey(t *testing.T) {
 	tests := []struct {
@@ -61,7 +65,7 @@ func TestReadSingleKeyWithHooks_SkipsStaleNewlines(t *testing.T) {
 	drain := func(int) {}
 	sleep := func(time.Duration) {}
 
-	got := readSingleKeyWithHooks(0, read, drain, sleep)
+	got := readSingleKeyWithHooks(context.Background(), 0, alwaysReadyPoll, read, drain, sleep)
 	if got != 'y' {
 		t.Fatalf("readSingleKeyWithHooks() = %q, want %q", got, 'y')
 	}
@@ -92,12 +96,57 @@ func TestReadSingleKeyWithHooks_DrainsLateSubmitNewline(t *testing.T) {
 		queue = append(queue, '\n')
 	}
 
-	got := readSingleKeyWithHooks(0, read, drain, sleep)
+	got := readSingleKeyWithHooks(context.Background(), 0, alwaysReadyPoll, read, drain, sleep)
 	if got != 'y' {
 		t.Fatalf("readSingleKeyWithHooks() = %q, want %q", got, 'y')
 	}
 	if drainCalls != 2 {
 		t.Fatalf("drain called %d times, want 2", drainCalls)
+	}
+}
+
+func TestReadSingleKeyWithHooks_CanceledContextDenies(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	read := func(buf []byte) (int, error) {
+		t.Fatal("read must not be called after cancellation")
+		return 0, nil
+	}
+	neverReady := func(int, time.Duration) (bool, error) { return false, nil }
+
+	got := readSingleKeyWithHooks(ctx, 0, neverReady, read, func(int) {}, func(time.Duration) {})
+	if got != 'n' {
+		t.Fatalf("readSingleKeyWithHooks() = %q, want 'n' (deny) on canceled context", got)
+	}
+}
+
+func TestReadSingleKeyWithHooks_CancelDuringWaitDenies(t *testing.T) {
+	// The user never presses a key; the turn is canceled (Ctrl+C / timeout)
+	// while the prompt is waiting. The read loop must notice and deny
+	// instead of blocking forever in raw mode.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	polls := 0
+	poll := func(int, time.Duration) (bool, error) {
+		polls++
+		if polls == 3 {
+			cancel()
+		}
+		return false, nil
+	}
+	read := func(buf []byte) (int, error) {
+		t.Fatal("read must not be called when input never arrives")
+		return 0, nil
+	}
+
+	got := readSingleKeyWithHooks(ctx, 0, poll, read, func(int) {}, func(time.Duration) {})
+	if got != 'n' {
+		t.Fatalf("readSingleKeyWithHooks() = %q, want 'n' (deny) after cancel", got)
+	}
+	if polls < 3 {
+		t.Fatalf("poll called %d times, want at least 3", polls)
 	}
 }
 
@@ -114,7 +163,7 @@ func TestReadSingleKeyWithHooks_EscapeThroughNewlines(t *testing.T) {
 		return 1, nil
 	}
 
-	got := readSingleKeyWithHooks(0, read, func(int) {}, func(time.Duration) {})
+	got := readSingleKeyWithHooks(context.Background(), 0, alwaysReadyPoll, read, func(int) {}, func(time.Duration) {})
 	if got != 0x1b {
 		t.Fatalf("readSingleKeyWithHooks() = %q, want ESC", got)
 	}

@@ -265,11 +265,11 @@ func TestAgentOutputCoordinator_ShowHints(t *testing.T) {
 	tests := []struct {
 		name     string
 		hintType ConfirmationType
-		expected string
+		expected []string
 	}{
-		{"command", ConfirmTypeCommand, "[Enter: run]"},
-		{"explanation", ConfirmTypeExplanation, "[Enter: ok]"},
-		{"error", ConfirmTypeError, "[Enter: retry]"},
+		{"command", ConfirmTypeCommand, []string{"cmd ·", "[Enter: run]"}},
+		{"explanation", ConfirmTypeExplanation, []string{"agent ·", "[r: reply]"}},
+		{"error", ConfirmTypeError, []string{"error ·", "[Enter: retry]"}},
 	}
 
 	for _, tt := range tests {
@@ -281,8 +281,10 @@ func TestAgentOutputCoordinator_ShowHints(t *testing.T) {
 			aoc.ShowHints(tt.hintType)
 
 			output := buf.String()
-			if !strings.Contains(output, tt.expected) {
-				t.Errorf("expected %q in output, got: %q", tt.expected, output)
+			for _, expected := range tt.expected {
+				if !strings.Contains(output, expected) {
+					t.Errorf("expected %q in output, got: %q", expected, output)
+				}
 			}
 		})
 	}
@@ -334,6 +336,79 @@ func TestAgentOutputCoordinator_PermissionWithoutStreaming(t *testing.T) {
 
 	if aoc.State() != AgentOutputStateIdle {
 		t.Errorf("should return to IDLE, got %v", aoc.State())
+	}
+}
+
+func TestAgentOutputCoordinator_StartStreamingDuringPermission(t *testing.T) {
+	var buf bytes.Buffer
+	aoc := NewAgentOutputCoordinator(&buf)
+
+	// Permission prompt is active before any text has streamed
+	// (agent requested a tool around its first text chunk).
+	aoc.EnterPermission()
+
+	// First chunk arrives while the prompt is up and the terminal is in raw
+	// mode: StartStreaming must not clobber the permission state, and the
+	// chunk must be buffered, not written.
+	aoc.StartStreaming()
+	if aoc.State() != AgentOutputStatePermission {
+		t.Fatalf("expected PERMISSION state preserved, got %v", aoc.State())
+	}
+	aoc.WriteStream("chunk during prompt")
+	if strings.Contains(buf.String(), "chunk during prompt") {
+		t.Fatalf("text written to terminal during permission prompt: %q", buf.String())
+	}
+
+	// Answering the prompt flushes the buffer and resumes streaming.
+	aoc.ClearPermissionPrompt(true)
+	if !strings.Contains(buf.String(), "chunk during prompt") {
+		t.Fatalf("buffered text not flushed after permission cleared: %q", buf.String())
+	}
+	if aoc.State() != AgentOutputStateStreaming {
+		t.Fatalf("expected STREAMING state after clear, got %v", aoc.State())
+	}
+
+	// Subsequent chunks must not be dropped.
+	aoc.WriteStream(" and after")
+	if !strings.Contains(buf.String(), " and after") {
+		t.Fatalf("text dropped after permission cleared: %q", buf.String())
+	}
+}
+
+func TestAgentOutputCoordinator_ClearPermissionPromptAfterCancel(t *testing.T) {
+	var buf bytes.Buffer
+	aoc := NewAgentOutputCoordinator(&buf)
+
+	aoc.RenderPermissionPrompt("rm -rf /tmp/x", "Bash", "")
+	aoc.Cancel() // Ctrl+C while the prompt is pending
+	buf.Reset()
+
+	// The prompt reader resolves later; it must not clear lines that no
+	// longer belong to the prompt.
+	aoc.ClearPermissionPrompt(false)
+	if got := buf.String(); got != "" {
+		t.Fatalf("expected no output after canceled prompt, got %q", got)
+	}
+}
+
+func TestAgentOutputCoordinator_ClearActiveLine(t *testing.T) {
+	var buf bytes.Buffer
+	aoc := NewAgentOutputCoordinator(&buf)
+
+	// Normally clears the current line (used to erase the spinner).
+	aoc.StartStreaming()
+	aoc.ClearActiveLine()
+	if got := buf.String(); got != "\r\x1b[K" {
+		t.Fatalf("expected clear-line sequence, got %q", got)
+	}
+
+	// While a permission prompt owns the screen, clearing would erase the
+	// prompt's last line, so it must be skipped.
+	buf.Reset()
+	aoc.EnterPermission()
+	aoc.ClearActiveLine()
+	if got := buf.String(); got != "" {
+		t.Fatalf("expected no output during permission prompt, got %q", got)
 	}
 }
 

@@ -2,6 +2,8 @@ package completion
 
 import "context"
 
+const completionItemLimit = 200
+
 // Item represents a single completion suggestion.
 type Item struct {
 	Value       string // The actual completion value
@@ -15,6 +17,13 @@ type Item struct {
 type Result struct {
 	Items  []Item // List of completions
 	Prefix string // Common prefix to preserve
+}
+
+func limitCompletionItems(items []Item) []Item {
+	if len(items) <= completionItemLimit {
+		return items
+	}
+	return items[:completionItemLimit]
 }
 
 // Completer provides completions for a given input.

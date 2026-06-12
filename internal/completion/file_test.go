@@ -2,11 +2,34 @@ package completion
 
 import (
 	"context"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 )
+
+type panicInfoDirEntry struct {
+	name string
+	mode fs.FileMode
+}
+
+func (e panicInfoDirEntry) Name() string      { return e.name }
+func (e panicInfoDirEntry) IsDir() bool       { return e.mode.IsDir() }
+func (e panicInfoDirEntry) Type() fs.FileMode { return e.mode.Type() }
+func (e panicInfoDirEntry) Info() (fs.FileInfo, error) {
+	panic("Info should not be called during completion")
+}
+
+func TestFileDescriptionDoesNotStatEntryForSize(t *testing.T) {
+	got := fileDescription(panicInfoDirEntry{name: "slow.txt"}, false)
+	if got != "text" {
+		t.Fatalf("fileDescription() = %q, want %q", got, "text")
+	}
+}
 
 func TestFileCompleter_CurrentDir(t *testing.T) {
 	// Create temp directory with test files
@@ -42,6 +65,26 @@ func TestFileCompleter_CurrentDir(t *testing.T) {
 	}
 	if !values["bar.txt"] {
 		t.Error("Missing bar.txt in completions")
+	}
+}
+
+func TestFileCompleter_LimitsHugeDirectoryResults(t *testing.T) {
+	entries := make([]os.DirEntry, 5000)
+	for i := range entries {
+		entries[i] = panicInfoDirEntry{name: "file-" + strconv.Itoa(i) + ".txt"}
+	}
+
+	completer := NewFileCompleter()
+	completer.readDir = func(dir string) ([]os.DirEntry, error) {
+		return entries, nil
+	}
+
+	result, err := completer.Complete(context.Background(), "cat ", len("cat "))
+	if err != nil {
+		t.Fatalf("Complete() error = %v", err)
+	}
+	if len(result.Items) > 200 {
+		t.Fatalf("expected huge directory completions to be capped, got %d items", len(result.Items))
 	}
 }
 
@@ -183,6 +226,125 @@ func TestFileCompleter_SymlinkToDirectory(t *testing.T) {
 		}
 	}
 	t.Error("symlink_dir not found in completions")
+}
+
+func TestFileCompleter_DoesNotFollowSymlinkTargetsForGeneralCompletion(t *testing.T) {
+	tmpDir := t.TempDir()
+	subDir := filepath.Join(tmpDir, "actual_dir")
+	os.Mkdir(subDir, 0o755) //nolint:gosec // G301: test directory
+	if err := os.Symlink(subDir, filepath.Join(tmpDir, "symlink_dir")); err != nil {
+		t.Skipf("Cannot create symlink: %v", err)
+	}
+
+	oldDir, _ := os.Getwd()
+	os.Chdir(tmpDir)
+	defer os.Chdir(oldDir)
+
+	completer := NewFileCompleter()
+	result, err := completer.Complete(context.Background(), "ls sym", len("ls sym"))
+	if err != nil {
+		t.Fatalf("Complete() error = %v", err)
+	}
+
+	for _, item := range result.Items {
+		if item.Display != "symlink_dir" {
+			continue
+		}
+		if item.Value == "symlink_dir/" {
+			t.Fatalf("general completion should not follow symlink targets to append slash; got %q", item.Value)
+		}
+		if item.Value != "symlink_dir" {
+			t.Fatalf("Value = %q, want %q", item.Value, "symlink_dir")
+		}
+		return
+	}
+	t.Fatalf("symlink_dir not found in completions: %#v", result.Items)
+}
+
+func TestFileCompleter_CoalescesSlowDirectoryReads(t *testing.T) {
+	completer := NewFileCompleter()
+	started := make(chan struct{}, 2)
+	release := make(chan struct{})
+	var calls atomic.Int32
+	completer.readDir = func(dir string) ([]os.DirEntry, error) {
+		calls.Add(1)
+		started <- struct{}{}
+		<-release
+		return nil, nil
+	}
+	defer close(release)
+
+	ctx1, cancel1 := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel1()
+	_, err := completer.Complete(ctx1, "cat ", len("cat "))
+	if err != nil {
+		t.Fatalf("first Complete() error = %v", err)
+	}
+	select {
+	case <-started:
+	default:
+		t.Fatal("first completion did not start a directory read")
+	}
+
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel2()
+	_, err = completer.Complete(ctx2, "cat ", len("cat "))
+	if err != nil {
+		t.Fatalf("second Complete() error = %v", err)
+	}
+
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("expected one in-flight directory read, got %d", got)
+	}
+}
+
+func TestFileCompleter_RetriesStaleInflightDirectoryRead(t *testing.T) {
+	completer := NewFileCompleter()
+	completer.inflightMaxWaitAge = time.Millisecond
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	defer close(release)
+	var calls atomic.Int32
+	completer.readDir = func(dir string) ([]os.DirEntry, error) {
+		call := calls.Add(1)
+		if call == 1 {
+			started <- struct{}{}
+			<-release
+			return nil, nil
+		}
+		return []os.DirEntry{panicInfoDirEntry{name: "fresh.txt"}}, nil
+	}
+
+	ctx1, cancel1 := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel1()
+	_, err := completer.Complete(ctx1, "cat ", len("cat "))
+	if err != nil {
+		t.Fatalf("first Complete() error = %v", err)
+	}
+	select {
+	case <-started:
+	default:
+		t.Fatal("first completion did not start a directory read")
+	}
+	time.Sleep(2 * time.Millisecond)
+
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel2()
+	start := time.Now()
+	result, err := completer.Complete(ctx2, "cat ", len("cat "))
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("second Complete() error = %v", err)
+	}
+	if elapsed > 30*time.Millisecond {
+		t.Fatalf("stale in-flight directory read retry took %s, want under 30ms", elapsed)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("expected stale in-flight read to retry, got %d reads", got)
+	}
+	if len(result.Items) != 1 || result.Items[0].Value != "fresh.txt" {
+		t.Fatalf("expected fresh retry result, got %#v", result.Items)
+	}
 }
 
 func TestFileCompleter_CdIncludesBrokenSymlinkWithoutFollowingTarget(t *testing.T) {

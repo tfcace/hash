@@ -240,15 +240,16 @@ func (m *InsertMode) insertChar(state *EditorState, r rune) {
 		state.Cursor.Pos.Row++
 		state.Cursor.Pos.Col = 0
 	} else {
-		state.Cursor.Pos.Col++
+		state.Cursor.Pos.Col += len(string(r))
 	}
 }
 
 func (m *InsertMode) deleteBack(state *EditorState) {
 	row, col := state.Cursor.Pos.Row, state.Cursor.Pos.Col
 	if col > 0 {
-		state.Buffer.Delete(Position{row, col - 1}, Position{row, col})
-		state.Cursor.Pos.Col--
+		prevCol := previousRuneBoundary(state.Buffer.Line(row), col)
+		state.Buffer.Delete(Position{row, prevCol}, Position{row, col})
+		state.Cursor.Pos.Col = prevCol
 	} else if row > 0 {
 		// Join with previous line
 		prevLen := len(state.Buffer.Line(row - 1))
@@ -262,7 +263,8 @@ func (m *InsertMode) deleteForward(state *EditorState) {
 	row, col := state.Cursor.Pos.Row, state.Cursor.Pos.Col
 	lineLen := len(state.Buffer.Line(row))
 	if col < lineLen {
-		state.Buffer.Delete(Position{row, col}, Position{row, col + 1})
+		nextCol := nextRuneBoundary(state.Buffer.Line(row), col)
+		state.Buffer.Delete(Position{row, col}, Position{row, nextCol})
 	} else if row < state.Buffer.LineCount()-1 {
 		// Join with next line
 		state.Buffer.Delete(Position{row, lineLen}, Position{row + 1, 0})
@@ -271,7 +273,7 @@ func (m *InsertMode) deleteForward(state *EditorState) {
 
 func (m *InsertMode) moveLeft(state *EditorState) {
 	if state.Cursor.Pos.Col > 0 {
-		state.Cursor.Pos.Col--
+		state.Cursor.Pos.Col = previousRuneBoundary(state.Buffer.Line(state.Cursor.Pos.Row), state.Cursor.Pos.Col)
 	} else if state.Cursor.Pos.Row > 0 {
 		state.Cursor.Pos.Row--
 		state.Cursor.Pos.Col = len(state.Buffer.Line(state.Cursor.Pos.Row))
@@ -281,7 +283,7 @@ func (m *InsertMode) moveLeft(state *EditorState) {
 func (m *InsertMode) moveRight(state *EditorState) {
 	lineLen := len(state.Buffer.Line(state.Cursor.Pos.Row))
 	if state.Cursor.Pos.Col < lineLen {
-		state.Cursor.Pos.Col++
+		state.Cursor.Pos.Col = nextRuneBoundary(state.Buffer.Line(state.Cursor.Pos.Row), state.Cursor.Pos.Col)
 	} else if state.Cursor.Pos.Row < state.Buffer.LineCount()-1 {
 		state.Cursor.Pos.Row++
 		state.Cursor.Pos.Col = 0
@@ -295,6 +297,7 @@ func (m *InsertMode) moveUp(state *EditorState) {
 		if state.Cursor.Pos.Col > lineLen {
 			state.Cursor.Pos.Col = lineLen
 		}
+		state.Cursor.Pos.Col = clampByteIndexToRuneBoundary(state.Buffer.Line(state.Cursor.Pos.Row), state.Cursor.Pos.Col)
 	}
 }
 
@@ -305,6 +308,7 @@ func (m *InsertMode) moveDown(state *EditorState) {
 		if state.Cursor.Pos.Col > lineLen {
 			state.Cursor.Pos.Col = lineLen
 		}
+		state.Cursor.Pos.Col = clampByteIndexToRuneBoundary(state.Buffer.Line(state.Cursor.Pos.Row), state.Cursor.Pos.Col)
 	}
 }
 
@@ -432,7 +436,7 @@ func (m *InsertMode) insertPasteContent(state *EditorState, text string) {
 			row++
 			col = 0
 		} else {
-			col++
+			col += len(string(r))
 		}
 	}
 	state.Cursor.Pos.Row = row

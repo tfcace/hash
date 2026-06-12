@@ -3,12 +3,23 @@ package completion
 import (
 	"context"
 	"strings"
+	"sync"
+	"time"
 )
 
 // KillHandler provides completions for kill and killall commands.
 type KillHandler struct {
 	command       string
 	listProcesses func(ctx context.Context) ([]processInfo, error)
+	cacheMu       sync.Mutex
+	cacheTTL      time.Duration
+	cacheExpires  time.Time
+	cached        []processInfo
+	now           func() time.Time
+
+	inflightMu         sync.Mutex
+	inflight           map[string]*processListCall
+	inflightMaxWaitAge time.Duration
 }
 
 type processInfo struct {
@@ -16,9 +27,21 @@ type processInfo struct {
 	Name string
 }
 
+type processListCall struct {
+	done      chan struct{}
+	started   time.Time
+	processes []processInfo
+	err       error
+}
+
 // NewKillHandler creates a kill/killall completion handler.
 func NewKillHandler(command string) *KillHandler {
-	return &KillHandler{command: command, listProcesses: defaultListProcesses}
+	return &KillHandler{
+		command:       command,
+		listProcesses: defaultListProcesses,
+		cacheTTL:      time.Second,
+		now:           time.Now,
+	}
 }
 
 // Commands returns the commands this handler supports.
@@ -35,7 +58,7 @@ func (h *KillHandler) Complete(ctx context.Context, args []string, current strin
 		return Result{}
 	}
 
-	processes, err := h.listProcesses(ctx)
+	processes, err := h.cachedProcesses(ctx)
 	if err != nil {
 		return Result{}
 	}
@@ -50,6 +73,9 @@ func (h *KillHandler) Complete(ctx context.Context, args []string, current strin
 					Value:   p.Name,
 					Display: p.Name,
 				})
+				if len(items) >= completionItemLimit {
+					break
+				}
 			}
 			continue
 		}
@@ -61,9 +87,96 @@ func (h *KillHandler) Complete(ctx context.Context, args []string, current strin
 				Display:     p.PID,
 				Description: p.Name,
 			})
+			if len(items) >= completionItemLimit {
+				break
+			}
 		}
 	}
 	return Result{Items: items}
+}
+
+func (h *KillHandler) cachedProcesses(ctx context.Context) ([]processInfo, error) {
+	if h.cacheTTL > 0 {
+		h.cacheMu.Lock()
+		if h.timeNow().Before(h.cacheExpires) {
+			processes := append([]processInfo(nil), h.cached...)
+			h.cacheMu.Unlock()
+			return processes, nil
+		}
+		h.cacheMu.Unlock()
+	}
+
+	processes, err := h.lookupProcesses(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if h.cacheTTL > 0 {
+		h.cacheMu.Lock()
+		h.cached = append([]processInfo(nil), processes...)
+		h.cacheExpires = h.timeNow().Add(h.cacheTTL)
+		h.cacheMu.Unlock()
+	}
+	return processes, nil
+}
+
+func (h *KillHandler) lookupProcesses(ctx context.Context) ([]processInfo, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	key := h.command
+	now := time.Now()
+	h.inflightMu.Lock()
+	if call, ok := h.inflight[key]; ok {
+		if !contextReadCallIsStale(call.started, now, h.inflightMaxWaitAge) {
+			h.inflightMu.Unlock()
+			return waitForProcessList(ctx, call)
+		}
+		delete(h.inflight, key)
+	}
+
+	call := &processListCall{done: make(chan struct{}), started: now}
+	if h.inflight == nil {
+		h.inflight = make(map[string]*processListCall)
+	}
+	h.inflight[key] = call
+	h.inflightMu.Unlock()
+
+	go h.finishProcessList(ctx, key, call)
+	return waitForProcessList(ctx, call)
+}
+
+func (h *KillHandler) finishProcessList(ctx context.Context, key string, call *processListCall) {
+	list := h.listProcesses
+	if list == nil {
+		list = defaultListProcesses
+	}
+	processes, err := list(ctx)
+
+	h.inflightMu.Lock()
+	call.processes = processes
+	call.err = err
+	if h.inflight[key] == call {
+		delete(h.inflight, key)
+	}
+	h.inflightMu.Unlock()
+	close(call.done)
+}
+
+func waitForProcessList(ctx context.Context, call *processListCall) ([]processInfo, error) {
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-call.done:
+		return append([]processInfo(nil), call.processes...), call.err
+	}
+}
+
+func (h *KillHandler) timeNow() time.Time {
+	if h.now != nil {
+		return h.now()
+	}
+	return time.Now()
 }
 
 func defaultListProcesses(ctx context.Context) ([]processInfo, error) {
