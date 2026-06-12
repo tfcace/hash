@@ -913,6 +913,19 @@ func (s *Shell) handleAgentRequest(ctx context.Context, parsed parser.ParseResul
 	return s.handleAgentRequestUnified(agentCtx, parsed)
 }
 
+// wireSpinnerGate keeps spinner frames off the screen while the output
+// coordinator has a permission prompt up. Wired lazily so any Shell,
+// including test fixtures built from struct literals, gets the guard.
+func (s *Shell) wireSpinnerGate() {
+	if s.responseUI == nil || s.agentOutput == nil {
+		return
+	}
+	aoc := s.agentOutput
+	s.responseUI.SetDrawGate(func() bool {
+		return aoc.State() != AgentOutputStatePermission
+	})
+}
+
 func (s *Shell) agentRequestTimeout() time.Duration {
 	agentCfg := s.config.EffectiveAgent()
 	timeout := 120 * time.Second // Match config default
@@ -1049,6 +1062,7 @@ func (s *Shell) handleAgentFullStreaming(ctx context.Context, parsed parser.Pars
 	defer timeoutCancel()
 
 	// Show thinking indicator (multi-stage: thinking -> receiving)
+	s.wireSpinnerGate()
 	s.responseUI.SetAgentModel(s.agentHandler.CurrentModel())
 	s.responseUI.ShowState(AgentStateThinking)
 
@@ -1234,6 +1248,7 @@ func (s *Shell) streamAgentFollowUpTurn(
 	requestCtx, timeoutCancel := context.WithTimeout(ctx, s.agentRequestTimeout())
 	defer timeoutCancel()
 
+	s.wireSpinnerGate()
 	s.responseUI.SetAgentModel(s.agentHandler.CurrentModel())
 	s.responseUI.ShowState(AgentStateThinking)
 	textCh, errCh := s.agentHandler.StreamFollowUp(requestCtx, reply, transcript)

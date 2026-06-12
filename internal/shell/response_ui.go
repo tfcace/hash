@@ -124,7 +124,18 @@ type ResponseUI struct {
 	spinnerDone    chan struct{} // signals when spinner goroutine has exited
 	spinnerText    string
 	spinnerRand    agentStatusRandom
-	agentModel     string // active model shown in spinner labels, "" hides it
+	agentModel     string      // active model shown in spinner labels, "" hides it
+	drawGate       func() bool // nil = always draw; false = skip spinner frames
+}
+
+// SetDrawGate installs a predicate consulted before each spinner frame.
+// When it returns false the frame is skipped (the spinner keeps ticking),
+// so the spinner cannot overwrite output it does not own, such as an
+// active permission prompt.
+func (u *ResponseUI) SetDrawGate(gate func() bool) {
+	u.spinnerMu.Lock()
+	u.drawGate = gate
+	u.spinnerMu.Unlock()
 }
 
 // SetAgentModel sets the model name shown in agent spinner labels. Pass "" to
@@ -223,7 +234,12 @@ func (u *ResponseUI) runSpinner() {
 		case <-ticker.C:
 			u.spinnerMu.Lock()
 			text := u.spinnerText
+			gate := u.drawGate
 			u.spinnerMu.Unlock()
+
+			if gate != nil && !gate() {
+				continue // screen owned elsewhere (e.g. permission prompt)
+			}
 
 			motion := selectAgentStatusMotion(frame, u.spinnerRand)
 			fmt.Fprintf(u.out, "\r\033[K%s", formatAgentStatusMotion(text, motion))
