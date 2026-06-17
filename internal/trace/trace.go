@@ -95,7 +95,10 @@ func Close() {
 
 	duration := time.Since(global.startTime).Milliseconds()
 	global.writeEntry(EndEntry(duration, global.eventsWritten.Load()))
-	global.file.Close()
+	if err := global.file.Close(); err != nil {
+		// Best-effort close for tracing output; error is handled explicitly.
+		_ = err
+	}
 	global = nil
 }
 
