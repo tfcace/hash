@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.6.1](https://github.com/tfcace/hash/compare/v0.6.0...v0.6.1) (2026-06-17)
+
+
+### Dependencies
+
+* bump charm.land/lipgloss/v2 from 2.0.0 to 2.0.4 ([#61](https://github.com/tfcace/hash/issues/61)) ([87404d8](https://github.com/tfcace/hash/commit/87404d867e888b1815b0a123a78b5d55a947307f))
+* bump github.com/mattn/go-sqlite3 from 1.14.32 to 1.14.45 ([#64](https://github.com/tfcace/hash/issues/64)) ([3c78ed8](https://github.com/tfcace/hash/commit/3c78ed8e92f5eedc99b85da616b42762918d31c1))
+* bump github.com/pelletier/go-toml/v2 from 2.2.4 to 2.4.0 ([#63](https://github.com/tfcace/hash/issues/63)) ([e2ac17f](https://github.com/tfcace/hash/commit/e2ac17f84a7fea710e92d7e85e5acea9c5bf7a4e))
+* bump golang.org/x/term from 0.41.0 to 0.44.0 ([#62](https://github.com/tfcace/hash/issues/62)) ([a30840a](https://github.com/tfcace/hash/commit/a30840a42502bfb9cacbb81f11dc85b004159e80))
+
 ## [0.6.0](https://github.com/tfcace/hash/compare/v0.5.1...v0.6.0) (2026-06-12)
 
 
