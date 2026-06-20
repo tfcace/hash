@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.0](https://github.com/tfcace/hash/compare/v0.6.1...v0.7.0) (2026-06-20)
+
+
+### Features
+
+* **onboarding:** agent-aware first-run welcome ([#67](https://github.com/tfcace/hash/issues/67)) ([0de0b46](https://github.com/tfcace/hash/commit/0de0b46b1355627a57c2049233d713358192e97d))
+
 ## [0.6.1](https://github.com/tfcace/hash/compare/v0.6.0...v0.6.1) (2026-06-17)
 
 
