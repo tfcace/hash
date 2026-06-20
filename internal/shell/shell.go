@@ -27,12 +27,14 @@ import (
 	"github.com/tfcace/hash/internal/executor"
 	"github.com/tfcace/hash/internal/history"
 	"github.com/tfcace/hash/internal/learning"
+	"github.com/tfcace/hash/internal/onboarding"
 	"github.com/tfcace/hash/internal/parser"
 	"github.com/tfcace/hash/internal/prediction"
 	"github.com/tfcace/hash/internal/prompt"
 	"github.com/tfcace/hash/internal/readline"
 	"github.com/tfcace/hash/internal/shell/integration"
 	"github.com/tfcace/hash/internal/trace"
+	"github.com/tfcace/hash/internal/version"
 )
 
 const editorCompletionTimeout = 150 * time.Millisecond
@@ -452,8 +454,70 @@ func (s *Shell) showWelcomeIfNeeded() {
 	if !welcome.ShouldShow() {
 		return
 	}
-	fmt.Print(welcome.Message())
+	s.runOnboarding()
 	_ = welcome.MarkShown()
+}
+
+// runOnboarding shows the agent-aware first-run panel: detect adapters, let
+// the user pick one (writing config.toml) or skip, with the quick-start tips
+// folded in. Re-runnable via the `setup` builtin.
+func (s *Shell) runOnboarding() {
+	if !s.mode.Interactive {
+		return
+	}
+	configPath := filepath.Join(getConfigDir(), "config.toml")
+	agents := onboarding.Detect(exec.LookPath)
+	chosen, ok, err := onboarding.New(agents, version.Version).Run()
+	if err != nil {
+		return
+	}
+
+	if !ok {
+		fmt.Printf("  No agent set up. Run %s anytime · %s\n", "\033[36msetup\033[0m", onboardingDocsURL)
+		return
+	}
+
+	switch {
+	case onboarding.AgentConfigured(configPath):
+		fmt.Printf("  Config already exists at %s — left unchanged.\n", configPath)
+	default:
+		if werr := onboarding.WriteAgentConfig(configPath, chosen); werr != nil {
+			fmt.Fprintf(os.Stderr, "  Could not write config: %v\n", werr)
+			return
+		}
+		// The default config already targets claude-agent-acp, so when the
+		// chosen command matches what's loaded and a handler exists, ?? works
+		// immediately; otherwise the new transport applies on next launch.
+		if s.agentHandler != nil && s.config.EffectiveAgent().Command == chosen.Command {
+			fmt.Printf("  \033[32m✓\033[0m %s ready — type \033[36m??\033[0m to try it.\n", chosen.Name)
+		} else {
+			fmt.Printf("  \033[32m✓\033[0m %s configured — restart hash to use it.\n", chosen.Name)
+		}
+	}
+}
+
+const onboardingDocsURL = "https://runhash.dev/docs"
+
+// agentAvailable reports whether the effective agent can actually be reached:
+// an http transport needs a URL, a stdio transport needs its command on PATH.
+// lookPath is injected (exec.LookPath in production) for testability.
+func (s *Shell) agentAvailable(lookPath func(string) (string, error)) bool {
+	cfg := s.config.EffectiveAgent()
+	if cfg.Transport == "http" {
+		return cfg.URL != ""
+	}
+	if cfg.Command == "" {
+		return false
+	}
+	_, err := lookPath(cfg.Command)
+	return err == nil
+}
+
+// writeNoAgentHint shows friendly guidance when ?? is used but no agent is
+// reachable, instead of letting a raw exec failure surface.
+func writeNoAgentHint(w io.Writer) {
+	fmt.Fprintf(w, "\n\033[31m✗ No AI agent available.\033[0m\n")
+	fmt.Fprintf(w, "  Run \033[36msetup\033[0m to configure one, or see %s\n", onboardingDocsURL)
 }
 
 // emitShellIntegration emits OSC shell integration sequences before prompt.
@@ -867,6 +931,15 @@ func (s *Shell) handleAgentRequest(ctx context.Context, parsed parser.ParseResul
 
 	if s.agentHandler == nil {
 		writeAgentNotConfiguredHint(os.Stderr)
+		s.lastExitCode = 1
+		return nil
+	}
+
+	// Pre-flight: if the configured agent can't be reached (adapter missing
+	// from PATH, or http transport with no URL), show friendly guidance
+	// instead of letting a raw exec failure surface.
+	if !s.agentAvailable(exec.LookPath) {
+		writeNoAgentHint(os.Stderr)
 		s.lastExitCode = 1
 		return nil
 	}
