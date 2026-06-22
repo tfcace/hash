@@ -23,8 +23,8 @@ func FormatWelcomePrompt(shell, rcFile string) string {
 	b.WriteString(titleStyle.Render("Welcome to Hash!"))
 	b.WriteString("\n\n")
 
-	b.WriteString(fmt.Sprintf("Detected %s from your previous shell (%s).\n",
-		lipgloss.NewStyle().Bold(true).Render(rcFile), shell))
+	fmt.Fprintf(&b, "Detected %s from your previous shell (%s).\n",
+		lipgloss.NewStyle().Bold(true).Render(rcFile), shell)
 	b.WriteString("Would you like to load compatible settings?\n\n")
 
 	b.WriteString("  [Y] Yes, load settings\n")
@@ -44,13 +44,13 @@ func FormatWelcomePromptFiles(files ShellFiles) string {
 	b.WriteString(titleStyle.Render("Welcome to Hash!"))
 	b.WriteString("\n\n")
 
-	b.WriteString(fmt.Sprintf("Detected %s config files:\n", files.Shell))
+	fmt.Fprintf(&b, "Detected %s config files:\n", files.Shell)
 	for _, f := range files.Files() {
 		displayPath := f
 		if home := os.Getenv("HOME"); home != "" && strings.HasPrefix(f, home) {
 			displayPath = "~" + f[len(home):]
 		}
-		b.WriteString(fmt.Sprintf("  %s\n", lipgloss.NewStyle().Bold(true).Render(displayPath)))
+		fmt.Fprintf(&b, "  %s\n", lipgloss.NewStyle().Bold(true).Render(displayPath))
 	}
 	b.WriteString("\nWould you like to load compatible settings?\n\n")
 
@@ -68,7 +68,7 @@ func FormatWelcomePromptFiles(files ShellFiles) string {
 func FormatImportSummary(report *Report) string {
 	var b strings.Builder
 
-	b.WriteString(fmt.Sprintf("Loaded from %s:\n", report.SourceFile))
+	fmt.Fprintf(&b, "Loaded from %s:\n", report.SourceFile)
 
 	if report.Summary.Aliases > 0 {
 		b.WriteString("  ")
@@ -141,7 +141,7 @@ func FormatHashrcCommentFiles(files []string) string {
 		if home != "" && strings.HasPrefix(file, home) {
 			displayFile = "~" + file[len(home):]
 		}
-		b.WriteString(fmt.Sprintf("#   %s\n", displayFile))
+		fmt.Fprintf(&b, "#   %s\n", displayFile)
 	}
 	b.WriteString("#\n")
 	b.WriteString("# Files are sourced at startup with the configured shell dialect.\n")

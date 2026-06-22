@@ -41,7 +41,7 @@ func (w *Welcome) MarkShown() error {
 func (w *Welcome) Message() string {
 	var b strings.Builder
 
-	b.WriteString(fmt.Sprintf("\033[1mWelcome to Hash %s\033[0m\n\n", version.Version))
+	fmt.Fprintf(&b, "\033[1mWelcome to Hash %s\033[0m\n\n", version.Version)
 	b.WriteString("Quick start:\n")
 	b.WriteString("  \033[36m??\033[0m          Ask the AI for help (e.g., ?? find large files)\n")
 	b.WriteString("  \033[36mcmd | ??\033[0m    Pipe output to AI (e.g., git diff | ?? summarize)\n")

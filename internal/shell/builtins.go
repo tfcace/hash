@@ -570,8 +570,9 @@ func (s *Shell) builtinSource(ctx context.Context, args []string) error {
 		}
 	}
 
-	// Check if file exists
-	info, err := os.Stat(path)
+	// Check if file exists. Reading a caller-supplied path is the whole point
+	// of `source`, so the path-traversal warning here is expected.
+	info, err := os.Stat(path) //nolint:gosec // G703: source intentionally reads a user-specified file
 	if err != nil {
 		return fmt.Errorf("source: %w", err)
 	}
@@ -580,7 +581,7 @@ func (s *Shell) builtinSource(ctx context.Context, args []string) error {
 	}
 
 	// Read file content
-	content, err := os.ReadFile(path)
+	content, err := os.ReadFile(path) //nolint:gosec // G703: source intentionally reads a user-specified file
 	if err != nil {
 		return fmt.Errorf("source: %w", err)
 	}

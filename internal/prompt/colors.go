@@ -242,6 +242,9 @@ func isVisibleColor(hex string) bool {
 
 // color256ToHex converts a 256-color code to approximate hex.
 func color256ToHex(n int) string {
+	if n < 0 {
+		return "#000000"
+	}
 	if n < 16 {
 		// Basic colors - return reasonable defaults
 		basics := []string{
