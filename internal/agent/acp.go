@@ -1385,6 +1385,11 @@ func (t *ACPTransport) sendStreamingAttempt( //nolint:gocyclo // streaming proto
 	var toolContentOrder []string
 	toolUpdateCount := 0
 	agentTextAfterLatestTool := true
+	// sawToolSinceText tracks whether any tool activity occurred since the last
+	// agent text chunk. Adjacent assistant text blocks split by a tool call
+	// arrive as separate chunks with no separator; without one they glue
+	// together ("Let me investigate." + "jj does see" -> "investigate.jj does see").
+	sawToolSinceText := false
 	rememberToolContent := func(update sessionUpdate, text string) {
 		toolCallID := update.ToolCallID
 		if toolCallID == "" {
@@ -1509,6 +1514,7 @@ func (t *ACPTransport) sendStreamingAttempt( //nolint:gocyclo // streaming proto
 				switch updateParams.Update.SessionUpdate {
 				case "tool_call", "tool_call_update":
 					toolUpdateCount++
+					sawToolSinceText = true
 				case "config_option_update":
 					// The agent switched a config option on its own (e.g. model
 					// fallback on rate limit); refresh our cached model state.
@@ -1517,6 +1523,12 @@ func (t *ACPTransport) sendStreamingAttempt( //nolint:gocyclo // streaming proto
 				}
 
 				if text, ok := agentMessageChunkText(updateParams.Update); ok {
+					// Separate this text block from a preceding one that was
+					// split off by a tool call, so the two don't glue together.
+					if sawToolSinceText && receivedText {
+						textCh <- "\n\n"
+					}
+					sawToolSinceText = false
 					// Send text chunk immediately.
 					textCh <- text
 					receivedText = true

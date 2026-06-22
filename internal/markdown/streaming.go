@@ -98,10 +98,12 @@ func (r *StreamingRenderer) processLine(line string) string {
 	}
 
 	var result string
+	fenceMarker := false
 
 	// 1. Code block markers
 	if !continuation && strings.HasPrefix(content, "```") {
 		result = r.handleCodeBlockMarker(content)
+		fenceMarker = true
 	} else if r.inCodeBlock {
 		// 2. Inside code block - just indent, no dim (dim causes visual artifacts)
 		// Open the color and indent once per line; close at the real line end.
@@ -123,7 +125,9 @@ func (r *StreamingRenderer) processLine(line string) string {
 		result = r.processInline(content, hasNewline)
 	}
 
-	if hasNewline {
+	// A fence marker line is invisible: it must not leave behind its own
+	// newline, or code blocks gain a blank line above and below.
+	if hasNewline && !fenceMarker {
 		return result + "\n"
 	}
 	return result
