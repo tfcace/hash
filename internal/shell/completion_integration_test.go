@@ -100,17 +100,20 @@ func createTestDirStructure(t *testing.T) string {
 func TestCompletionIntegration_AdapterCutsOffSlowCompleter(t *testing.T) {
 	router := completion.NewRouter()
 	router.Register(slowCompletionProvider{delay: 300 * time.Millisecond}, completion.PriorityFilesystem)
-	completeFunc := makeEditorCompleteFunc(router)
+	completeFunc := makeEditorCompleteOutcomeFunc(router)
 
 	start := time.Now()
-	items := completeFunc("slow ", len("slow "))
+	outcome := completeFunc("slow ", len("slow "))
 	elapsed := time.Since(start)
 
 	if elapsed > 250*time.Millisecond {
 		t.Fatalf("completion adapter took %s, want under 250ms", elapsed)
 	}
-	if len(items) != 0 {
-		t.Fatalf("slow completion should be cut off, got %#v", items)
+	if len(outcome.Items) != 0 {
+		t.Fatalf("slow completion should be cut off, got %#v", outcome.Items)
+	}
+	if !outcome.TimedOut {
+		t.Fatal("cut-off completion should report TimedOut")
 	}
 }
 
@@ -121,17 +124,17 @@ func TestCompletionIntegration_AdapterCutsOffContextIgnoringCompleter(t *testing
 
 	router := completion.NewRouter()
 	router.Register(contextIgnoringCompletionProvider{release: release}, completion.PriorityFilesystem)
-	completeFunc := makeEditorCompleteFunc(router)
+	completeFunc := makeEditorCompleteOutcomeFunc(router)
 
-	done := make(chan []editor.Completion, 1)
+	done := make(chan editor.CompletionOutcome, 1)
 	start := time.Now()
 	go func() {
 		done <- completeFunc("slow ", len("slow "))
 	}()
 
-	var items []editor.Completion
+	var outcome editor.CompletionOutcome
 	select {
-	case items = <-done:
+	case outcome = <-done:
 	case <-time.After(250 * time.Millisecond):
 		releaseOnce.Do(func() { close(release) })
 		<-done
@@ -142,8 +145,8 @@ func TestCompletionIntegration_AdapterCutsOffContextIgnoringCompleter(t *testing
 	if elapsed > 250*time.Millisecond {
 		t.Fatalf("completion adapter took %s, want under 250ms", elapsed)
 	}
-	if len(items) != 0 {
-		t.Fatalf("context-ignoring completion should be cut off, got %#v", items)
+	if len(outcome.Items) != 0 {
+		t.Fatalf("context-ignoring completion should be cut off, got %#v", outcome.Items)
 	}
 }
 
@@ -182,7 +185,7 @@ func TestCompletionIntegration_BasicTabFromEmpty(t *testing.T) {
 	router := completion.NewRouter()
 	fc := completion.NewFileCompleter()
 	router.Register(fc, completion.PriorityFilesystem)
-	completeFunc := makeEditorCompleteFunc(router)
+	completeFunc := editorItemsFunc(router)
 
 	items := completeFunc("ls ", 3)
 	if len(items) == 0 {
@@ -256,7 +259,7 @@ func TestCompletionIntegration_PartialWord(t *testing.T) {
 	router := completion.NewRouter()
 	fc := completion.NewFileCompleter()
 	router.Register(fc, completion.PriorityFilesystem)
-	completeFunc := makeEditorCompleteFunc(router)
+	completeFunc := editorItemsFunc(router)
 
 	items := completeFunc("ls sr", 5)
 	if len(items) != 1 {
@@ -284,7 +287,7 @@ func TestCompletionIntegration_SubdirectoryCompletion(t *testing.T) {
 	router := completion.NewRouter()
 	fc := completion.NewFileCompleter()
 	router.Register(fc, completion.PriorityFilesystem)
-	completeFunc := makeEditorCompleteFunc(router)
+	completeFunc := editorItemsFunc(router)
 
 	// After drilling into src/, the buffer would be "ls src/"
 	items := completeFunc("ls src/", 7)
@@ -329,7 +332,7 @@ func TestCompletionIntegration_DeepSubdirectory(t *testing.T) {
 	router := completion.NewRouter()
 	fc := completion.NewFileCompleter()
 	router.Register(fc, completion.PriorityFilesystem)
-	completeFunc := makeEditorCompleteFunc(router)
+	completeFunc := editorItemsFunc(router)
 
 	items := completeFunc("ls src/main/", 12)
 	if len(items) == 0 {
@@ -370,7 +373,7 @@ func TestCompletionIntegration_CompleteFuncSignature(t *testing.T) {
 	router.Register(fc, completion.PriorityFilesystem)
 
 	// The function should conform to the editor's expected signature
-	fn := makeEditorCompleteFunc(router)
+	fn := editorItemsFunc(router)
 
 	items := fn("ls ", 3)
 	if len(items) == 0 {
@@ -412,7 +415,7 @@ func TestCompletionIntegration_EscapesFilesystemCompletions(t *testing.T) {
 
 	router := completion.NewRouter()
 	router.Register(completion.NewFileCompleter(), completion.PriorityFilesystem)
-	completeFunc := makeEditorCompleteFunc(router)
+	completeFunc := editorItemsFunc(router)
 
 	items := completeFunc("ls ", 3)
 	got := map[string]bool{}
@@ -456,7 +459,7 @@ func TestCompletionIntegration_CompletesInsideEscapedDirectory(t *testing.T) {
 
 	router := completion.NewRouter()
 	router.Register(completion.NewFileCompleter(), completion.PriorityFilesystem)
-	completeFunc := makeEditorCompleteFunc(router)
+	completeFunc := editorItemsFunc(router)
 
 	items := completeFunc(`ls My\ Dir/`, len(`ls My\ Dir/`))
 	if len(items) != 1 {

@@ -33,24 +33,33 @@ type completionDrillState struct {
 
 // Config configures the editor.
 type Config struct {
-	Keybindings             string                                   // "helix", "emacs", "vim"
-	HistoryFunc             func(dir int, currentLine string) string // -1=prev, +1=next; currentLine is for saving
-	CompleteFunc            func(line string, pos int) []Completion  // Tab completion
-	PrefetchFunc            func(line string, pos int)               // Background completion prefetch (on space)
-	SuggestionFunc          func(input string) string                // Inline suggestion from history (Fish-style)
-	OnInputReady            func()                                   // Called after editor chrome is rendered, before input loop
-	Gutter                  bool                                     // Show gutter indicator
-	Prompt                  string                                   // Prompt string to display before input
-	InputBgColor            string                                   // Background color for submitted input (hex)
-	ScrollbarColor          string                                   // Foreground color for scrollbars (hex)
-	MaxPasteSize            uint                                     // Maximum paste size in bytes (default 10MB)
-	DisableLineContinuation bool                                     // Disable shell-style line continuations on newline/paste
-	InputFrame              *InputFrame                              // Optional frame for custom input rendering
-	PreventEmptySubmit      bool                                     // Keep editor open when submitting an empty buffer
-	DisableHistorySearch    bool                                     // Disable Ctrl+R history search
-	DisableContextPicker    bool                                     // Disable Ctrl+P context picker
-	ClearOnCancel           bool                                     // Clear display when Ctrl+C cancels input
-	CancelOnEscape          bool                                     // Treat Escape as canceled input instead of mode/completion handling
+	Keybindings             string                                       // "helix", "emacs", "vim"
+	HistoryFunc             func(dir int, currentLine string) string     // -1=prev, +1=next; currentLine is for saving
+	CompleteFunc            func(line string, pos int) []Completion      // Tab completion
+	CompleteOutcomeFunc     func(line string, pos int) CompletionOutcome // Tab completion with timeout awareness; preferred over CompleteFunc
+	AgentCompleteLine       func(line string) bool                       // Reports whether Tab should submit the line for agent completion
+	PrefetchFunc            func(line string, pos int)                   // Background completion prefetch (on space)
+	SuggestionFunc          func(input string) string                    // Inline suggestion from history (Fish-style)
+	OnInputReady            func()                                       // Called after editor chrome is rendered, before input loop
+	Gutter                  bool                                         // Show gutter indicator
+	Prompt                  string                                       // Prompt string to display before input
+	InputBgColor            string                                       // Background color for submitted input (hex)
+	ScrollbarColor          string                                       // Foreground color for scrollbars (hex)
+	MaxPasteSize            uint                                         // Maximum paste size in bytes (default 10MB)
+	DisableLineContinuation bool                                         // Disable shell-style line continuations on newline/paste
+	InputFrame              *InputFrame                                  // Optional frame for custom input rendering
+	PreventEmptySubmit      bool                                         // Keep editor open when submitting an empty buffer
+	DisableHistorySearch    bool                                         // Disable Ctrl+R history search
+	DisableContextPicker    bool                                         // Disable Ctrl+P context picker
+	ClearOnCancel           bool                                         // Clear display when Ctrl+C cancels input
+	CancelOnEscape          bool                                         // Treat Escape as canceled input instead of mode/completion handling
+}
+
+// CompletionOutcome is the result of a completion request, distinguishing
+// "nothing matched" from "the request timed out".
+type CompletionOutcome struct {
+	Items    []Completion
+	TimedOut bool
 }
 
 // Result is returned when the editor exits.
@@ -84,6 +93,7 @@ type Editor struct {
 
 	// Completion state
 	completionActive     bool
+	completionNotice     string // Transient "no matches"/"timed out" notice; cleared on next key
 	completionItems      []Completion
 	completionIndex      int                    // Selected item in menu
 	completionPrefix     string                 // Text being completed (for replacement)
@@ -420,6 +430,9 @@ func (e *Editor) handleKeyEvent(key Key) (Result, bool) {
 		"mode":              e.mode.Name(),
 	})
 
+	// Any keypress dismisses a lingering completion notice.
+	e.completionNotice = ""
+
 	if result, done, handled := e.handleControlKey(key); handled {
 		return result, done
 	}
@@ -527,6 +540,14 @@ func (e *Editor) processModeResult(result ModeResult) (Result, bool) {
 	if result.ContextPicker {
 		e.display.Clear()
 		return Result{Text: e.state.Buffer.Content(), ContextPicker: true}, true
+	}
+
+	// Tab on an inline ?? line submits it: the shell then runs the streaming
+	// agent completion flow, which a synchronous completion race never could.
+	if result.Complete && !e.ghost.Streaming && e.config.AgentCompleteLine != nil &&
+		e.config.AgentCompleteLine(e.state.Buffer.Content()) {
+		e.display.Finalize(e.state.Buffer)
+		return Result{Text: e.state.Buffer.Content()}, true
 	}
 
 	e.handleHistoryNavigation(result)
@@ -651,6 +672,15 @@ func (e *Editor) render() {
 				e.state.Cursor.Pos.Col,
 			)
 		}
+	}
+
+	// Render a transient notice when completion produced nothing
+	if e.completionNotice != "" && !e.completionActive {
+		e.display.RenderCompletionNotice(
+			e.completionNotice,
+			e.state.Cursor.Pos.Row,
+			e.state.Cursor.Pos.Col,
+		)
 	}
 }
 
@@ -896,16 +926,28 @@ func (e *Editor) paste(before bool) {
 
 // triggerCompletion fetches completions and activates the menu if needed.
 func (e *Editor) triggerCompletion() {
-	if e.config.CompleteFunc == nil {
+	if e.config.CompleteFunc == nil && e.config.CompleteOutcomeFunc == nil {
 		return
 	}
 
 	line := e.state.Buffer.Content()
 	pos := e.cursorOffset()
 
-	items := e.config.CompleteFunc(line, pos)
+	var items []Completion
+	timedOut := false
+	if e.config.CompleteOutcomeFunc != nil {
+		outcome := e.config.CompleteOutcomeFunc(line, pos)
+		items, timedOut = outcome.Items, outcome.TimedOut
+	} else {
+		items = e.config.CompleteFunc(line, pos)
+	}
 	if len(items) == 0 {
 		e.completionActive = false
+		if timedOut {
+			e.completionNotice = "completion timed out"
+		} else {
+			e.completionNotice = "no matches"
+		}
 		return
 	}
 
@@ -926,6 +968,18 @@ func (e *Editor) triggerCompletion() {
 	e.completionIndex = 0
 	e.completionFilter = ""
 	e.completionActive = true
+}
+
+// fetchCompletions queries whichever completion callback is configured,
+// preferring the outcome-aware one.
+func (e *Editor) fetchCompletions(line string, pos int) []Completion {
+	if e.config.CompleteOutcomeFunc != nil {
+		return e.config.CompleteOutcomeFunc(line, pos).Items
+	}
+	if e.config.CompleteFunc != nil {
+		return e.config.CompleteFunc(line, pos)
+	}
+	return nil
 }
 
 // triggerPrefetch calls the prefetch function to populate completion cache.
@@ -1048,10 +1102,10 @@ func (e *Editor) drillIntoDirectory(item Completion) {
 	e.completionIndex = 0
 
 	// Re-query completions for the new path
-	if e.config.CompleteFunc != nil {
+	if e.config.CompleteFunc != nil || e.config.CompleteOutcomeFunc != nil {
 		line := e.state.Buffer.Content()
 		pos := e.cursorOffset()
-		items := e.config.CompleteFunc(line, pos)
+		items := e.fetchCompletions(line, pos)
 		if len(items) == 0 {
 			// Empty directory — accept as-is
 			e.completionDrillStack = e.completionDrillStack[:len(e.completionDrillStack)-1]
@@ -1093,11 +1147,10 @@ func (e *Editor) drillUp() {
 	e.completionCol = prev.col
 
 	// Re-query completions for the parent
-	if e.config.CompleteFunc != nil {
+	if e.config.CompleteFunc != nil || e.config.CompleteOutcomeFunc != nil {
 		line := e.state.Buffer.Content()
 		pos := e.cursorOffset()
-		items := e.config.CompleteFunc(line, pos)
-		e.completionItems = items
+		e.completionItems = e.fetchCompletions(line, pos)
 	}
 
 	// Restore filter, index, and prefix

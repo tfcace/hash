@@ -311,14 +311,14 @@ func New(cfg *config.Config) (*Shell, error) {
 
 	// Configure editor mode
 	editorCfg := editor.Config{
-		Keybindings:    cfg.Input.Keybindings,
-		Gutter:         cfg.Input.Gutter,
-		InputBgColor:   "",
-		ScrollbarColor: colorPalette.Primary,
-		CompleteFunc:   makeEditorCompleteFunc(router),
-		PrefetchFunc:   makeEditorPrefetchFunc(router),
-		SuggestionFunc: makeEditorSuggestionFunc(historyStore, predictor),
-		MaxPasteSize:   cfg.Input.ParseMaxPasteSize(),
+		Keybindings:         cfg.Input.Keybindings,
+		Gutter:              cfg.Input.Gutter,
+		InputBgColor:        "",
+		ScrollbarColor:      colorPalette.Primary,
+		CompleteOutcomeFunc: makeEditorCompleteOutcomeFunc(router),
+		PrefetchFunc:        makeEditorPrefetchFunc(router),
+		SuggestionFunc:      makeEditorSuggestionFunc(historyStore, predictor),
+		MaxPasteSize:        cfg.Input.ParseMaxPasteSize(),
 	}
 
 	// Capture initial working directory for chpwd hook
@@ -358,6 +358,9 @@ func New(cfg *config.Config) (*Shell, error) {
 	if historyStore != nil {
 		shell.editorCfg.HistoryFunc = shell.navigateHistory
 	}
+
+	// Tab on an inline ?? line submits it to start agent completion
+	shell.editorCfg.AgentCompleteLine = shell.agentCompleteLinePredicate(exec.LookPath)
 
 	// Set up shell integration callback for editor mode
 	// This emits OSC 133;B (CommandStart) when the editor is ready for input
@@ -1655,28 +1658,6 @@ func trimSpace(s string) string {
 		end--
 	}
 	return s[start:end]
-}
-
-// makeEditorCompleteFunc adapts the completion router to editor's CompleteFunc.
-func makeEditorCompleteFunc(router *completion.Router) func(string, int) []editor.Completion {
-	return func(line string, pos int) []editor.Completion {
-		ctx, cancel := context.WithTimeout(context.Background(), editorCompletionTimeout)
-		defer cancel()
-
-		result, err := router.CompleteBounded(ctx, line, pos)
-		if err != nil || len(result.Items) == 0 {
-			return nil
-		}
-
-		items := make([]editor.Completion, len(result.Items))
-		for i, item := range result.Items {
-			items[i] = editor.Completion{
-				Text:        result.Prefix + item.Value,
-				Description: item.Description,
-			}
-		}
-		return items
-	}
 }
 
 func makeEditorPrefetchFunc(router *completion.Router) func(string, int) {
