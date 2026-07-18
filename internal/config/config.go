@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 
 	"github.com/pelletier/go-toml/v2"
 )
@@ -20,6 +21,10 @@ type Config struct {
 	Completions CompletionsConfig        `toml:"completions"`
 	Clipboard   ClipboardConfig          `toml:"clipboard"`
 	Prediction  PredictionConfig         `toml:"prediction"`
+
+	// LoadIssue records what went wrong while loading this config, so the
+	// shell can surface it (e.g. in `hash status`). Nil when loading was clean.
+	LoadIssue *LoadError `toml:"-"`
 }
 
 type ShellConfig struct {
@@ -202,13 +207,17 @@ func Load(configDir string) (*Config, error) {
 	}
 
 	if err := toml.Unmarshal(data, cfg); err != nil {
-		// Return defaults but include error so caller can warn user
-		return Default(), fmt.Errorf("config parse error (using defaults): %w", err)
+		return recoverConfig(configPath, data, err)
 	}
 
 	cfg.loadNamedAgents(data)
+	applyEmptyDefaults(cfg)
 
-	// Apply defaults for empty values
+	return cfg, nil
+}
+
+// applyEmptyDefaults fills defaults for values the file left empty.
+func applyEmptyDefaults(cfg *Config) {
 	if cfg.Shell.Keybindings == "" {
 		cfg.Shell.Keybindings = "emacs"
 	}
@@ -221,8 +230,45 @@ func Load(configDir string) (*Config, error) {
 	if cfg.Prompt.Mode == "" {
 		cfg.Prompt.Mode = "starship"
 	}
+}
 
-	return cfg, nil
+// recoverConfig salvages what it can from a config file that failed to
+// decode. Sections that decode individually keep the user's values; broken
+// ones fall back to defaults. A syntax error means nothing can be salvaged.
+// The returned error is a *LoadError, also attached as cfg.LoadIssue.
+func recoverConfig(configPath string, data []byte, cause error) (*Config, error) {
+	detail := decodeErrorDetail(cause)
+
+	var raw map[string]any
+	if err := toml.Unmarshal(data, &raw); err != nil {
+		cfg := Default()
+		cfg.LoadIssue = &LoadError{Path: configPath, Detail: detail, Err: cause}
+		return cfg, cfg.LoadIssue
+	}
+
+	cfg := Default()
+	var bad []string
+	for name, val := range raw {
+		sub, err := toml.Marshal(map[string]any{name: val})
+		if err != nil {
+			bad = append(bad, name)
+			continue
+		}
+		// Probe into a throwaway config first so a section that fails
+		// mid-decode cannot leave half-applied values behind.
+		if err := toml.Unmarshal(sub, Default()); err != nil {
+			bad = append(bad, name)
+			continue
+		}
+		_ = toml.Unmarshal(sub, cfg)
+	}
+	sort.Strings(bad)
+
+	cfg.loadNamedAgents(data)
+	applyEmptyDefaults(cfg)
+
+	cfg.LoadIssue = &LoadError{Path: configPath, BadSections: bad, Detail: detail, Err: cause}
+	return cfg, cfg.LoadIssue
 }
 
 // EffectiveAgent returns the concrete agent settings selected by [agent].default.

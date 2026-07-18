@@ -9,6 +9,11 @@ import (
 type SystemStatus struct {
 	Version string
 
+	// Config
+	ConfigPath string
+	ConfigOK   bool
+	ConfigErr  string
+
 	// Prompt
 	PromptMode string
 	PromptOK   bool
@@ -44,6 +49,13 @@ func (s *SystemStatus) Format() string {
 	var b strings.Builder
 
 	fmt.Fprintf(&b, "Shell:     hash %s\n", s.Version)
+
+	// Config
+	if s.ConfigOK {
+		fmt.Fprintf(&b, "Config:    %s \033[32m✓\033[0m\n", s.ConfigPath)
+	} else {
+		fmt.Fprintf(&b, "Config:    \033[31m✗\033[0m %s\n", s.ConfigErr)
+	}
 
 	// Prompt
 	if s.PromptOK {

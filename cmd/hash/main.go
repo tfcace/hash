@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -156,8 +157,13 @@ func run(mode ShellMode) error {
 	configDir := getConfigDir()
 	cfg, err := config.Load(configDir)
 	if err != nil {
-		// Parse errors return defaults with error - warn but continue
-		fmt.Fprintf(os.Stderr, "hash: %v\n", err)
+		// Load errors keep whatever could be salvaged - warn loudly but continue
+		var loadErr *config.LoadError
+		if errors.As(err, &loadErr) {
+			fmt.Fprint(os.Stderr, loadErr.Warning())
+		} else {
+			fmt.Fprintf(os.Stderr, "hash: %v\n", err)
+		}
 	}
 
 	// Create shell with mode
