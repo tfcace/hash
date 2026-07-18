@@ -298,9 +298,9 @@ func (aoc *AgentOutputCoordinator) ClearPermissionPrompt(allowed bool) {
 		sb.WriteString(ansiClearLine)
 	}
 	if allowed {
-		sb.WriteString(fmt.Sprintf("%s\x1b[32m✓\x1b[0m \x1b[90m%s\x1b[0m\n", permissionPad, cmd))
+		fmt.Fprintf(&sb, "%s\x1b[32m✓\x1b[0m \x1b[90m%s\x1b[0m\n", permissionPad, cmd)
 	} else {
-		sb.WriteString(fmt.Sprintf("%s\x1b[31m✗\x1b[0m \x1b[90m%s\x1b[0m\n", permissionPad, cmd))
+		fmt.Fprintf(&sb, "%s\x1b[31m✗\x1b[0m \x1b[90m%s\x1b[0m\n", permissionPad, cmd)
 	}
 	aoc.out.Write([]byte(sb.String()))
 

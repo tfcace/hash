@@ -37,3 +37,24 @@ func TestAgentAvailable_EmptyCommandUnavailable(t *testing.T) {
 		t.Error("empty command should be unavailable even if lookPath succeeds")
 	}
 }
+
+// A Command may embed a subcommand as a single string (e.g. "cursor-agent acp"
+// or "gemini --experimental-acp"). The transport splits it before spawning, so
+// availability must resolve only the program name — not the whole string, which
+// is never on PATH. Regression for `??` reporting "No AI agent available" while
+// the `model` builtin (which actually connects) worked.
+func TestAgentAvailable_EmbeddedSubcommandResolvesProgram(t *testing.T) {
+	s := &Shell{config: &config.Config{Agent: config.AgentConfig{Transport: "stdio", Command: "cursor-agent acp"}}}
+
+	// lookPath should be asked for the program only, never the full string.
+	onlyProgram := func(name string) (string, error) {
+		if name != "cursor-agent" {
+			t.Errorf("lookPath called with %q, want %q", name, "cursor-agent")
+			return "", errors.New("unexpected lookup")
+		}
+		return "/usr/local/bin/cursor-agent", nil
+	}
+	if !s.agentAvailable(onlyProgram) {
+		t.Error("want available when the embedded-subcommand program resolves on PATH")
+	}
+}

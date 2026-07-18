@@ -178,19 +178,19 @@ func (t *HTTPTransport) buildPrompt(req Request) string {
 
 	// Add context
 	if req.Context.Cwd != "" {
-		b.WriteString(fmt.Sprintf("Current directory: %s\n", req.Context.Cwd))
+		fmt.Fprintf(&b, "Current directory: %s\n", req.Context.Cwd)
 	}
 	if req.Context.GitBranch != "" {
-		b.WriteString(fmt.Sprintf("Git branch: %s\n", req.Context.GitBranch))
+		fmt.Fprintf(&b, "Git branch: %s\n", req.Context.GitBranch)
 	}
 	if req.Context.LastError != "" {
-		b.WriteString(fmt.Sprintf("Last error:\n%s\n", req.Context.LastError))
+		fmt.Fprintf(&b, "Last error:\n%s\n", req.Context.LastError)
 	}
 	if req.CommandLine != "" {
-		b.WriteString(fmt.Sprintf("Partial command: %s\n", req.CommandLine))
+		fmt.Fprintf(&b, "Partial command: %s\n", req.CommandLine)
 	}
 
-	b.WriteString(fmt.Sprintf("\nUser request: %s\n", req.Prompt))
+	fmt.Fprintf(&b, "\nUser request: %s\n", req.Prompt)
 
 	return b.String()
 }

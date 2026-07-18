@@ -208,6 +208,51 @@ func TestACPTransport_SendStreamingAttemptEmitsCompletedToolCallContent(t *testi
 	}
 }
 
+// Agent text that resumes after a tool call must be separated from the
+// pre-tool text, otherwise the two blocks glue together
+// ("Let me investigate." + "jj does see" -> "Let me investigate.jj does see").
+func TestACPTransport_SendStreamingSeparatesTextAcrossToolCalls(t *testing.T) {
+	transport := &ACPTransport{
+		config:    ACPConfig{Command: "test"},
+		stdin:     newMockPipe(),
+		sessionID: "test-session",
+		messages:  make(chan []byte, 10),
+		done:      make(chan struct{}),
+	}
+	transport.messages <- []byte(`{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"test-session","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Let me investigate."}}}}`)
+	transport.messages <- []byte(`{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"test-session","update":{"sessionUpdate":"tool_call","toolCallId":"call-1","status":"completed","content":[{"type":"content","content":{"type":"text","text":"v0.7.0: rytzqtsm 045f61f0"}}]}}}`)
+	transport.messages <- []byte(`{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"test-session","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"jj does see your tag."}}}}`)
+	transport.messages <- []byte(`{"jsonrpc":"2.0","id":1,"result":{"stopReason":"end_turn"}}`)
+
+	textCh := make(chan string, 10)
+	if _, err := transport.sendStreamingAttempt(context.Background(), Request{Prompt: "why"}, textCh); err != nil {
+		t.Fatalf("sendStreamingAttempt returned error: %v", err)
+	}
+
+	var got strings.Builder
+	for {
+		select {
+		case text := <-textCh:
+			got.WriteString(text)
+			continue
+		default:
+		}
+		break
+	}
+
+	out := got.String()
+	if strings.Contains(out, "investigate.jj does see") {
+		t.Errorf("text blocks glued across tool call: %q", out)
+	}
+	if !strings.Contains(out, "Let me investigate.") || !strings.Contains(out, "jj does see your tag.") {
+		t.Fatalf("missing expected text blocks: %q", out)
+	}
+	// The two text blocks must be separated by a blank line (paragraph break).
+	if !strings.Contains(out, "Let me investigate.\n\njj does see your tag.") {
+		t.Errorf("text blocks not separated by paragraph break: %q", out)
+	}
+}
+
 func TestACPTransport_SendStreamingAttemptNoTextIncludesStopReason(t *testing.T) {
 	transport := &ACPTransport{
 		config:    ACPConfig{Command: "test"},

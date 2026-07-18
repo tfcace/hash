@@ -509,7 +509,12 @@ func (s *Shell) agentAvailable(lookPath func(string) (string, error)) bool {
 	if cfg.Command == "" {
 		return false
 	}
-	_, err := lookPath(cfg.Command)
+	// The Command may embed a subcommand (e.g. "cursor-agent acp" or
+	// "gemini --experimental-acp"); the transport splits it via ParsedCommand
+	// before spawning, so resolve the same program name here rather than
+	// looking up the whole string, which would never be on PATH.
+	program, _ := agent.ACPConfig{Command: cfg.Command, Args: cfg.Args}.ParsedCommand()
+	_, err := lookPath(program)
 	return err == nil
 }
 

@@ -43,49 +43,49 @@ type SystemStatus struct {
 func (s *SystemStatus) Format() string {
 	var b strings.Builder
 
-	b.WriteString(fmt.Sprintf("Shell:     hash %s\n", s.Version))
+	fmt.Fprintf(&b, "Shell:     hash %s\n", s.Version)
 
 	// Prompt
 	if s.PromptOK {
-		b.WriteString(fmt.Sprintf("Prompt:    %s \033[32m✓\033[0m\n", s.PromptMode))
+		fmt.Fprintf(&b, "Prompt:    %s \033[32m✓\033[0m\n", s.PromptMode)
 	} else {
-		b.WriteString(fmt.Sprintf("Prompt:    %s \033[31m✗\033[0m %s\n", s.PromptMode, s.PromptErr))
+		fmt.Fprintf(&b, "Prompt:    %s \033[31m✗\033[0m %s\n", s.PromptMode, s.PromptErr)
 	}
 
 	// History
 	if s.HistoryOK {
-		b.WriteString(fmt.Sprintf("History:   %s \033[32m✓\033[0m (%s entries)\n",
-			s.HistoryPath, formatNumber(s.HistoryCount)))
+		fmt.Fprintf(&b, "History:   %s \033[32m✓\033[0m (%s entries)\n",
+			s.HistoryPath, formatNumber(s.HistoryCount))
 	} else {
-		b.WriteString(fmt.Sprintf("History:   \033[31m✗\033[0m %s\n", s.HistoryErr))
+		fmt.Fprintf(&b, "History:   \033[31m✗\033[0m %s\n", s.HistoryErr)
 	}
 
 	// Learning
 	if s.LearningOK {
-		b.WriteString(fmt.Sprintf("Learning:  enabled \033[32m✓\033[0m (%d patterns)\n", s.PatternCount))
+		fmt.Fprintf(&b, "Learning:  enabled \033[32m✓\033[0m (%d patterns)\n", s.PatternCount)
 	} else {
-		b.WriteString(fmt.Sprintf("Learning:  \033[31m✗\033[0m %s\n", s.LearningErr))
+		fmt.Fprintf(&b, "Learning:  \033[31m✗\033[0m %s\n", s.LearningErr)
 	}
 
 	// Agent
 	if s.AgentOK {
-		b.WriteString(fmt.Sprintf("Agent:     %s \033[32m✓\033[0m\n", s.AgentName))
+		fmt.Fprintf(&b, "Agent:     %s \033[32m✓\033[0m\n", s.AgentName)
 	} else {
-		b.WriteString(fmt.Sprintf("Agent:     %s (not connected)\n", s.AgentName))
+		fmt.Fprintf(&b, "Agent:     %s (not connected)\n", s.AgentName)
 	}
 
 	// PTY
 	if s.PTYOK {
 		b.WriteString("PTY:       available \033[32m✓\033[0m\n")
 	} else {
-		b.WriteString(fmt.Sprintf("PTY:       \033[33m⚠\033[0m %s\n", s.PTYErr))
+		fmt.Fprintf(&b, "PTY:       \033[33m⚠\033[0m %s\n", s.PTYErr)
 	}
 
 	// Clipboard
 	if s.ClipboardOK {
 		b.WriteString("Clipboard: available \033[32m✓\033[0m\n")
 	} else {
-		b.WriteString(fmt.Sprintf("Clipboard: \033[33m⚠\033[0m %s\n", s.ClipboardErr))
+		fmt.Fprintf(&b, "Clipboard: \033[33m⚠\033[0m %s\n", s.ClipboardErr)
 	}
 
 	return b.String()

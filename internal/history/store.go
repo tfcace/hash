@@ -145,17 +145,21 @@ func (s *Store) Search(opts SearchOptions) ([]Command, error) {
 	}
 
 	if len(conditions) > 0 {
-		query += " WHERE " + strings.Join(conditions, " AND ")
+		// conditions holds only hardcoded SQL fragments; every user value is
+		// bound through a ? placeholder in args, so this cannot be injected.
+		query += " WHERE " + strings.Join(conditions, " AND ") //nolint:gosec // G202: conditions are constant fragments, values are parameterized
 	}
 
 	query += " ORDER BY c.timestamp DESC"
 
 	if opts.Limit > 0 {
-		query += fmt.Sprintf(" LIMIT %d", opts.Limit)
+		query += " LIMIT ?"
+		args = append(args, opts.Limit)
 	}
 
 	if opts.Offset > 0 {
-		query += fmt.Sprintf(" OFFSET %d", opts.Offset)
+		query += " OFFSET ?"
+		args = append(args, opts.Offset)
 	}
 
 	rows, err := s.db.Query(query, args...)
