@@ -35,7 +35,7 @@ No mode switching. No special commands. Just `??` where you need help. And when 
 
 ## Highlights
 
-- **Agent-agnostic** — any ACP agent (Claude, Gemini CLI) over stdio, or Ollama-style HTTP model servers.
+- **Agent-agnostic** — any ACP agent (Claude Code, Cursor CLI, Gemini CLI) over stdio, or Ollama-style HTTP model servers.
 - **Explicit permissions** — agent tool calls prompt allow/deny/always, with approvals scoped per project, globally, or per session.
 - **Turn-by-turn conversations** *(new in 0.6)* — follow-up questions continue in the same agent session; leave with Esc, `/exit`, or just "done".
 - **Context you control** — the Ctrl+P picker decides exactly what is sent to the agent.
@@ -84,6 +84,19 @@ command = "claude-agent-acp"
 ```
 
 Authenticate with `ANTHROPIC_API_KEY`, or with your Claude subscription: on macOS, the adapter reuses the OAuth credentials from your Claude Code CLI login automatically.
+
+Prefer a different agent? Gemini CLI and Cursor CLI speak ACP too:
+
+```toml
+# Cursor CLI — authenticate once with `agent login`, then:
+[agent]
+command = "agent acp"
+
+# Gemini CLI
+[agent]
+command = "gemini"
+args = ["--experimental-acp"]
+```
 
 Hash also supports named agent profiles and Ollama-style HTTP servers. See [docs/config-reference.md](docs/config-reference.md) for every option, or the [agents guide](https://runhash.dev/docs/agents) on the website.
 

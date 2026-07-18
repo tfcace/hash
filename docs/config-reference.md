@@ -170,7 +170,9 @@ AI agent selection and shared behavior.
 
 For Claude over ACP, install the current adapter with
 `npm install -g @agentclientprotocol/claude-agent-acp` and use
-`command = "claude-agent-acp"`.
+`command = "claude-agent-acp"`. Gemini CLI (`command = "gemini"`,
+`args = ["--experimental-acp"]`) and Cursor CLI (`command = "agent acp"`, after
+`agent login`) speak ACP too. See the [agents guide](https://runhash.dev/docs/agents).
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
