@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.7.1](https://github.com/tfcace/hash/compare/v0.7.0...v0.7.1) (2026-07-18)
+
+
+### Bug Fixes
+
+* **acp:** various ACP fixes ([#82](https://github.com/tfcace/hash/issues/82)) ([7817950](https://github.com/tfcace/hash/commit/781795075718d180cf76ba99ecd91cbce71f9dcf))
+
+
+### Dependencies
+
+* bump charm.land/bubbletea/v2 from 2.0.0 to 2.0.7 ([#75](https://github.com/tfcace/hash/issues/75)) ([cfe0452](https://github.com/tfcace/hash/commit/cfe0452d193f7a43a8e578c24474a7fa9a1acb8d))
+* bump charm.land/lipgloss/v2 from 2.0.4 to 2.0.5 ([#80](https://github.com/tfcace/hash/issues/80)) ([fc32912](https://github.com/tfcace/hash/commit/fc329129a98b076254a9e75ce5bb2231eecdfcb1))
+* bump github.com/mattn/go-runewidth from 0.0.23 to 0.0.24 ([#74](https://github.com/tfcace/hash/issues/74)) ([af067e6](https://github.com/tfcace/hash/commit/af067e6742d99f7cb00170532d75430cb0d94102))
+* bump github.com/mattn/go-sqlite3 from 1.14.45 to 1.14.46 ([#72](https://github.com/tfcace/hash/issues/72)) ([6d31adc](https://github.com/tfcace/hash/commit/6d31adcbf5d62d031a40584ddc722ea22e4d1e78))
+* bump github.com/mattn/go-sqlite3 from 1.14.46 to 1.14.48 ([#79](https://github.com/tfcace/hash/issues/79)) ([98875fe](https://github.com/tfcace/hash/commit/98875fe6936a6bb01603b51cffdb4b58fb5daaa8))
+* bump github.com/pelletier/go-toml/v2 from 2.4.0 to 2.4.3 ([#78](https://github.com/tfcace/hash/issues/78)) ([09bec33](https://github.com/tfcace/hash/commit/09bec3389e51e78f7875401955d8bca2778122ad))
+* bump golang.design/x/clipboard from 0.7.1 to 0.8.0 ([#73](https://github.com/tfcace/hash/issues/73)) ([c6f372f](https://github.com/tfcace/hash/commit/c6f372fe0b73d591f88ed92df29d4d87f25dd8ea))
+
 ## [0.7.0](https://github.com/tfcace/hash/compare/v0.6.1...v0.7.0) (2026-06-20)
 
 
