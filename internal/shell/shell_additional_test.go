@@ -142,69 +142,6 @@ func TestErrorHandler_HandleCommandNotFound_AllCases(t *testing.T) {
 	}
 }
 
-// TestErrorHandler_GetSuggestion tests getting fix suggestions.
-func TestErrorHandler_GetSuggestion(t *testing.T) {
-	// Test with nil fix store
-	h := &ErrorHandler{fixStore: nil}
-
-	// Should return empty for exit code 0
-	got := h.GetSuggestion("ls", "", 0)
-	if got != "" {
-		t.Errorf("GetSuggestion with exit 0 should be empty, got %q", got)
-	}
-
-	// Should return empty with nil store
-	got = h.GetSuggestion("ls", "error", 1)
-	if got != "" {
-		t.Errorf("GetSuggestion with nil store should be empty, got %q", got)
-	}
-}
-
-// TestErrorHandler_FormatErrorPrompt tests error prompt formatting.
-func TestErrorHandler_FormatErrorPrompt(t *testing.T) {
-	h := &ErrorHandler{}
-
-	tests := []struct {
-		exitCode int
-		stderr   string
-		want     string
-	}{
-		{1, "error", "x Exit 1 | ?? to explain"},
-		{127, "command not found", "x Exit 127 | ?? to explain"},
-		{255, "", "x Exit 255 | ?? to explain"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.want, func(t *testing.T) {
-			got := h.FormatErrorPrompt(tt.exitCode, tt.stderr)
-			if got != tt.want {
-				t.Errorf("FormatErrorPrompt(%d, %q) = %q, want %q",
-					tt.exitCode, tt.stderr, got, tt.want)
-			}
-		})
-	}
-}
-
-// TestErrorHandler_HandleError_ExitZero tests that exit 0 is ignored.
-func TestErrorHandler_HandleError_ExitZero(t *testing.T) {
-	var buf bytes.Buffer
-	h := &ErrorHandler{out: &buf}
-
-	h.HandleError("ls", "", 0)
-
-	if buf.Len() > 0 {
-		t.Errorf("HandleError with exit 0 should produce no output, got: %s", buf.String())
-	}
-}
-
-// TestNewErrorHandler tests error handler creation.
-func TestNewErrorHandler(t *testing.T) {
-	h := NewErrorHandler(nil)
-	if h.fixStore != nil {
-		t.Error("NewErrorHandler with nil should have nil fixStore")
-	}
-}
-
 // TestCommandSuggestor_Suggest tests the Suggest method.
 func TestCommandSuggestor_Suggest(t *testing.T) {
 	// Create suggestor without history store

@@ -59,6 +59,8 @@ type Shell struct {
 	history             *history.Store
 	historyPath         string
 	learning            *learning.FixStore
+	fixes               *fixTracker   // Learning loop: observes outcomes, suggests fixes
+	errors              *ErrorHandler // Renders error/fix banners (stderr by default)
 	clipboard           *clipboard.Buffer
 	predictor           *prediction.Predictor
 	suggestor           *CommandSuggestor
@@ -334,6 +336,8 @@ func New(cfg *config.Config) (*Shell, error) {
 		history:      historyStore,
 		historyPath:  historyPath,
 		learning:     learningStore,
+		fixes:        newFixTracker(learningStore),
+		errors:       NewErrorHandler(),
 		clipboard:    clipboardBuf,
 		predictor:    predictor,
 		suggestor:    suggestor,
@@ -621,6 +625,7 @@ func (s *Shell) executeRegularCommand(ctx context.Context, line string) error {
 		fmt.Fprintf(os.Stderr, "hash: %v\n", err)
 		s.setLastCommandFailure(line, err, 1)
 		s.recordCommand(line, s.lastExitCode, s.lastDuration)
+		s.observeCommandOutcome(line)
 		s.updatePrompt()
 		return nil
 	}
@@ -628,6 +633,7 @@ func (s *Shell) executeRegularCommand(ctx context.Context, line string) error {
 		s.lastExitCode = 0
 		s.lastDuration = 0
 		s.recordCommand(line, 0, 0)
+		s.observeCommandOutcome(line)
 		s.updatePrompt()
 		return nil
 	}
@@ -669,6 +675,10 @@ func (s *Shell) handleExecutionResult(line string, result *executor.Result, err 
 	// Record command in history
 	s.recordCommand(line, s.lastExitCode, s.lastDuration)
 
+	// Feed the learning loop: failures may surface a learned fix,
+	// a subsequent success records the fix that worked
+	s.observeCommandOutcome(line)
+
 	// Record command sequence for prediction (only successful commands)
 	if s.predictor != nil && s.lastExitCode == 0 && prevCommand != "" {
 		cwd, _ := os.Getwd()
@@ -690,7 +700,10 @@ func (s *Shell) handleExecutionError(err error) {
 				}
 			}
 		}
-		handler := NewErrorHandler(s.learning)
+		handler := s.errors
+		if handler == nil {
+			handler = NewErrorHandler()
+		}
 		handler.HandleCommandNotFound(cnf.Command, suggestions, installHint)
 		s.lastExitCode = 127
 	} else {
@@ -766,12 +779,9 @@ func (s *Shell) readLineWithEditor(ctx context.Context) (string, error) {
 			ed.SetInitialText(initialText)
 		}
 
-		// Set ghost text prediction based on last command
-		if s.predictor != nil && s.lastCommand != "" {
-			cwd, _ := os.Getwd()
-			if predictedCmd := s.predictor.PredictCommand(s.lastCommand, cwd); predictedCmd != "" {
-				ed.SetGhostText(predictedCmd)
-			}
+		// Ghost text: learned fix for the last failure, else prediction
+		if ghost := s.promptGhostText(); ghost != "" {
+			ed.SetGhostText(ghost)
 		}
 
 		result, err := ed.Run(ctx)
