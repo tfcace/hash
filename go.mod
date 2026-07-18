@@ -4,7 +4,7 @@ go 1.25.0
 
 require (
 	charm.land/bubbletea/v2 v2.0.7
-	charm.land/lipgloss/v2 v2.0.4
+	charm.land/lipgloss/v2 v2.0.5
 	github.com/chzyer/readline v1.5.1
 	github.com/creack/pty v1.1.24
 	github.com/mattn/go-runewidth v0.0.23
