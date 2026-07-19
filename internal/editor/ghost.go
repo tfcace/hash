@@ -9,7 +9,6 @@ type GhostText struct {
 	Active     bool   // Whether ghost text is currently displayed
 	Streaming  bool   // Whether more text is still arriving
 	FromAgent  bool   // True for agent suggestions (show hints), false for predictions (fish-style)
-	Hint       string // Key hint rendered after non-agent ghosts (e.g. learned fixes); empty for bare predictions
 }
 
 // NewGhostText creates a new ghost text state.
@@ -17,13 +16,11 @@ func NewGhostText() *GhostText {
 	return &GhostText{}
 }
 
-// Set sets the ghost text content. The hint does not carry over: a plain
-// Set is a bare prediction unless SetGhostTextWithHint follows.
+// Set sets the ghost text content.
 func (g *GhostText) Set(text string) {
 	g.Text = text
 	g.AcceptedAt = 0
 	g.Active = true
-	g.Hint = ""
 }
 
 // Append adds more text to the ghost (for streaming).
@@ -39,7 +36,6 @@ func (g *GhostText) Clear() {
 	g.Active = false
 	g.Streaming = false
 	g.FromAgent = false
-	g.Hint = ""
 }
 
 // Remaining returns the unaccepted portion of ghost text.

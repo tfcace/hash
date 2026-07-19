@@ -66,26 +66,55 @@ func (t *fixTracker) SuggestedFix() string {
 	return t.pending.suggested
 }
 
+// SetSuggested replaces the suggestion for the pending failure, so ghost
+// text and outcome tracking follow a suggestion made outside the store
+// (e.g. a did-you-mean correction).
+func (t *fixTracker) SetSuggested(fix string) {
+	if t == nil || t.pending == nil {
+		return
+	}
+	t.pending.suggested = fix
+}
+
 // observeCommandOutcome feeds a finished command into the learning loop and
-// shows the learned-fix banner when a suggestion is available.
+// shows the best suggestion for a failure: a deterministic did-you-mean
+// correction when one exists, else the learned fix from the store.
 func (s *Shell) observeCommandOutcome(line string) {
 	if s.fixes == nil {
 		return
 	}
 	fix, found := s.fixes.Observe(line, s.lastStderr, s.lastExitCode)
-	if !found {
-		return
-	}
+
 	h := s.errors
 	if h == nil {
 		h = NewErrorHandler()
 	}
+
+	// A correction derived from the current repo state beats replaying a
+	// learned command whose arguments came from a different context.
+	if s.lastExitCode != 0 {
+		lister := s.branchLister
+		if lister == nil {
+			lister = gitBranches
+		}
+		if suggestion := gitDidYouMean(line, s.lastStderr, lister); suggestion != "" {
+			s.fixes.SetSuggested(suggestion)
+			h.showDidYouMean(suggestion)
+			return
+		}
+	}
+
+	if !found {
+		return
+	}
 	h.showLearnedFix(fix, fix.Score >= 0.7)
 }
 
-// promptGhostText returns the ghost text for the next prompt: a learned fix
-// for the last failure if available, otherwise the command predictor's guess.
-func (s *Shell) promptGhostText() string {
+// promptGhost returns the ghost text for the next prompt: a learned fix for
+// the last failure if available, otherwise the command predictor's guess.
+// Either way the ghost renders bare (fish-style); the keys are taught by the
+// banner above the prompt, not on the input line.
+func (s *Shell) promptGhost() string {
 	if fix := s.fixes.SuggestedFix(); fix != "" {
 		return fix
 	}

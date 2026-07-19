@@ -144,15 +144,20 @@ func (s *FixStore) GetFix(pattern Pattern) (Fix, bool) {
 }
 
 // calculateScore computes the reliability score for a fix.
-// score = (successRate * 0.5) + (recencyBoost * 0.3) + (frequencyBoost * 0.2)
+// score = (smoothedRate * 0.65) + (recencyBoost * sizeConfidence * 0.25) + (frequencyBoost * 0.10)
+//
+// The success rate is Laplace-smoothed and the recency boost is scaled by
+// sample size so that a single fresh success lands in the tentative band
+// [0.5, 0.7) instead of clearing the 0.7 high-confidence bar, while a fix
+// that fails more than it works drops below the 0.5 suggestion floor.
 func calculateScore(successCount, failureCount int, lastUsed time.Time) float64 {
 	total := successCount + failureCount
 	if total == 0 {
 		return 0
 	}
 
-	// Success rate (0-1)
-	successRate := float64(successCount) / float64(total)
+	// Smoothed success rate (0-1): pulls small samples toward 0.5
+	smoothedRate := (float64(successCount) + 0.5) / (float64(total) + 1.0)
 
 	// Recency boost (0-1, decay over 30 days)
 	daysSinceUse := time.Since(lastUsed).Hours() / 24
@@ -161,10 +166,13 @@ func calculateScore(successCount, failureCount int, lastUsed time.Time) float64 
 		recencyBoost = 1.0 / (1.0 + daysSinceUse/30.0)
 	}
 
+	// Sample-size confidence (0-1): recency alone can't carry one observation
+	sizeConfidence := float64(total) / (float64(total) + 1.0)
+
 	// Frequency boost (0-1, based on total uses)
 	frequencyBoost := float64(total) / (float64(total) + 10.0) // Asymptotic to 1
 
-	return (successRate * 0.5) + (recencyBoost * 0.3) + (frequencyBoost * 0.2)
+	return (smoothedRate * 0.65) + (recencyBoost * sizeConfidence * 0.25) + (frequencyBoost * 0.10)
 }
 
 // PatternCount returns the number of unique patterns stored.

@@ -238,7 +238,7 @@ func visibleWidthAtByteIndex(s string, col int) int {
 }
 
 // renderedGhostSuffixWidth returns the visible width added by ghost rendering.
-func renderedGhostSuffixWidth(ghostText string, streaming, fromAgent bool, hint string) int {
+func renderedGhostSuffixWidth(ghostText string, streaming, fromAgent bool) int {
 	if ghostText == "" {
 		if streaming {
 			return visibleWidth(" Agent thinking...")
@@ -258,8 +258,6 @@ func renderedGhostSuffixWidth(ghostText string, streaming, fromAgent bool, hint 
 		} else {
 			width += visibleWidth("   [enter]run  [tab]edit  [esc]")
 		}
-	} else if hint != "" {
-		width += visibleWidth("   " + hint)
 	}
 
 	return width
@@ -430,7 +428,7 @@ func (d *Display) Render(buf *Buffer, cur *Cursor, hasSelection bool) {
 // fromAgent indicates whether this is an agent suggestion (show hints) or prediction (fish-style).
 //
 //nolint:gocyclo // terminal rendering requires many conditional escape sequences
-func (d *Display) RenderWithGhost(buf *Buffer, cur *Cursor, hasSelection bool, ghostText string, streaming, fromAgent bool, modelName, ghostHint string) {
+func (d *Display) RenderWithGhost(buf *Buffer, cur *Cursor, hasSelection bool, ghostText string, streaming, fromAgent bool, modelName string) {
 	if d.frame != nil {
 		d.renderWithFrame(buf, cur, hasSelection, ghostText, streaming, fromAgent, modelName)
 		return
@@ -519,9 +517,6 @@ func (d *Display) RenderWithGhost(buf *Buffer, cur *Cursor, hasSelection bool, g
 					sb.WriteString("\x1b[38;5;242m") // Gray (brighter than 90)
 					sb.WriteString(ghostFirstLine)
 					sb.WriteString(ansiReset)
-					if ghostHint != "" {
-						sb.WriteString("\x1b[90m   " + ghostHint + "\x1b[0m")
-					}
 				}
 			}
 		}
@@ -530,7 +525,7 @@ func (d *Display) RenderWithGhost(buf *Buffer, cur *Cursor, hasSelection bool, g
 	// Clear everything below the buffer
 	sb.WriteString(ansiClearToEnd)
 
-	ghostWidth := renderedGhostSuffixWidth(ghostText, streaming, fromAgent, ghostHint)
+	ghostWidth := renderedGhostSuffixWidth(ghostText, streaming, fromAgent)
 	totalRows, cursorVisualRow, cursorVisualCol := d.layoutForStandardRender(buf, cur, ghostWidth)
 	linesBelowCursor := totalRows - 1 - cursorVisualRow
 	if linesBelowCursor > 0 {

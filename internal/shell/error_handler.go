@@ -43,6 +43,19 @@ func (h *ErrorHandler) HandleCommandNotFound(cmd string, suggestions []string, i
 	fmt.Fprintf(out, "  \033[90m└─ ?? to explain\033[0m\n")
 }
 
+// showDidYouMean displays a deterministic typo correction (e.g. a close
+// branch name), using the same key hints as the learned-fix banner.
+func (h *ErrorHandler) showDidYouMean(suggestion string) {
+	out := h.out
+	if out == nil {
+		out = os.Stderr
+	}
+
+	fmt.Fprintf(out, "\n\033[33m✗ Did you mean\033[0m\n")
+	fmt.Fprintf(out, "\n\033[32m→\033[0m %s\n", suggestion)
+	fmt.Fprintf(out, "  \033[90m└─ → to accept at prompt · esc to dismiss · ?? to explain\033[0m\n")
+}
+
 func (h *ErrorHandler) showLearnedFix(fix learning.Fix, highConfidence bool) {
 	out := h.out
 	if out == nil {

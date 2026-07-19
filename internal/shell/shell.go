@@ -59,8 +59,9 @@ type Shell struct {
 	history             *history.Store
 	historyPath         string
 	learning            *learning.FixStore
-	fixes               *fixTracker   // Learning loop: observes outcomes, suggests fixes
-	errors              *ErrorHandler // Renders error/fix banners (stderr by default)
+	fixes               *fixTracker     // Learning loop: observes outcomes, suggests fixes
+	errors              *ErrorHandler   // Renders error/fix banners (stderr by default)
+	branchLister        func() []string // Local git branches for did-you-mean; nil = gitBranches
 	clipboard           *clipboard.Buffer
 	predictor           *prediction.Predictor
 	suggestor           *CommandSuggestor
@@ -789,7 +790,7 @@ func (s *Shell) readLineWithEditor(ctx context.Context) (string, error) {
 		}
 
 		// Ghost text: learned fix for the last failure, else prediction
-		if ghost := s.promptGhostText(); ghost != "" {
+		if ghost := s.promptGhost(); ghost != "" {
 			ed.SetGhostText(ghost)
 		}
 

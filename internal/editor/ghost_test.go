@@ -194,43 +194,19 @@ func TestGhostText_UTF8(t *testing.T) {
 	}
 }
 
-func TestEditor_GhostHintRendered(t *testing.T) {
-	// A learned-fix ghost must advertise its keys at the prompt, unlike
-	// fish-style predictions which stay bare.
+func TestEditor_NonAgentGhostRendersBare(t *testing.T) {
+	// Predictions and learned fixes render fish-style: just the dim
+	// suggestion, no key hints on the input line.
 	var out strings.Builder
 	ed := New(Config{Keybindings: "emacs"}, strings.NewReader(""), &out)
-	ed.SetGhostTextWithHint("git checkout -b feat/demo", "[→]accept  [esc]dismiss")
+	ed.SetGhostText("git checkout master")
 	ed.render()
 
 	got := out.String()
-	if !strings.Contains(got, "git checkout -b feat/demo") {
+	if !strings.Contains(got, "git checkout master") {
 		t.Fatalf("render missing ghost text: %q", got)
 	}
-	if !strings.Contains(got, "[→]accept  [esc]dismiss") {
-		t.Errorf("render missing hint suffix: %q", got)
-	}
-}
-
-func TestEditor_GhostHintClearedWithGhost(t *testing.T) {
-	var out strings.Builder
-	ed := New(Config{Keybindings: "emacs"}, strings.NewReader(""), &out)
-	ed.SetGhostTextWithHint("git checkout -b feat/demo", "[→]accept  [esc]dismiss")
-
-	// Esc dismisses the ghost; a later render must not resurrect the hint.
-	ed.handleKeyEvent(Key{Special: KeyEscape})
-	out.Reset()
-	ed.render()
-	if strings.Contains(out.String(), "[→]accept") {
-		t.Errorf("hint survived ghost dismissal: %q", out.String())
-	}
-}
-
-func TestEditor_PlainGhostHasNoHint(t *testing.T) {
-	var out strings.Builder
-	ed := New(Config{Keybindings: "emacs"}, strings.NewReader(""), &out)
-	ed.SetGhostText("git status")
-	ed.render()
-	if strings.Contains(out.String(), "accept") {
-		t.Errorf("plain prediction ghost should have no hint: %q", out.String())
+	if strings.Contains(got, "accept") || strings.Contains(got, "dismiss") {
+		t.Errorf("non-agent ghost must render without key hints: %q", got)
 	}
 }

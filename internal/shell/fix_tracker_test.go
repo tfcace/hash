@@ -139,16 +139,16 @@ func TestShell_LearnedFixShownAndGhostedAfterFailure(t *testing.T) {
 	if !strings.Contains(banner.String(), "chmod +x deploy.sh") {
 		t.Errorf("expected learned-fix banner after failure, got: %q", banner.String())
 	}
-	if got := s.promptGhostText(); got != "chmod +x deploy.sh" {
-		t.Errorf("promptGhostText() = %q, want the learned fix", got)
+	if got := s.promptGhost(); got != "chmod +x deploy.sh" {
+		t.Errorf("promptGhost() = %q, want the learned fix", got)
 	}
 
 	// Accepting the fix and succeeding clears the ghost and reinforces the fix.
 	cap2 := newStderrCapture(io.Discard)
 	s.handleExecutionResult("chmod +x deploy.sh", &executor.Result{ExitCode: 0}, nil, cap2)
 
-	if got := s.promptGhostText(); got != "" {
-		t.Errorf("promptGhostText() after success = %q, want empty", got)
+	if got := s.promptGhost(); got != "" {
+		t.Errorf("promptGhost() after success = %q, want empty", got)
 	}
 	fix, found := store.GetFix(pattern)
 	if !found {
@@ -201,5 +201,34 @@ func TestErrorHandler_ShowLearnedFixAdvertisesRealKeys(t *testing.T) {
 	}
 	if !strings.Contains(out, "accept") || !strings.Contains(out, "esc") {
 		t.Errorf("banner should explain the ghost-text keys (accept/esc), got: %q", out)
+	}
+}
+
+func TestShell_PromptGhostIsBareForLearnedFix(t *testing.T) {
+	// The banner above the prompt already teaches the keys; the input line
+	// carries only the suggested command, fish-style.
+	store := newTestFixStore(t)
+	pattern := learning.ExtractPattern("./deploy.sh", "permission denied", 126)
+	if err := store.RecordFix(pattern, "chmod +x deploy.sh", true); err != nil {
+		t.Fatalf("RecordFix() error = %v", err)
+	}
+
+	s := &Shell{
+		fixes:  newFixTracker(store),
+		errors: &ErrorHandler{out: io.Discard},
+	}
+	cap1 := newStderrCapture(io.Discard)
+	_, _ = cap1.Write([]byte("permission denied"))
+	s.handleExecutionResult("./deploy.sh", &executor.Result{ExitCode: 126}, nil, cap1)
+
+	if text := s.promptGhost(); text != "chmod +x deploy.sh" {
+		t.Fatalf("promptGhost() = %q, want the learned fix", text)
+	}
+}
+
+func TestShell_PromptGhostEmptyWithNothingPending(t *testing.T) {
+	s := &Shell{fixes: newFixTracker(nil)}
+	if text := s.promptGhost(); text != "" {
+		t.Errorf("promptGhost() with nothing pending = %q, want empty", text)
 	}
 }
