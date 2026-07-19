@@ -673,6 +673,12 @@ func (s *Shell) handleExecutionResult(line string, result *executor.Result, err 
 	// Store for issue reporting
 	s.lastCommand = line
 	s.lastStderr = stderrCap.String()
+	if s.lastStderr == "" {
+		// A PTY merges child stderr into its output stream; recover the error
+		// text from the captured tail so learning patterns, ?? explanations,
+		// and issue reports see what actually went wrong.
+		s.lastStderr = ptyStderrFallback(result)
+	}
 	s.lastCwd, _ = os.Getwd()
 
 	// Record command in history
