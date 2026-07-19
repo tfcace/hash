@@ -375,6 +375,13 @@ func (r *InputReader) readEscapeSequence() (Key, error) {
 				// Timeout = standalone ESC key
 				return Key{Special: KeyEscape}, nil
 			}
+		} else if total == 2 && r.buf[1] == 'O' {
+			// ESC O is either Alt+O or the start of an SS3 sequence; a
+			// timeout on the final byte means it was Alt+O.
+			n, err, timedOut = r.readWithTimeout(r.buf[total:total+1], r.escTimeout)
+			if timedOut {
+				return Key{Rune: 'O', Alt: true}, nil
+			}
 		} else {
 			n, err = r.in.Read(r.buf[total : total+1])
 		}
@@ -465,6 +472,9 @@ func (r *InputReader) readPasteContent() (Key, error) {
 func isCompleteSequence(b []byte) bool {
 	if len(b) < 2 {
 		return false
+	}
+	if b[1] == 'O' {
+		return len(b) >= 3 // SS3 (application cursor keys): ESC O <code>
 	}
 	if b[1] != '[' {
 		return true // Alt+char

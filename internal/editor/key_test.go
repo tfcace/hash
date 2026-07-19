@@ -172,3 +172,36 @@ func TestParseKey_DA_Discarded(t *testing.T) {
 		t.Errorf("DA response should be discarded, got Special=%v Rune=%q", key.Special, key.Rune)
 	}
 }
+
+func TestParseKey_SS3Arrows(t *testing.T) {
+	// Application cursor keys mode (DECCKM) sends arrows as SS3: ESC O <code>
+	cases := []struct {
+		seq  []byte
+		want KeyCode
+	}{
+		{[]byte{0x1b, 'O', 'A'}, KeyUp},
+		{[]byte{0x1b, 'O', 'B'}, KeyDown},
+		{[]byte{0x1b, 'O', 'C'}, KeyRight},
+		{[]byte{0x1b, 'O', 'D'}, KeyLeft},
+		{[]byte{0x1b, 'O', 'H'}, KeyHome},
+		{[]byte{0x1b, 'O', 'F'}, KeyEnd},
+	}
+	for _, c := range cases {
+		key := ParseKey(c.seq)
+		if key.Special != c.want {
+			t.Errorf("ParseKey(%q).Special = %v, want %v", c.seq, key.Special, c.want)
+		}
+		if key.Alt {
+			t.Errorf("ParseKey(%q).Alt = true, want false", c.seq)
+		}
+	}
+}
+
+func TestParseKey_SS3UnknownDiscarded(t *testing.T) {
+	// SS3 F1: ESC O P. Not bound to anything; must be a no-op, not Escape
+	// (Escape would dismiss ghost text or cancel input).
+	key := ParseKey([]byte{0x1b, 'O', 'P'})
+	if key.Special != KeyNone || key.Rune != 0 {
+		t.Errorf("unknown SS3 should be discarded, got Special=%v Rune=%q", key.Special, key.Rune)
+	}
+}

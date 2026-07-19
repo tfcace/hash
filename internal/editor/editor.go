@@ -161,6 +161,13 @@ func (e *Editor) SetGhostText(text string) {
 	e.ghost.Set(text)
 }
 
+// SetGhostTextWithHint sets inline suggestion text plus a key hint rendered
+// after it, for suggestions the user was promised keys for (learned fixes).
+func (e *Editor) SetGhostTextWithHint(text, hint string) {
+	e.ghost.Set(text)
+	e.ghost.Hint = hint
+}
+
 // SetGhostTextStreaming sets up streaming ghost text from channels.
 // Text chunks arrive on textCh, errors on errCh.
 func (e *Editor) SetGhostTextStreaming(textCh <-chan string, errCh <-chan error) {
@@ -654,7 +661,7 @@ func (e *Editor) render() {
 	if e.ghost.Active && !e.ghost.IsEmpty() {
 		ghostText = e.ghost.Remaining()
 	}
-	e.display.RenderWithGhost(e.state.Buffer, e.state.Cursor, hasSelection, ghostText, ghostStreaming, ghostFromAgent, e.streamingModel)
+	e.display.RenderWithGhost(e.state.Buffer, e.state.Cursor, hasSelection, ghostText, ghostStreaming, ghostFromAgent, e.streamingModel, e.ghost.Hint)
 
 	// Render completion menu if active
 	if e.completionActive {

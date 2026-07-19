@@ -1,6 +1,9 @@
 package editor
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestGhostText_Set(t *testing.T) {
 	g := NewGhostText()
@@ -188,5 +191,46 @@ func TestGhostText_UTF8(t *testing.T) {
 
 	if g.Remaining() != "llo wörld" {
 		t.Errorf("expected 'llo wörld', got %q", g.Remaining())
+	}
+}
+
+func TestEditor_GhostHintRendered(t *testing.T) {
+	// A learned-fix ghost must advertise its keys at the prompt, unlike
+	// fish-style predictions which stay bare.
+	var out strings.Builder
+	ed := New(Config{Keybindings: "emacs"}, strings.NewReader(""), &out)
+	ed.SetGhostTextWithHint("git checkout -b feat/demo", "[→]accept  [esc]dismiss")
+	ed.render()
+
+	got := out.String()
+	if !strings.Contains(got, "git checkout -b feat/demo") {
+		t.Fatalf("render missing ghost text: %q", got)
+	}
+	if !strings.Contains(got, "[→]accept  [esc]dismiss") {
+		t.Errorf("render missing hint suffix: %q", got)
+	}
+}
+
+func TestEditor_GhostHintClearedWithGhost(t *testing.T) {
+	var out strings.Builder
+	ed := New(Config{Keybindings: "emacs"}, strings.NewReader(""), &out)
+	ed.SetGhostTextWithHint("git checkout -b feat/demo", "[→]accept  [esc]dismiss")
+
+	// Esc dismisses the ghost; a later render must not resurrect the hint.
+	ed.handleKeyEvent(Key{Special: KeyEscape})
+	out.Reset()
+	ed.render()
+	if strings.Contains(out.String(), "[→]accept") {
+		t.Errorf("hint survived ghost dismissal: %q", out.String())
+	}
+}
+
+func TestEditor_PlainGhostHasNoHint(t *testing.T) {
+	var out strings.Builder
+	ed := New(Config{Keybindings: "emacs"}, strings.NewReader(""), &out)
+	ed.SetGhostText("git status")
+	ed.render()
+	if strings.Contains(out.String(), "accept") {
+		t.Errorf("plain prediction ghost should have no hint: %q", out.String())
 	}
 }
