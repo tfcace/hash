@@ -44,6 +44,7 @@ const (
 	PriorityEnv        Priority = 130 // Environment variables ($VAR)
 	PriorityExecutable Priority = 150 // Executable names from PATH (command position only)
 	PriorityVCS        Priority = 175 // Context-aware VCS args (git/jj refs)
+	PriorityPlugin     Priority = 180 // Declarative completion plugins (user-extensible)
 	PrioritySemantic   Priority = 185 // Semantic completions for common commands
 	PriorityFilesystem Priority = 200 // Fallback for file arguments
 	PriorityAgent      Priority = 300 // AI-powered fallback

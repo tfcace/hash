@@ -138,6 +138,17 @@ func New(cfg *config.Config) (*Shell, error) {
 	// Semantic completions for common commands (ssh, make, kill, npm, etc.)
 	router.Register(completion.NewSemanticCompleter(), completion.PrioritySemantic)
 
+	// Declarative completion plugins: built-in specs (docker) plus user specs
+	// from <config>/completions/*.toml. Registered ahead of semantic so user
+	// plugins can override the built-in handlers.
+	if cfg.Completions.PluginsEnabled {
+		pluginSpecs, pluginErrs := completion.LoadPluginSpecs(filepath.Join(getConfigDir(), "completions"))
+		for _, pluginErr := range pluginErrs {
+			fmt.Fprintf(os.Stderr, "hash: warning: completion plugin: %v\n", pluginErr)
+		}
+		router.Register(completion.NewPluginCompleter(pluginSpecs), completion.PriorityPlugin)
+	}
+
 	if cfg.Completions.CobraEnabled {
 		router.Register(completion.NewCobraCompleter(), completion.PriorityToolNative)
 	}

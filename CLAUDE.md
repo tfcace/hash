@@ -59,6 +59,8 @@ Use `??` to invoke the agent:
 
 **Completion tiers**: 1) Filesystem (<10ms), 2) Tool-native via Cobra `__complete` (10-200ms), 3) Agent fallback (200-800ms).
 
+**Completion plugins**: Declarative TOML specs map subcommands to a candidate-producing command (`internal/completion/plugin.go`). Built-in docker spec uses the same format; users extend via `~/.config/hash/completions/*.toml`. See `docs/completion-plugins.md`.
+
 **Learning system**: Extracts normalized error signatures, scores fixes by success rate + recency + frequency. Suggests learned fixes when score >= 0.7.
 
 **History**: SQLite with unlimited entries, tracks sudo commands separately, stores agent interactions for recall.

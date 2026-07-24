@@ -53,6 +53,7 @@ fuzzy = true
 file_icons = true
 cobra_enabled = true
 mask_sensitive_env = true
+plugins_enabled = true
 
 [clipboard]
 max_output_size = "1MB"
@@ -237,6 +238,7 @@ Tab completion behavior.
 | `file_icons` | boolean | `true` | Show file type icons when the terminal font supports them. |
 | `cobra_enabled` | boolean | `true` | Enable Cobra `__complete` integration. |
 | `mask_sensitive_env` | boolean | `true` | Mask sensitive environment variable values in previews. |
+| `plugins_enabled` | boolean | `true` | Declarative completion plugins: built-in specs (docker) plus user specs from `~/.config/hash/completions/*.toml`. See [completion-plugins.md](completion-plugins.md). |
 
 Per-tool completion cache settings are not implemented in 0.6.x.
 
