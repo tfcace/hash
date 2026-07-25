@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.7.2](https://github.com/tfcace/hash/compare/v0.7.1...v0.7.2) (2026-07-25)
+
+
+### Bug Fixes
+
+* surface the failures hash was silently swallowing ([#88](https://github.com/tfcace/hash/issues/88)) ([70debc7](https://github.com/tfcace/hash/commit/70debc746df87a8552550122357861bc72ce3d08))
+
+
+### Dependencies
+
+* bump charm.land/bubbletea/v2 from 2.0.7 to 2.0.8 ([#87](https://github.com/tfcace/hash/issues/87)) ([e876a9c](https://github.com/tfcace/hash/commit/e876a9c5fa15109e7503f47ea9e1be2faea1cd1d))
+* bump github.com/mattn/go-runewidth from 0.0.24 to 0.0.27 ([#85](https://github.com/tfcace/hash/issues/85)) ([ba57114](https://github.com/tfcace/hash/commit/ba571140f4771f0cb65c599671055261deb0749b))
+* bump golang.org/x/sys from 0.46.0 to 0.47.0 ([#86](https://github.com/tfcace/hash/issues/86)) ([147378a](https://github.com/tfcace/hash/commit/147378a36fac65b781d647771920717b4b43021e))
+* bump golang.org/x/term from 0.44.0 to 0.45.0 ([#84](https://github.com/tfcace/hash/issues/84)) ([d4d15ab](https://github.com/tfcace/hash/commit/d4d15ab1d7ee83731433da13c0142323b1c5a1be))
+
 ## [0.7.1](https://github.com/tfcace/hash/compare/v0.7.0...v0.7.1) (2026-07-18)
 
 
