@@ -498,6 +498,20 @@ func (s *Shell) collectStatus() *SystemStatus {
 		Version: version.Version,
 	}
 
+	// Config status
+	status.ConfigPath = filepath.Join(getConfigDir(), "config.toml")
+	if s.config != nil && s.config.LoadIssue != nil {
+		issue := s.config.LoadIssue
+		status.ConfigPath = issue.Path
+		if len(issue.BadSections) == 0 {
+			status.ConfigErr = "parse error, all settings on defaults (" + issue.Detail + ")"
+		} else {
+			status.ConfigErr = "defaults used for [" + strings.Join(issue.BadSections, "], [") + "] (" + issue.Detail + ")"
+		}
+	} else {
+		status.ConfigOK = true
+	}
+
 	// Prompt status
 	status.PromptMode = s.config.Prompt.Mode
 	status.PromptOK = s.prompt != nil

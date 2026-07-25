@@ -59,6 +59,9 @@ type Shell struct {
 	history             *history.Store
 	historyPath         string
 	learning            *learning.FixStore
+	fixes               *fixTracker     // Learning loop: observes outcomes, suggests fixes
+	errors              *ErrorHandler   // Renders error/fix banners (stderr by default)
+	branchLister        func() []string // Local git branches for did-you-mean; nil = gitBranches
 	clipboard           *clipboard.Buffer
 	predictor           *prediction.Predictor
 	suggestor           *CommandSuggestor
@@ -309,14 +312,14 @@ func New(cfg *config.Config) (*Shell, error) {
 
 	// Configure editor mode
 	editorCfg := editor.Config{
-		Keybindings:    cfg.Input.Keybindings,
-		Gutter:         cfg.Input.Gutter,
-		InputBgColor:   "",
-		ScrollbarColor: colorPalette.Primary,
-		CompleteFunc:   makeEditorCompleteFunc(router),
-		PrefetchFunc:   makeEditorPrefetchFunc(router),
-		SuggestionFunc: makeEditorSuggestionFunc(historyStore, predictor),
-		MaxPasteSize:   cfg.Input.ParseMaxPasteSize(),
+		Keybindings:         cfg.Input.Keybindings,
+		Gutter:              cfg.Input.Gutter,
+		InputBgColor:        "",
+		ScrollbarColor:      colorPalette.Primary,
+		CompleteOutcomeFunc: makeEditorCompleteOutcomeFunc(router),
+		PrefetchFunc:        makeEditorPrefetchFunc(router),
+		SuggestionFunc:      makeEditorSuggestionFunc(historyStore, predictor),
+		MaxPasteSize:        cfg.Input.ParseMaxPasteSize(),
 	}
 
 	// Capture initial working directory for chpwd hook
@@ -334,6 +337,8 @@ func New(cfg *config.Config) (*Shell, error) {
 		history:      historyStore,
 		historyPath:  historyPath,
 		learning:     learningStore,
+		fixes:        newFixTracker(learningStore),
+		errors:       NewErrorHandler(),
 		clipboard:    clipboardBuf,
 		predictor:    predictor,
 		suggestor:    suggestor,
@@ -354,6 +359,9 @@ func New(cfg *config.Config) (*Shell, error) {
 	if historyStore != nil {
 		shell.editorCfg.HistoryFunc = shell.navigateHistory
 	}
+
+	// Tab on an inline ?? line submits it to start agent completion
+	shell.editorCfg.AgentCompleteLine = shell.agentCompleteLinePredicate(exec.LookPath)
 
 	// Set up shell integration callback for editor mode
 	// This emits OSC 133;B (CommandStart) when the editor is ready for input
@@ -621,6 +629,7 @@ func (s *Shell) executeRegularCommand(ctx context.Context, line string) error {
 		fmt.Fprintf(os.Stderr, "hash: %v\n", err)
 		s.setLastCommandFailure(line, err, 1)
 		s.recordCommand(line, s.lastExitCode, s.lastDuration)
+		s.observeCommandOutcome(line)
 		s.updatePrompt()
 		return nil
 	}
@@ -628,6 +637,7 @@ func (s *Shell) executeRegularCommand(ctx context.Context, line string) error {
 		s.lastExitCode = 0
 		s.lastDuration = 0
 		s.recordCommand(line, 0, 0)
+		s.observeCommandOutcome(line)
 		s.updatePrompt()
 		return nil
 	}
@@ -664,10 +674,20 @@ func (s *Shell) handleExecutionResult(line string, result *executor.Result, err 
 	// Store for issue reporting
 	s.lastCommand = line
 	s.lastStderr = stderrCap.String()
+	if s.lastStderr == "" {
+		// A PTY merges child stderr into its output stream; recover the error
+		// text from the captured tail so learning patterns, ?? explanations,
+		// and issue reports see what actually went wrong.
+		s.lastStderr = ptyStderrFallback(result)
+	}
 	s.lastCwd, _ = os.Getwd()
 
 	// Record command in history
 	s.recordCommand(line, s.lastExitCode, s.lastDuration)
+
+	// Feed the learning loop: failures may surface a learned fix,
+	// a subsequent success records the fix that worked
+	s.observeCommandOutcome(line)
 
 	// Record command sequence for prediction (only successful commands)
 	if s.predictor != nil && s.lastExitCode == 0 && prevCommand != "" {
@@ -690,7 +710,10 @@ func (s *Shell) handleExecutionError(err error) {
 				}
 			}
 		}
-		handler := NewErrorHandler(s.learning)
+		handler := s.errors
+		if handler == nil {
+			handler = NewErrorHandler()
+		}
 		handler.HandleCommandNotFound(cnf.Command, suggestions, installHint)
 		s.lastExitCode = 127
 	} else {
@@ -766,12 +789,9 @@ func (s *Shell) readLineWithEditor(ctx context.Context) (string, error) {
 			ed.SetInitialText(initialText)
 		}
 
-		// Set ghost text prediction based on last command
-		if s.predictor != nil && s.lastCommand != "" {
-			cwd, _ := os.Getwd()
-			if predictedCmd := s.predictor.PredictCommand(s.lastCommand, cwd); predictedCmd != "" {
-				ed.SetGhostText(predictedCmd)
-			}
+		// Ghost text: learned fix for the last failure, else prediction
+		if ghost := s.promptGhost(); ghost != "" {
+			ed.SetGhostText(ghost)
 		}
 
 		result, err := ed.Run(ctx)
@@ -1645,28 +1665,6 @@ func trimSpace(s string) string {
 		end--
 	}
 	return s[start:end]
-}
-
-// makeEditorCompleteFunc adapts the completion router to editor's CompleteFunc.
-func makeEditorCompleteFunc(router *completion.Router) func(string, int) []editor.Completion {
-	return func(line string, pos int) []editor.Completion {
-		ctx, cancel := context.WithTimeout(context.Background(), editorCompletionTimeout)
-		defer cancel()
-
-		result, err := router.CompleteBounded(ctx, line, pos)
-		if err != nil || len(result.Items) == 0 {
-			return nil
-		}
-
-		items := make([]editor.Completion, len(result.Items))
-		for i, item := range result.Items {
-			items[i] = editor.Completion{
-				Text:        result.Prefix + item.Value,
-				Description: item.Description,
-			}
-		}
-		return items
-	}
 }
 
 func makeEditorPrefetchFunc(router *completion.Router) func(string, int) {

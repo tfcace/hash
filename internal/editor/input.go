@@ -355,6 +355,49 @@ func keyString(k Key) string {
 	return strings.Join(parts, "+")
 }
 
+// readEscapeByte reads the next byte of an in-progress escape sequence into
+// r.buf[total]. Some reads are done with a timeout, where timing out identifies
+// the sequence on its own; in that case the resolved key is returned as early.
+func (r *InputReader) readEscapeByte(total int, firstRead bool) (n int, early *Key, err error) {
+	var timedOut bool
+
+	switch {
+	case firstRead:
+		// Use timeout to detect standalone ESC vs escape sequence
+		n, err, timedOut = r.readWithTimeout(r.buf[total:total+1], r.escTimeout)
+		if timedOut {
+			// Timeout = standalone ESC key
+			return n, &Key{Special: KeyEscape}, err
+		}
+	case total == 2 && r.buf[1] == 'O':
+		// ESC O is either Alt+O or the start of an SS3 sequence; a
+		// timeout on the final byte means it was Alt+O.
+		n, err, timedOut = r.readWithTimeout(r.buf[total:total+1], r.escTimeout)
+		if timedOut {
+			return n, &Key{Rune: 'O', Alt: true}, err
+		}
+	default:
+		n, err = r.in.Read(r.buf[total : total+1])
+	}
+
+	return n, nil, err
+}
+
+// escControlKey resolves an ESC followed by a control character (r.buf[1]).
+func (r *InputReader) escControlKey() Key {
+	// ESC + Enter (CR or LF) = Alt+Enter (used for multiline)
+	// Some terminals send this for Shift+Enter.
+	// Only treat as Alt+Enter if we're reading from a real terminal
+	// (which supports deadlines). Otherwise treat as separate keys.
+	if (r.buf[1] == '\r' || r.buf[1] == '\n') && r.supportsDeadlines() {
+		return Key{Special: KeyEnter, Alt: true}
+	}
+	// Other control chars (or non-terminal): treat as bare ESC and save for next read
+	r.pending = r.buf[1]
+	r.hasPending = true
+	return Key{Special: KeyEscape}
+}
+
 func (r *InputReader) readEscapeSequence() (Key, error) {
 	// Try to read more bytes for escape sequence
 	total := 1
@@ -363,43 +406,20 @@ func (r *InputReader) readEscapeSequence() (Key, error) {
 	firstRead := true
 
 	for total < len(r.buf) {
-		var n int
-		var err error
-		var timedOut bool
+		n, early, err := r.readEscapeByte(total, firstRead)
+		firstRead = false
 
-		if firstRead {
-			// Use timeout to detect standalone ESC vs escape sequence
-			n, err, timedOut = r.readWithTimeout(r.buf[total:total+1], r.escTimeout)
-			firstRead = false
-			if timedOut {
-				// Timeout = standalone ESC key
-				return Key{Special: KeyEscape}, nil
-			}
-		} else {
-			n, err = r.in.Read(r.buf[total : total+1])
+		if early != nil {
+			return *early, nil
 		}
-
-		if err == io.EOF || n == 0 {
-			break
-		}
-		if err != nil {
+		if err != nil || n == 0 {
 			break
 		}
 
 		// If second byte is a control character (not '[' or 'O'),
 		// handle specially
 		if total == 1 && r.buf[1] < 0x20 && r.buf[1] != '[' {
-			// ESC + Enter (CR or LF) = Alt+Enter (used for multiline)
-			// Some terminals send this for Shift+Enter.
-			// Only treat as Alt+Enter if we're reading from a real terminal
-			// (which supports deadlines). Otherwise treat as separate keys.
-			if (r.buf[1] == '\r' || r.buf[1] == '\n') && r.supportsDeadlines() {
-				return Key{Special: KeyEnter, Alt: true}, nil
-			}
-			// Other control chars (or non-terminal): treat as bare ESC and save for next read
-			r.pending = r.buf[1]
-			r.hasPending = true
-			return Key{Special: KeyEscape}, nil
+			return r.escControlKey(), nil
 		}
 
 		total++
@@ -465,6 +485,9 @@ func (r *InputReader) readPasteContent() (Key, error) {
 func isCompleteSequence(b []byte) bool {
 	if len(b) < 2 {
 		return false
+	}
+	if b[1] == 'O' {
+		return len(b) >= 3 // SS3 (application cursor keys): ESC O <code>
 	}
 	if b[1] != '[' {
 		return true // Alt+char

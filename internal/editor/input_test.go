@@ -168,3 +168,31 @@ func TestInputReader_ReadKey_BracketedPaste_LargeContent(t *testing.T) {
 		t.Errorf("PasteText length = %d, want <= %d", len(key.PasteText), testMaxSize)
 	}
 }
+
+func TestInputReader_ReadKey_SS3Arrow(t *testing.T) {
+	// Application cursor keys mode: right arrow arrives as ESC O C.
+	input := bytes.NewReader([]byte{0x1b, 'O', 'C'})
+	reader := NewInputReader(input)
+
+	key, err := reader.ReadKey()
+	if err != nil {
+		t.Fatalf("ReadKey() error = %v", err)
+	}
+	if key.Special != KeyRight {
+		t.Errorf("Special = %v, want KeyRight", key.Special)
+	}
+}
+
+func TestInputReader_ReadKey_AltO_StillWorks(t *testing.T) {
+	// A bare ESC O (nothing following) is Alt+O, not a truncated SS3.
+	input := bytes.NewReader([]byte{0x1b, 'O'})
+	reader := NewInputReader(input)
+
+	key, err := reader.ReadKey()
+	if err != nil {
+		t.Fatalf("ReadKey() error = %v", err)
+	}
+	if key.Rune != 'O' || !key.Alt {
+		t.Errorf("got Special=%v Rune=%q Alt=%v, want Alt+O", key.Special, key.Rune, key.Alt)
+	}
+}

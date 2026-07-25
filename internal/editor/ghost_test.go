@@ -1,6 +1,9 @@
 package editor
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestGhostText_Set(t *testing.T) {
 	g := NewGhostText()
@@ -188,5 +191,22 @@ func TestGhostText_UTF8(t *testing.T) {
 
 	if g.Remaining() != "llo wörld" {
 		t.Errorf("expected 'llo wörld', got %q", g.Remaining())
+	}
+}
+
+func TestEditor_NonAgentGhostRendersBare(t *testing.T) {
+	// Predictions and learned fixes render fish-style: just the dim
+	// suggestion, no key hints on the input line.
+	var out strings.Builder
+	ed := New(Config{Keybindings: "emacs"}, strings.NewReader(""), &out)
+	ed.SetGhostText("git checkout master")
+	ed.render()
+
+	got := out.String()
+	if !strings.Contains(got, "git checkout master") {
+		t.Fatalf("render missing ghost text: %q", got)
+	}
+	if strings.Contains(got, "accept") || strings.Contains(got, "dismiss") {
+		t.Errorf("non-agent ghost must render without key hints: %q", got)
 	}
 }

@@ -3,6 +3,7 @@ package learning
 import (
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestFixStore_RecordAndRetrieve(t *testing.T) {
@@ -89,5 +90,36 @@ func TestFixStore_NoFix(t *testing.T) {
 	_, found := store.GetFix(pattern)
 	if found {
 		t.Error("Should not find fix for unknown pattern")
+	}
+}
+
+func TestCalculateScore_SingleSuccessIsTentative(t *testing.T) {
+	// One observation must not cross the 0.7 high-confidence bar: a fresh
+	// 1-for-1 fix is worth suggesting, but only tentatively.
+	score := calculateScore(1, 0, time.Now())
+	if score < 0.5 || score >= 0.7 {
+		t.Errorf("score(1 success, fresh) = %f, want in [0.5, 0.7)", score)
+	}
+}
+
+func TestCalculateScore_TwoSuccessesAreConfident(t *testing.T) {
+	score := calculateScore(2, 0, time.Now())
+	if score < 0.7 {
+		t.Errorf("score(2 successes, fresh) = %f, want >= 0.7", score)
+	}
+}
+
+func TestCalculateScore_TiedRecordStaysTentative(t *testing.T) {
+	score := calculateScore(1, 1, time.Now())
+	if score < 0.5 || score >= 0.7 {
+		t.Errorf("score(1 success, 1 failure) = %f, want in [0.5, 0.7)", score)
+	}
+}
+
+func TestCalculateScore_FailureHeavyFixDropped(t *testing.T) {
+	// A fix that failed more than it worked should stop being suggested.
+	score := calculateScore(1, 2, time.Now())
+	if score >= 0.5 {
+		t.Errorf("score(1 success, 2 failures) = %f, want < 0.5", score)
 	}
 }

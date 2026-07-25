@@ -1092,6 +1092,39 @@ func (d *Display) RenderCompletionMenu(items []CompletionItem, selected, startCo
 	d.lastMenuItems = len(items)
 }
 
+// RenderCompletionNotice draws a one-line dim notice below the input where the
+// completion menu would appear ("no matches", "completion timed out").
+// It reuses the menu clearing contract via lastMenuItems.
+func (d *Display) RenderCompletionNotice(notice string, cursorRow, cursorCol int) {
+	if notice == "" {
+		return
+	}
+
+	var sb strings.Builder
+
+	prefixWidth := d.calcPrefixWidth(cursorRow)
+
+	sb.WriteString("\r\n")
+	sb.WriteString(ansiClearLine)
+	sb.WriteString("\x1b[2m") // Dim
+	sb.WriteString("  ")
+	sb.WriteString(notice)
+	sb.WriteString(ansiReset)
+
+	// Return to the original input cursor position.
+	fmt.Fprintf(&sb, ansiCursorUp, 1)
+	sb.WriteString("\r")
+	_, restoreCol := d.wrappedCursorForChars(cursorCol + prefixWidth)
+	if restoreCol > 0 {
+		fmt.Fprintf(&sb, ansiCursorForward, restoreCol)
+	}
+
+	d.out.Write([]byte(sb.String()))
+
+	// Track as one menu row so the next render clears it
+	d.lastMenuItems = 1
+}
+
 // ClearCompletionMenu removes the completion menu from display.
 func (d *Display) ClearCompletionMenu(numItems, cursorRow, cursorCol int) {
 	if numItems == 0 {

@@ -92,6 +92,17 @@ func parseEscapeSequence(b []byte) Key {
 		return Key{Rune: rune(b[1]), Alt: true}
 	}
 
+	// SS3 sequences: ESC O <code>, sent for arrows/Home/End by terminals
+	// in application cursor keys mode (DECCKM)
+	if b[1] == 'O' {
+		if len(b) >= 3 {
+			if key, ok := parseSimpleCSI(b[2]); ok {
+				return key
+			}
+		}
+		return Key{} // Unknown SS3 (e.g. F1-F4): discard, don't fake Escape
+	}
+
 	// CSI sequences: ESC [
 	if b[1] != '[' {
 		return Key{Special: KeyEscape}
