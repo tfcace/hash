@@ -24,11 +24,22 @@ completions generate terraform "complete workspace names too"
 ```
 
 `completions generate <tool>` captures the tool's `--help` output, asks the
-configured `??` agent to draft a spec in the format below, validates the
-result (retrying once with the validation error if the draft is broken),
-shows you the TOML, and — after you confirm — writes it to
-`~/.config/hash/completions/<tool>.toml` and activates it immediately. No
-restart needed.
+configured `??` agent to draft a spec in the format below, and shows you the
+TOML. From there it is a conversation:
+
+```
+[a]ccept  [r]evise <what to change>  [q]uit: r also complete namespaces
+```
+
+Revise as many times as you like; each round sends your instruction and the
+current spec back to the agent. A draft that fails validation is just another
+round: you see the error and can steer the fix rather than the command giving
+up. Accepting writes the spec to `~/.config/hash/completions/<tool>.toml`,
+activates it immediately (no restart), and ends the conversation.
+
+A generated plugin is a normal file you own from then on. To change it later,
+edit it and run `completions reload`, re-run `completions generate <tool>` to
+replace it, or delete it.
 
 Related subcommands:
 

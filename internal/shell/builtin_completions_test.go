@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -114,22 +113,48 @@ func TestBuildPluginGenPrompt(t *testing.T) {
 	}
 }
 
-func newTestGenerator(t *testing.T, ask func(ctx context.Context, prompt string) (string, error), confirm bool) (*pluginGenerator, *bytes.Buffer) {
+// scriptedReview replays a fixed sequence of review decisions and records the
+// allowAccept flag it was shown each time. Running past the end is a bug in
+// the test or an unterminated loop in the generator.
+type scriptedReview struct {
+	t       *testing.T
+	choices []genChoice
+	calls   int
+	offered []bool
+}
+
+func (r *scriptedReview) review(allowAccept bool) genChoice {
+	r.t.Helper()
+	if r.calls >= len(r.choices) {
+		r.t.Fatalf("review called %d times, script only has %d decisions", r.calls+1, len(r.choices))
+	}
+	r.offered = append(r.offered, allowAccept)
+	choice := r.choices[r.calls]
+	r.calls++
+	return choice
+}
+
+func newTestGenerator(t *testing.T, ask func(ctx context.Context, prompt string) (string, error), choices ...genChoice) (*pluginGenerator, *bytes.Buffer, *scriptedReview) {
 	t.Helper()
 	out := &bytes.Buffer{}
+	rev := &scriptedReview{t: t, choices: choices}
 	return &pluginGenerator{
 		ask:      ask,
 		toolHelp: func(ctx context.Context, tool string) string { return "kubectl help text" },
-		confirm:  func(prompt string) bool { return confirm },
+		review:   rev.review,
 		specsDir: t.TempDir(),
 		out:      out,
-	}, out
+	}, out, rev
 }
 
+func accept() genChoice         { return genChoice{action: genAccept} }
+func quit() genChoice           { return genChoice{action: genQuit} }
+func revise(m string) genChoice { return genChoice{action: genRevise, message: m} }
+
 func TestPluginGenerator_Run(t *testing.T) {
-	gen, _ := newTestGenerator(t, func(ctx context.Context, prompt string) (string, error) {
+	gen, _, _ := newTestGenerator(t, func(ctx context.Context, prompt string) (string, error) {
 		return "```toml\n" + validKubectlTOML + "```", nil
-	}, true)
+	}, accept())
 
 	path, err := gen.run(context.Background(), "kubectl", "")
 	if err != nil {
@@ -150,75 +175,143 @@ func TestPluginGenerator_Run(t *testing.T) {
 	}
 }
 
-func TestPluginGenerator_RunDeclined(t *testing.T) {
-	gen, out := newTestGenerator(t, func(ctx context.Context, prompt string) (string, error) {
+func TestPluginGenerator_QuitWritesNothing(t *testing.T) {
+	gen, out, _ := newTestGenerator(t, func(ctx context.Context, prompt string) (string, error) {
 		return validKubectlTOML, nil
-	}, false)
+	}, quit())
 
 	path, err := gen.run(context.Background(), "kubectl", "")
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
 	if path != "" {
-		t.Errorf("path = %q, want empty when declined", path)
+		t.Errorf("path = %q, want empty when the user quits", path)
 	}
 	if entries, _ := os.ReadDir(gen.specsDir); len(entries) != 0 {
-		t.Error("no file should be written when declined")
+		t.Error("no file should be written when the user quits")
 	}
 	if !strings.Contains(out.String(), "Discarded") {
 		t.Error("expected Discarded message")
 	}
 }
 
-func TestPluginGenerator_RetriesOnceWithValidationError(t *testing.T) {
-	calls := 0
-	gen, _ := newTestGenerator(t, func(ctx context.Context, prompt string) (string, error) {
-		calls++
-		if calls == 1 {
-			return "this is not toml [", nil
+// A revision sends the user's instruction plus the current spec, so the flow
+// survives transports that keep no conversation history.
+func TestPluginGenerator_ReviseThenAccept(t *testing.T) {
+	const revisedTOML = `[plugin]
+name = "kubectl"
+commands = ["kubectl"]
+
+[[rules]]
+subcommands = ["delete pod", "logs", "config use-context"]
+[rules.source]
+exec = ["kubectl", "get", "pods", "-o", "name"]
+`
+	var prompts []string
+	gen, _, rev := newTestGenerator(t, func(ctx context.Context, prompt string) (string, error) {
+		prompts = append(prompts, prompt)
+		if len(prompts) == 1 {
+			return validKubectlTOML, nil
 		}
-		// The retry prompt must carry the validation error and prior draft.
-		if !strings.Contains(prompt, "failed validation") || !strings.Contains(prompt, "this is not toml") {
-			return "", fmt.Errorf("retry prompt missing context: %q", prompt)
-		}
-		return validKubectlTOML, nil
-	}, true)
+		return revisedTOML, nil
+	}, revise("also complete contexts"), accept())
 
 	path, err := gen.run(context.Background(), "kubectl", "")
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	if calls != 2 {
-		t.Errorf("agent calls = %d, want 2", calls)
+	if len(prompts) != 2 {
+		t.Fatalf("agent calls = %d, want 2", len(prompts))
 	}
-	if path == "" {
-		t.Error("expected spec written after successful retry")
+	if !strings.Contains(prompts[1], "also complete contexts") {
+		t.Errorf("revision prompt missing the user's instruction: %q", prompts[1])
+	}
+	if !strings.Contains(prompts[1], "delete pod") {
+		t.Errorf("revision prompt missing the current spec: %q", prompts[1])
+	}
+	data, _ := os.ReadFile(path)
+	if !strings.Contains(string(data), "config use-context") {
+		t.Error("written spec is not the revised one")
+	}
+	for i, offered := range rev.offered {
+		if !offered {
+			t.Errorf("review %d: accept should be offered for a valid spec", i)
+		}
 	}
 }
 
-func TestPluginGenerator_FailsAfterRetries(t *testing.T) {
+// The user decides how deep to go; nothing caps the number of rounds.
+func TestPluginGenerator_RevisionsAreUncapped(t *testing.T) {
 	calls := 0
-	gen, _ := newTestGenerator(t, func(ctx context.Context, prompt string) (string, error) {
+	gen, _, _ := newTestGenerator(t, func(ctx context.Context, prompt string) (string, error) {
 		calls++
-		return "still not toml [", nil
-	}, true)
+		return validKubectlTOML, nil
+	}, revise("one"), revise("two"), revise("three"), revise("four"), accept())
 
-	_, err := gen.run(context.Background(), "kubectl", "")
-	if err == nil {
-		t.Fatal("expected error after exhausted retries")
+	if _, err := gen.run(context.Background(), "kubectl", ""); err != nil {
+		t.Fatalf("run: %v", err)
 	}
-	if calls != pluginGenTries {
-		t.Errorf("agent calls = %d, want %d", calls, pluginGenTries)
+	if calls != 5 {
+		t.Errorf("agent calls = %d, want 5 (4 revisions + initial)", calls)
 	}
-	if !strings.Contains(err.Error(), "Draft:") {
-		t.Errorf("error should include the draft for manual fixing: %v", err)
+}
+
+// An invalid spec is a turn in the loop, not a hard failure: the user is shown
+// the error and can steer the fix. Accept must not be offered.
+func TestPluginGenerator_ValidationFailureStaysInLoop(t *testing.T) {
+	var prompts []string
+	gen, out, rev := newTestGenerator(t, func(ctx context.Context, prompt string) (string, error) {
+		prompts = append(prompts, prompt)
+		if len(prompts) == 1 {
+			return "this is not toml [", nil
+		}
+		return validKubectlTOML, nil
+	}, revise(""), accept())
+
+	path, err := gen.run(context.Background(), "kubectl", "")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if path == "" {
+		t.Fatal("expected a spec written after the user steered a fix")
+	}
+	if !strings.Contains(prompts[1], "this is not toml") {
+		t.Errorf("fix prompt missing the rejected draft: %q", prompts[1])
+	}
+	if !strings.Contains(prompts[1], "failed validation") {
+		t.Errorf("fix prompt missing the validation error: %q", prompts[1])
+	}
+	if len(rev.offered) < 1 || rev.offered[0] {
+		t.Error("accept must not be offered while the draft is invalid")
+	}
+	if !strings.Contains(out.String(), "failed validation") {
+		t.Error("the validation error should be shown to the user")
+	}
+}
+
+// Accepting ends the conversation; no further agent calls or prompts.
+func TestPluginGenerator_AcceptExitsLoop(t *testing.T) {
+	calls := 0
+	gen, _, rev := newTestGenerator(t, func(ctx context.Context, prompt string) (string, error) {
+		calls++
+		return validKubectlTOML, nil
+	}, accept())
+
+	if _, err := gen.run(context.Background(), "kubectl", ""); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if calls != 1 {
+		t.Errorf("agent calls = %d, want 1", calls)
+	}
+	if rev.calls != 1 {
+		t.Errorf("review prompts = %d, want 1", rev.calls)
 	}
 }
 
 func TestPluginGenerator_AgentError(t *testing.T) {
-	gen, _ := newTestGenerator(t, func(ctx context.Context, prompt string) (string, error) {
+	gen, _, _ := newTestGenerator(t, func(ctx context.Context, prompt string) (string, error) {
 		return "", errors.New("agent exploded")
-	}, true)
+	})
 
 	if _, err := gen.run(context.Background(), "kubectl", ""); err == nil || !strings.Contains(err.Error(), "agent exploded") {
 		t.Fatalf("err = %v, want agent error surfaced", err)

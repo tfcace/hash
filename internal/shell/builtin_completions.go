@@ -18,7 +18,6 @@ import (
 const (
 	toolHelpTimeout  = 3 * time.Second
 	toolHelpMaxBytes = 8 * 1024
-	pluginGenTries   = 2
 )
 
 // builtinCompletions manages completion plugins:
@@ -147,7 +146,7 @@ func (s *Shell) completionsGenerate(ctx context.Context, args []string) error {
 	gen := &pluginGenerator{
 		ask:      s.agentHandler.AskText,
 		toolHelp: collectToolHelp,
-		confirm:  confirmOnStdin,
+		review:   reviewOnStdin,
 		specsDir: completionsSpecsDir(),
 		out:      os.Stdout,
 	}
@@ -172,19 +171,39 @@ func validatePluginToolName(tool string) error {
 	return nil
 }
 
+// genAction is what the user chose at the review prompt.
+type genAction int
+
+const (
+	genAccept genAction = iota
+	genRevise
+	genQuit
+)
+
+// genChoice is one review decision. message carries the free-text instruction
+// for genRevise, and is empty when the user just wants the agent to try again.
+type genChoice struct {
+	action  genAction
+	message string
+}
+
 // pluginGenerator runs the agent-assisted plugin generation flow. Its
 // collaborators are injected for testing.
 type pluginGenerator struct {
 	ask      func(ctx context.Context, prompt string) (string, error)
 	toolHelp func(ctx context.Context, tool string) string
-	confirm  func(prompt string) bool
+	// review presents the draft and returns what the user wants to do next.
+	// allowAccept is false when the current draft failed validation, so there
+	// is nothing worth saving yet.
+	review   func(allowAccept bool) genChoice
 	specsDir string
 	out      io.Writer
 }
 
-// run drives generation and returns the written spec path, or "" if the user
-// declined. Validation failures are retried once with the error fed back to
-// the agent.
+// run drives the generate-review-revise conversation and returns the written
+// spec path, or "" if the user quit. The number of rounds is up to the user:
+// each revision is a follow-up to the agent, and a spec that fails validation
+// is just another round rather than a hard failure.
 func (g *pluginGenerator) run(ctx context.Context, tool, hints string) (string, error) {
 	fmt.Fprintf(g.out, "Inspecting `%s --help`...\n", tool)
 	helpText := g.toolHelp(ctx, tool)
@@ -193,43 +212,49 @@ func (g *pluginGenerator) run(ctx context.Context, tool, hints string) (string, 
 	}
 
 	prompt := buildPluginGenPrompt(tool, helpText, hints)
-	var specTOML string
-	var spec *completion.PluginSpec
+	fmt.Fprintf(g.out, "Asking the agent to draft a completion plugin for %s...\n", tool)
 
-	for attempt := 1; ; attempt++ {
-		fmt.Fprintf(g.out, "Asking the agent to draft a completion plugin for %s...\n", tool)
+	for {
 		reply, err := g.ask(ctx, prompt)
 		if err != nil {
 			return "", fmt.Errorf("agent request failed: %w", err)
 		}
 
-		specTOML = extractPluginTOML(reply)
-		spec, err = validateGeneratedSpec(tool, specTOML)
-		if err == nil {
-			break
+		specTOML := extractPluginTOML(reply)
+		spec, validErr := validateGeneratedSpec(tool, specTOML)
+		if validErr == nil {
+			g.printPreview(tool, specTOML, spec)
+		} else {
+			fmt.Fprintf(g.out, "\nThe agent's spec failed validation: %v\n\nDraft:\n%s\n", validErr, specTOML)
 		}
-		if attempt >= pluginGenTries {
-			return "", fmt.Errorf("the agent's spec failed validation: %w\n\nDraft:\n%s", err, specTOML)
+
+		choice := g.review(validErr == nil)
+		switch choice.action {
+		case genQuit:
+			fmt.Fprintln(g.out, "Discarded.")
+			return "", nil
+		case genAccept:
+			if validErr != nil {
+				continue // Nothing valid to save; ask again.
+			}
+			return g.save(tool, specTOML)
 		}
-		fmt.Fprintf(g.out, "Draft failed validation (%v); asking the agent to fix it...\n", err)
-		prompt = buildPluginRetryPrompt(specTOML, err)
-	}
 
-	g.printPreview(tool, specTOML, spec)
-
-	path := filepath.Join(g.specsDir, tool+".toml")
-	confirmMsg := fmt.Sprintf("Save to %s? [y/N] ", path)
-	if _, err := os.Stat(path); err == nil {
-		confirmMsg = fmt.Sprintf("Overwrite existing %s? [y/N] ", path)
+		if validErr != nil {
+			prompt = buildPluginRetryPrompt(specTOML, validErr, choice.message)
+		} else {
+			prompt = buildPluginRevisePrompt(specTOML, choice.message)
+		}
+		fmt.Fprintln(g.out, "Asking the agent to revise...")
 	}
-	if !g.confirm(confirmMsg) {
-		fmt.Fprintln(g.out, "Discarded.")
-		return "", nil
-	}
+}
 
+// save writes the accepted spec, replacing any existing file for the tool.
+func (g *pluginGenerator) save(tool, specTOML string) (string, error) {
 	if err := os.MkdirAll(g.specsDir, 0o750); err != nil {
 		return "", fmt.Errorf("create %s: %w", g.specsDir, err)
 	}
+	path := filepath.Join(g.specsDir, tool+".toml")
 	if err := os.WriteFile(path, []byte(specTOML), 0o644); err != nil { //nolint:gosec // config file, not a secret
 		return "", fmt.Errorf("write %s: %w", path, err)
 	}
@@ -327,18 +352,52 @@ func runToolHelpCommand(ctx context.Context, tool string, args []string) string 
 	return out
 }
 
-func confirmOnStdin(prompt string) bool {
-	fmt.Print(prompt)
+// reviewOnStdin prompts for the next step. A bare word picks an action; a
+// revision may carry its instruction inline ("r also complete namespaces") or
+// be typed at the follow-up prompt. Anything unrecognized is treated as a
+// revision instruction, since that is what free text almost always is.
+func reviewOnStdin(allowAccept bool) genChoice {
 	reader := bufio.NewReader(os.Stdin)
-	input, err := reader.ReadString('\n')
-	if err != nil {
-		return false
-	}
-	switch strings.TrimSpace(strings.ToLower(input)) {
-	case "y", "yes":
-		return true
-	default:
-		return false
+	for {
+		if allowAccept {
+			fmt.Print("\n[a]ccept  [r]evise <what to change>  [q]uit: ")
+		} else {
+			fmt.Print("\n[r]evise <what to change>  [q]uit: ")
+		}
+
+		input, err := reader.ReadString('\n')
+		if err != nil {
+			return genChoice{action: genQuit}
+		}
+		input = strings.TrimSpace(input)
+
+		verb, rest, _ := strings.Cut(input, " ")
+		rest = strings.TrimSpace(rest)
+
+		switch strings.ToLower(verb) {
+		case "":
+			continue
+		case "q", "quit":
+			return genChoice{action: genQuit}
+		case "a", "accept":
+			if allowAccept {
+				return genChoice{action: genAccept}
+			}
+			fmt.Println("Nothing valid to accept yet.")
+			continue
+		case "r", "revise":
+			if rest == "" {
+				fmt.Print("What should change? (blank to let the agent retry): ")
+				line, err := reader.ReadString('\n')
+				if err != nil {
+					return genChoice{action: genQuit}
+				}
+				rest = strings.TrimSpace(line)
+			}
+			return genChoice{action: genRevise, message: rest}
+		default:
+			return genChoice{action: genRevise, message: input}
+		}
 	}
 }
 
@@ -405,12 +464,30 @@ func buildPluginGenPrompt(tool, helpText, hints string) string {
 	return b.String()
 }
 
-func buildPluginRetryPrompt(previousTOML string, validationErr error) string {
+func buildPluginRetryPrompt(previousTOML string, validationErr error, instruction string) string {
 	var b strings.Builder
 	b.WriteString("The plugin spec you produced failed validation.\n\nError: ")
 	b.WriteString(validationErr.Error())
 	b.WriteString("\n\nYour previous spec:\n")
 	b.WriteString(previousTOML)
+	if instruction != "" {
+		b.WriteString("\n\nThe user also asks: ")
+		b.WriteString(instruction)
+	}
 	b.WriteString("\n\nFix the problem and reply with ONLY the corrected TOML file content — no markdown fences, no commentary.")
+	return b.String()
+}
+
+// buildPluginRevisePrompt asks for a change to a spec that already validates.
+// The current spec is restated rather than relied on from conversation
+// history, so revision works on transports that keep no history.
+func buildPluginRevisePrompt(currentTOML, instruction string) string {
+	var b strings.Builder
+	b.WriteString("Revise this completion plugin spec.\n\nCurrent spec:\n")
+	b.WriteString(currentTOML)
+	b.WriteString("\n\nRequested change: ")
+	b.WriteString(instruction)
+	b.WriteString("\n\nKeep everything else intact. The same rules as before still apply: sources must be read-only, non-interactive, and fast, and you must not invent subcommands the tool does not have.")
+	b.WriteString("\n\nReply with ONLY the full revised TOML file content — no markdown fences, no commentary.")
 	return b.String()
 }
