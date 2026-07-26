@@ -4,6 +4,8 @@ package editor
 import (
 	"bytes"
 	"io"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -474,5 +476,52 @@ func TestDisplay_RenderCompletionMenu_WrapsLongColumns(t *testing.T) {
 	// cursorCol=17 + prefix=2 => wrapped restore column 9
 	if !strings.Contains(output, "\x1b[9C") {
 		t.Fatalf("menu should restore wrapped cursor column 9, got %q", output)
+	}
+}
+
+// menuRowWidths returns the visible width of each rendered completion menu
+// row, including the leading cursor-forward offset that positions it.
+func menuRowWidths(t *testing.T, output string) []int {
+	t.Helper()
+	var widths []int
+	for _, row := range strings.Split(output, "\r\n")[1:] {
+		// A row ends when the menu moves the cursor back up.
+		if idx := strings.Index(row, "\x1b["); idx >= 0 {
+			if up := regexp.MustCompile(`\x1b\[\d+A`).FindStringIndex(row); up != nil {
+				row = row[:up[0]]
+			}
+		}
+		indent := 0
+		if m := regexp.MustCompile(`^\x1b\[2K\x1b\[(\d+)C`).FindStringSubmatch(row); m != nil {
+			indent, _ = strconv.Atoi(m[1])
+		}
+		widths = append(widths, indent+visibleWidth(row))
+	}
+	return widths
+}
+
+// A menu row wider than the terminal wraps onto an extra physical row, but the
+// menu only moves the cursor back up by its logical row count. The cursor then
+// sits below the input line and the next render redraws the prompt there,
+// stacking a duplicate copy for every completion.
+func TestDisplay_RenderCompletionMenu_RowsFitTerminalWidth(t *testing.T) {
+	const width = 100
+	var out bytes.Buffer
+	d := NewDisplay(&out, width, 24)
+	d.SetPrompt("~/projects/hash on main ❯ ") // A Starship-sized prompt.
+	d.gutter = true
+
+	items := []CompletionItem{
+		{Text: "tfcace/hash", Description: "A POSIX shell with AI in the grammar: agent-native, local-first"},
+		{Text: "tfcace/homebrew-hash", Description: "Hash Homebrew Tap"},
+		{Text: "tfcace/agent-client-protocol", Description: "A protocol for connecting any editor to any agent"},
+	}
+
+	d.RenderCompletionMenu(items, 0, len("gh repo clone "), 0, len("gh repo clone "))
+
+	for i, got := range menuRowWidths(t, out.String()) {
+		if got > width {
+			t.Errorf("menu row %d is %d columns wide, terminal is %d; it will wrap and desync the cursor", i, got, width)
+		}
 	}
 }

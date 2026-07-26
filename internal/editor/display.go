@@ -956,6 +956,17 @@ type CompletionItem struct {
 	Description string
 }
 
+// descFixedCols is how many columns a menu row spends on everything except
+// the item text and the description: the optional scrollbar column, the space
+// before the text, the two-column gap after it, and the trailing space.
+func descFixedCols(hasScrollbar bool) int {
+	cols := 1 + 2 + 1
+	if hasScrollbar {
+		cols++
+	}
+	return cols
+}
+
 // RenderCompletionMenu draws the completion dropdown below the cursor.
 //
 //nolint:gocyclo // completion menu rendering requires layout and scroll calculations
@@ -1050,9 +1061,15 @@ func (d *Display) RenderCompletionMenu(items []CompletionItem, selected, startCo
 			sb.WriteByte(' ')
 		}
 
-		// Description (dimmed) - only render if we have room
+		// Description (dimmed) - only render if we have room.
+		//
+		// The budget must be measured from menuCol, where the row actually
+		// starts, not from startCol: menuCol includes the prompt/gutter prefix.
+		// A row wider than the terminal wraps onto an extra physical row, while
+		// the cursor-up below only accounts for logical rows, so the cursor ends
+		// up below the input line and the next render stacks a duplicate prompt.
 		if item.Description != "" {
-			maxDesc := d.width - startCol - maxTextWidth - 5
+			maxDesc := d.width - menuCol - maxTextWidth - descFixedCols(needsScrollbar)
 			if maxDesc > 3 { // Only render if we have room for at least some text
 				if i != selected {
 					sb.WriteString("\x1b[2m") // Dim
