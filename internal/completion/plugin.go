@@ -231,6 +231,26 @@ type PluginCompleter struct {
 
 	inflightMu sync.Mutex
 	inflight   map[string]*pluginSourceCall
+
+	readyMu sync.RWMutex
+	onReady func()
+}
+
+// SetOnReady registers a callback fired whenever a source finishes and fills
+// the cache. The UI uses it to refresh a "fetching" menu without another TAB.
+func (c *PluginCompleter) SetOnReady(fn func()) {
+	c.readyMu.Lock()
+	c.onReady = fn
+	c.readyMu.Unlock()
+}
+
+func (c *PluginCompleter) notifyReady() {
+	c.readyMu.RLock()
+	fn := c.onReady
+	c.readyMu.RUnlock()
+	if fn != nil {
+		fn()
+	}
 }
 
 // pluginSourceCall is a single in-flight source execution shared by all
@@ -372,6 +392,11 @@ func (c *PluginCompleter) Complete(ctx context.Context, line string, pos int) (R
 			continue
 		}
 		items, err := c.completeRule(ctx, rule, current)
+		if errors.Is(err, errPluginSourcePending) {
+			// Matched, but the data is still on its way. Say so instead of
+			// letting an unrelated completer answer for this argument.
+			return Result{Pending: true}, nil
+		}
 		if err != nil {
 			return Result{}, nil // Source failed (tool missing, daemon down): stay silent.
 		}
@@ -520,6 +545,10 @@ func (c *PluginCompleter) finishSourceCall(key string, call *pluginSourceCall, r
 	}
 	c.inflightMu.Unlock()
 	close(call.done)
+
+	if err == nil {
+		c.notifyReady()
+	}
 }
 
 // Prefetch warms the source cache when the input matches a plugin rule.

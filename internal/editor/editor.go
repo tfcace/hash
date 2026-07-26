@@ -37,6 +37,7 @@ type Config struct {
 	HistoryFunc             func(dir int, currentLine string) string     // -1=prev, +1=next; currentLine is for saving
 	CompleteFunc            func(line string, pos int) []Completion      // Tab completion
 	CompleteOutcomeFunc     func(line string, pos int) CompletionOutcome // Tab completion with timeout awareness; preferred over CompleteFunc
+	CompletionReadyCh       <-chan struct{}                              // Signals that a pending completion source landed
 	AgentCompleteLine       func(line string) bool                       // Reports whether Tab should submit the line for agent completion
 	PrefetchFunc            func(line string, pos int)                   // Background completion prefetch (on space)
 	SuggestionFunc          func(input string) string                    // Inline suggestion from history (Fish-style)
@@ -60,6 +61,9 @@ type Config struct {
 type CompletionOutcome struct {
 	Items    []Completion
 	TimedOut bool
+	// Pending reports that a completer matched the input but its data has not
+	// arrived yet. The editor says so and reopens the menu when it lands.
+	Pending bool
 }
 
 // Result is returned when the editor exits.
@@ -94,6 +98,7 @@ type Editor struct {
 	// Completion state
 	completionActive     bool
 	completionNotice     string // Transient "no matches"/"timed out" notice; cleared on next key
+	awaitingCompletion   string // Buffer contents a pending completion was requested for
 	completionItems      []Completion
 	completionIndex      int                    // Selected item in menu
 	completionPrefix     string                 // Text being completed (for replacement)
@@ -369,6 +374,8 @@ func (e *Editor) runEventLoop(ctx context.Context, sigCh <-chan os.Signal, keyCh
 			return Result{Canceled: true}, ctx.Err()
 		case <-sigCh:
 			e.handleResize()
+		case <-e.config.CompletionReadyCh:
+			e.handleCompletionReady()
 		case text, ok := <-e.ghostTextChan:
 			e.handleGhostTextUpdate(text, ok)
 		case err, ok := <-e.ghostErrChan:
@@ -388,6 +395,23 @@ func (e *Editor) runEventLoop(ctx context.Context, sigCh <-chan os.Signal, keyCh
 			}
 		}
 	}
+}
+
+// completionFetchingNotice is shown while a matched completion source is still
+// loading, in place of falling through to unrelated completions.
+const completionFetchingNotice = "fetching completions..."
+
+// handleCompletionReady retries a completion that was pending when the user
+// pressed Tab. A source landing for input the user has since moved on from is
+// ignored, so the menu never opens over a line it does not describe.
+func (e *Editor) handleCompletionReady() {
+	if e.awaitingCompletion == "" || e.awaitingCompletion != e.state.Buffer.Content() {
+		return
+	}
+	e.awaitingCompletion = ""
+	e.completionNotice = ""
+	e.triggerCompletion()
+	e.render()
 }
 
 // handleGhostTextUpdate processes ghost text streaming updates.
@@ -934,22 +958,31 @@ func (e *Editor) triggerCompletion() {
 	pos := e.cursorOffset()
 
 	var items []Completion
-	timedOut := false
+	timedOut, pending := false, false
 	if e.config.CompleteOutcomeFunc != nil {
 		outcome := e.config.CompleteOutcomeFunc(line, pos)
-		items, timedOut = outcome.Items, outcome.TimedOut
+		items, timedOut, pending = outcome.Items, outcome.TimedOut, outcome.Pending
 	} else {
 		items = e.config.CompleteFunc(line, pos)
 	}
 	if len(items) == 0 {
 		e.completionActive = false
-		if timedOut {
+		switch {
+		case pending:
+			// Matched, but the source is still fetching. Remember what we asked
+			// for so a late arrival for stale input can be discarded.
+			e.completionNotice = completionFetchingNotice
+			e.awaitingCompletion = line
+		case timedOut:
 			e.completionNotice = "completion timed out"
-		} else {
+			e.awaitingCompletion = ""
+		default:
 			e.completionNotice = "no matches"
+			e.awaitingCompletion = ""
 		}
 		return
 	}
+	e.awaitingCompletion = ""
 
 	// Find the word being completed for replacement
 	// Use current line only (not full buffer content) for prefix extraction

@@ -20,7 +20,7 @@ func makeEditorCompleteOutcomeFunc(router *completion.Router) func(string, int) 
 		timedOut := errors.Is(err, context.DeadlineExceeded) ||
 			(len(result.Items) == 0 && errors.Is(ctx.Err(), context.DeadlineExceeded))
 		if err != nil || len(result.Items) == 0 {
-			return editor.CompletionOutcome{TimedOut: timedOut}
+			return editor.CompletionOutcome{TimedOut: timedOut, Pending: result.Pending}
 		}
 
 		items := make([]editor.Completion, len(result.Items))

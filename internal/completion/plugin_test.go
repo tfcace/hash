@@ -1010,3 +1010,58 @@ func containsArg(argv []string, want string) bool {
 	}
 	return false
 }
+
+// A source that has not landed yet must be reported as pending, so callers can
+// say "fetching" instead of falling through to unrelated completions.
+func TestPluginCompleter_ReportsPendingWhileSourceRuns(t *testing.T) {
+	release := make(chan struct{})
+	defer close(release)
+	runner := func(ctx context.Context, argv []string, timeout time.Duration) ([]string, error) {
+		<-release
+		return []string{"abc123\tweb"}, nil
+	}
+	c := newTestPluginCompleter(t, testPluginSpec, runner)
+
+	line := "docker rm "
+	result, err := c.Complete(context.Background(), line, len(line))
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if len(result.Items) != 0 {
+		t.Fatalf("items = %+v, want none while loading", result.Items)
+	}
+	if !result.Pending {
+		t.Error("result should be marked pending while the source is still running")
+	}
+}
+
+// No rule matched, so nothing is pending and other completers should run.
+func TestPluginCompleter_NotPendingWhenNoRuleMatches(t *testing.T) {
+	c := newTestPluginCompleter(t, testPluginSpec, staticRunner([]string{"abc123\tweb"}))
+
+	line := "docker push "
+	result, err := c.Complete(context.Background(), line, len(line))
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if result.Pending {
+		t.Error("no rule matched, so nothing should be pending")
+	}
+}
+
+// The completer signals when a source lands so the UI can refresh itself
+// without the user pressing TAB again.
+func TestPluginCompleter_NotifiesWhenSourceLands(t *testing.T) {
+	ready := make(chan struct{}, 4)
+	c := newTestPluginCompleter(t, testPluginSpec, staticRunner([]string{"abc123\tweb"}))
+	c.SetOnReady(func() { ready <- struct{}{} })
+
+	line := "docker rm "
+	c.Prefetch(line, len(line))
+
+	select {
+	case <-ready:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no ready notification after the source landed")
+	}
+}

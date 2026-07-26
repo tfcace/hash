@@ -800,3 +800,54 @@ func TestRouter_EnvVarCompletion(t *testing.T) {
 		t.Errorf("Expected $HASH_SRC, got %s", result.Items[0].Value)
 	}
 }
+
+// pendingCompleter matches the input but has no data yet.
+type pendingCompleter struct{}
+
+func (pendingCompleter) Name() string { return "pending" }
+func (pendingCompleter) Complete(ctx context.Context, line string, pos int) (Result, error) {
+	return Result{Pending: true}, nil
+}
+
+// itemsCompleter always answers, standing in for the filesystem fallback.
+type itemsCompleter struct{ items []Item }
+
+func (itemsCompleter) Name() string { return "items" }
+func (c itemsCompleter) Complete(ctx context.Context, line string, pos int) (Result, error) {
+	return Result{Items: c.items}, nil
+}
+
+// A pending higher-priority completer owns the argument: answering it with
+// filenames would be actively wrong, so the router must stop and report
+// pending instead.
+func TestRouter_PendingCompleterStopsFallthrough(t *testing.T) {
+	r := NewRouter()
+	r.Register(itemsCompleter{items: []Item{{Value: "some-file.go"}}}, PriorityFilesystem)
+	r.Register(pendingCompleter{}, PriorityPlugin)
+
+	result, err := r.Complete(context.Background(), "docker rm ", len("docker rm "))
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if len(result.Items) != 0 {
+		t.Errorf("items = %+v, want none while a matching completer is pending", result.Items)
+	}
+	if !result.Pending {
+		t.Error("router should report pending so the UI can say fetching")
+	}
+}
+
+// Nothing pending: the fallback still answers as before.
+func TestRouter_FallsThroughWhenNothingPending(t *testing.T) {
+	r := NewRouter()
+	r.Register(itemsCompleter{items: []Item{{Value: "some-file.go"}}}, PriorityFilesystem)
+	r.Register(itemsCompleter{}, PriorityPlugin)
+
+	result, err := r.Complete(context.Background(), "ls ", len("ls "))
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if len(result.Items) != 1 {
+		t.Errorf("items = %+v, want the fallback result", result.Items)
+	}
+}

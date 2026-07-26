@@ -141,6 +141,8 @@ func New(cfg *config.Config) (*Shell, error) {
 	// Semantic completions for common commands (ssh, make, kill, npm, etc.)
 	router.Register(completion.NewSemanticCompleter(), completion.PrioritySemantic)
 
+	completionReadyCh := make(chan struct{}, 1)
+
 	// Declarative completion plugins: built-in specs (docker) plus user specs
 	// from <config>/completions/*.toml. Registered ahead of semantic so user
 	// plugins can override the built-in handlers.
@@ -151,6 +153,15 @@ func New(cfg *config.Config) (*Shell, error) {
 			fmt.Fprintf(os.Stderr, "hash: warning: completion plugin: %v\n", pluginErr)
 		}
 		pluginCompleter = completion.NewPluginCompleter(pluginSpecs)
+		// Wake the editor when a slow source lands so a "fetching" menu can
+		// fill itself in without the user pressing Tab again. Non-blocking:
+		// one pending wake-up is enough to trigger a refresh.
+		pluginCompleter.SetOnReady(func() {
+			select {
+			case completionReadyCh <- struct{}{}:
+			default:
+			}
+		})
 		router.Register(pluginCompleter, completion.PriorityPlugin)
 	}
 
@@ -333,6 +344,7 @@ func New(cfg *config.Config) (*Shell, error) {
 		InputBgColor:        "",
 		ScrollbarColor:      colorPalette.Primary,
 		CompleteOutcomeFunc: makeEditorCompleteOutcomeFunc(router),
+		CompletionReadyCh:   completionReadyCh,
 		PrefetchFunc:        makeEditorPrefetchFunc(router),
 		SuggestionFunc:      makeEditorSuggestionFunc(historyStore, predictor),
 		MaxPasteSize:        cfg.Input.ParseMaxPasteSize(),

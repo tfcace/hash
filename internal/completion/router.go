@@ -132,6 +132,19 @@ func (r *Router) Complete(ctx context.Context, line string, pos int) (Result, er
 			continue // Try next completer on error
 		}
 
+		// A completer that matched but is still fetching owns this argument.
+		// Falling through would answer it with something unrelated (filenames
+		// for a container name), so stop and let the caller say "fetching".
+		if result.Pending && len(result.Items) == 0 {
+			if traceEnabled {
+				trace.Emit("completion", "router_pending", trace.LevelDetailed, map[string]any{
+					"name":        rc.completer.Name(),
+					"duration_ms": float64(time.Since(start).Microseconds()) / 1000.0,
+				})
+			}
+			return Result{Pending: true}, nil
+		}
+
 		if len(result.Items) > 0 {
 			result = r.finalizeResult(result, query)
 			if traceEnabled {

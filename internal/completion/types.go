@@ -17,6 +17,10 @@ type Item struct {
 type Result struct {
 	Items  []Item // List of completions
 	Prefix string // Common prefix to preserve
+	// Pending reports that a completer matched the input but its data has not
+	// arrived yet. Callers should say so rather than falling through to an
+	// unrelated completer, and refresh when the data lands.
+	Pending bool
 }
 
 func limitCompletionItems(items []Item) []Item {
