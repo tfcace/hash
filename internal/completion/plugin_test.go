@@ -591,6 +591,98 @@ func TestLoadPluginSpecs_MissingDir(t *testing.T) {
 	}
 }
 
+func TestPluginCompleter_SlowSourceSurvivesUIDeadline(t *testing.T) {
+	var calls atomic.Int64
+	release := make(chan struct{})
+	runner := func(ctx context.Context, argv []string, timeout time.Duration) ([]string, error) {
+		calls.Add(1)
+		<-release
+		return []string{"abc123\tweb"}, nil
+	}
+	c := newTestPluginCompleter(t, testPluginSpec, runner)
+
+	// TAB with an expired UI deadline: no items, but the source keeps going.
+	line := "docker rm "
+	shortCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	result, err := c.Complete(shortCtx, line, len(line))
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if len(result.Items) != 0 {
+		t.Fatalf("items = %+v, want none under expired deadline", result.Items)
+	}
+
+	// Second TAB joins the still-running call instead of starting a new one.
+	close(release)
+	result, err = c.Complete(context.Background(), line, len(line))
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if len(result.Items) != 1 {
+		t.Fatalf("items = %+v, want 1 after source finished", result.Items)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("runner calls = %d, want 1 (shared in-flight call)", got)
+	}
+}
+
+func TestPluginCompleter_PrefetchWarmsCache(t *testing.T) {
+	var calls atomic.Int64
+	ran := make(chan struct{}, 8)
+	runner := func(ctx context.Context, argv []string, timeout time.Duration) ([]string, error) {
+		calls.Add(1)
+		ran <- struct{}{}
+		return []string{"abc123\tweb"}, nil
+	}
+	c := newTestPluginCompleter(t, testPluginSpec, runner)
+
+	line := "docker rm "
+	c.Prefetch(line, len(line))
+
+	select {
+	case <-ran:
+	case <-time.After(5 * time.Second):
+		t.Fatal("prefetch never ran the source")
+	}
+
+	// The cache fill races with the source returning; a warm cache or joining
+	// the in-flight call are both fine — either way TAB gets items and the
+	// source ran exactly once.
+	result, err := c.Complete(context.Background(), line, len(line))
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if len(result.Items) != 1 {
+		t.Fatalf("items = %+v, want 1 from prefetched source", result.Items)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("runner calls = %d, want 1", got)
+	}
+
+	// Prefetching again while cached is a no-op.
+	c.Prefetch(line, len(line))
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("runner calls after cached prefetch = %d, want 1", got)
+	}
+}
+
+func TestPluginCompleter_PrefetchIgnoresNonMatchingInput(t *testing.T) {
+	var calls atomic.Int64
+	runner := func(ctx context.Context, argv []string, timeout time.Duration) ([]string, error) {
+		calls.Add(1)
+		return []string{"abc123\tweb"}, nil
+	}
+	c := newTestPluginCompleter(t, testPluginSpec, runner)
+
+	for _, line := range []string{"docker ", "docker push ", "ls ", "docker rm -"} {
+		c.Prefetch(line, len(line))
+	}
+	if got := calls.Load(); got != 0 {
+		t.Fatalf("runner calls = %d, want 0 for non-matching prefetches", got)
+	}
+}
+
 func TestPluginCompleter_SetUserSpecsReload(t *testing.T) {
 	c := NewPluginCompleter(nil)
 	c.runner = staticRunner([]string{"api"})

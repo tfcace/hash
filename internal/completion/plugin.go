@@ -214,6 +214,18 @@ type PluginCompleter struct {
 	runner  pluginRunner
 	cache   stringListCache
 	now     func() time.Time
+
+	inflightMu sync.Mutex
+	inflight   map[string]*pluginSourceCall
+}
+
+// pluginSourceCall is a single in-flight source execution shared by all
+// waiters for the same exec argv.
+type pluginSourceCall struct {
+	started time.Time
+	done    chan struct{}
+	lines   []string
+	err     error
 }
 
 // pluginEntry is the handler for a single command, tracking which spec it
@@ -423,18 +435,99 @@ func (c *PluginCompleter) completeRule(ctx context.Context, rule *PluginRule, cu
 }
 
 func (c *PluginCompleter) sourceLines(ctx context.Context, rule *PluginRule) ([]string, error) {
-	key := strings.Join(rule.Source.Exec, "\x00")
-	now := c.now()
-	if lines, ok := c.cache.get(key, now); ok {
+	key := sourceCacheKey(rule)
+	if lines, ok := c.cache.get(key, c.now()); ok {
 		return lines, nil
 	}
 
-	lines, err := c.runner(ctx, rule.Source.Exec, rule.timeout)
-	if err != nil {
-		return nil, err
+	call := c.startSourceCall(key, rule)
+	select {
+	case <-ctx.Done():
+		// The UI deadline fired first. The source keeps running in the
+		// background and fills the cache, so the next TAB answers instantly.
+		return nil, ctx.Err()
+	case <-call.done:
+		return append([]string(nil), call.lines...), call.err
 	}
-	c.cache.set(key, lines, c.now().Add(rule.cacheTTL))
-	return lines, nil
+}
+
+func sourceCacheKey(rule *PluginRule) string {
+	return strings.Join(rule.Source.Exec, "\x00")
+}
+
+// startSourceCall returns the in-flight call for the source, starting one if
+// needed. Execution is detached from the caller's context and bounded only by
+// the rule's own timeout, so completion UI deadlines can't kill a slow source
+// (e.g. docker ps on a cold daemon) before it ever manages to fill the cache.
+func (c *PluginCompleter) startSourceCall(key string, rule *PluginRule) *pluginSourceCall {
+	now := c.now()
+	c.inflightMu.Lock()
+	if call, ok := c.inflight[key]; ok && !contextReadCallIsStale(call.started, now, 0) {
+		c.inflightMu.Unlock()
+		return call
+	}
+	call := &pluginSourceCall{started: now, done: make(chan struct{})}
+	if c.inflight == nil {
+		c.inflight = make(map[string]*pluginSourceCall)
+	}
+	c.inflight[key] = call
+	c.inflightMu.Unlock()
+
+	go c.finishSourceCall(key, call, rule)
+	return call
+}
+
+func (c *PluginCompleter) finishSourceCall(key string, call *pluginSourceCall, rule *PluginRule) {
+	lines, err := c.runner(context.Background(), rule.Source.Exec, rule.timeout)
+	call.lines, call.err = lines, err
+	if err == nil {
+		c.cache.set(key, lines, c.now().Add(rule.cacheTTL))
+	}
+
+	c.inflightMu.Lock()
+	if c.inflight[key] == call {
+		delete(c.inflight, key)
+	}
+	c.inflightMu.Unlock()
+	close(call.done)
+}
+
+// Prefetch warms the source cache when the input matches a plugin rule.
+// The router calls this when the user types a space, giving sources a head
+// start over the completion UI deadline.
+func (c *PluginCompleter) Prefetch(line string, pos int) {
+	pipeLine, pipePos := ExtractPipeContext(line, pos)
+	segment := pipeLine[:pipePos]
+	trailingSpace := strings.HasSuffix(segment, " ")
+	parts := strings.Fields(segment)
+	if len(parts) == 0 {
+		return
+	}
+	if len(parts) < 2 && !trailingSpace {
+		return
+	}
+
+	rules, ok := c.commandRules(parts[0])
+	if !ok {
+		return
+	}
+
+	current, args := splitCurrentArg(parts[1:], trailingSpace)
+	if strings.HasPrefix(current, "-") {
+		return
+	}
+
+	positionals := nonFlagArgs(args)
+	for _, rule := range rules {
+		if !rule.matches(positionals) {
+			continue
+		}
+		key := sourceCacheKey(rule)
+		if _, cached := c.cache.get(key, c.now()); !cached {
+			c.startSourceCall(key, rule)
+		}
+		return
+	}
 }
 
 // parseLine splits an output line into a completion value and description.
