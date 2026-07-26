@@ -10,11 +10,12 @@ name = "docker"
 description = "Containers, images, volumes, and networks for docker"
 commands = ["docker"]
 
-# Running containers.
+# Running containers. "restart" is deliberately absent: it accepts stopped
+# containers too, so it lives with the any-state rule below.
 [[rules]]
 subcommands = [
-  "stop", "kill", "restart", "pause", "unpause", "attach", "top", "stats", "port", "update",
-  "container stop", "container kill", "container restart", "container pause",
+  "stop", "kill", "pause", "unpause", "attach", "top", "stats", "port", "update",
+  "container stop", "container kill", "container pause",
   "container unpause", "container attach", "container top", "container stats",
   "container port", "container update",
 ]
@@ -42,9 +43,10 @@ cache_ttl = "30s"
 # All containers (any state).
 [[rules]]
 subcommands = [
-  "rm", "inspect", "logs", "wait", "diff", "commit", "export", "rename", "cp",
+  "rm", "inspect", "logs", "wait", "diff", "commit", "export", "rename", "cp", "restart",
   "container rm", "container inspect", "container logs", "container wait",
   "container diff", "container commit", "container export", "container rename", "container cp",
+  "container restart",
 ]
 [rules.source]
 exec = ["docker", "ps", "-a", "--format", "{{.Names}}\t{{.ID}}  {{.Image}}  ({{.Status}})"]
@@ -109,12 +111,73 @@ cache_ttl = "30s"
 
 # Networks.
 [[rules]]
-subcommands = ["network rm", "network inspect", "network connect", "network disconnect"]
+subcommands = ["network rm", "network inspect"]
 [rules.source]
 exec = ["docker", "network", "ls", "--format", "{{.Name}}\t{{.ID}}  {{.Driver}}"]
 delimiter = "\t"
 value_column = 1
 description_column = 2
+timeout = "3s"
+cache_ttl = "30s"
+
+# docker network connect|disconnect NETWORK CONTAINER: the first positional is
+# a network, everything after it is a container. These two rules must stay in
+# this order — the max_args = 1 rule stops matching once the network is given,
+# so the container rule below picks up the rest.
+[[rules]]
+subcommands = ["network connect", "network disconnect"]
+max_args = 1
+[rules.source]
+exec = ["docker", "network", "ls", "--format", "{{.Name}}\t{{.ID}}  {{.Driver}}"]
+delimiter = "\t"
+value_column = 1
+description_column = 2
+timeout = "3s"
+cache_ttl = "30s"
+
+[[rules]]
+subcommands = ["network connect", "network disconnect"]
+[rules.source]
+exec = ["docker", "ps", "--format", "{{.Names}}\t{{.ID}}  {{.Image}}  ({{.Status}})"]
+delimiter = "\t"
+value_column = 1
+description_column = 2
+timeout = "3s"
+cache_ttl = "30s"
+
+# Contexts.
+[[rules]]
+subcommands = [
+  "context use", "context rm", "context inspect", "context update",
+  "context export", "context show",
+]
+[rules.source]
+exec = ["docker", "context", "ls", "--format", "{{.Name}}\t{{.Description}}"]
+delimiter = "\t"
+value_column = 1
+description_column = 2
+timeout = "3s"
+cache_ttl = "30s"
+
+# Installed plugins.
+[[rules]]
+subcommands = [
+  "plugin rm", "plugin enable", "plugin disable", "plugin inspect",
+  "plugin push", "plugin set", "plugin upgrade",
+]
+[rules.source]
+exec = ["docker", "plugin", "ls", "--format", "{{.Name}}\t{{.Description}}"]
+delimiter = "\t"
+value_column = 1
+description_column = 2
+timeout = "3s"
+cache_ttl = "30s"
+
+# Buildx builders.
+[[rules]]
+subcommands = ["builder use", "builder rm", "builder inspect", "builder stop"]
+[rules.source]
+exec = ["docker", "builder", "ls", "--format", "{{.Name}}"]
 timeout = "3s"
 cache_ttl = "30s"
 `

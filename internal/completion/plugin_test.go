@@ -480,6 +480,78 @@ func TestNewPluginCompleter_BuiltinDocker(t *testing.T) {
 	}
 }
 
+// dockerSpecArgv returns the source argv the built-in docker spec would run
+// for the given line, or nil when no rule matches.
+func dockerSpecArgv(t *testing.T, line string) []string {
+	t.Helper()
+	var gotArgv []string
+	c := NewPluginCompleter(nil)
+	c.runner = func(ctx context.Context, argv []string, timeout time.Duration) ([]string, error) {
+		gotArgv = argv
+		return nil, nil
+	}
+	if _, err := c.Complete(context.Background(), line, len(line)); err != nil {
+		t.Fatalf("Complete(%q): %v", line, err)
+	}
+	return gotArgv
+}
+
+// docker network connect/disconnect take NETWORK first, then CONTAINER.
+func TestBuiltinDocker_NetworkSecondArgIsContainer(t *testing.T) {
+	for _, sub := range []string{"connect", "disconnect"} {
+		first := dockerSpecArgv(t, "docker network "+sub+" ")
+		if len(first) < 3 || first[1] != "network" || first[2] != "ls" {
+			t.Errorf("%s first positional: argv = %v, want docker network ls", sub, first)
+		}
+
+		second := dockerSpecArgv(t, "docker network "+sub+" mynet ")
+		if len(second) < 2 || second[1] != "ps" {
+			t.Errorf("%s second positional: argv = %v, want docker ps (containers)", sub, second)
+		}
+	}
+}
+
+func TestBuiltinDocker_ContextCompletion(t *testing.T) {
+	for _, sub := range []string{"use", "rm", "inspect", "update", "export", "show"} {
+		argv := dockerSpecArgv(t, "docker context "+sub+" ")
+		if len(argv) < 3 || argv[1] != "context" || argv[2] != "ls" {
+			t.Errorf("docker context %s: argv = %v, want docker context ls", sub, argv)
+		}
+	}
+}
+
+func TestBuiltinDocker_PluginCompletion(t *testing.T) {
+	for _, sub := range []string{"rm", "enable", "disable", "inspect", "push", "set", "upgrade"} {
+		argv := dockerSpecArgv(t, "docker plugin "+sub+" ")
+		if len(argv) < 3 || argv[1] != "plugin" || argv[2] != "ls" {
+			t.Errorf("docker plugin %s: argv = %v, want docker plugin ls", sub, argv)
+		}
+	}
+}
+
+func TestBuiltinDocker_BuilderCompletion(t *testing.T) {
+	for _, sub := range []string{"use", "rm", "inspect", "stop"} {
+		argv := dockerSpecArgv(t, "docker builder "+sub+" ")
+		if len(argv) < 3 || argv[1] != "builder" || argv[2] != "ls" {
+			t.Errorf("docker builder %s: argv = %v, want docker builder ls", sub, argv)
+		}
+	}
+}
+
+// docker restart works on stopped containers too, so it must not be limited
+// to the running set.
+func TestBuiltinDocker_RestartListsAllContainers(t *testing.T) {
+	for _, line := range []string{"docker restart ", "docker container restart "} {
+		argv := dockerSpecArgv(t, line)
+		if len(argv) < 2 || argv[1] != "ps" {
+			t.Fatalf("%q: argv = %v, want docker ps", line, argv)
+		}
+		if !containsArg(argv, "-a") {
+			t.Errorf("%q: argv = %v, want -a (restart accepts stopped containers)", line, argv)
+		}
+	}
+}
+
 func TestNewPluginCompleter_BuiltinDockerRunImages(t *testing.T) {
 	var gotArgv []string
 	runner := func(ctx context.Context, argv []string, timeout time.Duration) ([]string, error) {
