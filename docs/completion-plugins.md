@@ -125,13 +125,28 @@ are dropped, and candidates are filtered by what has already been typed
   plugin can override handlers like `ssh` or `kill`.
 - **Failure is silent**: if the source command fails (tool not installed,
   docker daemon not running), the plugin produces no items and completion
-  falls through to the next tier. Slow sources are cut off by `timeout` and
-  by the completion UI's own deadline.
+  falls through to the next tier. Slow sources are cut off by `timeout`.
 - **Isolation**: sources run in their own session with stdin from
   `/dev/null`, and are killed as a group on cancellation. They should be
   read-only, fast, and non-interactive.
 - **Caching**: output is cached per `exec` argv for `cache_ttl`, so holding
   TAB or typing quickly does not hammer the source command.
+- **Cold TAB does not block**: a source with nothing cached gets a short
+  grace period (40ms) to answer; past that, completion falls through to the
+  next tier while the source keeps running in the background, so the next
+  TAB is instant. Sources slower than that grace period are therefore
+  answered from the second TAB onward, not the first.
+- **Stale results are served while refreshing**: once `cache_ttl` expires,
+  the previous output is still offered (for up to a minute) while a refresh
+  runs in the background. This keeps TAB instant for sources that take
+  longer than the completion deadline, so `cache_ttl` controls how fresh
+  the data is, not whether completion feels responsive.
+
+Set `timeout` generously. It bounds a background process, not the TAB you
+are waiting on, and a source killed by its timeout caches nothing, so it
+fails identically on every attempt. The built-in `docker` spec uses
+`timeout = "3s"` and `cache_ttl = "30s"` because `docker ps` regularly takes
+several hundred milliseconds against a real daemon.
 
 ## More examples
 

@@ -26,6 +26,10 @@ description_column = 2
 cache_ttl = "1s"
 `
 
+// editorDeadlineForTest mirrors shell.editorCompletionTimeout, the budget the
+// editor gives the whole completion router for one TAB.
+const editorDeadlineForTest = 150 * time.Millisecond
+
 func newTestPluginCompleter(t *testing.T, specTOML string, runner pluginRunner) *PluginCompleter {
 	t.Helper()
 	spec, err := ParsePluginSpec([]byte(specTOML))
@@ -331,6 +335,7 @@ func TestPluginCompleter_CachesSourceOutput(t *testing.T) {
 		return []string{"abc123\tweb"}, nil
 	}
 	c := newTestPluginCompleter(t, testPluginSpec, runner)
+	clock := newTestClock(c)
 
 	line := "docker rm "
 	for i := 0; i < 3; i++ {
@@ -342,14 +347,28 @@ func TestPluginCompleter_CachesSourceOutput(t *testing.T) {
 		t.Fatalf("runner calls = %d, want 1 (cached)", got)
 	}
 
-	// Expired cache runs the source again.
-	c.now = func() time.Time { return time.Now().Add(time.Minute) }
+	// Expired cache runs the source again, in the background.
+	clock.advance(time.Minute)
 	if _, err := c.Complete(context.Background(), line, len(line)); err != nil {
 		t.Fatalf("Complete: %v", err)
 	}
-	if got := calls.Load(); got != 2 {
-		t.Fatalf("runner calls after expiry = %d, want 2", got)
+	waitForCalls(t, &calls, 2)
+}
+
+// waitForCalls waits for a background source refresh to reach want.
+func waitForCalls(t *testing.T, calls *atomic.Int64, want int64) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if got := calls.Load(); got >= want {
+			if got != want {
+				t.Fatalf("runner calls = %d, want %d", got, want)
+			}
+			return
+		}
+		time.Sleep(time.Millisecond)
 	}
+	t.Fatalf("runner calls = %d, want %d", calls.Load(), want)
 }
 
 func TestPluginCompleter_DeduplicatesValues(t *testing.T) {
@@ -624,6 +643,155 @@ func TestPluginCompleter_SlowSourceSurvivesUIDeadline(t *testing.T) {
 	}
 	if got := calls.Load(); got != 1 {
 		t.Fatalf("runner calls = %d, want 1 (shared in-flight call)", got)
+	}
+}
+
+func TestPluginCompleter_SlowSourceLeavesDeadlineForFallback(t *testing.T) {
+	release := make(chan struct{})
+	defer close(release)
+	runner := func(ctx context.Context, argv []string, timeout time.Duration) ([]string, error) {
+		<-release
+		return []string{"abc123\tweb"}, nil
+	}
+	c := newTestPluginCompleter(t, testPluginSpec, runner)
+
+	// The editor gives the whole router 150ms. A cold plugin source must give
+	// up early enough that lower-priority completers still get a turn.
+	line := "docker rm "
+	ctx, cancel := context.WithTimeout(context.Background(), editorDeadlineForTest)
+	defer cancel()
+
+	start := time.Now()
+	result, err := c.Complete(ctx, line, len(line))
+	elapsed := time.Since(start)
+
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if len(result.Items) != 0 {
+		t.Fatalf("items = %+v, want none while the source is still running", result.Items)
+	}
+	if elapsed >= editorDeadlineForTest {
+		t.Fatalf("Complete blocked for %v, want it to give up before the %v deadline", elapsed, editorDeadlineForTest)
+	}
+	if ctx.Err() != nil {
+		t.Fatalf("completion deadline was consumed: %v", ctx.Err())
+	}
+}
+
+func TestPluginCompleter_ServesStaleWhileRefreshing(t *testing.T) {
+	var calls atomic.Int64
+	refreshed := make(chan struct{}, 4)
+	runner := func(ctx context.Context, argv []string, timeout time.Duration) ([]string, error) {
+		n := calls.Add(1)
+		if n == 1 {
+			return []string{"abc123\told"}, nil
+		}
+		defer func() { refreshed <- struct{}{} }()
+		return []string{"def456\tnew"}, nil
+	}
+	c := newTestPluginCompleter(t, testPluginSpec, runner)
+	clock := newTestClock(c)
+
+	line := "docker rm "
+	result, err := c.Complete(context.Background(), line, len(line))
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if len(result.Items) != 1 || result.Items[0].Value != "abc123" {
+		t.Fatalf("items = %+v, want the first source result", result.Items)
+	}
+
+	// testPluginSpec sets cache_ttl = 1s; step past it but stay inside the
+	// stale grace window. Background refreshes read the clock, so shifting it
+	// has to be synchronized.
+	clock.advance(2 * time.Second)
+
+	// The expired entry must be served immediately rather than waiting on the
+	// refresh, so TAB stays instant.
+	start := time.Now()
+	result, err = c.Complete(context.Background(), line, len(line))
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if len(result.Items) != 1 || result.Items[0].Value != "abc123" {
+		t.Fatalf("items = %+v, want the stale entry while refreshing", result.Items)
+	}
+	if elapsed >= pluginSourceWait {
+		t.Fatalf("stale read took %v, want an immediate answer", elapsed)
+	}
+
+	// The background refresh replaces it.
+	select {
+	case <-refreshed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("stale read did not trigger a background refresh")
+	}
+
+	result, err = c.Complete(context.Background(), line, len(line))
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if len(result.Items) != 1 || result.Items[0].Value != "def456" {
+		t.Fatalf("items = %+v, want the refreshed result", result.Items)
+	}
+}
+
+// testClock replaces a completer's clock with one that can be advanced from
+// the test goroutine while background refreshes read it.
+type testClock struct{ offset atomic.Int64 }
+
+func newTestClock(c *PluginCompleter) *testClock {
+	clock := &testClock{}
+	c.now = func() time.Time { return time.Now().Add(time.Duration(clock.offset.Load())) }
+	return clock
+}
+
+func (c *testClock) advance(d time.Duration) { c.offset.Add(int64(d)) }
+
+func TestPluginCompleter_StaleCacheExpiresAfterGrace(t *testing.T) {
+	var calls atomic.Int64
+	release := make(chan struct{})
+	runner := func(ctx context.Context, argv []string, timeout time.Duration) ([]string, error) {
+		if calls.Add(1) == 1 {
+			return []string{"abc123\told"}, nil
+		}
+		<-release
+		return nil, errors.New("docker daemon is gone")
+	}
+	defer close(release)
+	c := newTestPluginCompleter(t, testPluginSpec, runner)
+	clock := newTestClock(c)
+
+	line := "docker rm "
+	if _, err := c.Complete(context.Background(), line, len(line)); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+
+	// Well past cache_ttl + the stale grace: the entry must not be served.
+	clock.advance(pluginStaleGrace + time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), editorDeadlineForTest)
+	defer cancel()
+	result, err := c.Complete(ctx, line, len(line))
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if len(result.Items) != 0 {
+		t.Fatalf("items = %+v, want none once the stale grace expired", result.Items)
+	}
+}
+
+func TestBuiltinDockerSpec_TimeoutsSuitForRealDaemon(t *testing.T) {
+	spec := mustParsePluginSpec(builtinDockerSpec)
+	for i := range spec.Rules {
+		rule := &spec.Rules[i]
+		if rule.timeout < time.Second {
+			t.Errorf("rules[%d] timeout = %v, want at least 1s (docker ps is routinely slower than the default)", i, rule.timeout)
+		}
+		if rule.cacheTTL < 10*time.Second {
+			t.Errorf("rules[%d] cache_ttl = %v, want at least 10s so warm TABs stay warm", i, rule.cacheTTL)
+		}
 	}
 }
 

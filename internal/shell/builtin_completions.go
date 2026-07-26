@@ -357,8 +357,11 @@ exec = ["cmd", "arg"]           # required argv, run without a shell
 delimiter = "\t"                # optional column separator (default: whitespace)
 value_column = 1                # 1-based column inserted into the command line
 description_column = 2          # optional 1-based column shown next to the value
-timeout = "500ms"               # optional
-cache_ttl = "2s"                # optional; raise for slow/stable sources
+timeout = "3s"                  # optional; bounds a background process, not the TAB.
+                                # A source killed by its timeout caches nothing and
+                                # fails the same way every time, so be generous.
+cache_ttl = "30s"               # optional; expired results are still served while a
+                                # refresh runs in the background, so prefer 10s-60s
 
 Example (systemd units):
 

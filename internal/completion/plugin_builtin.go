@@ -23,6 +23,8 @@ exec = ["docker", "ps", "--format", "{{.Names}}\t{{.ID}}  {{.Image}}  ({{.Status
 delimiter = "\t"
 value_column = 1
 description_column = 2
+timeout = "3s"
+cache_ttl = "30s"
 
 # Running containers where only the first positional is a container
 # (what follows is a command to run inside it).
@@ -34,6 +36,8 @@ exec = ["docker", "ps", "--format", "{{.Names}}\t{{.ID}}  {{.Image}}  ({{.Status
 delimiter = "\t"
 value_column = 1
 description_column = 2
+timeout = "3s"
+cache_ttl = "30s"
 
 # All containers (any state).
 [[rules]]
@@ -47,6 +51,8 @@ exec = ["docker", "ps", "-a", "--format", "{{.Names}}\t{{.ID}}  {{.Image}}  ({{.
 delimiter = "\t"
 value_column = 1
 description_column = 2
+timeout = "3s"
+cache_ttl = "30s"
 
 # Stopped containers.
 [[rules]]
@@ -60,6 +66,8 @@ exec = [
 delimiter = "\t"
 value_column = 1
 description_column = 2
+timeout = "3s"
+cache_ttl = "30s"
 
 # Images where only the first positional is an image
 # (docker run IMAGE cmd..., docker create IMAGE cmd...).
@@ -71,6 +79,8 @@ exec = ["docker", "images", "--filter", "dangling=false", "--format", "{{.Reposi
 delimiter = "\t"
 value_column = 1
 description_column = 2
+timeout = "3s"
+cache_ttl = "30s"
 
 # Images.
 [[rules]]
@@ -83,6 +93,8 @@ exec = ["docker", "images", "--filter", "dangling=false", "--format", "{{.Reposi
 delimiter = "\t"
 value_column = 1
 description_column = 2
+timeout = "3s"
+cache_ttl = "30s"
 
 # Volumes.
 [[rules]]
@@ -92,6 +104,8 @@ exec = ["docker", "volume", "ls", "--format", "{{.Name}}\t{{.Driver}}"]
 delimiter = "\t"
 value_column = 1
 description_column = 2
+timeout = "3s"
+cache_ttl = "30s"
 
 # Networks.
 [[rules]]
@@ -101,6 +115,8 @@ exec = ["docker", "network", "ls", "--format", "{{.Name}}\t{{.ID}}  {{.Driver}}"
 delimiter = "\t"
 value_column = 1
 description_column = 2
+timeout = "3s"
+cache_ttl = "30s"
 `
 
 func builtinPluginSpecs() []*PluginSpec {

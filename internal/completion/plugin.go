@@ -2,6 +2,7 @@ package completion
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -16,6 +17,19 @@ import (
 const (
 	defaultPluginTimeout  = 500 * time.Millisecond
 	defaultPluginCacheTTL = 2 * time.Second
+
+	// pluginSourceWait bounds how long a cold TAB waits on a source. The
+	// editor gives the whole router 150ms, so waiting the full budget here
+	// would starve the lower-priority completers (filesystem in particular)
+	// and leave TAB doing nothing at all. Give up early instead: the source
+	// keeps running in the background and the next TAB is warm.
+	pluginSourceWait = 40 * time.Millisecond
+
+	// pluginStaleGrace is how far past its TTL a cached result may still be
+	// served while a refresh runs in the background. Without this, any source
+	// slower than pluginSourceWait is only usable in the brief window between
+	// finishing and expiring.
+	pluginStaleGrace = 60 * time.Second
 )
 
 // PluginSpec is a declarative completion plugin, typically loaded from a TOML
@@ -436,20 +450,36 @@ func (c *PluginCompleter) completeRule(ctx context.Context, rule *PluginRule, cu
 
 func (c *PluginCompleter) sourceLines(ctx context.Context, rule *PluginRule) ([]string, error) {
 	key := sourceCacheKey(rule)
-	if lines, ok := c.cache.get(key, c.now()); ok {
+	now := c.now()
+	if lines, ok := c.cache.get(key, now); ok {
 		return lines, nil
 	}
 
 	call := c.startSourceCall(key, rule)
+
+	// Serve an expired-but-recent result immediately while the refresh runs.
+	if lines, ok := c.cache.getStale(key, now, pluginStaleGrace); ok {
+		return lines, nil
+	}
+
+	// Nothing cached: wait briefly, then leave the rest of the completion
+	// deadline to the other completers. The source keeps running in the
+	// background and fills the cache, so the next TAB answers instantly.
+	timer := time.NewTimer(pluginSourceWait)
+	defer timer.Stop()
 	select {
 	case <-ctx.Done():
-		// The UI deadline fired first. The source keeps running in the
-		// background and fills the cache, so the next TAB answers instantly.
 		return nil, ctx.Err()
+	case <-timer.C:
+		return nil, errPluginSourcePending
 	case <-call.done:
 		return append([]string(nil), call.lines...), call.err
 	}
 }
+
+// errPluginSourcePending means the source is still running. Complete treats it
+// like any other source failure: stay silent and let the router move on.
+var errPluginSourcePending = errors.New("completion: plugin source still running")
 
 func sourceCacheKey(rule *PluginRule) string {
 	return strings.Join(rule.Source.Exec, "\x00")
