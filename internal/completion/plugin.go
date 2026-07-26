@@ -1,6 +1,7 @@
 package completion
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -30,6 +31,12 @@ const (
 	// slower than pluginSourceWait is only usable in the brief window between
 	// finishing and expiring.
 	pluginStaleGrace = 60 * time.Second
+
+	// pluginFailureTTL is how long a source failure is remembered. The editor
+	// retries a pending completion as soon as the source finishes, so without
+	// a negative cache a failing source would be relaunched by its own failure
+	// notification, forever.
+	pluginFailureTTL = 5 * time.Second
 )
 
 // PluginSpec is a declarative completion plugin, typically loaded from a TOML
@@ -46,6 +53,11 @@ type PluginMeta struct {
 	Name        string   `toml:"name"`
 	Description string   `toml:"description"`
 	Commands    []string `toml:"commands"`
+	// ValueFlags lists global flags that consume the next token as their
+	// value (e.g. docker's --context). Without this, `docker --context remote
+	// rm` would read "remote" as the subcommand and match no rule. Flags
+	// given as --flag=value need no declaration.
+	ValueFlags []string `toml:"value_flags"`
 	// Disabled removes completions for Commands, including built-in ones.
 	Disabled bool `toml:"disabled"`
 }
@@ -87,10 +99,18 @@ type PluginSource struct {
 	CacheTTL string `toml:"cache_ttl"`
 }
 
-// ParsePluginSpec parses and validates a TOML plugin spec.
+// ParsePluginSpec parses and validates a TOML plugin spec. Unknown fields are
+// errors: specs are often machine-generated, and a misspelled key silently
+// falling back to its default is much harder to spot than a parse failure.
 func ParsePluginSpec(data []byte) (*PluginSpec, error) {
 	var spec PluginSpec
-	if err := toml.Unmarshal(data, &spec); err != nil {
+	dec := toml.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&spec); err != nil {
+		var strict *toml.StrictMissingError
+		if errors.As(err, &strict) {
+			return nil, fmt.Errorf("unknown fields:\n%s", strict.String())
+		}
 		return nil, err
 	}
 	if err := spec.validate(); err != nil {
@@ -109,6 +129,11 @@ func (s *PluginSpec) validate() error {
 	for _, cmd := range s.Plugin.Commands {
 		if strings.TrimSpace(cmd) == "" || strings.ContainsAny(cmd, " \t") {
 			return fmt.Errorf("plugin %q: invalid command name %q", s.Plugin.Name, cmd)
+		}
+	}
+	for _, flag := range s.Plugin.ValueFlags {
+		if !strings.HasPrefix(flag, "-") || strings.ContainsAny(flag, " \t=") {
+			return fmt.Errorf("plugin %q: invalid value_flags entry %q", s.Plugin.Name, flag)
 		}
 	}
 	if s.Plugin.Disabled {
@@ -210,13 +235,15 @@ func LoadPluginSpecs(dir string) ([]*PluginSpec, []error) {
 	return specs, errs
 }
 
-// pluginRunner executes a completion source and returns its output lines.
-type pluginRunner func(ctx context.Context, argv []string, timeout time.Duration) ([]string, error)
+// pluginRunner executes a completion source in dir and returns its output
+// lines. The directory is passed explicitly because sources run on detached
+// goroutines: by the time one starts, the shell may have cd'd elsewhere.
+type pluginRunner func(ctx context.Context, argv []string, dir string, timeout time.Duration) ([]string, error)
 
-func defaultPluginRunner(ctx context.Context, argv []string, timeout time.Duration) ([]string, error) {
+func defaultPluginRunner(ctx context.Context, argv []string, dir string, timeout time.Duration) ([]string, error) {
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	return runIsolatedCommand(runCtx, argv[0], argv[1:]...)
+	return runIsolatedCommandIn(runCtx, dir, argv[0], argv[1:]...)
 }
 
 // PluginCompleter serves completions from declarative plugin specs.
@@ -228,9 +255,14 @@ type PluginCompleter struct {
 	runner  pluginRunner
 	cache   stringListCache
 	now     func() time.Time
+	getwd   func() string
+	fuzzy   bool
 
 	inflightMu sync.Mutex
 	inflight   map[string]*pluginSourceCall
+
+	failMu   sync.Mutex
+	failures map[string]time.Time // source key -> when the failure entry expires
 
 	readyMu sync.RWMutex
 	onReady func()
@@ -265,9 +297,10 @@ type pluginSourceCall struct {
 // pluginEntry is the handler for a single command, tracking which spec it
 // came from for introspection.
 type pluginEntry struct {
-	specName string
-	builtin  bool
-	rules    []*PluginRule
+	specName   string
+	builtin    bool
+	rules      []*PluginRule
+	valueFlags map[string]bool
 }
 
 // PluginInfo describes a registered plugin handler for one command.
@@ -285,6 +318,7 @@ func NewPluginCompleter(userSpecs []*PluginSpec) *PluginCompleter {
 	c := &PluginCompleter{
 		runner: defaultPluginRunner,
 		now:    time.Now,
+		getwd:  defaultGetwd,
 	}
 	c.SetUserSpecs(userSpecs)
 	return c
@@ -314,16 +348,42 @@ func addSpec(entries map[string]pluginEntry, builtin bool, specs ...*PluginSpec)
 			for i := range spec.Rules {
 				rules[i] = &spec.Rules[i]
 			}
-			entries[cmd] = pluginEntry{specName: spec.Plugin.Name, builtin: builtin, rules: rules}
+			var valueFlags map[string]bool
+			if len(spec.Plugin.ValueFlags) > 0 {
+				valueFlags = make(map[string]bool, len(spec.Plugin.ValueFlags))
+				for _, flag := range spec.Plugin.ValueFlags {
+					valueFlags[flag] = true
+				}
+			}
+			entries[cmd] = pluginEntry{
+				specName:   spec.Plugin.Name,
+				builtin:    builtin,
+				rules:      rules,
+				valueFlags: valueFlags,
+			}
 		}
 	}
 }
 
-func (c *PluginCompleter) commandRules(cmd string) ([]*PluginRule, bool) {
+func (c *PluginCompleter) commandEntry(cmd string) (pluginEntry, bool) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	entry, ok := c.entries[cmd]
-	return entry.rules, ok
+	return entry, ok
+}
+
+// SetFuzzyMode sets whether to return all candidates (for router-level fuzzy
+// filtering) instead of prefix-filtering them here.
+func (c *PluginCompleter) SetFuzzyMode(enabled bool) {
+	c.mu.Lock()
+	c.fuzzy = enabled
+	c.mu.Unlock()
+}
+
+func (c *PluginCompleter) fuzzyMode() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.fuzzy
 }
 
 // Name returns the completer name.
@@ -376,7 +436,7 @@ func (c *PluginCompleter) Complete(ctx context.Context, line string, pos int) (R
 		return Result{}, nil
 	}
 
-	rules, ok := c.commandRules(parts[0])
+	entry, ok := c.commandEntry(parts[0])
 	if !ok {
 		return Result{}, nil
 	}
@@ -386,34 +446,51 @@ func (c *PluginCompleter) Complete(ctx context.Context, line string, pos int) (R
 		return Result{}, nil // Flags are not ours to complete.
 	}
 
-	positionals := nonFlagArgs(args)
-	for _, rule := range rules {
+	positionals, currentIsFlagValue := stripFlags(args, entry.valueFlags)
+	if currentIsFlagValue {
+		return Result{}, nil // The word being typed belongs to a flag, not us.
+	}
+	dir := c.getwd()
+	for _, rule := range entry.rules {
 		if !rule.matches(positionals) {
 			continue
 		}
-		items, err := c.completeRule(ctx, rule, current)
+		items, err := c.completeRule(ctx, rule, current, dir)
 		if errors.Is(err, errPluginSourcePending) {
 			// Matched, but the data is still on its way. Say so instead of
 			// letting an unrelated completer answer for this argument.
 			return Result{Pending: true}, nil
 		}
 		if err != nil {
-			return Result{}, nil // Source failed (tool missing, daemon down): stay silent.
+			return Result{}, nil //nolint:nilerr // Source failed (tool missing, daemon down): stay silent.
 		}
-		return Result{Items: items}, nil
+		// Handled even when empty: this rule owns the argument, and filenames
+		// are not an answer to "which container".
+		return Result{Items: items, Handled: true}, nil
 	}
 	return Result{}, nil
 }
 
-func nonFlagArgs(args []string) []string {
-	positionals := make([]string, 0, len(args))
-	for _, arg := range args {
-		if strings.HasPrefix(arg, "-") {
+// stripFlags returns the positional arguments with flags removed. A flag
+// listed in valueFlags also consumes the following token as its value.
+// currentIsFlagValue reports that the word being completed is the value of a
+// trailing flag rather than a positional.
+func stripFlags(args []string, valueFlags map[string]bool) (positionals []string, currentIsFlagValue bool) {
+	positionals = make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if !strings.HasPrefix(arg, "-") {
+			positionals = append(positionals, arg)
 			continue
 		}
-		positionals = append(positionals, arg)
+		if valueFlags[arg] {
+			if i == len(args)-1 {
+				return positionals, true
+			}
+			i++ // Skip the flag's value.
+		}
 	}
-	return positionals
+	return positionals, false
 }
 
 // matches reports whether the rule applies to the given positional arguments
@@ -444,11 +521,15 @@ func (r *PluginRule) maxArgsAllows(completedPositionals int) bool {
 	return r.MaxArgs == 0 || completedPositionals < r.MaxArgs
 }
 
-func (c *PluginCompleter) completeRule(ctx context.Context, rule *PluginRule, current string) ([]Item, error) {
-	lines, err := c.sourceLines(ctx, rule)
+func (c *PluginCompleter) completeRule(ctx context.Context, rule *PluginRule, current, dir string) ([]Item, error) {
+	lines, err := c.sourceLines(ctx, rule, dir)
 	if err != nil {
 		return nil, err
 	}
+
+	// In fuzzy mode all candidates go to the router, whose fuzzy filter would
+	// otherwise never see the non-prefix matches it exists to find.
+	prefixFilter := !c.fuzzyMode()
 
 	var items []Item
 	seen := make(map[string]bool)
@@ -457,7 +538,7 @@ func (c *PluginCompleter) completeRule(ctx context.Context, rule *PluginRule, cu
 		if value == "" || seen[value] {
 			continue
 		}
-		if current != "" && !strings.HasPrefix(value, current) {
+		if prefixFilter && current != "" && !strings.HasPrefix(value, current) {
 			continue
 		}
 		seen[value] = true
@@ -473,14 +554,23 @@ func (c *PluginCompleter) completeRule(ctx context.Context, rule *PluginRule, cu
 	return items, nil
 }
 
-func (c *PluginCompleter) sourceLines(ctx context.Context, rule *PluginRule) ([]string, error) {
-	key := sourceCacheKey(rule)
+func (c *PluginCompleter) sourceLines(ctx context.Context, rule *PluginRule, dir string) ([]string, error) {
+	key := sourceCacheKey(rule, dir)
 	now := c.now()
 	if lines, ok := c.cache.get(key, now); ok {
 		return lines, nil
 	}
 
-	call := c.startSourceCall(key, rule)
+	// A source that just failed will fail again; don't relaunch it on every
+	// retrigger. Old results are still worth serving while it recovers.
+	if c.recentFailure(key, now) {
+		if lines, ok := c.cache.getStale(key, now, pluginStaleGrace); ok {
+			return lines, nil
+		}
+		return nil, errPluginSourceFailed
+	}
+
+	call := c.startSourceCall(key, rule, dir)
 
 	// Serve an expired-but-recent result immediately while the refresh runs.
 	if lines, ok := c.cache.getStale(key, now, pluginStaleGrace); ok {
@@ -506,15 +596,50 @@ func (c *PluginCompleter) sourceLines(ctx context.Context, rule *PluginRule) ([]
 // like any other source failure: stay silent and let the router move on.
 var errPluginSourcePending = errors.New("completion: plugin source still running")
 
-func sourceCacheKey(rule *PluginRule) string {
-	return strings.Join(rule.Source.Exec, "\x00")
+// errPluginSourceFailed means the source failed recently and is in the
+// negative cache.
+var errPluginSourceFailed = errors.New("completion: plugin source failed recently")
+
+func (c *PluginCompleter) recentFailure(key string, now time.Time) bool {
+	c.failMu.Lock()
+	defer c.failMu.Unlock()
+	expiry, ok := c.failures[key]
+	return ok && now.Before(expiry)
+}
+
+func (c *PluginCompleter) recordFailure(key string, failed bool) {
+	c.failMu.Lock()
+	defer c.failMu.Unlock()
+	if !failed {
+		delete(c.failures, key)
+		return
+	}
+	if c.failures == nil {
+		c.failures = make(map[string]time.Time)
+	}
+	c.failures[key] = c.now().Add(pluginFailureTTL)
+}
+
+// sourceCacheKey includes the working directory: many sources (terraform
+// workspace list, git-based tools) answer differently per directory, and a
+// cached result must never leak across a cd.
+func sourceCacheKey(rule *PluginRule, dir string) string {
+	return dir + "\x00" + strings.Join(rule.Source.Exec, "\x00")
+}
+
+func defaultGetwd() string {
+	dir, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	return dir
 }
 
 // startSourceCall returns the in-flight call for the source, starting one if
 // needed. Execution is detached from the caller's context and bounded only by
 // the rule's own timeout, so completion UI deadlines can't kill a slow source
 // (e.g. docker ps on a cold daemon) before it ever manages to fill the cache.
-func (c *PluginCompleter) startSourceCall(key string, rule *PluginRule) *pluginSourceCall {
+func (c *PluginCompleter) startSourceCall(key string, rule *PluginRule, dir string) *pluginSourceCall {
 	now := c.now()
 	c.inflightMu.Lock()
 	if call, ok := c.inflight[key]; ok && !contextReadCallIsStale(call.started, now, 0) {
@@ -528,16 +653,17 @@ func (c *PluginCompleter) startSourceCall(key string, rule *PluginRule) *pluginS
 	c.inflight[key] = call
 	c.inflightMu.Unlock()
 
-	go c.finishSourceCall(key, call, rule)
+	go c.finishSourceCall(key, call, rule, dir)
 	return call
 }
 
-func (c *PluginCompleter) finishSourceCall(key string, call *pluginSourceCall, rule *PluginRule) {
-	lines, err := c.runner(context.Background(), rule.Source.Exec, rule.timeout)
+func (c *PluginCompleter) finishSourceCall(key string, call *pluginSourceCall, rule *PluginRule, dir string) {
+	lines, err := c.runner(context.Background(), rule.Source.Exec, dir, rule.timeout)
 	call.lines, call.err = lines, err
 	if err == nil {
 		c.cache.set(key, lines, c.now().Add(rule.cacheTTL))
 	}
+	c.recordFailure(key, err != nil)
 
 	c.inflightMu.Lock()
 	if c.inflight[key] == call {
@@ -546,9 +672,10 @@ func (c *PluginCompleter) finishSourceCall(key string, call *pluginSourceCall, r
 	c.inflightMu.Unlock()
 	close(call.done)
 
-	if err == nil {
-		c.notifyReady()
-	}
+	// Notify on failure too: the editor may be showing "fetching completions"
+	// and needs a wake-up to clear it and fall back to other completers. The
+	// failure entry above keeps that retry from relaunching the source.
+	c.notifyReady()
 }
 
 // Prefetch warms the source cache when the input matches a plugin rule.
@@ -566,7 +693,7 @@ func (c *PluginCompleter) Prefetch(line string, pos int) {
 		return
 	}
 
-	rules, ok := c.commandRules(parts[0])
+	entry, ok := c.commandEntry(parts[0])
 	if !ok {
 		return
 	}
@@ -576,14 +703,18 @@ func (c *PluginCompleter) Prefetch(line string, pos int) {
 		return
 	}
 
-	positionals := nonFlagArgs(args)
-	for _, rule := range rules {
+	positionals, currentIsFlagValue := stripFlags(args, entry.valueFlags)
+	if currentIsFlagValue {
+		return
+	}
+	dir := c.getwd()
+	for _, rule := range entry.rules {
 		if !rule.matches(positionals) {
 			continue
 		}
-		key := sourceCacheKey(rule)
+		key := sourceCacheKey(rule, dir)
 		if _, cached := c.cache.get(key, c.now()); !cached {
-			c.startSourceCall(key, rule)
+			c.startSourceCall(key, rule, dir)
 		}
 		return
 	}

@@ -175,6 +175,43 @@ func TestPluginGenerator_Run(t *testing.T) {
 	}
 }
 
+// When a plugin file for the tool already exists, the user must be told that
+// accepting replaces it, and it must survive untouched if they quit.
+func TestPluginGenerator_WarnsBeforeReplacingExistingPlugin(t *testing.T) {
+	gen, out, _ := newTestGenerator(t, func(ctx context.Context, prompt string) (string, error) {
+		return validKubectlTOML, nil
+	}, quit())
+	existing := filepath.Join(gen.specsDir, "kubectl.toml")
+	if err := os.WriteFile(existing, []byte("# hand-tuned\n"), 0o644); err != nil { //nolint:gosec // test fixture
+		t.Fatal(err)
+	}
+
+	if _, err := gen.run(context.Background(), "kubectl", ""); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if !strings.Contains(out.String(), "replace") || !strings.Contains(out.String(), existing) {
+		t.Errorf("output %q should warn that accepting replaces %s", out.String(), existing)
+	}
+	data, err := os.ReadFile(existing)
+	if err != nil || string(data) != "# hand-tuned\n" {
+		t.Errorf("existing plugin changed on quit: %q, %v", data, err)
+	}
+}
+
+// No existing file, no warning.
+func TestPluginGenerator_NoReplaceWarningForNewPlugin(t *testing.T) {
+	gen, out, _ := newTestGenerator(t, func(ctx context.Context, prompt string) (string, error) {
+		return validKubectlTOML, nil
+	}, accept())
+
+	if _, err := gen.run(context.Background(), "kubectl", ""); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if strings.Contains(out.String(), "replace the existing") {
+		t.Errorf("output %q warns about replacing a file that does not exist", out.String())
+	}
+}
+
 func TestPluginGenerator_QuitWritesNothing(t *testing.T) {
 	gen, out, _ := newTestGenerator(t, func(ctx context.Context, prompt string) (string, error) {
 		return validKubectlTOML, nil
@@ -330,6 +367,33 @@ func TestCollectToolHelp(t *testing.T) {
 	out := collectToolHelp(context.Background(), tool)
 	if !strings.Contains(out, "usage: fake-tool") {
 		t.Errorf("collectToolHelp = %q, want usage output", out)
+	}
+}
+
+// Output is bounded while the command runs, not after: a tool that floods
+// stdout must not balloon memory before the cap is applied.
+func TestCollectToolHelp_CapsOutputWhileStreaming(t *testing.T) {
+	dir := t.TempDir()
+	tool := filepath.Join(dir, "fake-tool")
+	script := "#!/bin/sh\nyes usage-line | head -c 1000000\nexit 0\n"
+	if err := os.WriteFile(tool, []byte(script), 0o755); err != nil { //nolint:gosec // test fixture must be executable
+		t.Fatal(err)
+	}
+
+	out := collectToolHelp(context.Background(), tool)
+	if len(out) == 0 || len(out) > toolHelpMaxBytes {
+		t.Errorf("len(out) = %d, want capped at %d", len(out), toolHelpMaxBytes)
+	}
+}
+
+func TestLimitedBuffer_CapsWrites(t *testing.T) {
+	b := &limitedBuffer{max: 10}
+	n, err := b.Write([]byte("0123456789abcdef"))
+	if err != nil || n != 16 {
+		t.Fatalf("Write = (%d, %v), want (16, nil): a full buffer must keep accepting", n, err)
+	}
+	if got := b.String(); got != "0123456789" {
+		t.Errorf("String() = %q, want first 10 bytes", got)
 	}
 }
 

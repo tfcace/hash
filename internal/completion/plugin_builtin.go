@@ -9,6 +9,12 @@ const builtinDockerSpec = `
 name = "docker"
 description = "Containers, images, volumes, and networks for docker"
 commands = ["docker"]
+# Global flags that take a separate value, so "docker --context remote rm"
+# still matches the rm rule instead of reading "remote" as the subcommand.
+value_flags = [
+  "-c", "--context", "--config", "-H", "--host",
+  "-l", "--log-level", "--tlscacert", "--tlscert", "--tlskey",
+]
 
 # Running containers. "restart" is deliberately absent: it accepts stopped
 # containers too, so it lives with the any-state rule below.
@@ -145,11 +151,12 @@ description_column = 2
 timeout = "3s"
 cache_ttl = "30s"
 
-# Contexts.
+# Contexts. "context show" is absent on purpose: it prints the current
+# context and takes no arguments.
 [[rules]]
 subcommands = [
   "context use", "context rm", "context inspect", "context update",
-  "context export", "context show",
+  "context export",
 ]
 [rules.source]
 exec = ["docker", "context", "ls", "--format", "{{.Name}}\t{{.Description}}"]

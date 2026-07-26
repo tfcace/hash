@@ -837,6 +837,34 @@ func TestRouter_PendingCompleterStopsFallthrough(t *testing.T) {
 	}
 }
 
+// handledCompleter matched and answered authoritatively with zero items.
+type handledCompleter struct{}
+
+func (handledCompleter) Name() string { return "handled" }
+func (handledCompleter) Complete(ctx context.Context, line string, pos int) (Result, error) {
+	return Result{Handled: true}, nil
+}
+
+// A completer that matched and answered with zero candidates still owns the
+// argument: docker rm with no containers must say "no matches", not offer
+// filenames that are invalid for that argument.
+func TestRouter_HandledEmptyResultStopsFallthrough(t *testing.T) {
+	r := NewRouter()
+	r.Register(itemsCompleter{items: []Item{{Value: "some-file.go"}}}, PriorityFilesystem)
+	r.Register(handledCompleter{}, PriorityPlugin)
+
+	result, err := r.Complete(context.Background(), "docker rm nonexistent", len("docker rm nonexistent"))
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if len(result.Items) != 0 {
+		t.Errorf("items = %+v, want none when the owner answered empty", result.Items)
+	}
+	if result.Pending {
+		t.Error("a handled empty result is final, not pending")
+	}
+}
+
 // Nothing pending: the fallback still answers as before.
 func TestRouter_FallsThroughWhenNothingPending(t *testing.T) {
 	r := NewRouter()

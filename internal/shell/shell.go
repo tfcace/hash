@@ -153,6 +153,7 @@ func New(cfg *config.Config) (*Shell, error) {
 			fmt.Fprintf(os.Stderr, "hash: warning: completion plugin: %v\n", pluginErr)
 		}
 		pluginCompleter = completion.NewPluginCompleter(pluginSpecs)
+		pluginCompleter.SetFuzzyMode(cfg.Completions.Fuzzy)
 		// Wake the editor when a slow source lands so a "fetching" menu can
 		// fill itself in without the user pressing Tab again. Non-blocking:
 		// one pending wake-up is enough to trigger a refresh.

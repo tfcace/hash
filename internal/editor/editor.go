@@ -96,15 +96,16 @@ type Editor struct {
 	clipboardInit bool // Lazy clipboard initialization
 
 	// Completion state
-	completionActive     bool
-	completionNotice     string // Transient "no matches"/"timed out" notice; cleared on next key
-	awaitingCompletion   string // Buffer contents a pending completion was requested for
-	completionItems      []Completion
-	completionIndex      int                    // Selected item in menu
-	completionPrefix     string                 // Text being completed (for replacement)
-	completionCol        int                    // Column where completion started
-	completionFilter     string                 // Live filter text while menu is open
-	completionDrillStack []completionDrillState // Stack of parent dirs for backspace-up
+	completionActive      bool
+	completionNotice      string // Transient "no matches"/"timed out" notice; cleared on next key
+	awaitingCompletion    string // Buffer contents a pending completion was requested for
+	awaitingCompletionPos int    // Cursor offset the pending completion was requested at
+	completionItems       []Completion
+	completionIndex       int                    // Selected item in menu
+	completionPrefix      string                 // Text being completed (for replacement)
+	completionCol         int                    // Column where completion started
+	completionFilter      string                 // Live filter text while menu is open
+	completionDrillStack  []completionDrillState // Stack of parent dirs for backspace-up
 
 	// Ghost text state (inline suggestions)
 	ghost          *GhostText
@@ -403,9 +404,16 @@ const completionFetchingNotice = "fetching completions..."
 
 // handleCompletionReady retries a completion that was pending when the user
 // pressed Tab. A source landing for input the user has since moved on from is
-// ignored, so the menu never opens over a line it does not describe.
+// ignored, so the menu never opens over a line it does not describe. The
+// cursor offset matters as much as the text: arrow keys leave the buffer
+// unchanged, and a late result must not open at a different argument.
 func (e *Editor) handleCompletionReady() {
-	if e.awaitingCompletion == "" || e.awaitingCompletion != e.state.Buffer.Content() {
+	if e.awaitingCompletion == "" {
+		return
+	}
+	if e.awaitingCompletion != e.state.Buffer.Content() || e.awaitingCompletionPos != e.cursorOffset() {
+		e.awaitingCompletion = ""
+		e.completionNotice = ""
 		return
 	}
 	e.awaitingCompletion = ""
@@ -973,6 +981,7 @@ func (e *Editor) triggerCompletion() {
 			// for so a late arrival for stale input can be discarded.
 			e.completionNotice = completionFetchingNotice
 			e.awaitingCompletion = line
+			e.awaitingCompletionPos = pos
 		case timedOut:
 			e.completionNotice = "completion timed out"
 			e.awaitingCompletion = ""

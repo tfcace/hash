@@ -42,7 +42,7 @@ func newTestPluginCompleter(t *testing.T, specTOML string, runner pluginRunner) 
 }
 
 func staticRunner(lines []string) pluginRunner {
-	return func(ctx context.Context, argv []string, timeout time.Duration) ([]string, error) {
+	return func(ctx context.Context, argv []string, dir string, timeout time.Duration) ([]string, error) {
 		return lines, nil
 	}
 }
@@ -150,6 +150,24 @@ subcommands = [" "]
 exec = ["x"]
 `},
 		{"not toml", `{"json": true}`},
+		{"misspelled rule field", `
+[plugin]
+name = "x"
+commands = ["x"]
+[[rules]]
+subcomands = ["rm"]
+[rules.source]
+exec = ["x"]
+`},
+		{"misspelled source field", `
+[plugin]
+name = "x"
+commands = ["x"]
+[[rules]]
+[rules.source]
+exec = ["x"]
+cache_ttl_ms = "2s"
+`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -224,6 +242,25 @@ func TestPluginCompleter_PrefixFilter(t *testing.T) {
 	}
 }
 
+// In fuzzy mode the router does the filtering; the plugin must not throw away
+// non-prefix candidates first, or fuzzy matching can never see them.
+func TestPluginCompleter_FuzzyModeKeepsNonPrefixCandidates(t *testing.T) {
+	c := newTestPluginCompleter(t, testPluginSpec, staticRunner([]string{
+		"web-server\t...",
+		"postgres\t...",
+	}))
+	c.SetFuzzyMode(true)
+
+	line := "docker rm srv"
+	result, err := c.Complete(context.Background(), line, len(line))
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if len(result.Items) != 2 {
+		t.Fatalf("items = %+v, want both candidates for router-level fuzzy filtering", result.Items)
+	}
+}
+
 func TestPluginCompleter_NoMatchCases(t *testing.T) {
 	c := newTestPluginCompleter(t, testPluginSpec, staticRunner([]string{"abc123\tweb"}))
 
@@ -248,6 +285,49 @@ func TestPluginCompleter_NoMatchCases(t *testing.T) {
 				t.Fatalf("items = %+v, want none", result.Items)
 			}
 		})
+	}
+}
+
+// Flags declared in value_flags consume the following token, so
+// `docker --context remote rm ` still matches the "rm" rule instead of
+// treating "remote" as the subcommand.
+func TestPluginCompleter_ValueFlagsConsumeTheirArgument(t *testing.T) {
+	spec := `
+[plugin]
+name = "docker-test"
+commands = ["docker"]
+value_flags = ["--context", "-H"]
+
+[[rules]]
+subcommands = ["rm"]
+[rules.source]
+exec = ["docker", "ps", "-a"]
+`
+	c := newTestPluginCompleter(t, spec, staticRunner([]string{"web"}))
+
+	for _, line := range []string{
+		"docker --context remote rm ",
+		"docker -H tcp://x:2375 rm ",
+		"docker --context=remote rm ",
+	} {
+		result, err := c.Complete(context.Background(), line, len(line))
+		if err != nil {
+			t.Fatalf("Complete(%q): %v", line, err)
+		}
+		if len(result.Items) != 1 {
+			t.Errorf("Complete(%q): items = %+v, want the rm rule to match", line, result.Items)
+		}
+	}
+
+	// The word after a value flag is that flag's value, not a positional the
+	// plugin knows how to complete.
+	line := "docker rm --context "
+	result, err := c.Complete(context.Background(), line, len(line))
+	if err != nil {
+		t.Fatalf("Complete(%q): %v", line, err)
+	}
+	if len(result.Items) != 0 || result.Handled || result.Pending {
+		t.Errorf("Complete(%q) = %+v, want silence while typing a flag value", line, result)
 	}
 }
 
@@ -313,7 +393,7 @@ func TestPluginCompleter_PipeContext(t *testing.T) {
 }
 
 func TestPluginCompleter_SourceErrorIsSilent(t *testing.T) {
-	runner := func(ctx context.Context, argv []string, timeout time.Duration) ([]string, error) {
+	runner := func(ctx context.Context, argv []string, dir string, timeout time.Duration) ([]string, error) {
 		return nil, errors.New("docker daemon not running")
 	}
 	c := newTestPluginCompleter(t, testPluginSpec, runner)
@@ -330,7 +410,7 @@ func TestPluginCompleter_SourceErrorIsSilent(t *testing.T) {
 
 func TestPluginCompleter_CachesSourceOutput(t *testing.T) {
 	var calls atomic.Int64
-	runner := func(ctx context.Context, argv []string, timeout time.Duration) ([]string, error) {
+	runner := func(ctx context.Context, argv []string, dir string, timeout time.Duration) ([]string, error) {
 		calls.Add(1)
 		return []string{"abc123\tweb"}, nil
 	}
@@ -369,6 +449,53 @@ func waitForCalls(t *testing.T, calls *atomic.Int64, want int64) {
 		time.Sleep(time.Millisecond)
 	}
 	t.Fatalf("runner calls = %d, want %d", calls.Load(), want)
+}
+
+// A matched rule whose source answered still owns the argument even when no
+// candidate survives the filter, so the router doesn't offer filenames for
+// something like `docker rm nonexistent<TAB>`.
+func TestPluginCompleter_MatchedRuleWithZeroCandidatesIsHandled(t *testing.T) {
+	c := newTestPluginCompleter(t, testPluginSpec, staticRunner([]string{"abc123\tweb"}))
+
+	line := "docker rm zzz"
+	result, err := c.Complete(context.Background(), line, len(line))
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if len(result.Items) != 0 {
+		t.Fatalf("items = %+v, want none", result.Items)
+	}
+	if !result.Handled {
+		t.Error("a matched rule with a successful source must report Handled")
+	}
+}
+
+// A cached result from one directory must not answer for another: sources
+// like `terraform workspace list` are directory-sensitive.
+func TestPluginCompleter_CacheDoesNotLeakAcrossDirectories(t *testing.T) {
+	c := newTestPluginCompleter(t, testPluginSpec, func(ctx context.Context, argv []string, dir string, timeout time.Duration) ([]string, error) {
+		return []string{filepath.Base(dir) + "-candidate"}, nil
+	})
+	cwd := "/projects/alpha"
+	c.getwd = func() string { return cwd }
+
+	line := "docker rm "
+	result, err := c.Complete(context.Background(), line, len(line))
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if len(result.Items) != 1 || result.Items[0].Value != "alpha-candidate" {
+		t.Fatalf("items = %+v, want alpha-candidate", result.Items)
+	}
+
+	cwd = "/projects/beta"
+	result, err = c.Complete(context.Background(), line, len(line))
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if len(result.Items) != 1 || result.Items[0].Value != "beta-candidate" {
+		t.Fatalf("after cd: items = %+v, want beta-candidate (stale directory leak?)", result.Items)
+	}
 }
 
 func TestPluginCompleter_DeduplicatesValues(t *testing.T) {
@@ -437,7 +564,7 @@ exec = ["svc", "list"]
 
 func TestNewPluginCompleter_BuiltinDocker(t *testing.T) {
 	var gotArgv []string
-	runner := func(ctx context.Context, argv []string, timeout time.Duration) ([]string, error) {
+	runner := func(ctx context.Context, argv []string, dir string, timeout time.Duration) ([]string, error) {
 		gotArgv = argv
 		return []string{"web-server\tabc123  nginx:latest  (Up 2 hours)"}, nil
 	}
@@ -486,7 +613,7 @@ func dockerSpecArgv(t *testing.T, line string) []string {
 	t.Helper()
 	var gotArgv []string
 	c := NewPluginCompleter(nil)
-	c.runner = func(ctx context.Context, argv []string, timeout time.Duration) ([]string, error) {
+	c.runner = func(ctx context.Context, argv []string, dir string, timeout time.Duration) ([]string, error) {
 		gotArgv = argv
 		return nil, nil
 	}
@@ -512,11 +639,18 @@ func TestBuiltinDocker_NetworkSecondArgIsContainer(t *testing.T) {
 }
 
 func TestBuiltinDocker_ContextCompletion(t *testing.T) {
-	for _, sub := range []string{"use", "rm", "inspect", "update", "export", "show"} {
+	for _, sub := range []string{"use", "rm", "inspect", "update", "export"} {
 		argv := dockerSpecArgv(t, "docker context "+sub+" ")
 		if len(argv) < 3 || argv[1] != "context" || argv[2] != "ls" {
 			t.Errorf("docker context %s: argv = %v, want docker context ls", sub, argv)
 		}
+	}
+}
+
+// docker context show takes no arguments, so no rule may claim it.
+func TestBuiltinDocker_ContextShowHasNoRule(t *testing.T) {
+	if argv := dockerSpecArgv(t, "docker context show "); len(argv) != 0 {
+		t.Errorf("docker context show: argv = %v, want no matching rule", argv)
 	}
 }
 
@@ -554,7 +688,7 @@ func TestBuiltinDocker_RestartListsAllContainers(t *testing.T) {
 
 func TestNewPluginCompleter_BuiltinDockerRunImages(t *testing.T) {
 	var gotArgv []string
-	runner := func(ctx context.Context, argv []string, timeout time.Duration) ([]string, error) {
+	runner := func(ctx context.Context, argv []string, dir string, timeout time.Duration) ([]string, error) {
 		gotArgv = argv
 		return []string{"nginx:latest\tabc123  187MB"}, nil
 	}
@@ -591,7 +725,7 @@ exec = ["my-docker-helper"]
 
 	var gotArgv []string
 	c := NewPluginCompleter([]*PluginSpec{spec})
-	c.runner = func(ctx context.Context, argv []string, timeout time.Duration) ([]string, error) {
+	c.runner = func(ctx context.Context, argv []string, dir string, timeout time.Duration) ([]string, error) {
 		gotArgv = argv
 		return []string{"custom"}, nil
 	}
@@ -685,7 +819,7 @@ func TestLoadPluginSpecs_MissingDir(t *testing.T) {
 func TestPluginCompleter_SlowSourceSurvivesUIDeadline(t *testing.T) {
 	var calls atomic.Int64
 	release := make(chan struct{})
-	runner := func(ctx context.Context, argv []string, timeout time.Duration) ([]string, error) {
+	runner := func(ctx context.Context, argv []string, dir string, timeout time.Duration) ([]string, error) {
 		calls.Add(1)
 		<-release
 		return []string{"abc123\tweb"}, nil
@@ -721,7 +855,7 @@ func TestPluginCompleter_SlowSourceSurvivesUIDeadline(t *testing.T) {
 func TestPluginCompleter_SlowSourceLeavesDeadlineForFallback(t *testing.T) {
 	release := make(chan struct{})
 	defer close(release)
-	runner := func(ctx context.Context, argv []string, timeout time.Duration) ([]string, error) {
+	runner := func(ctx context.Context, argv []string, dir string, timeout time.Duration) ([]string, error) {
 		<-release
 		return []string{"abc123\tweb"}, nil
 	}
@@ -754,7 +888,7 @@ func TestPluginCompleter_SlowSourceLeavesDeadlineForFallback(t *testing.T) {
 func TestPluginCompleter_ServesStaleWhileRefreshing(t *testing.T) {
 	var calls atomic.Int64
 	refreshed := make(chan struct{}, 4)
-	runner := func(ctx context.Context, argv []string, timeout time.Duration) ([]string, error) {
+	runner := func(ctx context.Context, argv []string, dir string, timeout time.Duration) ([]string, error) {
 		n := calls.Add(1)
 		if n == 1 {
 			return []string{"abc123\told"}, nil
@@ -825,7 +959,7 @@ func (c *testClock) advance(d time.Duration) { c.offset.Add(int64(d)) }
 func TestPluginCompleter_StaleCacheExpiresAfterGrace(t *testing.T) {
 	var calls atomic.Int64
 	release := make(chan struct{})
-	runner := func(ctx context.Context, argv []string, timeout time.Duration) ([]string, error) {
+	runner := func(ctx context.Context, argv []string, dir string, timeout time.Duration) ([]string, error) {
 		if calls.Add(1) == 1 {
 			return []string{"abc123\told"}, nil
 		}
@@ -870,7 +1004,7 @@ func TestBuiltinDockerSpec_TimeoutsSuitForRealDaemon(t *testing.T) {
 func TestPluginCompleter_PrefetchWarmsCache(t *testing.T) {
 	var calls atomic.Int64
 	ran := make(chan struct{}, 8)
-	runner := func(ctx context.Context, argv []string, timeout time.Duration) ([]string, error) {
+	runner := func(ctx context.Context, argv []string, dir string, timeout time.Duration) ([]string, error) {
 		calls.Add(1)
 		ran <- struct{}{}
 		return []string{"abc123\tweb"}, nil
@@ -909,7 +1043,7 @@ func TestPluginCompleter_PrefetchWarmsCache(t *testing.T) {
 
 func TestPluginCompleter_PrefetchIgnoresNonMatchingInput(t *testing.T) {
 	var calls atomic.Int64
-	runner := func(ctx context.Context, argv []string, timeout time.Duration) ([]string, error) {
+	runner := func(ctx context.Context, argv []string, dir string, timeout time.Duration) ([]string, error) {
 		calls.Add(1)
 		return []string{"abc123\tweb"}, nil
 	}
@@ -1016,7 +1150,7 @@ func containsArg(argv []string, want string) bool {
 func TestPluginCompleter_ReportsPendingWhileSourceRuns(t *testing.T) {
 	release := make(chan struct{})
 	defer close(release)
-	runner := func(ctx context.Context, argv []string, timeout time.Duration) ([]string, error) {
+	runner := func(ctx context.Context, argv []string, dir string, timeout time.Duration) ([]string, error) {
 		<-release
 		return []string{"abc123\tweb"}, nil
 	}
@@ -1046,6 +1180,63 @@ func TestPluginCompleter_NotPendingWhenNoRuleMatches(t *testing.T) {
 	}
 	if result.Pending {
 		t.Error("no rule matched, so nothing should be pending")
+	}
+}
+
+// A failing source must notify too: the editor is showing "fetching
+// completions..." and needs a wake-up to clear it and fall back, or the
+// notice sits there until the next keypress.
+func TestPluginCompleter_NotifiesWhenSourceFails(t *testing.T) {
+	ready := make(chan struct{}, 4)
+	c := newTestPluginCompleter(t, testPluginSpec, func(ctx context.Context, argv []string, dir string, timeout time.Duration) ([]string, error) {
+		return nil, errors.New("daemon down")
+	})
+	c.SetOnReady(func() { ready <- struct{}{} })
+
+	line := "docker rm "
+	c.Prefetch(line, len(line))
+
+	select {
+	case <-ready:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no ready notification after the source failed")
+	}
+}
+
+// After a failure, the retriggered completion must answer immediately (not
+// Pending) and must not rerun the source, or the notify/retry pair would loop.
+func TestPluginCompleter_FailureIsCachedBriefly(t *testing.T) {
+	var runs atomic.Int32
+	c := newTestPluginCompleter(t, testPluginSpec, func(ctx context.Context, argv []string, dir string, timeout time.Duration) ([]string, error) {
+		runs.Add(1)
+		return nil, errors.New("daemon down")
+	})
+	now := time.Now()
+	c.now = func() time.Time { return now }
+
+	line := "docker rm "
+	first := c.startSourceCall(sourceCacheKey(c.entries["docker"].rules[0], c.getwd()), c.entries["docker"].rules[0], c.getwd())
+	<-first.done
+
+	result, err := c.Complete(context.Background(), line, len(line))
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if result.Pending {
+		t.Error("a recent failure must not report Pending again")
+	}
+	if len(result.Items) != 0 {
+		t.Errorf("items = %+v, want none", result.Items)
+	}
+	if got := runs.Load(); got != 1 {
+		t.Errorf("source ran %d times, want 1 (failure not cached)", got)
+	}
+
+	// Once the failure entry expires, the source may run again.
+	now = now.Add(pluginFailureTTL + time.Second)
+	_, _ = c.Complete(context.Background(), line, len(line))
+	if got := runs.Load(); got != 2 {
+		t.Errorf("source ran %d times after expiry, want 2", got)
 	}
 }
 

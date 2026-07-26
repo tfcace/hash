@@ -99,7 +99,11 @@ cache_ttl = "5s"
 | `name` | string | yes | Plugin identifier used in warnings. |
 | `description` | string | no | Human-readable summary. |
 | `commands` | array of strings | yes | Command names this plugin completes (no spaces). |
+| `value_flags` | array of strings | no | Global flags that consume the next word as their value, e.g. `["--context", "-H"]` for docker. Without this, `docker --context remote rm <TAB>` would read `remote` as the subcommand and match no rule. `--flag=value` needs no declaration. |
 | `disabled` | boolean | no | Remove completions for `commands`, including built-in ones. |
+
+Unknown keys anywhere in a spec are validation errors, so a misspelled field
+fails loudly instead of silently falling back to its default.
 
 ### `[[rules]]`
 
@@ -134,19 +138,27 @@ are dropped, and candidates are filtered by what has already been typed
 - **Priority**: plugins run after tool-native (Cobra) and VCS completion but
   before the built-in semantic handlers and filesystem fallback, so a user
   plugin can override handlers like `ssh` or `kill`.
+- **A matched rule owns the argument**: when a rule matches and its source
+  answers, an empty candidate list means "no matches" — completion does not
+  fall through and offer filenames for something like a container name.
 - **Failure is silent**: if the source command fails (tool not installed,
   docker daemon not running), the plugin produces no items and completion
-  falls through to the next tier. Slow sources are cut off by `timeout`.
+  falls through to the next tier. A failure is remembered for a few seconds
+  so a broken source is not relaunched on every TAB. Slow sources are cut
+  off by `timeout`.
 - **Isolation**: sources run in their own session with stdin from
   `/dev/null`, and are killed as a group on cancellation. They should be
   read-only, fast, and non-interactive.
-- **Caching**: output is cached per `exec` argv for `cache_ttl`, so holding
-  TAB or typing quickly does not hammer the source command.
+- **Caching**: output is cached per `exec` argv *and working directory* for
+  `cache_ttl`, so holding TAB or typing quickly does not hammer the source
+  command, and directory-sensitive sources (`terraform workspace list`)
+  never leak results across a `cd`.
 - **Cold TAB does not block**: a source with nothing cached gets a short
-  grace period (40ms) to answer; past that, completion falls through to the
-  next tier while the source keeps running in the background, so the next
-  TAB is instant. Sources slower than that grace period are therefore
-  answered from the second TAB onward, not the first.
+  grace period (40ms) to answer. Past that, the shell shows a dim
+  "fetching completions..." notice while the source keeps running in the
+  background, and the menu opens by itself as soon as the data lands — no
+  second TAB needed. If the source fails instead, the notice clears and
+  completion falls back to the next tier.
 - **Stale results are served while refreshing**: once `cache_ttl` expires,
   the previous output is still offered (for up to a minute) while a refresh
   runs in the background. This keeps TAB instant for sources that take

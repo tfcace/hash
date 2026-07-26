@@ -525,3 +525,46 @@ func TestDisplay_RenderCompletionMenu_RowsFitTerminalWidth(t *testing.T) {
 		}
 	}
 }
+
+// CJK characters occupy two terminal columns each, so truncating by rune
+// count still overflows the row and recreates the prompt-stacking corruption.
+func TestDisplay_RenderCompletionMenu_WideRunesFitTerminalWidth(t *testing.T) {
+	const width = 60
+	var out bytes.Buffer
+	d := NewDisplay(&out, width, 24)
+	d.SetPrompt("❯ ")
+
+	items := []CompletionItem{
+		{Text: "web-server", Description: "ウェブサーバーコンテナ、ポート8080で待機中、再起動ポリシーあり"},
+		{Text: "データベース", Description: "本番環境のPostgreSQLデータベース、毎日バックアップ"},
+	}
+
+	d.RenderCompletionMenu(items, 0, 0, 0, 0)
+
+	for i, got := range menuRowWidths(t, out.String()) {
+		if got > width {
+			t.Errorf("menu row %d is %d columns wide, terminal is %d; wide runes must be truncated by display width", i, got, width)
+		}
+	}
+}
+
+// A completion value longer than the terminal must be truncated too; only
+// descriptions were width-budgeted before.
+func TestDisplay_RenderCompletionMenu_LongValuesFitTerminalWidth(t *testing.T) {
+	const width = 50
+	var out bytes.Buffer
+	d := NewDisplay(&out, width, 24)
+	d.SetPrompt("❯ ")
+
+	items := []CompletionItem{
+		{Text: strings.Repeat("registry.example.com/org/very-long-image-name:", 3), Description: "oversized"},
+	}
+
+	d.RenderCompletionMenu(items, 0, 0, 0, 0)
+
+	for i, got := range menuRowWidths(t, out.String()) {
+		if got > width {
+			t.Errorf("menu row %d is %d columns wide, terminal is %d; values must be width-capped", i, got, width)
+		}
+	}
+}

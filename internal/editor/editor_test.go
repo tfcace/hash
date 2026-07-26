@@ -520,3 +520,31 @@ func TestEditor_CompletionReadyIgnoredAfterInputChanged(t *testing.T) {
 		t.Error("a late arrival for older input must not open a menu")
 	}
 }
+
+// Moving the cursor leaves the buffer unchanged, but the late result belongs
+// to the argument where Tab was pressed. It must not open (or auto-insert) at
+// the argument the cursor sits on now.
+func TestEditor_CompletionReadyIgnoredAfterCursorMoved(t *testing.T) {
+	e := New(Config{
+		CompleteOutcomeFunc: func(line string, pos int) CompletionOutcome {
+			return CompletionOutcome{Items: []Completion{{Text: "tfcace/hash"}}}
+		},
+	}, strings.NewReader(""), io.Discard)
+	e.state.Buffer = NewBufferFromString("docker rm redis")
+	e.state.Cursor.MoveTo(0, len("docker rm redis"))
+	e.completionNotice = completionFetchingNotice
+	e.awaitingCompletion = "docker rm redis"
+	e.awaitingCompletionPos = len("docker rm redis")
+
+	// The user arrowed back to another argument; the buffer text is identical.
+	e.state.Cursor.MoveTo(0, len("docker"))
+
+	e.handleCompletionReady()
+
+	if e.completionActive {
+		t.Error("a late arrival for another cursor position must not open a menu")
+	}
+	if e.awaitingCompletion != "" {
+		t.Error("a stale pending completion must be cleared, not left armed")
+	}
+}

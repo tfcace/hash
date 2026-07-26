@@ -21,6 +21,10 @@ type Result struct {
 	// arrived yet. Callers should say so rather than falling through to an
 	// unrelated completer, and refresh when the data lands.
 	Pending bool
+	// Handled reports that a completer matched the input and answered
+	// authoritatively: an empty Items means "no matches for this argument",
+	// not "not mine", so the router must not fall through.
+	Handled bool
 }
 
 func limitCompletionItems(items []Item) []Item {

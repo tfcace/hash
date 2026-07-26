@@ -249,12 +249,13 @@ func (g *pluginGenerator) run(ctx context.Context, tool, hints string) (string, 
 	}
 }
 
-// save writes the accepted spec, replacing any existing file for the tool.
+// save writes the accepted spec, replacing any existing file for the tool
+// (the preview warned about that before accept was offered).
 func (g *pluginGenerator) save(tool, specTOML string) (string, error) {
 	if err := os.MkdirAll(g.specsDir, 0o750); err != nil {
 		return "", fmt.Errorf("create %s: %w", g.specsDir, err)
 	}
-	path := filepath.Join(g.specsDir, tool+".toml")
+	path := g.specPath(tool)
 	if err := os.WriteFile(path, []byte(specTOML), 0o644); err != nil { //nolint:gosec // config file, not a secret
 		return "", fmt.Errorf("write %s: %w", path, err)
 	}
@@ -267,12 +268,24 @@ func (g *pluginGenerator) printPreview(tool, specTOML string, spec *completion.P
 		fmt.Fprintf(g.out, "  %s\n", line)
 	}
 	var covered []string
-	for _, rule := range spec.Rules {
-		covered = append(covered, rule.Subcommands...)
+	for i := range spec.Rules {
+		covered = append(covered, spec.Rules[i].Subcommands...)
 	}
 	if len(covered) > 0 {
 		fmt.Fprintf(g.out, "\n%d rules covering: %s\n", len(spec.Rules), strings.Join(covered, ", "))
 	}
+	if path := g.specPath(tool); fileExists(path) {
+		fmt.Fprintf(g.out, "\nAccepting will replace the existing plugin at %s.\n", path)
+	}
+}
+
+func (g *pluginGenerator) specPath(tool string) string {
+	return filepath.Join(g.specsDir, tool+".toml")
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 // validateGeneratedSpec parses the TOML and applies extra safety checks that
@@ -327,7 +340,7 @@ func extractPluginTOML(reply string) string {
 func collectToolHelp(ctx context.Context, tool string) string {
 	for _, args := range [][]string{{"--help"}, {"help"}, {"-h"}} {
 		out := runToolHelpCommand(ctx, tool, args)
-		if len(out) > 0 {
+		if out != "" {
 			return out
 		}
 	}
@@ -339,17 +352,38 @@ func runToolHelpCommand(ctx context.Context, tool string, args []string) string 
 	defer cancel()
 
 	cmd := exec.CommandContext(helpCtx, tool, args...) //nolint:gosec // tool name is validated and PATH-resolved
-	var buf bytes.Buffer
-	cmd.Stdout = &buf
-	cmd.Stderr = &buf // Many tools print help to stderr.
+	buf := &limitedBuffer{max: toolHelpMaxBytes}
+	cmd.Stdout = buf
+	cmd.Stderr = buf // Many tools print help to stderr.
 	cmd.Stdin = nil
+	// Same containment as completion sources: without it, a descendant that
+	// inherits stdout keeps Wait blocked long past the timeout.
+	completion.ConfigureIsolatedCommand(cmd)
 	_ = cmd.Run() // Non-zero exit is fine as long as we captured output.
 
-	out := strings.TrimSpace(buf.String())
-	if len(out) > toolHelpMaxBytes {
-		out = out[:toolHelpMaxBytes]
+	return strings.TrimSpace(buf.String())
+}
+
+// limitedBuffer keeps the first max bytes written and silently discards the
+// rest, so output is bounded while the command runs, not after it exits.
+type limitedBuffer struct {
+	buf bytes.Buffer
+	max int
+}
+
+func (b *limitedBuffer) Write(p []byte) (int, error) {
+	if room := b.max - b.buf.Len(); room > 0 {
+		if len(p) > room {
+			b.buf.Write(p[:room])
+		} else {
+			b.buf.Write(p)
+		}
 	}
-	return out
+	return len(p), nil
+}
+
+func (b *limitedBuffer) String() string {
+	return b.buf.String()
 }
 
 // reviewOnStdin prompts for the next step. A bare word picks an action; a
