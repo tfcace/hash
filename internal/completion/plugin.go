@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	toml "github.com/pelletier/go-toml/v2"
@@ -208,10 +209,27 @@ func defaultPluginRunner(ctx context.Context, argv []string, timeout time.Durati
 // Built-in specs are registered first; user specs override built-ins on a
 // per-command basis.
 type PluginCompleter struct {
-	rules  map[string][]*PluginRule
-	runner pluginRunner
-	cache  stringListCache
-	now    func() time.Time
+	mu      sync.RWMutex
+	entries map[string]pluginEntry
+	runner  pluginRunner
+	cache   stringListCache
+	now     func() time.Time
+}
+
+// pluginEntry is the handler for a single command, tracking which spec it
+// came from for introspection.
+type pluginEntry struct {
+	specName string
+	builtin  bool
+	rules    []*PluginRule
+}
+
+// PluginInfo describes a registered plugin handler for one command.
+type PluginInfo struct {
+	Command  string
+	SpecName string
+	Builtin  bool
+	Rules    int
 }
 
 // NewPluginCompleter creates a plugin completer from the built-in specs plus
@@ -219,31 +237,47 @@ type PluginCompleter struct {
 // they declare; a spec with disabled = true removes its commands entirely.
 func NewPluginCompleter(userSpecs []*PluginSpec) *PluginCompleter {
 	c := &PluginCompleter{
-		rules:  make(map[string][]*PluginRule),
 		runner: defaultPluginRunner,
 		now:    time.Now,
 	}
-	for _, spec := range builtinPluginSpecs() {
-		c.addSpec(spec)
-	}
-	for _, spec := range userSpecs {
-		c.addSpec(spec)
-	}
+	c.SetUserSpecs(userSpecs)
 	return c
 }
 
-func (c *PluginCompleter) addSpec(spec *PluginSpec) {
-	for _, cmd := range spec.Plugin.Commands {
-		if spec.Plugin.Disabled {
-			delete(c.rules, cmd)
-			continue
+// SetUserSpecs replaces the user specs, rebuilding the handler table from
+// built-ins plus the given specs. Safe to call while completions are running,
+// so freshly written plugin files can take effect without a shell restart.
+func (c *PluginCompleter) SetUserSpecs(userSpecs []*PluginSpec) {
+	entries := make(map[string]pluginEntry)
+	addSpec(entries, true, builtinPluginSpecs()...)
+	addSpec(entries, false, userSpecs...)
+
+	c.mu.Lock()
+	c.entries = entries
+	c.mu.Unlock()
+}
+
+func addSpec(entries map[string]pluginEntry, builtin bool, specs ...*PluginSpec) {
+	for _, spec := range specs {
+		for _, cmd := range spec.Plugin.Commands {
+			if spec.Plugin.Disabled {
+				delete(entries, cmd)
+				continue
+			}
+			rules := make([]*PluginRule, len(spec.Rules))
+			for i := range spec.Rules {
+				rules[i] = &spec.Rules[i]
+			}
+			entries[cmd] = pluginEntry{specName: spec.Plugin.Name, builtin: builtin, rules: rules}
 		}
-		rules := make([]*PluginRule, len(spec.Rules))
-		for i := range spec.Rules {
-			rules[i] = &spec.Rules[i]
-		}
-		c.rules[cmd] = rules
 	}
+}
+
+func (c *PluginCompleter) commandRules(cmd string) ([]*PluginRule, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	entry, ok := c.entries[cmd]
+	return entry.rules, ok
 }
 
 // Name returns the completer name.
@@ -253,12 +287,32 @@ func (c *PluginCompleter) Name() string {
 
 // Commands returns the command names with registered plugin rules.
 func (c *PluginCompleter) Commands() []string {
-	names := make([]string, 0, len(c.rules))
-	for cmd := range c.rules {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	names := make([]string, 0, len(c.entries))
+	for cmd := range c.entries {
 		names = append(names, cmd)
 	}
 	sort.Strings(names)
 	return names
+}
+
+// Plugins returns information about the registered handlers, sorted by
+// command name.
+func (c *PluginCompleter) Plugins() []PluginInfo {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	infos := make([]PluginInfo, 0, len(c.entries))
+	for cmd, entry := range c.entries {
+		infos = append(infos, PluginInfo{
+			Command:  cmd,
+			SpecName: entry.specName,
+			Builtin:  entry.builtin,
+			Rules:    len(entry.rules),
+		})
+	}
+	sort.Slice(infos, func(i, j int) bool { return infos[i].Command < infos[j].Command })
+	return infos
 }
 
 // Complete returns plugin completions for the current input.
@@ -276,7 +330,7 @@ func (c *PluginCompleter) Complete(ctx context.Context, line string, pos int) (R
 		return Result{}, nil
 	}
 
-	rules, ok := c.rules[parts[0]]
+	rules, ok := c.commandRules(parts[0])
 	if !ok {
 		return Result{}, nil
 	}

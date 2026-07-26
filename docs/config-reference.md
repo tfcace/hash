@@ -83,7 +83,7 @@ Core shell behavior.
 | `disable_builtins` | array of strings | `[]` | Builtins to let external commands handle. |
 
 Disableable builtins include `cd`, `history`, `copy`, `issue`, `status`,
-`tips`, `setup-zoxide`, `source`, `exit`, and `quit`.
+`tips`, `setup-zoxide`, `completions`, `source`, `exit`, and `quit`.
 
 ### Shell Dialect
 
@@ -277,6 +277,7 @@ Interactive builtins:
 | `history` | Inspect or search command history. |
 | `copy cmd|out|all [N]` | Copy recent commands and output. |
 | `issue [--last]` | Draft a GitHub issue from shell context. |
+| `completions list|reload|generate <tool>` | Manage completion plugins; `generate` asks the agent to write one. |
 | `setup-zoxide` | Configure zoxide integration. |
 | `source <file>` / `. <file>` | Source shell setup files. |
 

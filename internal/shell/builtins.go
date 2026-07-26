@@ -34,7 +34,7 @@ func isBuiltinEnabled(cfg *config.Config, name string) bool {
 // isBuiltin returns true if the command is a shell builtin.
 func isBuiltin(cmd string) bool {
 	switch cmd {
-	case "cd", "exit", "quit", "history", "copy", "issue", "status", "tips", "setup", "setup-zoxide", "model":
+	case "cd", "exit", "quit", "history", "copy", "issue", "status", "tips", "setup", "setup-zoxide", "model", "completions":
 		return true
 	// Source builtin with executor dialect support
 	case "source", ".":
@@ -92,6 +92,8 @@ func (s *Shell) executeBuiltin(ctx context.Context, line string) (bool, error) {
 		return true, s.builtinSetupZoxide(ctx, args)
 	case "model":
 		return true, s.builtinModel(ctx, args)
+	case "completions":
+		return true, s.builtinCompletions(ctx, args)
 	case "source", ".":
 		return true, s.builtinSource(ctx, args)
 	case "bindkey", "setopt", "unsetopt", "autoload", "compdef", "zstyle", "zmodload", "zle", "compinit", "promptinit":
@@ -480,6 +482,7 @@ func (s *Shell) builtinTips(args []string) error {
 	fmt.Printf("  %s      %s\n", keyStyle.Render("??"), dimStyle.Render("Full command generation"))
 	fmt.Printf("  %s  %s\n", keyStyle.Render("cmd | ??"), dimStyle.Render("Pipe to AI for transformation"))
 	fmt.Printf("  %s    %s\n", keyStyle.Render("cmd ??"), dimStyle.Render("Inline completion"))
+	fmt.Printf("  %s  %s\n", keyStyle.Render("completions generate <tool>"), dimStyle.Render("AI-generated tab completion plugin"))
 	fmt.Println()
 
 	fmt.Println(headerStyle.Render("Clipboard:"))

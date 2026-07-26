@@ -14,6 +14,29 @@ web-server    abc123def456  nginx:latest  (Up 2 hours)
 postgres      789aaa000bbb  postgres:16   (Exited (0) 3 days ago)
 ```
 
+## Generating plugins with the agent
+
+The fastest way to write a plugin is to let the shell's agent do it:
+
+```
+completions generate kubectl
+completions generate terraform "complete workspace names too"
+```
+
+`completions generate <tool>` captures the tool's `--help` output, asks the
+configured `??` agent to draft a spec in the format below, validates the
+result (retrying once with the validation error if the draft is broken),
+shows you the TOML, and — after you confirm — writes it to
+`~/.config/hash/completions/<tool>.toml` and activates it immediately. No
+restart needed.
+
+Related subcommands:
+
+```
+completions list      # show registered plugin handlers (built-in and user)
+completions reload    # re-read user specs after editing them by hand
+```
+
 ## Where plugins live
 
 User plugins are TOML files in:
@@ -22,10 +45,10 @@ User plugins are TOML files in:
 ~/.config/hash/completions/*.toml
 ```
 
-Files are loaded in filename order at shell startup. A file that fails to
-parse prints a warning and is skipped; the rest still load. Plugins can be
-turned off entirely with `completions.plugins_enabled = false` in
-`config.toml`.
+Files are loaded in filename order at shell startup (and on `completions
+reload`). A file that fails to parse prints a warning and is skipped; the
+rest still load. Plugins can be turned off entirely with
+`completions.plugins_enabled = false` in `config.toml`.
 
 A user plugin that declares the same command as a built-in plugin **replaces**
 the built-in handler for that command. To remove a built-in without providing

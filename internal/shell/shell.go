@@ -87,6 +87,9 @@ type Shell struct {
 
 	// Directory change hook state
 	prevCwd string // Previous working directory for chpwd hook
+
+	// Completion plugin state (nil when completions.plugins_enabled = false)
+	pluginCompleter *completion.PluginCompleter
 }
 
 // New creates a new Shell instance.
@@ -141,12 +144,14 @@ func New(cfg *config.Config) (*Shell, error) {
 	// Declarative completion plugins: built-in specs (docker) plus user specs
 	// from <config>/completions/*.toml. Registered ahead of semantic so user
 	// plugins can override the built-in handlers.
+	var pluginCompleter *completion.PluginCompleter
 	if cfg.Completions.PluginsEnabled {
 		pluginSpecs, pluginErrs := completion.LoadPluginSpecs(filepath.Join(getConfigDir(), "completions"))
 		for _, pluginErr := range pluginErrs {
 			fmt.Fprintf(os.Stderr, "hash: warning: completion plugin: %v\n", pluginErr)
 		}
-		router.Register(completion.NewPluginCompleter(pluginSpecs), completion.PriorityPlugin)
+		pluginCompleter = completion.NewPluginCompleter(pluginSpecs)
+		router.Register(pluginCompleter, completion.PriorityPlugin)
 	}
 
 	if cfg.Completions.CobraEnabled {
@@ -360,6 +365,8 @@ func New(cfg *config.Config) (*Shell, error) {
 		historyIndex: -1, // Start before history (current line)
 		osc:          osc,
 		prevCwd:      initialCwd,
+
+		pluginCompleter: pluginCompleter,
 	}
 
 	if acpTransport != nil {

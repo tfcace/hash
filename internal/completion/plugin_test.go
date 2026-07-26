@@ -32,12 +32,8 @@ func newTestPluginCompleter(t *testing.T, specTOML string, runner pluginRunner) 
 	if err != nil {
 		t.Fatalf("ParsePluginSpec: %v", err)
 	}
-	c := &PluginCompleter{
-		rules:  make(map[string][]*PluginRule),
-		runner: runner,
-		now:    time.Now,
-	}
-	c.addSpec(spec)
+	c := NewPluginCompleter([]*PluginSpec{spec})
+	c.runner = runner
 	return c
 }
 
@@ -592,6 +588,85 @@ func TestLoadPluginSpecs_MissingDir(t *testing.T) {
 	specs, errs := LoadPluginSpecs(filepath.Join(t.TempDir(), "does-not-exist"))
 	if specs != nil || errs != nil {
 		t.Fatalf("specs = %v errs = %v, want nil/nil", specs, errs)
+	}
+}
+
+func TestPluginCompleter_SetUserSpecsReload(t *testing.T) {
+	c := NewPluginCompleter(nil)
+	c.runner = staticRunner([]string{"api"})
+
+	// No kubectl handler initially.
+	line := "kubectl delete pod "
+	result, err := c.Complete(context.Background(), line, len(line))
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if len(result.Items) != 0 {
+		t.Fatalf("items = %+v, want none before reload", result.Items)
+	}
+
+	spec, err := ParsePluginSpec([]byte(`
+[plugin]
+name = "kubectl"
+commands = ["kubectl"]
+
+[[rules]]
+subcommands = ["delete pod"]
+[rules.source]
+exec = ["kubectl", "get", "pods"]
+`))
+	if err != nil {
+		t.Fatalf("ParsePluginSpec: %v", err)
+	}
+	c.SetUserSpecs([]*PluginSpec{spec})
+
+	result, err = c.Complete(context.Background(), line, len(line))
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if len(result.Items) != 1 {
+		t.Fatalf("items = %+v, want 1 after reload", result.Items)
+	}
+
+	// Reloading with no user specs restores built-ins only.
+	c.SetUserSpecs(nil)
+	result, err = c.Complete(context.Background(), line, len(line))
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if len(result.Items) != 0 {
+		t.Fatalf("items = %+v, want none after clearing user specs", result.Items)
+	}
+}
+
+func TestPluginCompleter_Plugins(t *testing.T) {
+	spec, err := ParsePluginSpec([]byte(`
+[plugin]
+name = "kubectl"
+commands = ["kubectl"]
+
+[[rules]]
+[rules.source]
+exec = ["kubectl", "get", "pods"]
+`))
+	if err != nil {
+		t.Fatalf("ParsePluginSpec: %v", err)
+	}
+	c := NewPluginCompleter([]*PluginSpec{spec})
+
+	infos := c.Plugins()
+	byCommand := make(map[string]PluginInfo, len(infos))
+	for _, info := range infos {
+		byCommand[info.Command] = info
+	}
+
+	docker, ok := byCommand["docker"]
+	if !ok || !docker.Builtin || docker.SpecName != "docker" {
+		t.Errorf("docker info = %+v, want built-in docker entry", docker)
+	}
+	kubectl, ok := byCommand["kubectl"]
+	if !ok || kubectl.Builtin || kubectl.SpecName != "kubectl" || kubectl.Rules != 1 {
+		t.Errorf("kubectl info = %+v, want user kubectl entry with 1 rule", kubectl)
 	}
 }
 

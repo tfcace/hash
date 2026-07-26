@@ -80,6 +80,28 @@ func (h *AgentHandler) EnsureModelInfo(ctx context.Context) error {
 	return h.client.EnsureModelInfo(ctx)
 }
 
+// AskText sends a raw prompt to the agent and returns its reply as plain
+// text, regardless of whether the agent classified it as a command or an
+// explanation. Used by builtins that drive the agent directly (e.g.
+// `completions generate`).
+func (h *AgentHandler) AskText(ctx context.Context, prompt string) (string, error) {
+	if h == nil || h.client == nil {
+		return "", fmt.Errorf("no agent configured")
+	}
+
+	resp, err := h.client.Ask(ctx, agent.Request{Prompt: prompt})
+	if err != nil {
+		return "", err
+	}
+	if resp.Type == agent.ResponseTypeError {
+		return "", fmt.Errorf("%s", resp.Error)
+	}
+	if resp.Explanation != "" {
+		return resp.Explanation, nil
+	}
+	return resp.Command, nil
+}
+
 // HandleRequest processes a parsed agent request and returns the response.
 func (h *AgentHandler) HandleRequest(ctx context.Context, parsed parser.ParseResult) (agent.Response, error) {
 	if h.client == nil {
