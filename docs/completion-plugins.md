@@ -127,7 +127,7 @@ completers.
 | `value_column` | integer | `1` | 1-based column inserted into the command line. |
 | `description_column` | integer | `0` | 1-based column shown next to the value in the menu (`0` = none). |
 | `timeout` | duration string | `"500ms"` | Kill the source if it runs longer. |
-| `cache_ttl` | duration string | `"2s"` | Reuse output between keystrokes for this long. |
+| `cache_ttl` | duration string | `"2s"` | Reuse output between keystrokes for this long. `"0s"` disables reuse entirely: every completion re-queries the source. Use it when the tool's own commands change the answer (docker, systemctl), so completion never shows pre-command state. |
 
 Each output line becomes one completion item. Empty values and duplicates
 are dropped, and candidates are filtered by what has already been typed
@@ -152,7 +152,9 @@ are dropped, and candidates are filtered by what has already been typed
 - **Caching**: output is cached per `exec` argv *and working directory* for
   `cache_ttl`, so holding TAB or typing quickly does not hammer the source
   command, and directory-sensitive sources (`terraform workspace list`)
-  never leak results across a `cd`.
+  never leak results across a `cd`. With `cache_ttl = "0s"` nothing is
+  reused (beyond a ~1s handoff to the notice-refresh described below), for
+  sources whose answer changes when the user runs the command itself.
 - **Cold TAB does not block**: a source with nothing cached gets a short
   grace period (40ms) to answer. Past that, the shell shows a dim
   "fetching completions..." notice while the source keeps running in the
@@ -168,8 +170,11 @@ are dropped, and candidates are filtered by what has already been typed
 Set `timeout` generously. It bounds a background process, not the TAB you
 are waiting on, and a source killed by its timeout caches nothing, so it
 fails identically on every attempt. The built-in `docker` spec uses
-`timeout = "3s"` and `cache_ttl = "30s"` because `docker ps` regularly takes
-several hundred milliseconds against a real daemon.
+`timeout = "3s"` because `docker ps` regularly takes several hundred
+milliseconds against a real daemon, and `cache_ttl = "0s"` because docker
+commands change what the sources return: `docker stop web` must move `web`
+from the `stop <TAB>` list to the `start <TAB>` list immediately, not when
+a cache expires.
 
 ## More examples
 

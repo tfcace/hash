@@ -4,6 +4,11 @@ package completion
 // <config>/completions/. They double as reference examples and can be
 // overridden (or disabled) by a user spec that declares the same command.
 
+// The docker spec uses cache_ttl = "0s" throughout: docker's own commands
+// change what these sources return (stop moves a container from the running
+// list to the stopped list), so any reuse across completions shows stale
+// state. Zero TTL re-queries on every TAB; the fetching notice plus
+// auto-refresh keeps that responsive even against a slow daemon.
 const builtinDockerSpec = `
 [plugin]
 name = "docker"
@@ -31,7 +36,7 @@ delimiter = "\t"
 value_column = 1
 description_column = 2
 timeout = "3s"
-cache_ttl = "30s"
+cache_ttl = "0s"
 
 # Running containers where only the first positional is a container
 # (what follows is a command to run inside it).
@@ -44,7 +49,7 @@ delimiter = "\t"
 value_column = 1
 description_column = 2
 timeout = "3s"
-cache_ttl = "30s"
+cache_ttl = "0s"
 
 # All containers (any state).
 [[rules]]
@@ -60,7 +65,7 @@ delimiter = "\t"
 value_column = 1
 description_column = 2
 timeout = "3s"
-cache_ttl = "30s"
+cache_ttl = "0s"
 
 # Stopped containers.
 [[rules]]
@@ -75,7 +80,7 @@ delimiter = "\t"
 value_column = 1
 description_column = 2
 timeout = "3s"
-cache_ttl = "30s"
+cache_ttl = "0s"
 
 # Images where only the first positional is an image
 # (docker run IMAGE cmd..., docker create IMAGE cmd...).
@@ -88,7 +93,7 @@ delimiter = "\t"
 value_column = 1
 description_column = 2
 timeout = "3s"
-cache_ttl = "30s"
+cache_ttl = "0s"
 
 # Images.
 [[rules]]
@@ -102,7 +107,7 @@ delimiter = "\t"
 value_column = 1
 description_column = 2
 timeout = "3s"
-cache_ttl = "30s"
+cache_ttl = "0s"
 
 # Volumes.
 [[rules]]
@@ -113,7 +118,7 @@ delimiter = "\t"
 value_column = 1
 description_column = 2
 timeout = "3s"
-cache_ttl = "30s"
+cache_ttl = "0s"
 
 # Networks.
 [[rules]]
@@ -124,7 +129,7 @@ delimiter = "\t"
 value_column = 1
 description_column = 2
 timeout = "3s"
-cache_ttl = "30s"
+cache_ttl = "0s"
 
 # docker network connect|disconnect NETWORK CONTAINER: the first positional is
 # a network, everything after it is a container. These two rules must stay in
@@ -139,7 +144,7 @@ delimiter = "\t"
 value_column = 1
 description_column = 2
 timeout = "3s"
-cache_ttl = "30s"
+cache_ttl = "0s"
 
 [[rules]]
 subcommands = ["network connect", "network disconnect"]
@@ -149,7 +154,7 @@ delimiter = "\t"
 value_column = 1
 description_column = 2
 timeout = "3s"
-cache_ttl = "30s"
+cache_ttl = "0s"
 
 # Contexts. "context show" is absent on purpose: it prints the current
 # context and takes no arguments.
@@ -164,7 +169,7 @@ delimiter = "\t"
 value_column = 1
 description_column = 2
 timeout = "3s"
-cache_ttl = "30s"
+cache_ttl = "0s"
 
 # Installed plugins.
 [[rules]]
@@ -178,7 +183,7 @@ delimiter = "\t"
 value_column = 1
 description_column = 2
 timeout = "3s"
-cache_ttl = "30s"
+cache_ttl = "0s"
 
 # Buildx builders.
 [[rules]]
@@ -186,7 +191,7 @@ subcommands = ["builder use", "builder rm", "builder inspect", "builder stop"]
 [rules.source]
 exec = ["docker", "builder", "ls", "--format", "{{.Name}}"]
 timeout = "3s"
-cache_ttl = "30s"
+cache_ttl = "0s"
 `
 
 func builtinPluginSpecs() []*PluginSpec {

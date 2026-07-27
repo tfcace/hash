@@ -178,6 +178,123 @@ cache_ttl_ms = "2s"
 	}
 }
 
+// cache_ttl = "0s" disables reuse between completions; timeout stays strictly
+// positive because a source that can never finish is useless.
+func TestParsePluginSpec_ZeroCacheTTL(t *testing.T) {
+	spec, err := ParsePluginSpec([]byte(`
+[plugin]
+name = "x"
+commands = ["x"]
+[[rules]]
+[rules.source]
+exec = ["x"]
+cache_ttl = "0s"
+`))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if spec.Rules[0].cacheTTL != 0 {
+		t.Errorf("cacheTTL = %v, want 0", spec.Rules[0].cacheTTL)
+	}
+
+	if _, err := ParsePluginSpec([]byte(`
+[plugin]
+name = "x"
+commands = ["x"]
+[[rules]]
+[rules.source]
+exec = ["x"]
+timeout = "0s"
+`)); err == nil {
+		t.Error("timeout = 0s should be rejected")
+	}
+}
+
+// With cache_ttl = 0 every completion re-queries the source, so lists that
+// change when the user runs commands (docker ps) are never stale.
+func TestPluginCompleter_ZeroTTLRefetchesEveryCompletion(t *testing.T) {
+	spec := `
+[plugin]
+name = "docker-test"
+commands = ["docker"]
+[[rules]]
+subcommands = ["rm"]
+[rules.source]
+exec = ["docker", "ps", "-a"]
+cache_ttl = "0s"
+`
+	var runs atomic.Int32
+	c := newTestPluginCompleter(t, spec, func(ctx context.Context, argv []string, dir string, timeout time.Duration) ([]string, error) {
+		runs.Add(1)
+		return []string{"web"}, nil
+	})
+	now := time.Now()
+	c.now = func() time.Time { return now }
+
+	line := "docker rm "
+	if _, err := c.Complete(context.Background(), line, len(line)); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	// Past the handoff window but well inside the default 2s TTL: a zero-TTL
+	// rule must query again where a defaulted rule would reuse.
+	now = now.Add(pluginHandoffTTL + 500*time.Millisecond)
+	if _, err := c.Complete(context.Background(), line, len(line)); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if got := runs.Load(); got != 2 {
+		t.Errorf("source ran %d times, want 2 (zero TTL must not reuse results)", got)
+	}
+}
+
+// A zero-TTL slow source must still hand its result to the completion that
+// was pending on it, or the notify/retry pair would fetch forever.
+func TestPluginCompleter_ZeroTTLHandsOffToPendingCompletion(t *testing.T) {
+	spec := `
+[plugin]
+name = "docker-test"
+commands = ["docker"]
+[[rules]]
+subcommands = ["rm"]
+[rules.source]
+exec = ["docker", "ps", "-a"]
+cache_ttl = "0s"
+`
+	var runs atomic.Int32
+	c := newTestPluginCompleter(t, spec, func(ctx context.Context, argv []string, dir string, timeout time.Duration) ([]string, error) {
+		runs.Add(1)
+		time.Sleep(2 * pluginSourceWait)
+		return []string{"web"}, nil
+	})
+	ready := make(chan struct{}, 1)
+	c.SetOnReady(func() { ready <- struct{}{} })
+
+	line := "docker rm "
+	result, err := c.Complete(context.Background(), line, len(line))
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if !result.Pending {
+		t.Fatal("precondition: slow cold source should report pending")
+	}
+
+	select {
+	case <-ready:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no ready notification")
+	}
+
+	result, err = c.Complete(context.Background(), line, len(line))
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if len(result.Items) != 1 || result.Items[0].Value != "web" {
+		t.Fatalf("items = %+v, want the handed-off result", result.Items)
+	}
+	if got := runs.Load(); got != 1 {
+		t.Errorf("source ran %d times, want 1 (retrigger must consume the handoff, not refetch)", got)
+	}
+}
+
 func TestParsePluginSpec_DisabledNeedsNoRules(t *testing.T) {
 	spec, err := ParsePluginSpec([]byte(`
 [plugin]
@@ -995,8 +1112,11 @@ func TestBuiltinDockerSpec_TimeoutsSuitForRealDaemon(t *testing.T) {
 		if rule.timeout < time.Second {
 			t.Errorf("rules[%d] timeout = %v, want at least 1s (docker ps is routinely slower than the default)", i, rule.timeout)
 		}
-		if rule.cacheTTL < 10*time.Second {
-			t.Errorf("rules[%d] cache_ttl = %v, want at least 10s so warm TABs stay warm", i, rule.cacheTTL)
+		// Docker's own commands change these lists (stop moves a container
+		// between the running and stopped rules), so nothing may be reused
+		// across completions.
+		if rule.cacheTTL != 0 {
+			t.Errorf("rules[%d] cache_ttl = %v, want 0 so completions never show pre-command state", i, rule.cacheTTL)
 		}
 	}
 }

@@ -37,6 +37,14 @@ const (
 	// a negative cache a failing source would be relaunched by its own failure
 	// notification, forever.
 	pluginFailureTTL = 5 * time.Second
+
+	// pluginHandoffTTL is how long a zero-cache_ttl source result is held.
+	// It exists only to bridge the notify/retrigger gap: the completion that
+	// went pending re-runs when the source lands and must find the result, or
+	// it would go pending again and refetch forever. It is far shorter than
+	// any realistic state change (running another docker command), so a
+	// cache_ttl = 0 rule still never shows stale data in practice.
+	pluginHandoffTTL = time.Second
 )
 
 // PluginSpec is a declarative completion plugin, typically loaded from a TOML
@@ -95,7 +103,9 @@ type PluginSource struct {
 	DescriptionColumn int `toml:"description_column"`
 	// Timeout bounds source execution (default "500ms").
 	Timeout string `toml:"timeout"`
-	// CacheTTL keeps results between keystrokes (default "2s").
+	// CacheTTL keeps results between keystrokes (default "2s"). "0s" disables
+	// reuse: every completion re-queries the source. Use it for sources whose
+	// answer changes when the user runs the command itself, like docker ps.
 	CacheTTL string `toml:"cache_ttl"`
 }
 
@@ -171,16 +181,16 @@ func (r *PluginRule) validate() error {
 	}
 
 	var err error
-	if r.timeout, err = parsePluginDuration(r.Source.Timeout, defaultPluginTimeout); err != nil {
+	if r.timeout, err = parsePluginDuration(r.Source.Timeout, defaultPluginTimeout, false); err != nil {
 		return fmt.Errorf("source.timeout: %w", err)
 	}
-	if r.cacheTTL, err = parsePluginDuration(r.Source.CacheTTL, defaultPluginCacheTTL); err != nil {
+	if r.cacheTTL, err = parsePluginDuration(r.Source.CacheTTL, defaultPluginCacheTTL, true); err != nil {
 		return fmt.Errorf("source.cache_ttl: %w", err)
 	}
 	return nil
 }
 
-func parsePluginDuration(value string, fallback time.Duration) (time.Duration, error) {
+func parsePluginDuration(value string, fallback time.Duration, allowZero bool) (time.Duration, error) {
 	if value == "" {
 		return fallback, nil
 	}
@@ -188,7 +198,7 @@ func parsePluginDuration(value string, fallback time.Duration) (time.Duration, e
 	if err != nil {
 		return 0, err
 	}
-	if d <= 0 {
+	if d < 0 || (d == 0 && !allowZero) {
 		return 0, fmt.Errorf("duration must be positive, got %q", value)
 	}
 	return d, nil
@@ -561,10 +571,16 @@ func (c *PluginCompleter) sourceLines(ctx context.Context, rule *PluginRule, dir
 		return lines, nil
 	}
 
+	// A zero-TTL rule never serves expired results; freshness is the point.
+	staleGrace := time.Duration(0)
+	if rule.cacheTTL > 0 {
+		staleGrace = pluginStaleGrace
+	}
+
 	// A source that just failed will fail again; don't relaunch it on every
 	// retrigger. Old results are still worth serving while it recovers.
 	if c.recentFailure(key, now) {
-		if lines, ok := c.cache.getStale(key, now, pluginStaleGrace); ok {
+		if lines, ok := c.cache.getStale(key, now, staleGrace); ok {
 			return lines, nil
 		}
 		return nil, errPluginSourceFailed
@@ -573,7 +589,7 @@ func (c *PluginCompleter) sourceLines(ctx context.Context, rule *PluginRule, dir
 	call := c.startSourceCall(key, rule, dir)
 
 	// Serve an expired-but-recent result immediately while the refresh runs.
-	if lines, ok := c.cache.getStale(key, now, pluginStaleGrace); ok {
+	if lines, ok := c.cache.getStale(key, now, staleGrace); ok {
 		return lines, nil
 	}
 
@@ -661,7 +677,11 @@ func (c *PluginCompleter) finishSourceCall(key string, call *pluginSourceCall, r
 	lines, err := c.runner(context.Background(), rule.Source.Exec, dir, rule.timeout)
 	call.lines, call.err = lines, err
 	if err == nil {
-		c.cache.set(key, lines, c.now().Add(rule.cacheTTL))
+		ttl := rule.cacheTTL
+		if ttl == 0 {
+			ttl = pluginHandoffTTL // Just enough for the pending retrigger.
+		}
+		c.cache.set(key, lines, c.now().Add(ttl))
 	}
 	c.recordFailure(key, err != nil)
 

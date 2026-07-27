@@ -454,7 +454,10 @@ timeout = "3s"                  # optional; bounds a background process, not the
                                 # A source killed by its timeout caches nothing and
                                 # fails the same way every time, so be generous.
 cache_ttl = "30s"               # optional; expired results are still served while a
-                                # refresh runs in the background, so prefer 10s-60s
+                                # refresh runs in the background, so prefer 10s-60s.
+                                # Use "0s" (no reuse) when the tool's own commands
+                                # change the answer, e.g. listing containers or
+                                # services the user is about to start/stop
 
 Example (systemd units):
 
