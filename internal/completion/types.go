@@ -47,12 +47,17 @@ type Completer interface {
 type Priority int
 
 const (
-	PriorityToolNative Priority = 100 // Try first for subcommand completion
+	// Plugins outrank tool-native completion on purpose: a matched rule is
+	// curated (descriptions, per-subcommand sources) where Cobra __complete
+	// output is bare names, and which one answered would otherwise depend on
+	// whose prefetch cache happened to be warm. Plugins only claim arguments
+	// an explicit rule matches, so unmatched input still falls through.
+	PriorityPlugin     Priority = 90  // Declarative completion plugins (user-extensible)
+	PriorityToolNative Priority = 100 // Tool-native subcommand completion (Cobra __complete)
 	PriorityAlias      Priority = 125 // User-defined functions/aliases (before executables)
 	PriorityEnv        Priority = 130 // Environment variables ($VAR)
 	PriorityExecutable Priority = 150 // Executable names from PATH (command position only)
 	PriorityVCS        Priority = 175 // Context-aware VCS args (git/jj refs)
-	PriorityPlugin     Priority = 180 // Declarative completion plugins (user-extensible)
 	PrioritySemantic   Priority = 185 // Semantic completions for common commands
 	PriorityFilesystem Priority = 200 // Fallback for file arguments
 	PriorityAgent      Priority = 300 // AI-powered fallback

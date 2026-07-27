@@ -51,12 +51,14 @@ description_column = 2
 timeout = "3s"
 cache_ttl = "0s"
 
-# All containers (any state).
+# All containers (any state). "cp" is deliberately absent: its arguments mix
+# container:path and local paths, and docker's own completion defers to file
+# completion there, so claiming it would block path completion.
 [[rules]]
 subcommands = [
-  "rm", "inspect", "logs", "wait", "diff", "commit", "export", "rename", "cp", "restart",
+  "rm", "inspect", "logs", "wait", "diff", "commit", "export", "rename", "restart",
   "container rm", "container inspect", "container logs", "container wait",
-  "container diff", "container commit", "container export", "container rename", "container cp",
+  "container diff", "container commit", "container export", "container rename",
   "container restart",
 ]
 [rules.source]

@@ -452,8 +452,8 @@ func (c *PluginCompleter) Complete(ctx context.Context, line string, pos int) (R
 	}
 
 	current, args := splitCurrentArg(parts[1:], trailingSpace)
-	if strings.HasPrefix(current, "-") {
-		return Result{}, nil // Flags are not ours to complete.
+	if declinesCurrentWord(current) {
+		return Result{}, nil
 	}
 
 	positionals, currentIsFlagValue := stripFlags(args, entry.valueFlags)
@@ -479,6 +479,17 @@ func (c *PluginCompleter) Complete(ctx context.Context, line string, pos int) (R
 		return Result{Items: items, Handled: true}, nil
 	}
 	return Result{}, nil
+}
+
+// declinesCurrentWord reports whether the word being completed is another
+// completer's domain: flags are not ours, "$VAR" belongs to the env completer,
+// and "~/..." is a path. Since a matched plugin rule owns its argument
+// outright, answering these would suppress the completer the user is
+// actually asking for.
+func declinesCurrentWord(current string) bool {
+	return strings.HasPrefix(current, "-") ||
+		strings.HasPrefix(current, "$") ||
+		strings.HasPrefix(current, "~")
 }
 
 // stripFlags returns the positional arguments with flags removed. A flag
@@ -719,7 +730,7 @@ func (c *PluginCompleter) Prefetch(line string, pos int) {
 	}
 
 	current, args := splitCurrentArg(parts[1:], trailingSpace)
-	if strings.HasPrefix(current, "-") {
+	if declinesCurrentWord(current) {
 		return
 	}
 

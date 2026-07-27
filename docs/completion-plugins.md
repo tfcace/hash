@@ -135,9 +135,11 @@ are dropped, and candidates are filtered by what has already been typed
 
 ## Behavior notes
 
-- **Priority**: plugins run after tool-native (Cobra) and VCS completion but
-  before the built-in semantic handlers and filesystem fallback, so a user
-  plugin can override handlers like `ssh` or `kill`.
+- **Priority**: plugins run first, ahead of tool-native (Cobra `__complete`)
+  completion. A matched rule is curated (per-subcommand sources, descriptions)
+  where `__complete` returns bare names, so the plugin answer wins whenever a
+  rule matches. Input no rule matches falls through to the other tiers, and a
+  user plugin can override any built-in handler (`docker`, `ssh`, `kill`).
 - **A matched rule owns the argument**: when a rule matches and its source
   answers, an empty candidate list means "no matches" — completion does not
   fall through and offer filenames for something like a container name.

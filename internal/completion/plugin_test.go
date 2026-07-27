@@ -390,6 +390,10 @@ func TestPluginCompleter_NoMatchCases(t *testing.T) {
 		{"unknown command", "podman rm "},
 		{"completing a flag", "docker rm -"},
 		{"completing a flag long", "docker rm --for"},
+		// Plugins outrank the env and filesystem completers, so words in
+		// their domains must be declined, not owned-and-emptied.
+		{"completing an env var", "docker rm $CONT"},
+		{"completing a home path", "docker rm ~/back"},
 		{"empty line", ""},
 	}
 	for _, tt := range tests {
@@ -768,6 +772,26 @@ func TestBuiltinDocker_ContextCompletion(t *testing.T) {
 func TestBuiltinDocker_ContextShowHasNoRule(t *testing.T) {
 	if argv := dockerSpecArgv(t, "docker context show "); len(argv) != 0 {
 		t.Errorf("docker context show: argv = %v, want no matching rule", argv)
+	}
+}
+
+// docker cp mixes container:path and local path arguments; docker's own
+// completion defers to files there, and a rule would block path completion.
+func TestBuiltinDocker_CpHasNoRule(t *testing.T) {
+	for _, line := range []string{"docker cp ", "docker container cp "} {
+		if argv := dockerSpecArgv(t, line); len(argv) != 0 {
+			t.Errorf("%s: argv = %v, want no matching rule so paths complete", line, argv)
+		}
+	}
+}
+
+// A matched plugin rule must outrank tool-native (Cobra) completion: plugin
+// output is curated and described, while __complete returns bare names, and
+// which one answered must not depend on whose prefetch cache is warm.
+func TestPriorities_PluginOutranksToolNative(t *testing.T) {
+	if PriorityPlugin >= PriorityToolNative {
+		t.Errorf("PriorityPlugin = %d, want lower (higher priority) than PriorityToolNative = %d",
+			PriorityPlugin, PriorityToolNative)
 	}
 }
 
