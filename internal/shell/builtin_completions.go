@@ -441,10 +441,18 @@ const pluginSpecReference = `A plugin is a TOML file with this structure:
 name = "<tool>"                 # required identifier
 description = "..."             # optional
 commands = ["<tool>"]           # required: command names this plugin completes
+value_flags = ["-n", "--namespace"]   # global flags whose VALUE is the next word;
+                                # without this, "tool -n foo sub" misparses "foo"
+                                # as the subcommand
 
 [[rules]]                       # one or more; first matching rule wins
 subcommands = ["rm", "container rm"]  # subcommand paths; empty list = any arguments
 max_args = 1                    # optional: stop completing after N positionals (0 = unlimited)
+forward_flags = ["-n", "--namespace"] # optional: copy these flags (with values) from the
+                                # typed line into the source command, so e.g.
+                                # "kubectl delete pod -n staging <TAB>" queries the
+                                # staging namespace. Value-taking entries must also
+                                # be listed in value_flags.
 [rules.source]
 exec = ["cmd", "arg"]           # required argv, run without a shell
 delimiter = "\t"                # optional column separator (default: whitespace)
@@ -484,6 +492,7 @@ func buildPluginGenPrompt(tool, helpText, hints string) string {
 	b.WriteString("- prefer machine-readable output flags (--format, -o name, --porcelain, --no-legend) with a tab delimiter, and include a useful description_column when possible\n")
 	b.WriteString("- cover the subcommands where completing a resource name helps most (remove/start/stop/inspect-style commands); include long-form paths like \"container rm\" when the tool has them\n")
 	b.WriteString("- use max_args = 1 for subcommands where only the first positional is a resource name\n")
+	b.WriteString("- declare the tool's global value-taking flags in value_flags, and forward_flags any flag that changes which resources exist (namespace, context, project, profile) so completions come from the right scope\n")
 	b.WriteString("- only include rules the help output below supports; do not invent subcommands or flags\n")
 	if helpText != "" {
 		b.WriteString("\nHelp output of `")

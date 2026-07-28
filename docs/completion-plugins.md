@@ -117,6 +117,7 @@ completers.
 |-----|------|---------|-------------|
 | `subcommands` | array of strings | `[]` | Subcommand paths this rule applies to, e.g. `["rm", "container rm"]`. Empty matches any arguments of the command. |
 | `max_args` | integer | `0` | Maximum positional arguments after the subcommand that this rule completes (`0` = unlimited). Use `1` for `docker run IMAGE cmd...`-style commands where only the first positional should be completed. |
+| `forward_flags` | array of strings | `[]` | Flags copied from the typed line into the source command (with their values), inserted right after the command name. Declare any flag that changes which resources exist, so `kubectl delete pod -n staging <TAB>` queries the staging namespace and `docker --context remote rm <TAB>` asks the remote daemon. A forwarded flag whose value is a separate word must also appear in `value_flags`. Results are cached per final command line, so scopes never mix. |
 
 ### `[rules.source]`
 

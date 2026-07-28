@@ -159,6 +159,15 @@ subcomands = ["rm"]
 [rules.source]
 exec = ["x"]
 `},
+		{"forward_flags without dash", `
+[plugin]
+name = "x"
+commands = ["x"]
+[[rules]]
+forward_flags = ["n"]
+[rules.source]
+exec = ["x"]
+`},
 		{"misspelled source field", `
 [plugin]
 name = "x"
@@ -449,6 +458,119 @@ exec = ["docker", "ps", "-a"]
 	}
 	if len(result.Items) != 0 || result.Handled || result.Pending {
 		t.Errorf("Complete(%q) = %+v, want silence while typing a flag value", line, result)
+	}
+}
+
+// forward_flags passes declared line flags into the source argv, inserted
+// right after the command (docker requires global flags before the
+// subcommand), so `kubectl delete pod -n staging <TAB>` queries staging.
+func TestPluginCompleter_ForwardFlagsReachTheSource(t *testing.T) {
+	spec := `
+[plugin]
+name = "kubectl"
+commands = ["kubectl"]
+value_flags = ["-n", "--namespace"]
+
+[[rules]]
+subcommands = ["delete pod"]
+forward_flags = ["-n", "--namespace"]
+[rules.source]
+exec = ["kubectl", "get", "pods", "--no-headers"]
+cache_ttl = "0s"
+`
+	queried := make(map[string]bool)
+	c := newTestPluginCompleter(t, spec, func(ctx context.Context, argv []string, dir string, timeout time.Duration) ([]string, error) {
+		queried[strings.Join(argv, " ")] = true
+		return []string{"pod-a"}, nil
+	})
+
+	// The first two lines normalize to the same source argv, so the second
+	// answers from cache; queried tracks every argv the source ever saw.
+	tests := []struct {
+		line string
+		want string
+	}{
+		{"kubectl delete pod -n staging ", "kubectl -n staging get pods --no-headers"},
+		{"kubectl -n staging delete pod ", "kubectl -n staging get pods --no-headers"},
+		{"kubectl delete pod --namespace=staging ", "kubectl --namespace=staging get pods --no-headers"},
+		{"kubectl delete pod ", "kubectl get pods --no-headers"},
+	}
+	for _, tt := range tests {
+		result, err := c.Complete(context.Background(), tt.line, len(tt.line))
+		if err != nil {
+			t.Fatalf("Complete(%q): %v", tt.line, err)
+		}
+		if len(result.Items) != 1 {
+			t.Errorf("Complete(%q): items = %+v, want the rule to match", tt.line, result.Items)
+		}
+		if !queried[tt.want] {
+			t.Errorf("Complete(%q): source argv %q never ran; ran: %v", tt.line, tt.want, queried)
+		}
+	}
+}
+
+// Undeclared flags stay out of the source argv: docker rm -f must not turn
+// into docker ps -f.
+func TestPluginCompleter_UndeclaredFlagsAreNotForwarded(t *testing.T) {
+	spec := `
+[plugin]
+name = "kubectl"
+commands = ["kubectl"]
+value_flags = ["-n"]
+
+[[rules]]
+subcommands = ["delete pod"]
+forward_flags = ["-n"]
+[rules.source]
+exec = ["kubectl", "get", "pods"]
+`
+	var gotArgv []string
+	c := newTestPluginCompleter(t, spec, func(ctx context.Context, argv []string, dir string, timeout time.Duration) ([]string, error) {
+		gotArgv = argv
+		return []string{"pod-a"}, nil
+	})
+
+	line := "kubectl delete pod --force "
+	if _, err := c.Complete(context.Background(), line, len(line)); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if got := strings.Join(gotArgv, " "); got != "kubectl get pods" {
+		t.Errorf("source argv = %q, want no forwarded flags", got)
+	}
+}
+
+// Different forwarded values must not share a cache entry: pods in staging
+// are not pods in prod.
+func TestPluginCompleter_ForwardedFlagsSplitTheCache(t *testing.T) {
+	spec := `
+[plugin]
+name = "kubectl"
+commands = ["kubectl"]
+value_flags = ["-n"]
+
+[[rules]]
+subcommands = ["delete pod"]
+forward_flags = ["-n"]
+[rules.source]
+exec = ["kubectl", "get", "pods"]
+cache_ttl = "30s"
+`
+	c := newTestPluginCompleter(t, spec, func(ctx context.Context, argv []string, dir string, timeout time.Duration) ([]string, error) {
+		return []string{strings.Join(argv, "_")}, nil
+	})
+
+	first := "kubectl delete pod -n staging "
+	r1, err := c.Complete(context.Background(), first, len(first))
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	second := "kubectl delete pod -n prod "
+	r2, err := c.Complete(context.Background(), second, len(second))
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if len(r1.Items) != 1 || len(r2.Items) != 1 || r1.Items[0].Value == r2.Items[0].Value {
+		t.Errorf("staging item %+v vs prod item %+v: forwarded values must not share a cache entry", r1.Items, r2.Items)
 	}
 }
 
@@ -772,6 +894,15 @@ func TestBuiltinDocker_ContextCompletion(t *testing.T) {
 func TestBuiltinDocker_ContextShowHasNoRule(t *testing.T) {
 	if argv := dockerSpecArgv(t, "docker context show "); len(argv) != 0 {
 		t.Errorf("docker context show: argv = %v, want no matching rule", argv)
+	}
+}
+
+// The builtin spec forwards --context so completion queries the daemon the
+// user is addressing, not the default one.
+func TestBuiltinDocker_ForwardsContextToSource(t *testing.T) {
+	argv := dockerSpecArgv(t, "docker --context remote rm ")
+	if len(argv) < 4 || argv[1] != "--context" || argv[2] != "remote" || argv[3] != "ps" {
+		t.Errorf("argv = %v, want docker --context remote ps ...", argv)
 	}
 }
 
@@ -1359,7 +1490,8 @@ func TestPluginCompleter_FailureIsCachedBriefly(t *testing.T) {
 	c.now = func() time.Time { return now }
 
 	line := "docker rm "
-	first := c.startSourceCall(sourceCacheKey(c.entries["docker"].rules[0], c.getwd()), c.entries["docker"].rules[0], c.getwd())
+	rule := c.entries["docker"].rules[0]
+	first := c.startSourceCall(sourceCacheKey(rule.Source.Exec, c.getwd()), rule, rule.Source.Exec, c.getwd())
 	<-first.done
 
 	result, err := c.Complete(context.Background(), line, len(line))

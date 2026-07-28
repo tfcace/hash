@@ -30,6 +30,7 @@ subcommands = [
   "container unpause", "container attach", "container top", "container stats",
   "container port", "container update",
 ]
+forward_flags = ["-c", "--context"]
 [rules.source]
 exec = ["docker", "ps", "--format", "{{.Names}}\t{{.ID}}  {{.Image}}  ({{.Status}})"]
 delimiter = "\t"
@@ -43,6 +44,7 @@ cache_ttl = "0s"
 [[rules]]
 subcommands = ["exec", "container exec"]
 max_args = 1
+forward_flags = ["-c", "--context"]
 [rules.source]
 exec = ["docker", "ps", "--format", "{{.Names}}\t{{.ID}}  {{.Image}}  ({{.Status}})"]
 delimiter = "\t"
@@ -61,6 +63,7 @@ subcommands = [
   "container diff", "container commit", "container export", "container rename",
   "container restart",
 ]
+forward_flags = ["-c", "--context"]
 [rules.source]
 exec = ["docker", "ps", "-a", "--format", "{{.Names}}\t{{.ID}}  {{.Image}}  ({{.Status}})"]
 delimiter = "\t"
@@ -72,6 +75,7 @@ cache_ttl = "0s"
 # Stopped containers.
 [[rules]]
 subcommands = ["start", "container start"]
+forward_flags = ["-c", "--context"]
 [rules.source]
 exec = [
   "docker", "ps", "-a",
@@ -89,6 +93,7 @@ cache_ttl = "0s"
 [[rules]]
 subcommands = ["run", "create", "container run", "container create"]
 max_args = 1
+forward_flags = ["-c", "--context"]
 [rules.source]
 exec = ["docker", "images", "--filter", "dangling=false", "--format", "{{.Repository}}:{{.Tag}}\t{{.ID}}  {{.Size}}"]
 delimiter = "\t"
@@ -103,6 +108,7 @@ subcommands = [
   "rmi", "push", "tag", "history", "save",
   "image rm", "image inspect", "image push", "image tag", "image history", "image save",
 ]
+forward_flags = ["-c", "--context"]
 [rules.source]
 exec = ["docker", "images", "--filter", "dangling=false", "--format", "{{.Repository}}:{{.Tag}}\t{{.ID}}  {{.Size}}"]
 delimiter = "\t"
@@ -114,6 +120,7 @@ cache_ttl = "0s"
 # Volumes.
 [[rules]]
 subcommands = ["volume rm", "volume inspect"]
+forward_flags = ["-c", "--context"]
 [rules.source]
 exec = ["docker", "volume", "ls", "--format", "{{.Name}}\t{{.Driver}}"]
 delimiter = "\t"
@@ -125,6 +132,7 @@ cache_ttl = "0s"
 # Networks.
 [[rules]]
 subcommands = ["network rm", "network inspect"]
+forward_flags = ["-c", "--context"]
 [rules.source]
 exec = ["docker", "network", "ls", "--format", "{{.Name}}\t{{.ID}}  {{.Driver}}"]
 delimiter = "\t"
@@ -140,6 +148,7 @@ cache_ttl = "0s"
 [[rules]]
 subcommands = ["network connect", "network disconnect"]
 max_args = 1
+forward_flags = ["-c", "--context"]
 [rules.source]
 exec = ["docker", "network", "ls", "--format", "{{.Name}}\t{{.ID}}  {{.Driver}}"]
 delimiter = "\t"
@@ -150,6 +159,7 @@ cache_ttl = "0s"
 
 [[rules]]
 subcommands = ["network connect", "network disconnect"]
+forward_flags = ["-c", "--context"]
 [rules.source]
 exec = ["docker", "ps", "--format", "{{.Names}}\t{{.ID}}  {{.Image}}  ({{.Status}})"]
 delimiter = "\t"
@@ -165,6 +175,7 @@ subcommands = [
   "context use", "context rm", "context inspect", "context update",
   "context export",
 ]
+forward_flags = ["-c", "--context"]
 [rules.source]
 exec = ["docker", "context", "ls", "--format", "{{.Name}}\t{{.Description}}"]
 delimiter = "\t"
@@ -179,6 +190,7 @@ subcommands = [
   "plugin rm", "plugin enable", "plugin disable", "plugin inspect",
   "plugin push", "plugin set", "plugin upgrade",
 ]
+forward_flags = ["-c", "--context"]
 [rules.source]
 exec = ["docker", "plugin", "ls", "--format", "{{.Name}}\t{{.Description}}"]
 delimiter = "\t"
@@ -190,6 +202,7 @@ cache_ttl = "0s"
 # Buildx builders.
 [[rules]]
 subcommands = ["builder use", "builder rm", "builder inspect", "builder stop"]
+forward_flags = ["-c", "--context"]
 [rules.source]
 exec = ["docker", "builder", "ls", "--format", "{{.Name}}"]
 timeout = "3s"

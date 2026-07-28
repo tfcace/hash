@@ -79,8 +79,14 @@ type PluginRule struct {
 	// MaxArgs limits how many positional arguments after the subcommand are
 	// completed by this rule (0 = unlimited). Use 1 for commands like
 	// `docker run IMAGE cmd...` where only the first positional is an image.
-	MaxArgs int          `toml:"max_args"`
-	Source  PluginSource `toml:"source"`
+	MaxArgs int `toml:"max_args"`
+	// ForwardFlags lists flags that are copied from the command line into the
+	// source argv (with their values), inserted right after the command. This
+	// lets `kubectl delete pod -n staging <TAB>` query the staging namespace
+	// instead of the default one. A forwarded flag whose value is a separate
+	// token must also appear in the plugin's value_flags.
+	ForwardFlags []string     `toml:"forward_flags"`
+	Source       PluginSource `toml:"source"`
 
 	// Compiled during validation.
 	subTokens [][]string
@@ -169,6 +175,12 @@ func (r *PluginRule) validate() error {
 	}
 	if r.Source.ValueColumn < 0 || r.Source.DescriptionColumn < 0 {
 		return fmt.Errorf("column indexes are 1-based and must not be negative")
+	}
+
+	for _, flag := range r.ForwardFlags {
+		if !strings.HasPrefix(flag, "-") || strings.ContainsAny(flag, " \t=") {
+			return fmt.Errorf("invalid forward_flags entry %q", flag)
+		}
 	}
 
 	r.subTokens = r.subTokens[:0]
@@ -456,7 +468,7 @@ func (c *PluginCompleter) Complete(ctx context.Context, line string, pos int) (R
 		return Result{}, nil
 	}
 
-	positionals, currentIsFlagValue := stripFlags(args, entry.valueFlags)
+	positionals, flagGroups, currentIsFlagValue := stripFlags(args, entry.valueFlags)
 	if currentIsFlagValue {
 		return Result{}, nil // The word being typed belongs to a flag, not us.
 	}
@@ -465,7 +477,7 @@ func (c *PluginCompleter) Complete(ctx context.Context, line string, pos int) (R
 		if !rule.matches(positionals) {
 			continue
 		}
-		items, err := c.completeRule(ctx, rule, current, dir)
+		items, err := c.completeRule(ctx, rule, rule.forwardedSourceArgv(flagGroups), current, dir)
 		if errors.Is(err, errPluginSourcePending) {
 			// Matched, but the data is still on its way. Say so instead of
 			// letting an unrelated completer answer for this argument.
@@ -494,9 +506,11 @@ func declinesCurrentWord(current string) bool {
 
 // stripFlags returns the positional arguments with flags removed. A flag
 // listed in valueFlags also consumes the following token as its value.
+// flagGroups collects each flag occurrence with its value tokens, so a
+// matched rule can forward declared flags into its source argv.
 // currentIsFlagValue reports that the word being completed is the value of a
 // trailing flag rather than a positional.
-func stripFlags(args []string, valueFlags map[string]bool) (positionals []string, currentIsFlagValue bool) {
+func stripFlags(args []string, valueFlags map[string]bool) (positionals []string, flagGroups [][]string, currentIsFlagValue bool) {
 	positionals = make([]string, 0, len(args))
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
@@ -506,12 +520,42 @@ func stripFlags(args []string, valueFlags map[string]bool) (positionals []string
 		}
 		if valueFlags[arg] {
 			if i == len(args)-1 {
-				return positionals, true
+				return positionals, flagGroups, true
 			}
+			flagGroups = append(flagGroups, []string{arg, args[i+1]})
 			i++ // Skip the flag's value.
+			continue
+		}
+		flagGroups = append(flagGroups, []string{arg})
+	}
+	return positionals, flagGroups, false
+}
+
+// forwardedSourceArgv builds the source argv for a matched rule, inserting the
+// line flags the rule forwards right after the command: docker requires
+// global flags before the subcommand, and kubectl accepts either position.
+func (r *PluginRule) forwardedSourceArgv(flagGroups [][]string) []string {
+	if len(r.ForwardFlags) == 0 || len(flagGroups) == 0 {
+		return r.Source.Exec
+	}
+	var forwarded []string
+	for _, group := range flagGroups {
+		name, _, _ := strings.Cut(group[0], "=")
+		for _, allowed := range r.ForwardFlags {
+			if name == allowed {
+				forwarded = append(forwarded, group...)
+				break
+			}
 		}
 	}
-	return positionals, false
+	if len(forwarded) == 0 {
+		return r.Source.Exec
+	}
+	argv := make([]string, 0, len(r.Source.Exec)+len(forwarded))
+	argv = append(argv, r.Source.Exec[0])
+	argv = append(argv, forwarded...)
+	argv = append(argv, r.Source.Exec[1:]...)
+	return argv
 }
 
 // matches reports whether the rule applies to the given positional arguments
@@ -542,8 +586,8 @@ func (r *PluginRule) maxArgsAllows(completedPositionals int) bool {
 	return r.MaxArgs == 0 || completedPositionals < r.MaxArgs
 }
 
-func (c *PluginCompleter) completeRule(ctx context.Context, rule *PluginRule, current, dir string) ([]Item, error) {
-	lines, err := c.sourceLines(ctx, rule, dir)
+func (c *PluginCompleter) completeRule(ctx context.Context, rule *PluginRule, argv []string, current, dir string) ([]Item, error) {
+	lines, err := c.sourceLines(ctx, rule, argv, dir)
 	if err != nil {
 		return nil, err
 	}
@@ -575,8 +619,8 @@ func (c *PluginCompleter) completeRule(ctx context.Context, rule *PluginRule, cu
 	return items, nil
 }
 
-func (c *PluginCompleter) sourceLines(ctx context.Context, rule *PluginRule, dir string) ([]string, error) {
-	key := sourceCacheKey(rule, dir)
+func (c *PluginCompleter) sourceLines(ctx context.Context, rule *PluginRule, argv []string, dir string) ([]string, error) {
+	key := sourceCacheKey(argv, dir)
 	now := c.now()
 	if lines, ok := c.cache.get(key, now); ok {
 		return lines, nil
@@ -597,7 +641,7 @@ func (c *PluginCompleter) sourceLines(ctx context.Context, rule *PluginRule, dir
 		return nil, errPluginSourceFailed
 	}
 
-	call := c.startSourceCall(key, rule, dir)
+	call := c.startSourceCall(key, rule, argv, dir)
 
 	// Serve an expired-but-recent result immediately while the refresh runs.
 	if lines, ok := c.cache.getStale(key, now, staleGrace); ok {
@@ -649,9 +693,10 @@ func (c *PluginCompleter) recordFailure(key string, failed bool) {
 
 // sourceCacheKey includes the working directory: many sources (terraform
 // workspace list, git-based tools) answer differently per directory, and a
-// cached result must never leak across a cd.
-func sourceCacheKey(rule *PluginRule, dir string) string {
-	return dir + "\x00" + strings.Join(rule.Source.Exec, "\x00")
+// cached result must never leak across a cd. The argv is the final one,
+// forwarded flags included, so per-namespace results stay separate too.
+func sourceCacheKey(argv []string, dir string) string {
+	return dir + "\x00" + strings.Join(argv, "\x00")
 }
 
 func defaultGetwd() string {
@@ -666,7 +711,7 @@ func defaultGetwd() string {
 // needed. Execution is detached from the caller's context and bounded only by
 // the rule's own timeout, so completion UI deadlines can't kill a slow source
 // (e.g. docker ps on a cold daemon) before it ever manages to fill the cache.
-func (c *PluginCompleter) startSourceCall(key string, rule *PluginRule, dir string) *pluginSourceCall {
+func (c *PluginCompleter) startSourceCall(key string, rule *PluginRule, argv []string, dir string) *pluginSourceCall {
 	now := c.now()
 	c.inflightMu.Lock()
 	if call, ok := c.inflight[key]; ok && !contextReadCallIsStale(call.started, now, 0) {
@@ -680,12 +725,12 @@ func (c *PluginCompleter) startSourceCall(key string, rule *PluginRule, dir stri
 	c.inflight[key] = call
 	c.inflightMu.Unlock()
 
-	go c.finishSourceCall(key, call, rule, dir)
+	go c.finishSourceCall(key, call, rule, argv, dir)
 	return call
 }
 
-func (c *PluginCompleter) finishSourceCall(key string, call *pluginSourceCall, rule *PluginRule, dir string) {
-	lines, err := c.runner(context.Background(), rule.Source.Exec, dir, rule.timeout)
+func (c *PluginCompleter) finishSourceCall(key string, call *pluginSourceCall, rule *PluginRule, argv []string, dir string) {
+	lines, err := c.runner(context.Background(), argv, dir, rule.timeout)
 	call.lines, call.err = lines, err
 	if err == nil {
 		ttl := rule.cacheTTL
@@ -734,7 +779,7 @@ func (c *PluginCompleter) Prefetch(line string, pos int) {
 		return
 	}
 
-	positionals, currentIsFlagValue := stripFlags(args, entry.valueFlags)
+	positionals, flagGroups, currentIsFlagValue := stripFlags(args, entry.valueFlags)
 	if currentIsFlagValue {
 		return
 	}
@@ -743,9 +788,10 @@ func (c *PluginCompleter) Prefetch(line string, pos int) {
 		if !rule.matches(positionals) {
 			continue
 		}
-		key := sourceCacheKey(rule, dir)
+		argv := rule.forwardedSourceArgv(flagGroups)
+		key := sourceCacheKey(argv, dir)
 		if _, cached := c.cache.get(key, c.now()); !cached {
-			c.startSourceCall(key, rule, dir)
+			c.startSourceCall(key, rule, argv, dir)
 		}
 		return
 	}
