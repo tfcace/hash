@@ -170,6 +170,22 @@ are dropped, and candidates are filtered by what has already been typed
   longer than the completion deadline, so `cache_ttl` controls how fresh
   the data is, not whether completion feels responsive.
 
+## Debugging a plugin
+
+Start hash with completion tracing to see exactly what the plugin system did:
+
+```
+HASH_TRACE=completion HASH_TRACE_LEVEL=detailed HASH_TRACE_PATH=/tmp/hash-trace.jsonl hash
+```
+
+Every TAB then logs, as JSON lines: `plugin_rule_matched` (which rule claimed
+the argument and the final source argv, forwarded flags included),
+`plugin_lookup` (where the answer came from: `cache_hit`, `live`, `pending`,
+`stale_while_refreshing`, `suppressed_after_failure`, ...), and
+`plugin_source_start` / `plugin_source_done` (the background run with its
+duration, line count, and error). When reporting a completion bug, this file
+is the most useful thing to attach.
+
 Set `timeout` generously. It bounds a background process, not the TAB you
 are waiting on, and a source killed by its timeout caches nothing, so it
 fails identically on every attempt. The built-in `docker` spec uses

@@ -9,6 +9,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/tfcace/hash/internal/trace"
 )
 
 const testPluginSpec = `
@@ -1513,6 +1515,51 @@ func TestPluginCompleter_FailureIsCachedBriefly(t *testing.T) {
 	_, _ = c.Complete(context.Background(), line, len(line))
 	if got := runs.Load(); got != 2 {
 		t.Errorf("source ran %d times after expiry, want 2", got)
+	}
+}
+
+// Plugin lookups emit trace events so beta users can report what rule
+// matched, which argv ran, and where each answer came from.
+func TestPluginCompleter_EmitsTraceEvents(t *testing.T) {
+	tmpDir := t.TempDir()
+	tracePath := filepath.Join(tmpDir, "completion-trace.jsonl")
+	t.Setenv("HASH_TRACE", "completion")
+	t.Setenv("HASH_TRACE_PATH", tracePath)
+	t.Setenv("HASH_TRACE_LEVEL", "detailed")
+
+	if err := trace.Init(); err != nil {
+		t.Fatalf("trace init: %v", err)
+	}
+	t.Cleanup(trace.Close)
+
+	c := newTestPluginCompleter(t, testPluginSpec, staticRunner([]string{"abc123\tweb"}))
+
+	line := "docker rm "
+	if _, err := c.Complete(context.Background(), line, len(line)); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	// Second TAB answers from cache.
+	if _, err := c.Complete(context.Background(), line, len(line)); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	trace.Close()
+
+	content, err := os.ReadFile(tracePath)
+	if err != nil {
+		t.Fatalf("ReadFile(%q): %v", tracePath, err)
+	}
+	text := string(content)
+	for _, want := range []string{
+		`"event":"plugin_rule_matched"`,
+		`"event":"plugin_source_start"`,
+		`"event":"plugin_source_done"`,
+		`"event":"plugin_lookup"`,
+		`"outcome":"live"`,
+		`"outcome":"cache_hit"`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("trace missing %s:\n%s", want, text)
+		}
 	}
 }
 

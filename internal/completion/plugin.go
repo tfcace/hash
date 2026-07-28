@@ -13,6 +13,8 @@ import (
 	"time"
 
 	toml "github.com/pelletier/go-toml/v2"
+
+	"github.com/tfcace/hash/internal/trace"
 )
 
 const (
@@ -477,7 +479,17 @@ func (c *PluginCompleter) Complete(ctx context.Context, line string, pos int) (R
 		if !rule.matches(positionals) {
 			continue
 		}
-		items, err := c.completeRule(ctx, rule, rule.forwardedSourceArgv(flagGroups), current, dir)
+		argv := rule.forwardedSourceArgv(flagGroups)
+		if trace.Enabled("completion") {
+			trace.Emit("completion", "plugin_rule_matched", trace.LevelDetailed, map[string]any{
+				"command":     parts[0],
+				"subcommands": strings.Join(rule.Subcommands, ","),
+				"argv":        strings.Join(argv, " "),
+				"current":     current,
+				"dir":         dir,
+			})
+		}
+		items, err := c.completeRule(ctx, rule, argv, current, dir)
 		if errors.Is(err, errPluginSourcePending) {
 			// Matched, but the data is still on its way. Say so instead of
 			// letting an unrelated completer answer for this argument.
@@ -620,9 +632,23 @@ func (c *PluginCompleter) completeRule(ctx context.Context, rule *PluginRule, ar
 }
 
 func (c *PluginCompleter) sourceLines(ctx context.Context, rule *PluginRule, argv []string, dir string) ([]string, error) {
+	start := time.Now()
+	emit := func(outcome string, lines int) {
+		if !trace.Enabled("completion") {
+			return
+		}
+		trace.Emit("completion", "plugin_lookup", trace.LevelDetailed, map[string]any{
+			"argv":    strings.Join(argv, " "),
+			"outcome": outcome,
+			"lines":   lines,
+			"wait_ms": float64(time.Since(start).Microseconds()) / 1000.0,
+		})
+	}
+
 	key := sourceCacheKey(argv, dir)
 	now := c.now()
 	if lines, ok := c.cache.get(key, now); ok {
+		emit("cache_hit", len(lines))
 		return lines, nil
 	}
 
@@ -636,8 +662,10 @@ func (c *PluginCompleter) sourceLines(ctx context.Context, rule *PluginRule, arg
 	// retrigger. Old results are still worth serving while it recovers.
 	if c.recentFailure(key, now) {
 		if lines, ok := c.cache.getStale(key, now, staleGrace); ok {
+			emit("stale_after_failure", len(lines))
 			return lines, nil
 		}
+		emit("suppressed_after_failure", 0)
 		return nil, errPluginSourceFailed
 	}
 
@@ -645,6 +673,7 @@ func (c *PluginCompleter) sourceLines(ctx context.Context, rule *PluginRule, arg
 
 	// Serve an expired-but-recent result immediately while the refresh runs.
 	if lines, ok := c.cache.getStale(key, now, staleGrace); ok {
+		emit("stale_while_refreshing", len(lines))
 		return lines, nil
 	}
 
@@ -655,10 +684,17 @@ func (c *PluginCompleter) sourceLines(ctx context.Context, rule *PluginRule, arg
 	defer timer.Stop()
 	select {
 	case <-ctx.Done():
+		emit("canceled", 0)
 		return nil, ctx.Err()
 	case <-timer.C:
+		emit("pending", 0)
 		return nil, errPluginSourcePending
 	case <-call.done:
+		if call.err != nil {
+			emit("live_error", 0)
+		} else {
+			emit("live", len(call.lines))
+		}
 		return append([]string(nil), call.lines...), call.err
 	}
 }
@@ -725,12 +761,32 @@ func (c *PluginCompleter) startSourceCall(key string, rule *PluginRule, argv []s
 	c.inflight[key] = call
 	c.inflightMu.Unlock()
 
+	if trace.Enabled("completion") {
+		trace.Emit("completion", "plugin_source_start", trace.LevelDetailed, map[string]any{
+			"argv": strings.Join(argv, " "),
+			"dir":  dir,
+		})
+	}
 	go c.finishSourceCall(key, call, rule, argv, dir)
 	return call
 }
 
 func (c *PluginCompleter) finishSourceCall(key string, call *pluginSourceCall, rule *PluginRule, argv []string, dir string) {
+	started := time.Now()
 	lines, err := c.runner(context.Background(), argv, dir, rule.timeout)
+	if trace.Enabled("completion") {
+		errText := ""
+		if err != nil {
+			errText = err.Error()
+		}
+		trace.Emit("completion", "plugin_source_done", trace.LevelDetailed, map[string]any{
+			"argv":        strings.Join(argv, " "),
+			"dir":         dir,
+			"lines":       len(lines),
+			"error":       errText,
+			"duration_ms": float64(time.Since(started).Microseconds()) / 1000.0,
+		})
+	}
 	call.lines, call.err = lines, err
 	if err == nil {
 		ttl := rule.cacheTTL
