@@ -43,8 +43,28 @@ type cachedResult struct {
 	expiresAt time.Time
 }
 
-const cobraPrefetchTimeout = 100 * time.Millisecond
+// cobraPrefetchTimeout bounds a background fetch, not the TAB the user is
+// waiting on, so it can afford to be generous. A cold kubectl __complete
+// takes 150-500ms; killing it early caches nothing and fails identically on
+// every retry, which shows up as completion "randomly" needing several
+// attempts to start working.
+const cobraPrefetchTimeout = 3 * time.Second
 const cobraFailedPrefetchTTL = 2 * time.Second
+
+// knownCobraCommands seeds tools that are widely known to answer
+// __complete, so their very first cache miss in a session reports pending
+// (fetching notice, menu opens itself) instead of flashing an unrelated
+// filename menu once. A wrong entry self-corrects: the fetch fails, the
+// failure is cached briefly, and completion falls through as before.
+var knownCobraCommands = map[string]bool{
+	"kubectl":  true,
+	"helm":     true,
+	"gh":       true,
+	"docker":   true,
+	"podman":   true,
+	"minikube": true,
+	"kind":     true,
+}
 
 var errCobraLookPathBusy = errors.New("cobra command path lookup already in progress")
 
@@ -181,6 +201,14 @@ func (c *CobraCompleter) Complete(ctx context.Context, line string, pos int) (Re
 		return Result{}, nil
 	}
 
+	// "$VAR" and "~/..." words belong to the env and file completers; a
+	// pending (or cached) cobra answer must not shadow them.
+	if len(parts) > 1 && !strings.HasSuffix(line[:pos], " ") {
+		if w := parts[len(parts)-1]; strings.HasPrefix(w, "$") || strings.HasPrefix(w, "~") {
+			return Result{}, nil
+		}
+	}
+
 	// Complete must be cache-only. PATH scans can block on slow mounts and
 	// must stay in background prefetch.
 	cmdPath, ok := c.cachedPath(cmdName)
@@ -203,16 +231,19 @@ func (c *CobraCompleter) Complete(ctx context.Context, line string, pos int) (Re
 		return cached.result, nil
 	}
 
-	// Miss. For a tool that has answered __complete before (kubectl, gh),
-	// falling through would answer a subcommand argument with filenames, so
-	// fetch in the background and report pending; the ready notification
-	// reopens the menu when the data lands. Unknown tools keep the old
-	// fall-through: pending would wrongly block file completion for them.
-	if !c.supportsComplete(cmdPath) {
-		return Result{}, nil
-	}
+	// Miss: always start the background fetch (deduplicated), so the next
+	// TAB can answer even when no space-triggered prefetch covered this key.
 	c.startPrefetch(cmdName, args)
-	return Result{Pending: true}, nil
+
+	// For a tool that answers __complete (learned this session, or seeded),
+	// falling through would answer a subcommand argument with filenames, so
+	// report pending; the ready notification reopens the menu when the data
+	// lands. Unknown tools keep the fall-through: pending would wrongly
+	// block file completion for them.
+	if c.supportsComplete(cmdPath) || knownCobraCommands[cmdName] {
+		return Result{Pending: true}, nil
+	}
+	return Result{}, nil
 }
 
 // Prefetch triggers background fetching of Cobra completions.
