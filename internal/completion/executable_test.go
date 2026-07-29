@@ -43,6 +43,41 @@ func TestExecutableCompleter_CommandPosition(t *testing.T) {
 	}
 }
 
+// Registered builtins complete in command position, labeled, deduplicated
+// against PATH executables of the same name, and prefix-filtered.
+func TestExecutableCompleter_CompletesBuiltins(t *testing.T) {
+	c := NewExecutableCompleter()
+	c.scanExecutables = func() []string { return []string{"completions", "compgen", "ls"} }
+	c.SetBuiltins([]string{"completions", "cd"})
+	ctx := context.Background()
+
+	result, err := c.Complete(ctx, "comp", 4)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var values []string
+	builtinCount := 0
+	for _, item := range result.Items {
+		values = append(values, item.Value)
+		if item.Value == "completions" {
+			builtinCount++
+			if item.Description != "hash builtin" {
+				t.Errorf("completions description = %q, want hash builtin", item.Description)
+			}
+		}
+	}
+	if builtinCount != 1 {
+		t.Errorf("completions appeared %d times in %v, want exactly once", builtinCount, values)
+	}
+	for _, unwanted := range []string{"cd", "ls"} {
+		for _, v := range values {
+			if v == unwanted {
+				t.Errorf("%q should not match prefix comp: %v", unwanted, values)
+			}
+		}
+	}
+}
+
 func TestExecutableCompleter_NotInArgPosition(t *testing.T) {
 	c := NewExecutableCompleter()
 	ctx := context.Background()

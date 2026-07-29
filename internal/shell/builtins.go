@@ -31,6 +31,26 @@ func isBuiltinEnabled(cfg *config.Config, name string) bool {
 	return true
 }
 
+// completableBuiltins are the builtins offered by tab completion in command
+// position. The zsh-compat no-ops are deliberately absent: they exist to
+// swallow sourced zshrc lines, not to be typed.
+var completableBuiltins = []string{
+	"cd", "completions", "copy", "exit", "history", "issue", "model",
+	"quit", "setup", "setup-zoxide", "source", "status", "tips",
+}
+
+// enabledCompletableBuiltins filters completableBuiltins by the config's
+// disabled-builtins list.
+func enabledCompletableBuiltins(cfg *config.Config) []string {
+	names := make([]string, 0, len(completableBuiltins))
+	for _, name := range completableBuiltins {
+		if isBuiltinEnabled(cfg, name) {
+			names = append(names, name)
+		}
+	}
+	return names
+}
+
 // isBuiltin returns true if the command is a shell builtin.
 func isBuiltin(cmd string) bool {
 	switch cmd {

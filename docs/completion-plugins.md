@@ -123,7 +123,8 @@ completers.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `exec` | array of strings | required | Command to run for candidates. Executed directly (argv), with no shell interpretation. Wrap with `["sh", "-c", "..."]` if you need pipes. |
+| `exec` | array of strings | see below | Command to run for candidates. Executed directly (argv), with no shell interpretation. Wrap with `["sh", "-c", "..."]` if you need pipes. |
+| `static` | array of strings | see below | Candidate lines given directly, parsed exactly like command output (delimiter, columns). For fixed subcommand sets that never change. Exactly one of `exec` and `static` must be set. |
 | `delimiter` | string | whitespace | Column separator for each output line. |
 | `value_column` | integer | `1` | 1-based column inserted into the command line. |
 | `description_column` | integer | `0` | 1-based column shown next to the value in the menu (`0` = none). |

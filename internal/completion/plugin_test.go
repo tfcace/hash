@@ -161,6 +161,15 @@ subcomands = ["rm"]
 [rules.source]
 exec = ["x"]
 `},
+		{"both exec and static", `
+[plugin]
+name = "x"
+commands = ["x"]
+[[rules]]
+[rules.source]
+exec = ["x"]
+static = ["a"]
+`},
 		{"forward_flags without dash", `
 [plugin]
 name = "x"
@@ -1515,6 +1524,60 @@ func TestPluginCompleter_FailureIsCachedBriefly(t *testing.T) {
 	_, _ = c.Complete(context.Background(), line, len(line))
 	if got := runs.Load(); got != 2 {
 		t.Errorf("source ran %d times after expiry, want 2", got)
+	}
+}
+
+// Static sources complete without running anything.
+func TestPluginCompleter_StaticSource(t *testing.T) {
+	spec := `
+[plugin]
+name = "hash-test"
+commands = ["completions"]
+[[rules]]
+max_args = 1
+[rules.source]
+static = ["list\tShow handlers", "reload\tReload plugins"]
+delimiter = "\t"
+value_column = 1
+description_column = 2
+`
+	c := newTestPluginCompleter(t, spec, func(ctx context.Context, argv []string, dir string, timeout time.Duration) ([]string, error) {
+		t.Fatal("a static source must never invoke the runner")
+		return nil, nil
+	})
+
+	line := "completions re"
+	result, err := c.Complete(context.Background(), line, len(line))
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if len(result.Items) != 1 || result.Items[0].Value != "reload" || result.Items[0].Description != "Reload plugins" {
+		t.Fatalf("items = %+v, want reload with description", result.Items)
+	}
+}
+
+// The builtin hash spec completes the completions builtin's subcommands, and
+// releases the argument after the first positional so tool names fall
+// through to other completers.
+func TestBuiltinHash_CompletionsSubcommands(t *testing.T) {
+	c := NewPluginCompleter(nil)
+
+	line := "completions "
+	result, err := c.Complete(context.Background(), line, len(line))
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if len(result.Items) != 3 {
+		t.Fatalf("items = %+v, want list/reload/generate", result.Items)
+	}
+
+	line = "completions generate "
+	result, err = c.Complete(context.Background(), line, len(line))
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if len(result.Items) != 0 || result.Handled || result.Pending {
+		t.Fatalf("result = %+v, want fallthrough after the subcommand", result)
 	}
 }
 

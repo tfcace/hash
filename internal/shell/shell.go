@@ -132,8 +132,10 @@ func New(cfg *config.Config) (*Shell, error) {
 	envCompleter.SetMaskSensitive(cfg.Completions.MaskSensitiveEnv)
 	router.Register(envCompleter, completion.PriorityEnv)
 
-	// Executable completer for command names from PATH
-	router.Register(completion.NewExecutableCompleter(), completion.PriorityExecutable)
+	// Executable completer for command names from PATH, plus hash builtins.
+	executableCompleter := completion.NewExecutableCompleter()
+	executableCompleter.SetBuiltins(enabledCompletableBuiltins(cfg))
+	router.Register(executableCompleter, completion.PriorityExecutable)
 
 	// Context-aware completions for git/jj branch and revision args.
 	router.Register(completion.NewVCSCompleter(), completion.PriorityVCS)

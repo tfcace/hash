@@ -209,9 +209,31 @@ timeout = "3s"
 cache_ttl = "0s"
 `
 
+// Subcommands of hash's own builtins, served from static lines: there is no
+// command to run for them.
+const builtinHashSpec = `
+[plugin]
+name = "hash-builtins"
+description = "Subcommands for hash builtin commands"
+commands = ["completions"]
+
+[[rules]]
+max_args = 1
+[rules.source]
+static = [
+  "list\tShow registered completion plugin handlers",
+  "reload\tReload user plugins from disk",
+  "generate\tAsk the agent to write a plugin for a tool",
+]
+delimiter = "\t"
+value_column = 1
+description_column = 2
+`
+
 func builtinPluginSpecs() []*PluginSpec {
 	return []*PluginSpec{
 		mustParsePluginSpec(builtinDockerSpec),
+		mustParsePluginSpec(builtinHashSpec),
 	}
 }
 

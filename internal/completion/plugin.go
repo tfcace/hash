@@ -101,6 +101,10 @@ type PluginRule struct {
 type PluginSource struct {
 	// Exec is the argv to run (no shell interpretation).
 	Exec []string `toml:"exec"`
+	// Static lists candidate lines directly instead of running a command.
+	// Each line is parsed exactly like command output (delimiter, columns).
+	// Exactly one of exec and static must be set.
+	Static []string `toml:"static"`
 	// Delimiter splits each output line into columns ("" = whitespace).
 	Delimiter string `toml:"delimiter"`
 	// ValueColumn is the 1-based column inserted into the command line
@@ -169,8 +173,9 @@ func (s *PluginSpec) validate() error {
 }
 
 func (r *PluginRule) validate() error {
-	if len(r.Source.Exec) == 0 || r.Source.Exec[0] == "" {
-		return fmt.Errorf("source.exec must not be empty")
+	hasExec := len(r.Source.Exec) > 0 && r.Source.Exec[0] != ""
+	if hasExec == (len(r.Source.Static) > 0) {
+		return fmt.Errorf("source needs exactly one of exec or static")
 	}
 	if r.MaxArgs < 0 {
 		return fmt.Errorf("max_args must not be negative")
@@ -547,7 +552,7 @@ func stripFlags(args []string, valueFlags map[string]bool) (positionals []string
 // line flags the rule forwards right after the command: docker requires
 // global flags before the subcommand, and kubectl accepts either position.
 func (r *PluginRule) forwardedSourceArgv(flagGroups [][]string) []string {
-	if len(r.ForwardFlags) == 0 || len(flagGroups) == 0 {
+	if len(r.Source.Exec) == 0 || len(r.ForwardFlags) == 0 || len(flagGroups) == 0 {
 		return r.Source.Exec
 	}
 	var forwarded []string
@@ -643,6 +648,12 @@ func (c *PluginCompleter) sourceLines(ctx context.Context, rule *PluginRule, arg
 			"lines":   lines,
 			"wait_ms": float64(time.Since(start).Microseconds()) / 1000.0,
 		})
+	}
+
+	// Static sources have nothing to run, cache, or fail.
+	if len(rule.Source.Static) > 0 {
+		emit("static", len(rule.Source.Static))
+		return rule.Source.Static, nil
 	}
 
 	key := sourceCacheKey(argv, dir)

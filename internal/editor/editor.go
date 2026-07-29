@@ -958,6 +958,17 @@ func (e *Editor) paste(before bool) {
 
 // triggerCompletion fetches completions and activates the menu if needed.
 func (e *Editor) triggerCompletion() {
+	e.completeWord(false)
+}
+
+// refineCompletion re-queries after the user edited the word with the menu
+// open. Unlike a fresh Tab, a single remaining candidate keeps the menu open
+// instead of auto-inserting: the user is mid-word and may keep typing.
+func (e *Editor) refineCompletion() {
+	e.completeWord(true)
+}
+
+func (e *Editor) completeWord(refine bool) {
 	if e.config.CompleteFunc == nil && e.config.CompleteOutcomeFunc == nil {
 		return
 	}
@@ -999,7 +1010,7 @@ func (e *Editor) triggerCompletion() {
 	e.completionCol = e.findWordStart()
 	e.completionPrefix = currentLine[e.completionCol:e.state.Cursor.Pos.Col]
 
-	if len(items) == 1 && !strings.HasSuffix(items[0].Text, "/") {
+	if !refine && len(items) == 1 && !strings.HasSuffix(items[0].Text, "/") {
 		// Single non-directory match: insert inline immediately
 		e.acceptCompletion(items[0])
 		return
@@ -1309,25 +1320,50 @@ func (e *Editor) handleCompletionKey(key Key) bool {
 			e.completionIndex = 0
 		case len(e.completionDrillStack) > 0:
 			e.drillUp()
+		case e.mode.Name() == "insert" && e.state.Cursor.Pos.Col > e.completionCol:
+			// Un-narrow: delete the last typed character and re-query, the
+			// mirror of printable keys narrowing the menu below.
+			e.deleteRuneBeforeCursor()
+			e.refineCompletion()
 		default:
-			// No filter, no drill stack — dismiss
+			// At the word start (or not inserting) — dismiss
 			e.dismissCompletion()
 			return false
 		}
 		return true
 
 	default:
-		// Printable characters should continue editing the command. Dismiss the
-		// menu and let the active mode handle the key.
-		if key.Special == 0 && key.Rune >= 32 && !key.Ctrl && !key.Alt {
-			e.dismissCompletion()
-			return false
+		// Printable characters narrow the open menu: the character is typed
+		// into the buffer as usual and the completion re-queries, so the menu
+		// filters like a search list using the configured matching mode
+		// (prefix or fuzzy). Space and non-insert modes fall through to
+		// normal editing instead.
+		if key.Special == 0 && key.Rune > ' ' && !key.Ctrl && !key.Alt && e.mode.Name() == "insert" {
+			row := e.state.Cursor.Pos.Row
+			e.state.Buffer.Insert(row, e.state.Cursor.Pos.Col, string(key.Rune))
+			e.state.Cursor.Pos.Col += len(string(key.Rune))
+			e.refineCompletion()
+			return true
 		}
 
-		// Non-printable: dismiss and pass through
+		// Anything else: dismiss and pass through
 		e.dismissCompletion()
 		return false
 	}
+}
+
+// deleteRuneBeforeCursor removes the rune immediately before the cursor on
+// the current line.
+func (e *Editor) deleteRuneBeforeCursor() {
+	row := e.state.Cursor.Pos.Row
+	col := e.state.Cursor.Pos.Col
+	line := e.state.Buffer.Line(row)
+	if col <= 0 || col > len(line) {
+		return
+	}
+	_, size := utf8.DecodeLastRuneInString(line[:col])
+	e.state.Buffer.Delete(Position{row, col - size}, Position{row, col})
+	e.state.Cursor.Pos.Col = col - size
 }
 
 // extractText extracts text between two positions.
