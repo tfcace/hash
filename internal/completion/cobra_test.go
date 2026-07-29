@@ -140,6 +140,81 @@ func TestCobraCompleter_SkipsShellBuiltinCd(t *testing.T) {
 	}
 }
 
+// Narrowing an open cobra menu must not fall through to filenames: a cache
+// miss for a tool that has answered __complete before reports pending,
+// fetches in the background, and notifies so the menu can refresh.
+func TestCobraCompleter_PendingOnMissForKnownCobraTool(t *testing.T) {
+	tmpDir := t.TempDir()
+	cmdPath := filepath.Join(tmpDir, "fakekubectl")
+	script := "#!/bin/sh\nif [ \"$1\" = \"__complete\" ]; then printf 'annotate\\tdesc\\napply\\tdesc\\n:4\\n'; exit 0; fi\nexit 1\n"
+	if err := os.WriteFile(cmdPath, []byte(script), 0o755); err != nil { //nolint:gosec // test fixture must be executable
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	completer := NewCobraCompleter()
+	completer.resolvePath = func(name string) (string, error) { return cmdPath, nil }
+	completer.prefetchTimeout = 5 * time.Second // Loaded CI machines exceed the production 100ms.
+	ready := make(chan struct{}, 8)
+	completer.SetOnReady(func() { ready <- struct{}{} })
+
+	waitReady := func(step string) {
+		t.Helper()
+		select {
+		case <-ready:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%s: no ready notification", step)
+		}
+	}
+
+	// Warm the subcommand list, as the space-triggered prefetch would.
+	completer.Prefetch("fakekubectl ", len("fakekubectl "))
+	waitReady("warm prefetch")
+
+	// The user types "a" while the menu is open: novel key, known tool.
+	line := "fakekubectl a"
+	result, err := completer.Complete(context.Background(), line, len(line))
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if !result.Pending || len(result.Items) != 0 {
+		t.Fatalf("result = %+v, want pending with no items (never filenames)", result)
+	}
+
+	waitReady("pending fetch")
+	result, err = completer.Complete(context.Background(), line, len(line))
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if result.Pending || len(result.Items) != 2 {
+		t.Fatalf("after fetch: result = %+v, want the two candidates", result)
+	}
+}
+
+// A tool that has never answered __complete keeps the old fall-through on a
+// cache miss; pending would wrongly block file completion for it.
+func TestCobraCompleter_MissForUnknownToolFallsThrough(t *testing.T) {
+	tmpDir := t.TempDir()
+	cmdPath := filepath.Join(tmpDir, "plaintool")
+	if err := os.WriteFile(cmdPath, []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil { //nolint:gosec // test fixture must be executable
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	completer := NewCobraCompleter()
+	completer.resolvePath = func(name string) (string, error) { return cmdPath, nil }
+	completer.lookPathCacheMu.Lock()
+	completer.lookPathCache["plaintool"] = cmdPath
+	completer.lookPathCacheMu.Unlock()
+
+	line := "plaintool a"
+	result, err := completer.Complete(context.Background(), line, len(line))
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if result.Pending || len(result.Items) != 0 {
+		t.Fatalf("result = %+v, want plain fall-through for an unknown tool", result)
+	}
+}
+
 func TestCobraCompleter_Name(t *testing.T) {
 	completer := NewCobraCompleter()
 	if completer.Name() != "cobra" {

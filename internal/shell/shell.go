@@ -169,7 +169,16 @@ func New(cfg *config.Config) (*Shell, error) {
 	}
 
 	if cfg.Completions.CobraEnabled {
-		router.Register(completion.NewCobraCompleter(), completion.PriorityToolNative)
+		cobraCompleter := completion.NewCobraCompleter()
+		// Same wake-up contract as the plugin completer: a cache miss for a
+		// known __complete-capable tool reports pending and fills in here.
+		cobraCompleter.SetOnReady(func() {
+			select {
+			case completionReadyCh <- struct{}{}:
+			default:
+			}
+		})
+		router.Register(cobraCompleter, completion.PriorityToolNative)
 	}
 
 	// Set up agent (for both ?? commands and completions)

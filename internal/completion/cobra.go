@@ -14,17 +14,24 @@ import (
 // CobraCompleter provides completions from Cobra-based CLI tools.
 // It uses background prefetching to avoid blocking on TAB press.
 type CobraCompleter struct {
-	cache      map[string]cachedResult
-	cacheMu    sync.RWMutex
-	cacheTTL   time.Duration
-	prefetched map[string]time.Time // prefetch key -> next retry time
-	prefetchMu sync.RWMutex
+	cache           map[string]cachedResult
+	cacheMu         sync.RWMutex
+	cacheTTL        time.Duration
+	prefetchTimeout time.Duration
+	prefetched      map[string]time.Time // prefetch key -> next retry time
+	prefetchMu      sync.RWMutex
 
 	resolvePath      func(string) (string, error)
 	lookPathCache    map[string]string // command name → resolved path
 	lookPathInFlight map[string]*cobraLookPathCall
 	lookPathMaxAge   time.Duration
 	lookPathCacheMu  sync.RWMutex
+
+	supportsMu sync.RWMutex
+	supports   map[string]bool // cmdPath → tool has answered __complete before
+
+	readyMu sync.RWMutex
+	onReady func()
 }
 
 type cobraLookPathCall struct {
@@ -46,6 +53,7 @@ func NewCobraCompleter() *CobraCompleter {
 	return &CobraCompleter{
 		cache:            make(map[string]cachedResult),
 		cacheTTL:         5 * time.Minute,
+		prefetchTimeout:  cobraPrefetchTimeout,
 		prefetched:       make(map[string]time.Time),
 		resolvePath:      exec.LookPath,
 		lookPathCache:    make(map[string]string),
@@ -57,6 +65,39 @@ func NewCobraCompleter() *CobraCompleter {
 // Name returns the completer name.
 func (c *CobraCompleter) Name() string {
 	return "cobra"
+}
+
+// SetOnReady registers a callback fired whenever a background fetch finishes
+// and fills the cache. The UI uses it to refresh a "fetching" menu without
+// another TAB.
+func (c *CobraCompleter) SetOnReady(fn func()) {
+	c.readyMu.Lock()
+	c.onReady = fn
+	c.readyMu.Unlock()
+}
+
+func (c *CobraCompleter) notifyReady() {
+	c.readyMu.RLock()
+	fn := c.onReady
+	c.readyMu.RUnlock()
+	if fn != nil {
+		fn()
+	}
+}
+
+func (c *CobraCompleter) markSupportsComplete(cmdPath string) {
+	c.supportsMu.Lock()
+	if c.supports == nil {
+		c.supports = make(map[string]bool)
+	}
+	c.supports[cmdPath] = true
+	c.supportsMu.Unlock()
+}
+
+func (c *CobraCompleter) supportsComplete(cmdPath string) bool {
+	c.supportsMu.RLock()
+	defer c.supportsMu.RUnlock()
+	return c.supports[cmdPath]
 }
 
 // lookPath returns the resolved path for a command, using a cache to avoid
@@ -154,15 +195,24 @@ func (c *CobraCompleter) Complete(ctx context.Context, line string, pos int) (Re
 	}
 	cacheKey := cmdPath + ":" + strings.Join(args, " ")
 
-	// Only return cached results - never block
+	// Only return cached results - never block.
 	c.cacheMu.RLock()
-	defer c.cacheMu.RUnlock()
-
-	if cached, ok := c.cache[cacheKey]; ok && time.Now().Before(cached.expiresAt) {
+	cached, ok := c.cache[cacheKey]
+	c.cacheMu.RUnlock()
+	if ok && time.Now().Before(cached.expiresAt) {
 		return cached.result, nil
 	}
 
-	return Result{}, nil
+	// Miss. For a tool that has answered __complete before (kubectl, gh),
+	// falling through would answer a subcommand argument with filenames, so
+	// fetch in the background and report pending; the ready notification
+	// reopens the menu when the data lands. Unknown tools keep the old
+	// fall-through: pending would wrongly block file completion for them.
+	if !c.supportsComplete(cmdPath) {
+		return Result{}, nil
+	}
+	c.startPrefetch(cmdName, args)
+	return Result{Pending: true}, nil
 }
 
 // Prefetch triggers background fetching of Cobra completions.
@@ -190,7 +240,12 @@ func (c *CobraCompleter) Prefetch(line string, pos int) {
 		args = append(args, "")
 	}
 
-	// Check if already prefetching or recently failed
+	c.startPrefetch(cmdName, args)
+}
+
+// startPrefetch launches a background fetch unless one for the same key is
+// already running or recently failed.
+func (c *CobraCompleter) startPrefetch(cmdName string, args []string) {
 	prefetchKey := cmdName + ":" + strings.Join(args, " ")
 	now := time.Now()
 	c.prefetchMu.Lock()
@@ -251,7 +306,7 @@ func (c *CobraCompleter) nextFailedPrefetchRetry(now time.Time) time.Time {
 // doPrefetch runs the actual Cobra completion in the background.
 func (c *CobraCompleter) doPrefetch(cmdPath string, args []string, cacheKey string) {
 	// Use short timeout - Cobra completions should be fast
-	ctx, cancel := context.WithTimeout(context.Background(), cobraPrefetchTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), c.prefetchTimeout)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, cmdPath, args...)
@@ -272,10 +327,19 @@ func (c *CobraCompleter) doPrefetch(cmdPath string, args []string, cacheKey stri
 
 	err = cmd.Run()
 	if err != nil {
-		// Command doesn't support __complete or timed out
-		// Mark as prefetched so we don't retry
+		// Command doesn't support __complete or timed out. Cache the empty
+		// result briefly so a pending Complete stops re-reporting pending,
+		// and notify so a "fetching" menu can clear itself and fall back.
+		c.cacheMu.Lock()
+		c.cache[cacheKey] = cachedResult{expiresAt: time.Now().Add(cobraFailedPrefetchTTL)}
+		c.cacheMu.Unlock()
+		c.notifyReady()
 		return
 	}
+
+	// The tool answered __complete: cache misses for it may now report
+	// pending instead of falling through to unrelated completers.
+	c.markSupportsComplete(cmdPath)
 
 	// Parse output
 	result := c.parseOutput(stdout.String())
@@ -287,6 +351,7 @@ func (c *CobraCompleter) doPrefetch(cmdPath string, args []string, cacheKey stri
 		expiresAt: time.Now().Add(c.cacheTTL),
 	}
 	c.cacheMu.Unlock()
+	c.notifyReady()
 }
 
 // parseOutput parses Cobra __complete output.
