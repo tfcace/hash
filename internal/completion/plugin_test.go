@@ -1527,6 +1527,55 @@ func TestPluginCompleter_FailureIsCachedBriefly(t *testing.T) {
 	}
 }
 
+// Regression: typing "completions " crashed the whole shell (closing the
+// terminal tab). Prefetch launched a background run for the static builtin
+// spec, whose empty exec argv panicked in the runner goroutine.
+func TestPluginCompleter_PrefetchStaticSourceDoesNotRun(t *testing.T) {
+	var runs atomic.Int32
+	c := NewPluginCompleter(nil)
+	c.runner = func(ctx context.Context, argv []string, dir string, timeout time.Duration) ([]string, error) {
+		runs.Add(1)
+		return nil, nil
+	}
+
+	c.Prefetch("completions ", len("completions "))
+	time.Sleep(50 * time.Millisecond)
+	if got := runs.Load(); got != 0 {
+		t.Errorf("static source ran %d times from prefetch, want 0", got)
+	}
+
+	// The real crash path: the default runner against the builtin specs.
+	c2 := NewPluginCompleter(nil)
+	c2.Prefetch("completions ", len("completions "))
+	time.Sleep(50 * time.Millisecond) // A panic here would kill the test process.
+}
+
+// A panicking source is a failed source, never a dead shell: sources run on
+// detached goroutines inside the user's login shell.
+func TestPluginCompleter_PanickingSourceIsAFailure(t *testing.T) {
+	c := newTestPluginCompleter(t, testPluginSpec, func(ctx context.Context, argv []string, dir string, timeout time.Duration) ([]string, error) {
+		panic("source bug")
+	})
+	ready := make(chan struct{}, 4)
+	c.SetOnReady(func() { ready <- struct{}{} })
+
+	line := "docker rm "
+	result, err := c.Complete(context.Background(), line, len(line))
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if len(result.Items) != 0 {
+		t.Errorf("items = %+v, want none from a panicking source", result.Items)
+	}
+
+	// The failure still notifies so a fetching notice can clear itself.
+	select {
+	case <-ready:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no ready notification after the source panicked")
+	}
+}
+
 // Static sources complete without running anything.
 func TestPluginCompleter_StaticSource(t *testing.T) {
 	spec := `

@@ -270,6 +270,9 @@ func LoadPluginSpecs(dir string) ([]*PluginSpec, []error) {
 type pluginRunner func(ctx context.Context, argv []string, dir string, timeout time.Duration) ([]string, error)
 
 func defaultPluginRunner(ctx context.Context, argv []string, dir string, timeout time.Duration) ([]string, error) {
+	if len(argv) == 0 {
+		return nil, errors.New("completion: plugin source has no command")
+	}
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	return runIsolatedCommandIn(runCtx, dir, argv[0], argv[1:]...)
@@ -784,7 +787,7 @@ func (c *PluginCompleter) startSourceCall(key string, rule *PluginRule, argv []s
 
 func (c *PluginCompleter) finishSourceCall(key string, call *pluginSourceCall, rule *PluginRule, argv []string, dir string) {
 	started := time.Now()
-	lines, err := c.runner(context.Background(), argv, dir, rule.timeout)
+	lines, err := c.runSourceGuarded(argv, dir, rule.timeout)
 	if trace.Enabled("completion") {
 		errText := ""
 		if err != nil {
@@ -821,6 +824,19 @@ func (c *PluginCompleter) finishSourceCall(key string, call *pluginSourceCall, r
 	c.notifyReady()
 }
 
+// runSourceGuarded invokes the runner, converting a panic into an ordinary
+// source failure. Sources run on detached goroutines inside the user's login
+// shell: an unrecovered panic here doesn't just break completion, it kills
+// the shell process and closes their terminal tab.
+func (c *PluginCompleter) runSourceGuarded(argv []string, dir string, timeout time.Duration) (lines []string, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			lines, err = nil, fmt.Errorf("completion: plugin source panicked: %v", r)
+		}
+	}()
+	return c.runner(context.Background(), argv, dir, timeout)
+}
+
 // Prefetch warms the source cache when the input matches a plugin rule.
 // The router calls this when the user types a space, giving sources a head
 // start over the completion UI deadline.
@@ -854,6 +870,9 @@ func (c *PluginCompleter) Prefetch(line string, pos int) {
 	for _, rule := range entry.rules {
 		if !rule.matches(positionals) {
 			continue
+		}
+		if len(rule.Source.Static) > 0 {
+			return // Static sources have nothing to warm.
 		}
 		argv := rule.forwardedSourceArgv(flagGroups)
 		key := sourceCacheKey(argv, dir)

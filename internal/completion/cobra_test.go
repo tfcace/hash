@@ -447,7 +447,7 @@ func TestCobraCompleter_RetriesStaleFailedPrefetch(t *testing.T) {
 func TestCobraCompleter_PrefetchReturnsWhenChildKeepsStdoutOpen(t *testing.T) {
 	tmpDir := t.TempDir()
 	cmdPath := filepath.Join(tmpDir, "fakecobra")
-	if err := os.WriteFile(cmdPath, []byte("#!/bin/sh\nprintf 'pods\\tpod resources\\n'\nsleep 0.25 &\n"), 0o755); err != nil {
+	if err := os.WriteFile(cmdPath, []byte("#!/bin/sh\nprintf 'pods\\tpod resources\\n'\nsleep 1 &\n"), 0o755); err != nil {
 		t.Fatalf("WriteFile(%q): %v", cmdPath, err)
 	}
 
@@ -456,8 +456,11 @@ func TestCobraCompleter_PrefetchReturnsWhenChildKeepsStdoutOpen(t *testing.T) {
 	completer.doPrefetch(cmdPath, []string{"__complete"}, cmdPath+":__complete")
 	elapsed := time.Since(start)
 
-	if elapsed > 150*time.Millisecond {
-		t.Fatalf("cobra prefetch waited %s for child-held stdout pipe, want under 150ms", elapsed)
+	// The WaitDelay releases Wait ~50ms after the script exits; well under
+	// the decoy child's 1s sleep and the 3s fetch timeout. The bound leaves
+	// headroom for loaded CI machines.
+	if elapsed > 500*time.Millisecond {
+		t.Fatalf("cobra prefetch waited %s for child-held stdout pipe, want prompt return", elapsed)
 	}
 }
 
