@@ -96,18 +96,27 @@ func (m *InsertMode) handleSpecialKey(key Key, state *EditorState) (ModeResult, 
 
 // handleArrowKey processes arrow and navigation keys with Shift selection support.
 func (m *InsertMode) handleArrowKey(key Key, state *EditorState) (ModeResult, bool) {
-	// Up/Down at buffer boundary trigger history navigation
-	if key.Special == KeyUp && state.Cursor.Pos.Row == 0 {
-		state.Cursor.ClearSelection()
-		return ModeResult{HistoryPrev: true}, true
-	}
-	if key.Special == KeyDown && state.Cursor.Pos.Row == state.Buffer.LineCount()-1 {
-		state.Cursor.ClearSelection()
-		return ModeResult{HistoryNext: true}, true
-	}
-
 	// Update selection state
 	m.updateSelectionForShift(key.Shift, state)
+
+	// Up/Down move by visual (soft-wrapped) row; at the buffer's visual
+	// boundaries they navigate history instead
+	if key.Special == KeyUp || key.Special == KeyDown {
+		moved := false
+		if key.Special == KeyUp {
+			moved = visualUp(state)
+		} else {
+			moved = visualDown(state)
+		}
+		if !moved {
+			state.Cursor.ClearSelection()
+			if key.Special == KeyUp {
+				return ModeResult{HistoryPrev: true}, true
+			}
+			return ModeResult{HistoryNext: true}, true
+		}
+		return ModeResult{}, true
+	}
 
 	// Perform the movement
 	switch key.Special {
@@ -115,10 +124,6 @@ func (m *InsertMode) handleArrowKey(key Key, state *EditorState) (ModeResult, bo
 		m.moveLeft(state)
 	case KeyRight:
 		m.moveRight(state)
-	case KeyUp:
-		m.moveUp(state)
-	case KeyDown:
-		m.moveDown(state)
 	case KeyHome:
 		state.Cursor.Pos.Col = 0
 	case KeyEnd:
@@ -290,28 +295,6 @@ func (m *InsertMode) moveRight(state *EditorState) {
 	} else if state.Cursor.Pos.Row < state.Buffer.LineCount()-1 {
 		state.Cursor.Pos.Row++
 		state.Cursor.Pos.Col = 0
-	}
-}
-
-func (m *InsertMode) moveUp(state *EditorState) {
-	if state.Cursor.Pos.Row > 0 {
-		state.Cursor.Pos.Row--
-		lineLen := len(state.Buffer.Line(state.Cursor.Pos.Row))
-		if state.Cursor.Pos.Col > lineLen {
-			state.Cursor.Pos.Col = lineLen
-		}
-		state.Cursor.Pos.Col = clampByteIndexToRuneBoundary(state.Buffer.Line(state.Cursor.Pos.Row), state.Cursor.Pos.Col)
-	}
-}
-
-func (m *InsertMode) moveDown(state *EditorState) {
-	if state.Cursor.Pos.Row < state.Buffer.LineCount()-1 {
-		state.Cursor.Pos.Row++
-		lineLen := len(state.Buffer.Line(state.Cursor.Pos.Row))
-		if state.Cursor.Pos.Col > lineLen {
-			state.Cursor.Pos.Col = lineLen
-		}
-		state.Cursor.Pos.Col = clampByteIndexToRuneBoundary(state.Buffer.Line(state.Cursor.Pos.Row), state.Cursor.Pos.Col)
 	}
 }
 

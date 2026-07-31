@@ -67,16 +67,14 @@ func (m *NormalMode) handleSpecialKey(key Key, state *EditorState) (ModeResult, 
 		state.Cursor.ClearSelection()
 		return ModeResult{}, true
 	case KeyUp:
-		if state.Cursor.Pos.Row == 0 {
+		if !visualUp(state) {
 			return ModeResult{HistoryPrev: true}, true
 		}
-		m.moveUp(state)
 		return ModeResult{}, true
 	case KeyDown:
-		if state.Cursor.Pos.Row == state.Buffer.LineCount()-1 {
+		if !visualDown(state) {
 			return ModeResult{HistoryNext: true}, true
 		}
-		m.moveDown(state)
 		return ModeResult{}, true
 	case KeyLeft:
 		m.moveLeft(state)
@@ -98,16 +96,14 @@ func (m *NormalMode) handleMovement(key Key, state *EditorState) (ModeResult, bo
 		m.moveRight(state)
 		return ModeResult{}, true
 	case 'j':
-		if state.Cursor.Pos.Row == state.Buffer.LineCount()-1 {
+		if !visualDown(state) {
 			return ModeResult{HistoryNext: true}, true
 		}
-		m.moveDown(state)
 		return ModeResult{}, true
 	case 'k':
-		if state.Cursor.Pos.Row == 0 {
+		if !visualUp(state) {
 			return ModeResult{HistoryPrev: true}, true
 		}
-		m.moveUp(state)
 		return ModeResult{}, true
 	case 'w':
 		m.moveWordForward(state)
@@ -270,28 +266,6 @@ func (m *NormalMode) moveRight(state *EditorState) {
 		state.Cursor.Pos.Col = 0
 	}
 	state.Cursor.ClearSelection()
-}
-
-func (m *NormalMode) moveUp(state *EditorState) {
-	if state.Cursor.Pos.Row > 0 {
-		state.Cursor.Pos.Row--
-		lineLen := len(state.Buffer.Line(state.Cursor.Pos.Row))
-		if state.Cursor.Pos.Col > lineLen {
-			state.Cursor.Pos.Col = lineLen
-		}
-		state.Cursor.Pos.Col = clampByteIndexToRuneBoundary(state.Buffer.Line(state.Cursor.Pos.Row), state.Cursor.Pos.Col)
-	}
-}
-
-func (m *NormalMode) moveDown(state *EditorState) {
-	if state.Cursor.Pos.Row < state.Buffer.LineCount()-1 {
-		state.Cursor.Pos.Row++
-		lineLen := len(state.Buffer.Line(state.Cursor.Pos.Row))
-		if state.Cursor.Pos.Col > lineLen {
-			state.Cursor.Pos.Col = lineLen
-		}
-		state.Cursor.Pos.Col = clampByteIndexToRuneBoundary(state.Buffer.Line(state.Cursor.Pos.Row), state.Cursor.Pos.Col)
-	}
 }
 
 func (m *NormalMode) moveWordForward(state *EditorState) {

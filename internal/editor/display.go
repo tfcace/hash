@@ -122,6 +122,17 @@ func (d *Display) SetScrollbarColor(hexColor string) {
 	d.scrollbarCode = fmt.Sprintf("\x1b[38;2;%d;%d;%dm", r, g, b)
 }
 
+// WrapWidth implements LineLayout: the width used for soft wrapping.
+func (d *Display) WrapWidth() int {
+	return d.wrapWidth()
+}
+
+// PrefixWidth implements LineLayout: the visible width rendered before a
+// logical line.
+func (d *Display) PrefixWidth(row int) int {
+	return d.calcPrefixWidth(row)
+}
+
 // calcPrefixWidth calculates the prefix width for cursor positioning on a given row.
 // Structure: [mode bar "i│" or "n│" if gutter] + [prompt on line 0, space on others]
 func (d *Display) calcPrefixWidth(row int) int {

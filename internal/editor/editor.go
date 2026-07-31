@@ -146,6 +146,7 @@ func New(cfg Config, in io.Reader, out io.Writer) *Editor {
 	state.LineContinuation = !cfg.DisableLineContinuation
 	state.AllowHistorySearch = !cfg.DisableHistorySearch
 	state.AllowContextPicker = !cfg.DisableContextPicker
+	state.Layout = display // visual-row vertical movement follows the render wrap
 
 	return &Editor{
 		config:  cfg,
