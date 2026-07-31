@@ -2,6 +2,7 @@ package editor
 
 import (
 	"io"
+	"strings"
 	"testing"
 )
 
@@ -216,6 +217,7 @@ func newTestEditorForCompletion(items []Completion) *Editor {
 	e := &Editor{
 		display: newTestDisplay(),
 		state:   NewEditorState(),
+		mode:    NewInsertMode(),
 	}
 	e.completionActive = true
 	e.completionItems = items
@@ -655,6 +657,8 @@ func TestHandleCompletionKeyEnterFile(t *testing.T) {
 // TestHandleCompletionKeyTyping verifies that printable characters are passed
 // through to the active editing mode instead of being trapped in a hidden menu
 // filter.
+// Typing while the menu is open narrows it like a search list: the character
+// lands in the buffer and the re-query filters the candidates.
 func TestHandleCompletionKeyTyping(t *testing.T) {
 	items := []Completion{
 		{Text: "internal/", Description: "directory"},
@@ -663,16 +667,47 @@ func TestHandleCompletionKeyTyping(t *testing.T) {
 		{Text: "README.md", Description: "file"},
 	}
 	e := newTestEditorForCompletion(items)
+	e.config.CompleteFunc = func(line string, pos int) []Completion {
+		var out []Completion
+		for _, item := range items {
+			if strings.HasPrefix(item.Text, line) {
+				out = append(out, item)
+			}
+		}
+		return out
+	}
 
 	handled := e.handleCompletionKey(Key{Rune: 'i'})
-	if handled {
-		t.Fatal("expected printable key to pass through")
+	if !handled {
+		t.Fatal("expected printable key to narrow the open menu")
 	}
-	if e.completionActive {
-		t.Fatal("expected printable key to dismiss completion")
+	if !e.completionActive {
+		t.Fatal("expected the menu to stay open while narrowing")
 	}
-	if e.completionFilter != "" {
-		t.Errorf("filter = %q, want empty", e.completionFilter)
+	if got := e.state.Buffer.Content(); got != "i" {
+		t.Fatalf("buffer = %q, want %q", got, "i")
+	}
+	if len(e.completionItems) != 3 {
+		t.Fatalf("items = %+v, want the three i-prefixed entries", e.completionItems)
+	}
+
+	// Narrowing to a single candidate keeps the menu open: the user is
+	// mid-word, auto-inserting here would hijack their typing.
+	for _, r := range "nit" {
+		e.handleCompletionKey(Key{Rune: r})
+	}
+	if !e.completionActive || len(e.completionItems) != 1 || e.completionItems[0].Text != "init.go" {
+		t.Fatalf("after narrowing: active=%v items=%+v, want open menu with init.go", e.completionActive, e.completionItems)
+	}
+
+	// Backspace un-narrows.
+	e.handleCompletionKey(Key{Special: KeyBackspace})
+	e.handleCompletionKey(Key{Special: KeyBackspace})
+	if got := e.state.Buffer.Content(); got != "in" {
+		t.Fatalf("buffer after backspace = %q, want %q", got, "in")
+	}
+	if len(e.completionItems) != 3 {
+		t.Fatalf("items after backspace = %+v, want the three i(n)-prefixed entries", e.completionItems)
 	}
 }
 
@@ -816,10 +851,11 @@ func TestHandleCompletionKeyRightDrillsIntoDirectory(t *testing.T) {
 }
 
 func TestCompletionMenuTypingContinuesEditing(t *testing.T) {
-	e := newTestEditorForCompletion([]Completion{
+	files := []Completion{
 		{Text: "README.md", Description: "file"},
 		{Text: "release-notes.md", Description: "file"},
-	})
+	}
+	e := newTestEditorForCompletion(files)
 	e.state = NewEditorState()
 	e.mode = NewInsertMode()
 	e.ghost = NewGhostText()
@@ -827,16 +863,40 @@ func TestCompletionMenuTypingContinuesEditing(t *testing.T) {
 	e.state.Cursor.MoveTo(0, 4)
 	e.completionCol = 3
 	e.completionPrefix = "r"
+	e.config.CompleteFunc = func(line string, pos int) []Completion {
+		word := strings.TrimPrefix(line, "ls ")
+		var out []Completion
+		for _, item := range files {
+			if strings.HasPrefix(strings.ToLower(item.Text), strings.ToLower(word)) {
+				out = append(out, item)
+			}
+		}
+		return out
+	}
 
 	result, done := e.handleKeyEvent(Key{Rune: 'e'})
 	if done {
 		t.Fatalf("typing while completion is active should not finish editing: %#v", result)
 	}
-	if e.completionActive {
-		t.Fatal("typing while completion is active should dismiss the menu")
+	if !e.completionActive {
+		t.Fatal("typing while completion is active should narrow the menu, not dismiss it")
 	}
 	if got := e.state.Buffer.Content(); got != "ls re" {
 		t.Fatalf("buffer = %q, want %q", got, "ls re")
+	}
+	if len(e.completionItems) != 2 {
+		t.Fatalf("items = %+v, want both re-matching files (README case-insensitively)", e.completionItems)
+	}
+
+	// A space ends the word and falls back to normal editing.
+	if _, done := e.handleKeyEvent(Key{Rune: ' '}); done {
+		t.Fatal("space should not finish editing")
+	}
+	if e.completionActive {
+		t.Fatal("space should dismiss the menu")
+	}
+	if got := e.state.Buffer.Content(); got != "ls re " {
+		t.Fatalf("buffer = %q, want %q", got, "ls re ")
 	}
 }
 

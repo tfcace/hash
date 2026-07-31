@@ -111,6 +111,7 @@ type CompletionsConfig struct {
 	FileIcons        bool `toml:"file_icons"`
 	CobraEnabled     bool `toml:"cobra_enabled"`
 	MaskSensitiveEnv bool `toml:"mask_sensitive_env"` // Mask values of sensitive env vars (KEY, SECRET, TOKEN, etc.)
+	PluginsEnabled   bool `toml:"plugins_enabled"`    // Declarative completion plugins (built-in + <config>/completions/*.toml)
 }
 
 type ClipboardConfig struct {
@@ -175,6 +176,7 @@ func Default() *Config {
 			FileIcons:        true,
 			CobraEnabled:     true,
 			MaskSensitiveEnv: true,
+			PluginsEnabled:   true,
 		},
 		Clipboard: ClipboardConfig{
 			MaxOutputSize:  "1MB",

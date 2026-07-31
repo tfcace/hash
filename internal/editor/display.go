@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"strings"
-	"unicode/utf8"
 
 	"github.com/mattn/go-runewidth"
 	"github.com/tfcace/hash/internal/trace"
@@ -956,6 +955,42 @@ type CompletionItem struct {
 	Description string
 }
 
+// truncateToWidth shortens s to at most maxWidth terminal columns, appending
+// "..." when something was cut. Width is measured in display cells, not
+// runes: CJK characters occupy two columns each.
+func truncateToWidth(s string, maxWidth int) string {
+	if visibleWidth(s) <= maxWidth {
+		return s
+	}
+	if maxWidth <= 3 {
+		return strings.Repeat(".", maxWidth)
+	}
+	budget := maxWidth - 3
+	width := 0
+	var b strings.Builder
+	for _, r := range s {
+		rw := runewidth.RuneWidth(r)
+		if width+rw > budget {
+			break
+		}
+		width += rw
+		b.WriteRune(r)
+	}
+	b.WriteString("...")
+	return b.String()
+}
+
+// descFixedCols is how many columns a menu row spends on everything except
+// the item text and the description: the optional scrollbar column, the space
+// before the text, the two-column gap after it, and the trailing space.
+func descFixedCols(hasScrollbar bool) int {
+	cols := 1 + 2 + 1
+	if hasScrollbar {
+		cols++
+	}
+	return cols
+}
+
 // RenderCompletionMenu draws the completion dropdown below the cursor.
 //
 //nolint:gocyclo // completion menu rendering requires layout and scroll calculations
@@ -970,10 +1005,20 @@ func (d *Display) RenderCompletionMenu(items []CompletionItem, selected, startCo
 	prefixWidth := d.calcPrefixWidth(cursorRow)
 	_, menuCol := d.wrappedCursorForChars(startCol + prefixWidth)
 
-	// Calculate max width for alignment
+	// Calculate max width for alignment. Values are capped to the row budget:
+	// a row wider than the terminal wraps onto an extra physical row that the
+	// cursor-up below does not account for, corrupting the prompt.
+	maxValueWidth := d.width - menuCol - descFixedCols(d.scrollbarCode != "")
+	if maxValueWidth < 1 {
+		maxValueWidth = 1
+	}
 	maxTextWidth := 0
 	for _, item := range items {
-		if itemWidth := visibleWidth(item.Text); itemWidth > maxTextWidth {
+		itemWidth := visibleWidth(item.Text)
+		if itemWidth > maxValueWidth {
+			itemWidth = maxValueWidth
+		}
+		if itemWidth > maxTextWidth {
 			maxTextWidth = itemWidth
 		}
 	}
@@ -1041,29 +1086,32 @@ func (d *Display) RenderCompletionMenu(items []CompletionItem, selected, startCo
 		}
 
 		// Draw item
+		text := truncateToWidth(item.Text, maxValueWidth)
 		sb.WriteString(" ")
-		sb.WriteString(item.Text)
+		sb.WriteString(text)
 
 		// Pad to align descriptions
-		padding := maxTextWidth - visibleWidth(item.Text) + 2
+		padding := maxTextWidth - visibleWidth(text) + 2
 		for j := 0; j < padding; j++ {
 			sb.WriteByte(' ')
 		}
 
-		// Description (dimmed) - only render if we have room
+		// Description (dimmed) - only render if we have room.
+		//
+		// The budget must be measured from menuCol, where the row actually
+		// starts, not from startCol: menuCol includes the prompt/gutter prefix.
+		// A row wider than the terminal wraps onto an extra physical row, while
+		// the cursor-up below only accounts for logical rows, so the cursor ends
+		// up below the input line and the next render stacks a duplicate prompt.
 		if item.Description != "" {
-			maxDesc := d.width - startCol - maxTextWidth - 5
+			maxDesc := d.width - menuCol - maxTextWidth - descFixedCols(needsScrollbar)
 			if maxDesc > 3 { // Only render if we have room for at least some text
 				if i != selected {
 					sb.WriteString("\x1b[2m") // Dim
 				}
-				// Truncate description if too long (rune-aware for UTF-8 safety)
-				desc := item.Description
-				if utf8.RuneCountInString(desc) > maxDesc {
-					runes := []rune(desc)
-					desc = string(runes[:maxDesc-3]) + "..."
-				}
-				sb.WriteString(desc)
+				// Truncate by display width, not rune count: CJK runes
+				// occupy two columns and would overflow the row.
+				sb.WriteString(truncateToWidth(item.Description, maxDesc))
 				if i != selected {
 					sb.WriteString(ansiReset)
 				}

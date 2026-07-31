@@ -87,6 +87,9 @@ type Shell struct {
 
 	// Directory change hook state
 	prevCwd string // Previous working directory for chpwd hook
+
+	// Completion plugin state (nil when completions.plugins_enabled = false)
+	pluginCompleter *completion.PluginCompleter
 }
 
 // New creates a new Shell instance.
@@ -129,8 +132,10 @@ func New(cfg *config.Config) (*Shell, error) {
 	envCompleter.SetMaskSensitive(cfg.Completions.MaskSensitiveEnv)
 	router.Register(envCompleter, completion.PriorityEnv)
 
-	// Executable completer for command names from PATH
-	router.Register(completion.NewExecutableCompleter(), completion.PriorityExecutable)
+	// Executable completer for command names from PATH, plus hash builtins.
+	executableCompleter := completion.NewExecutableCompleter()
+	executableCompleter.SetBuiltins(enabledCompletableBuiltins(cfg))
+	router.Register(executableCompleter, completion.PriorityExecutable)
 
 	// Context-aware completions for git/jj branch and revision args.
 	router.Register(completion.NewVCSCompleter(), completion.PriorityVCS)
@@ -138,8 +143,42 @@ func New(cfg *config.Config) (*Shell, error) {
 	// Semantic completions for common commands (ssh, make, kill, npm, etc.)
 	router.Register(completion.NewSemanticCompleter(), completion.PrioritySemantic)
 
+	completionReadyCh := make(chan struct{}, 1)
+
+	// Declarative completion plugins: built-in specs (docker) plus user specs
+	// from <config>/completions/*.toml. Registered ahead of semantic so user
+	// plugins can override the built-in handlers.
+	var pluginCompleter *completion.PluginCompleter
+	if cfg.Completions.PluginsEnabled {
+		pluginSpecs, pluginErrs := completion.LoadPluginSpecs(filepath.Join(getConfigDir(), "completions"))
+		for _, pluginErr := range pluginErrs {
+			fmt.Fprintf(os.Stderr, "hash: warning: completion plugin: %v\n", pluginErr)
+		}
+		pluginCompleter = completion.NewPluginCompleter(pluginSpecs)
+		pluginCompleter.SetFuzzyMode(cfg.Completions.Fuzzy)
+		// Wake the editor when a slow source lands so a "fetching" menu can
+		// fill itself in without the user pressing Tab again. Non-blocking:
+		// one pending wake-up is enough to trigger a refresh.
+		pluginCompleter.SetOnReady(func() {
+			select {
+			case completionReadyCh <- struct{}{}:
+			default:
+			}
+		})
+		router.Register(pluginCompleter, completion.PriorityPlugin)
+	}
+
 	if cfg.Completions.CobraEnabled {
-		router.Register(completion.NewCobraCompleter(), completion.PriorityToolNative)
+		cobraCompleter := completion.NewCobraCompleter()
+		// Same wake-up contract as the plugin completer: a cache miss for a
+		// known __complete-capable tool reports pending and fills in here.
+		cobraCompleter.SetOnReady(func() {
+			select {
+			case completionReadyCh <- struct{}{}:
+			default:
+			}
+		})
+		router.Register(cobraCompleter, completion.PriorityToolNative)
 	}
 
 	// Set up agent (for both ?? commands and completions)
@@ -317,6 +356,7 @@ func New(cfg *config.Config) (*Shell, error) {
 		InputBgColor:        "",
 		ScrollbarColor:      colorPalette.Primary,
 		CompleteOutcomeFunc: makeEditorCompleteOutcomeFunc(router),
+		CompletionReadyCh:   completionReadyCh,
 		PrefetchFunc:        makeEditorPrefetchFunc(router),
 		SuggestionFunc:      makeEditorSuggestionFunc(historyStore, predictor),
 		MaxPasteSize:        cfg.Input.ParseMaxPasteSize(),
@@ -349,6 +389,8 @@ func New(cfg *config.Config) (*Shell, error) {
 		historyIndex: -1, // Start before history (current line)
 		osc:          osc,
 		prevCwd:      initialCwd,
+
+		pluginCompleter: pluginCompleter,
 	}
 
 	if acpTransport != nil {

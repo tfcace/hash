@@ -17,6 +17,14 @@ type Item struct {
 type Result struct {
 	Items  []Item // List of completions
 	Prefix string // Common prefix to preserve
+	// Pending reports that a completer matched the input but its data has not
+	// arrived yet. Callers should say so rather than falling through to an
+	// unrelated completer, and refresh when the data lands.
+	Pending bool
+	// Handled reports that a completer matched the input and answered
+	// authoritatively: an empty Items means "no matches for this argument",
+	// not "not mine", so the router must not fall through.
+	Handled bool
 }
 
 func limitCompletionItems(items []Item) []Item {
@@ -39,7 +47,13 @@ type Completer interface {
 type Priority int
 
 const (
-	PriorityToolNative Priority = 100 // Try first for subcommand completion
+	// Plugins outrank tool-native completion on purpose: a matched rule is
+	// curated (descriptions, per-subcommand sources) where Cobra __complete
+	// output is bare names, and which one answered would otherwise depend on
+	// whose prefetch cache happened to be warm. Plugins only claim arguments
+	// an explicit rule matches, so unmatched input still falls through.
+	PriorityPlugin     Priority = 90  // Declarative completion plugins (user-extensible)
+	PriorityToolNative Priority = 100 // Tool-native subcommand completion (Cobra __complete)
 	PriorityAlias      Priority = 125 // User-defined functions/aliases (before executables)
 	PriorityEnv        Priority = 130 // Environment variables ($VAR)
 	PriorityExecutable Priority = 150 // Executable names from PATH (command position only)

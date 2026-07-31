@@ -37,6 +37,7 @@ type Config struct {
 	HistoryFunc             func(dir int, currentLine string) string     // -1=prev, +1=next; currentLine is for saving
 	CompleteFunc            func(line string, pos int) []Completion      // Tab completion
 	CompleteOutcomeFunc     func(line string, pos int) CompletionOutcome // Tab completion with timeout awareness; preferred over CompleteFunc
+	CompletionReadyCh       <-chan struct{}                              // Signals that a pending completion source landed
 	AgentCompleteLine       func(line string) bool                       // Reports whether Tab should submit the line for agent completion
 	PrefetchFunc            func(line string, pos int)                   // Background completion prefetch (on space)
 	SuggestionFunc          func(input string) string                    // Inline suggestion from history (Fish-style)
@@ -60,6 +61,9 @@ type Config struct {
 type CompletionOutcome struct {
 	Items    []Completion
 	TimedOut bool
+	// Pending reports that a completer matched the input but its data has not
+	// arrived yet. The editor says so and reopens the menu when it lands.
+	Pending bool
 }
 
 // Result is returned when the editor exits.
@@ -92,14 +96,16 @@ type Editor struct {
 	clipboardInit bool // Lazy clipboard initialization
 
 	// Completion state
-	completionActive     bool
-	completionNotice     string // Transient "no matches"/"timed out" notice; cleared on next key
-	completionItems      []Completion
-	completionIndex      int                    // Selected item in menu
-	completionPrefix     string                 // Text being completed (for replacement)
-	completionCol        int                    // Column where completion started
-	completionFilter     string                 // Live filter text while menu is open
-	completionDrillStack []completionDrillState // Stack of parent dirs for backspace-up
+	completionActive      bool
+	completionNotice      string // Transient "no matches"/"timed out" notice; cleared on next key
+	awaitingCompletion    string // Buffer contents a pending completion was requested for
+	awaitingCompletionPos int    // Cursor offset the pending completion was requested at
+	completionItems       []Completion
+	completionIndex       int                    // Selected item in menu
+	completionPrefix      string                 // Text being completed (for replacement)
+	completionCol         int                    // Column where completion started
+	completionFilter      string                 // Live filter text while menu is open
+	completionDrillStack  []completionDrillState // Stack of parent dirs for backspace-up
 
 	// Ghost text state (inline suggestions)
 	ghost          *GhostText
@@ -369,6 +375,8 @@ func (e *Editor) runEventLoop(ctx context.Context, sigCh <-chan os.Signal, keyCh
 			return Result{Canceled: true}, ctx.Err()
 		case <-sigCh:
 			e.handleResize()
+		case <-e.config.CompletionReadyCh:
+			e.handleCompletionReady()
 		case text, ok := <-e.ghostTextChan:
 			e.handleGhostTextUpdate(text, ok)
 		case err, ok := <-e.ghostErrChan:
@@ -388,6 +396,30 @@ func (e *Editor) runEventLoop(ctx context.Context, sigCh <-chan os.Signal, keyCh
 			}
 		}
 	}
+}
+
+// completionFetchingNotice is shown while a matched completion source is still
+// loading, in place of falling through to unrelated completions.
+const completionFetchingNotice = "fetching completions..."
+
+// handleCompletionReady retries a completion that was pending when the user
+// pressed Tab. A source landing for input the user has since moved on from is
+// ignored, so the menu never opens over a line it does not describe. The
+// cursor offset matters as much as the text: arrow keys leave the buffer
+// unchanged, and a late result must not open at a different argument.
+func (e *Editor) handleCompletionReady() {
+	if e.awaitingCompletion == "" {
+		return
+	}
+	if e.awaitingCompletion != e.state.Buffer.Content() || e.awaitingCompletionPos != e.cursorOffset() {
+		e.awaitingCompletion = ""
+		e.completionNotice = ""
+		return
+	}
+	e.awaitingCompletion = ""
+	e.completionNotice = ""
+	e.triggerCompletion()
+	e.render()
 }
 
 // handleGhostTextUpdate processes ghost text streaming updates.
@@ -926,6 +958,17 @@ func (e *Editor) paste(before bool) {
 
 // triggerCompletion fetches completions and activates the menu if needed.
 func (e *Editor) triggerCompletion() {
+	e.completeWord(false)
+}
+
+// refineCompletion re-queries after the user edited the word with the menu
+// open. Unlike a fresh Tab, a single remaining candidate keeps the menu open
+// instead of auto-inserting: the user is mid-word and may keep typing.
+func (e *Editor) refineCompletion() {
+	e.completeWord(true)
+}
+
+func (e *Editor) completeWord(refine bool) {
 	if e.config.CompleteFunc == nil && e.config.CompleteOutcomeFunc == nil {
 		return
 	}
@@ -934,22 +977,32 @@ func (e *Editor) triggerCompletion() {
 	pos := e.cursorOffset()
 
 	var items []Completion
-	timedOut := false
+	timedOut, pending := false, false
 	if e.config.CompleteOutcomeFunc != nil {
 		outcome := e.config.CompleteOutcomeFunc(line, pos)
-		items, timedOut = outcome.Items, outcome.TimedOut
+		items, timedOut, pending = outcome.Items, outcome.TimedOut, outcome.Pending
 	} else {
 		items = e.config.CompleteFunc(line, pos)
 	}
 	if len(items) == 0 {
 		e.completionActive = false
-		if timedOut {
+		switch {
+		case pending:
+			// Matched, but the source is still fetching. Remember what we asked
+			// for so a late arrival for stale input can be discarded.
+			e.completionNotice = completionFetchingNotice
+			e.awaitingCompletion = line
+			e.awaitingCompletionPos = pos
+		case timedOut:
 			e.completionNotice = "completion timed out"
-		} else {
+			e.awaitingCompletion = ""
+		default:
 			e.completionNotice = "no matches"
+			e.awaitingCompletion = ""
 		}
 		return
 	}
+	e.awaitingCompletion = ""
 
 	// Find the word being completed for replacement
 	// Use current line only (not full buffer content) for prefix extraction
@@ -957,7 +1010,7 @@ func (e *Editor) triggerCompletion() {
 	e.completionCol = e.findWordStart()
 	e.completionPrefix = currentLine[e.completionCol:e.state.Cursor.Pos.Col]
 
-	if len(items) == 1 && !strings.HasSuffix(items[0].Text, "/") {
+	if !refine && len(items) == 1 && !strings.HasSuffix(items[0].Text, "/") {
 		// Single non-directory match: insert inline immediately
 		e.acceptCompletion(items[0])
 		return
@@ -1267,25 +1320,50 @@ func (e *Editor) handleCompletionKey(key Key) bool {
 			e.completionIndex = 0
 		case len(e.completionDrillStack) > 0:
 			e.drillUp()
+		case e.mode.Name() == "insert" && e.state.Cursor.Pos.Col > e.completionCol:
+			// Un-narrow: delete the last typed character and re-query, the
+			// mirror of printable keys narrowing the menu below.
+			e.deleteRuneBeforeCursor()
+			e.refineCompletion()
 		default:
-			// No filter, no drill stack — dismiss
+			// At the word start (or not inserting) — dismiss
 			e.dismissCompletion()
 			return false
 		}
 		return true
 
 	default:
-		// Printable characters should continue editing the command. Dismiss the
-		// menu and let the active mode handle the key.
-		if key.Special == 0 && key.Rune >= 32 && !key.Ctrl && !key.Alt {
-			e.dismissCompletion()
-			return false
+		// Printable characters narrow the open menu: the character is typed
+		// into the buffer as usual and the completion re-queries, so the menu
+		// filters like a search list using the configured matching mode
+		// (prefix or fuzzy). Space and non-insert modes fall through to
+		// normal editing instead.
+		if key.Special == 0 && key.Rune > ' ' && !key.Ctrl && !key.Alt && e.mode.Name() == "insert" {
+			row := e.state.Cursor.Pos.Row
+			e.state.Buffer.Insert(row, e.state.Cursor.Pos.Col, string(key.Rune))
+			e.state.Cursor.Pos.Col += len(string(key.Rune))
+			e.refineCompletion()
+			return true
 		}
 
-		// Non-printable: dismiss and pass through
+		// Anything else: dismiss and pass through
 		e.dismissCompletion()
 		return false
 	}
+}
+
+// deleteRuneBeforeCursor removes the rune immediately before the cursor on
+// the current line.
+func (e *Editor) deleteRuneBeforeCursor() {
+	row := e.state.Cursor.Pos.Row
+	col := e.state.Cursor.Pos.Col
+	line := e.state.Buffer.Line(row)
+	if col <= 0 || col > len(line) {
+		return
+	}
+	_, size := utf8.DecodeLastRuneInString(line[:col])
+	e.state.Buffer.Delete(Position{row, col - size}, Position{row, col})
+	e.state.Cursor.Pos.Col = col - size
 }
 
 // extractText extracts text between two positions.

@@ -140,6 +140,150 @@ func TestCobraCompleter_SkipsShellBuiltinCd(t *testing.T) {
 	}
 }
 
+// Narrowing an open cobra menu must not fall through to filenames: a cache
+// miss for a tool that has answered __complete before reports pending,
+// fetches in the background, and notifies so the menu can refresh.
+func TestCobraCompleter_PendingOnMissForKnownCobraTool(t *testing.T) {
+	tmpDir := t.TempDir()
+	cmdPath := filepath.Join(tmpDir, "fakekubectl")
+	script := "#!/bin/sh\nif [ \"$1\" = \"__complete\" ]; then printf 'annotate\\tdesc\\napply\\tdesc\\n:4\\n'; exit 0; fi\nexit 1\n"
+	if err := os.WriteFile(cmdPath, []byte(script), 0o755); err != nil { //nolint:gosec // test fixture must be executable
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	completer := NewCobraCompleter()
+	completer.resolvePath = func(name string) (string, error) { return cmdPath, nil }
+	completer.prefetchTimeout = 5 * time.Second // Loaded CI machines exceed the production 100ms.
+	ready := make(chan struct{}, 8)
+	completer.SetOnReady(func() { ready <- struct{}{} })
+
+	waitReady := func(step string) {
+		t.Helper()
+		select {
+		case <-ready:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%s: no ready notification", step)
+		}
+	}
+
+	// Warm the subcommand list, as the space-triggered prefetch would.
+	completer.Prefetch("fakekubectl ", len("fakekubectl "))
+	waitReady("warm prefetch")
+
+	// The user types "a" while the menu is open: novel key, known tool.
+	line := "fakekubectl a"
+	result, err := completer.Complete(context.Background(), line, len(line))
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if !result.Pending || len(result.Items) != 0 {
+		t.Fatalf("result = %+v, want pending with no items (never filenames)", result)
+	}
+
+	waitReady("pending fetch")
+	result, err = completer.Complete(context.Background(), line, len(line))
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if result.Pending || len(result.Items) != 2 {
+		t.Fatalf("after fetch: result = %+v, want the two candidates", result)
+	}
+}
+
+// A tool that has never answered __complete keeps the old fall-through on a
+// cache miss; pending would wrongly block file completion for it. The miss
+// still starts a background fetch, so the next TAB answers from cache.
+func TestCobraCompleter_MissForUnknownToolFallsThroughButFetches(t *testing.T) {
+	tmpDir := t.TempDir()
+	cmdPath := filepath.Join(tmpDir, "plaintool")
+	script := "#!/bin/sh\nif [ \"$1\" = \"__complete\" ]; then printf 'sub-a\\tdesc\\n:4\\n'; exit 0; fi\nexit 1\n"
+	if err := os.WriteFile(cmdPath, []byte(script), 0o755); err != nil { //nolint:gosec // test fixture must be executable
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	completer := NewCobraCompleter()
+	completer.resolvePath = func(name string) (string, error) { return cmdPath, nil }
+	completer.prefetchTimeout = 5 * time.Second
+	completer.lookPathCacheMu.Lock()
+	completer.lookPathCache["plaintool"] = cmdPath
+	completer.lookPathCacheMu.Unlock()
+	ready := make(chan struct{}, 4)
+	completer.SetOnReady(func() { ready <- struct{}{} })
+
+	line := "plaintool a"
+	result, err := completer.Complete(context.Background(), line, len(line))
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if result.Pending || len(result.Items) != 0 {
+		t.Fatalf("result = %+v, want plain fall-through for an unknown tool", result)
+	}
+
+	select {
+	case <-ready:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the miss should have started a background fetch")
+	}
+	result, err = completer.Complete(context.Background(), line, len(line))
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if len(result.Items) != 1 {
+		t.Fatalf("second TAB: result = %+v, want the fetched candidate", result)
+	}
+}
+
+// Well-known cobra tools are seeded: their first-ever miss in a session
+// reports pending instead of flashing a filename menu once per tool.
+func TestCobraCompleter_SeededToolPendsOnFirstMiss(t *testing.T) {
+	tmpDir := t.TempDir()
+	cmdPath := filepath.Join(tmpDir, "kubectl")
+	script := "#!/bin/sh\nif [ \"$1\" = \"__complete\" ]; then printf 'annotate\\tdesc\\n:4\\n'; exit 0; fi\nexit 1\n"
+	if err := os.WriteFile(cmdPath, []byte(script), 0o755); err != nil { //nolint:gosec // test fixture must be executable
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	completer := NewCobraCompleter()
+	completer.resolvePath = func(name string) (string, error) { return cmdPath, nil }
+	completer.prefetchTimeout = 5 * time.Second
+	completer.lookPathCacheMu.Lock()
+	completer.lookPathCache["kubectl"] = cmdPath
+	completer.lookPathCacheMu.Unlock()
+	ready := make(chan struct{}, 4)
+	completer.SetOnReady(func() { ready <- struct{}{} })
+
+	line := "kubectl a"
+	result, err := completer.Complete(context.Background(), line, len(line))
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if !result.Pending {
+		t.Fatalf("result = %+v, want pending for a seeded cobra tool", result)
+	}
+
+	select {
+	case <-ready:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no ready notification")
+	}
+	result, err = completer.Complete(context.Background(), line, len(line))
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if result.Pending || len(result.Items) != 1 {
+		t.Fatalf("after fetch: result = %+v, want the candidate", result)
+	}
+}
+
+// The prefetch timeout bounds a background process, not a keystroke. Cold
+// kubectl needs hundreds of milliseconds; killing it early fails identically
+// on every retry and completion never warms up.
+func TestCobraPrefetchTimeoutSurvivesColdStarts(t *testing.T) {
+	if cobraPrefetchTimeout < time.Second {
+		t.Fatalf("cobraPrefetchTimeout = %v, want at least 1s", cobraPrefetchTimeout)
+	}
+}
+
 func TestCobraCompleter_Name(t *testing.T) {
 	completer := NewCobraCompleter()
 	if completer.Name() != "cobra" {
@@ -303,7 +447,7 @@ func TestCobraCompleter_RetriesStaleFailedPrefetch(t *testing.T) {
 func TestCobraCompleter_PrefetchReturnsWhenChildKeepsStdoutOpen(t *testing.T) {
 	tmpDir := t.TempDir()
 	cmdPath := filepath.Join(tmpDir, "fakecobra")
-	if err := os.WriteFile(cmdPath, []byte("#!/bin/sh\nprintf 'pods\\tpod resources\\n'\nsleep 0.25 &\n"), 0o755); err != nil {
+	if err := os.WriteFile(cmdPath, []byte("#!/bin/sh\nprintf 'pods\\tpod resources\\n'\nsleep 1 &\n"), 0o755); err != nil {
 		t.Fatalf("WriteFile(%q): %v", cmdPath, err)
 	}
 
@@ -312,8 +456,11 @@ func TestCobraCompleter_PrefetchReturnsWhenChildKeepsStdoutOpen(t *testing.T) {
 	completer.doPrefetch(cmdPath, []string{"__complete"}, cmdPath+":__complete")
 	elapsed := time.Since(start)
 
-	if elapsed > 150*time.Millisecond {
-		t.Fatalf("cobra prefetch waited %s for child-held stdout pipe, want under 150ms", elapsed)
+	// The WaitDelay releases Wait ~50ms after the script exits; well under
+	// the decoy child's 1s sleep and the 3s fetch timeout. The bound leaves
+	// headroom for loaded CI machines.
+	if elapsed > 500*time.Millisecond {
+		t.Fatalf("cobra prefetch waited %s for child-held stdout pipe, want prompt return", elapsed)
 	}
 }
 

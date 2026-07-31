@@ -12,6 +12,7 @@ import (
 // ExecutableCompleter completes executable names from PATH.
 // It is triggered when completing the first word of a command (or after a pipe).
 type ExecutableCompleter struct {
+	builtins        []string
 	cache           []string
 	cacheTime       time.Time
 	cacheMu         sync.RWMutex
@@ -36,6 +37,12 @@ func NewExecutableCompleter() *ExecutableCompleter {
 	}
 	c.scanExecutables = c.scanPATHExecutables
 	return c
+}
+
+// SetBuiltins registers shell builtin names offered alongside PATH
+// executables in command position, labeled so users can tell them apart.
+func (c *ExecutableCompleter) SetBuiltins(names []string) {
+	c.builtins = append([]string(nil), names...)
 }
 
 // Name returns the completer name.
@@ -79,11 +86,14 @@ func (c *ExecutableCompleter) Complete(ctx context.Context, line string, pos int
 		return Result{}, err
 	}
 
-	items := make([]Item, 0, min(len(executables), 50))
 	lowerPrefix := strings.ToLower(prefix)
+	items, seen := c.builtinItems(lowerPrefix)
 	for _, exe := range executables {
 		if err := ctx.Err(); err != nil {
 			return Result{}, err
+		}
+		if seen[exe] {
+			continue
 		}
 		if prefix == "" || strings.HasPrefix(strings.ToLower(exe), lowerPrefix) {
 			items = append(items, Item{
@@ -98,6 +108,25 @@ func (c *ExecutableCompleter) Complete(ctx context.Context, line string, pos int
 	}
 
 	return Result{Items: items}, nil
+}
+
+// builtinItems returns the registered builtins matching the prefix, labeled
+// so they stand out from PATH executables. Builtins come first: they are
+// few, always available, and shadow same-named executables when executed.
+func (c *ExecutableCompleter) builtinItems(lowerPrefix string) (items []Item, seen map[string]bool) {
+	seen = make(map[string]bool, len(c.builtins))
+	items = make([]Item, 0, len(c.builtins))
+	for _, name := range c.builtins {
+		if lowerPrefix == "" || strings.HasPrefix(strings.ToLower(name), lowerPrefix) {
+			seen[name] = true
+			items = append(items, Item{
+				Value:       name,
+				Display:     name,
+				Description: "hash builtin",
+			})
+		}
+	}
+	return items, seen
 }
 
 // getExecutables returns all executables in PATH, using a cache.

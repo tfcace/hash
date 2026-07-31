@@ -53,6 +53,7 @@ fuzzy = true
 file_icons = true
 cobra_enabled = true
 mask_sensitive_env = true
+plugins_enabled = true
 
 [clipboard]
 max_output_size = "1MB"
@@ -82,7 +83,7 @@ Core shell behavior.
 | `disable_builtins` | array of strings | `[]` | Builtins to let external commands handle. |
 
 Disableable builtins include `cd`, `history`, `copy`, `issue`, `status`,
-`tips`, `setup-zoxide`, `source`, `exit`, and `quit`.
+`tips`, `setup-zoxide`, `completions`, `source`, `exit`, and `quit`.
 
 ### Shell Dialect
 
@@ -237,8 +238,11 @@ Tab completion behavior.
 | `file_icons` | boolean | `true` | Show file type icons when the terminal font supports them. |
 | `cobra_enabled` | boolean | `true` | Enable Cobra `__complete` integration. |
 | `mask_sensitive_env` | boolean | `true` | Mask sensitive environment variable values in previews. |
+| `plugins_enabled` | boolean | `true` | Declarative completion plugins: built-in specs (docker) plus user specs from `~/.config/hash/completions/*.toml`. See [completion-plugins.md](completion-plugins.md). |
 
-Per-tool completion cache settings are not implemented in 0.6.x.
+Per-tool completion caching is configured in the plugin specs themselves,
+not here: each `[rules.source]` has a `cache_ttl` (including `"0s"` for no
+reuse). See [completion-plugins.md](completion-plugins.md).
 
 ## `[clipboard]`
 
@@ -275,6 +279,7 @@ Interactive builtins:
 | `history` | Inspect or search command history. |
 | `copy cmd|out|all [N]` | Copy recent commands and output. |
 | `issue [--last]` | Draft a GitHub issue from shell context. |
+| `completions list|reload|generate <tool>` | Manage completion plugins; `generate` asks the agent to write one. |
 | `setup-zoxide` | Configure zoxide integration. |
 | `source <file>` / `. <file>` | Source shell setup files. |
 

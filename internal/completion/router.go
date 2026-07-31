@@ -132,6 +132,12 @@ func (r *Router) Complete(ctx context.Context, line string, pos int) (Result, er
 			continue // Try next completer on error
 		}
 
+		// A completer that matched but is still fetching, or matched and
+		// answered "no matches", owns this argument even without items.
+		if owned, ok := ownedEmptyResult(result, rc, traceEnabled, start); ok {
+			return owned, nil
+		}
+
 		if len(result.Items) > 0 {
 			result = r.finalizeResult(result, query)
 			if traceEnabled {
@@ -153,6 +159,28 @@ func (r *Router) Complete(ctx context.Context, line string, pos int) (Result, er
 		})
 	}
 	return Result{}, nil
+}
+
+// ownedEmptyResult reports whether an item-less result still owns the
+// argument: the completer matched but its data is on its way (Pending), or it
+// answered authoritatively that nothing matches (Handled). Falling through
+// would answer the argument with something unrelated, like filenames for a
+// container name.
+func ownedEmptyResult(result Result, rc registeredCompleter, traceEnabled bool, start time.Time) (Result, bool) {
+	if len(result.Items) > 0 || (!result.Pending && !result.Handled) {
+		return Result{}, false
+	}
+	if traceEnabled {
+		event := "router_done"
+		if result.Pending {
+			event = "router_pending"
+		}
+		trace.Emit("completion", event, trace.LevelDetailed, map[string]any{
+			"name":        rc.completer.Name(),
+			"duration_ms": float64(time.Since(start).Microseconds()) / 1000.0,
+		})
+	}
+	return Result{Pending: result.Pending}, true
 }
 
 func (r *Router) finalizeResult(result Result, query string) Result {

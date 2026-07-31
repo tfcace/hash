@@ -6,6 +6,7 @@ import (
 	"context"
 	"io"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -437,5 +438,113 @@ func TestEditor_CompletionKey_EmptyItems(t *testing.T) {
 	handled = ed.handleCompletionKey(Key{Special: KeyEnter})
 	if handled {
 		t.Error("handleCompletionKey should return false for empty items on Enter")
+	}
+}
+
+// A pending completion must say so rather than silently showing nothing, and
+// must not open a menu it has no items for.
+func TestEditor_PendingCompletionShowsFetchingNotice(t *testing.T) {
+	e := New(Config{
+		CompleteOutcomeFunc: func(line string, pos int) CompletionOutcome {
+			return CompletionOutcome{Pending: true}
+		},
+	}, strings.NewReader(""), io.Discard)
+	e.state.Buffer = NewBufferFromString("gh repo clone ")
+	e.state.Cursor.MoveTo(0, len("gh repo clone "))
+
+	e.triggerCompletion()
+
+	if e.completionActive {
+		t.Error("menu should not activate with no items")
+	}
+	if e.completionNotice != completionFetchingNotice {
+		t.Errorf("notice = %q, want %q", e.completionNotice, completionFetchingNotice)
+	}
+}
+
+// When the data lands, the menu opens by itself: no second TAB.
+func TestEditor_CompletionReadyOpensMenuWithoutKeypress(t *testing.T) {
+	var landed atomic.Bool
+	e := New(Config{
+		CompleteOutcomeFunc: func(line string, pos int) CompletionOutcome {
+			if !landed.Load() {
+				return CompletionOutcome{Pending: true}
+			}
+			return CompletionOutcome{Items: []Completion{
+				{Text: "tfcace/hash"},
+				{Text: "tfcace/blog"},
+			}}
+		},
+	}, strings.NewReader(""), io.Discard)
+	e.state.Buffer = NewBufferFromString("gh repo clone ")
+	e.state.Cursor.MoveTo(0, len("gh repo clone "))
+
+	e.triggerCompletion()
+	if e.completionActive {
+		t.Fatal("precondition: menu should not be active while pending")
+	}
+
+	landed.Store(true)
+	e.handleCompletionReady()
+
+	if !e.completionActive {
+		t.Error("menu should open when the pending source lands")
+	}
+	if len(e.completionItems) != 2 {
+		t.Errorf("items = %d, want 2", len(e.completionItems))
+	}
+	if e.completionNotice != "" {
+		t.Errorf("notice = %q, want it cleared once items arrived", e.completionNotice)
+	}
+}
+
+// If the user kept typing, a late arrival for the old input must be ignored.
+func TestEditor_CompletionReadyIgnoredAfterInputChanged(t *testing.T) {
+	e := New(Config{
+		CompleteOutcomeFunc: func(line string, pos int) CompletionOutcome {
+			return CompletionOutcome{Items: []Completion{{Text: "tfcace/hash"}}}
+		},
+	}, strings.NewReader(""), io.Discard)
+	e.state.Buffer = NewBufferFromString("gh repo clone ")
+	e.state.Cursor.MoveTo(0, len("gh repo clone "))
+	e.completionNotice = completionFetchingNotice
+	e.awaitingCompletion = "gh repo clone "
+
+	// The user typed on: the awaited line is stale.
+	e.state.Buffer = NewBufferFromString("gh repo clone something-else")
+	e.state.Cursor.MoveTo(0, len("gh repo clone something-else"))
+
+	e.handleCompletionReady()
+
+	if e.completionActive {
+		t.Error("a late arrival for older input must not open a menu")
+	}
+}
+
+// Moving the cursor leaves the buffer unchanged, but the late result belongs
+// to the argument where Tab was pressed. It must not open (or auto-insert) at
+// the argument the cursor sits on now.
+func TestEditor_CompletionReadyIgnoredAfterCursorMoved(t *testing.T) {
+	e := New(Config{
+		CompleteOutcomeFunc: func(line string, pos int) CompletionOutcome {
+			return CompletionOutcome{Items: []Completion{{Text: "tfcace/hash"}}}
+		},
+	}, strings.NewReader(""), io.Discard)
+	e.state.Buffer = NewBufferFromString("docker rm redis")
+	e.state.Cursor.MoveTo(0, len("docker rm redis"))
+	e.completionNotice = completionFetchingNotice
+	e.awaitingCompletion = "docker rm redis"
+	e.awaitingCompletionPos = len("docker rm redis")
+
+	// The user arrowed back to another argument; the buffer text is identical.
+	e.state.Cursor.MoveTo(0, len("docker"))
+
+	e.handleCompletionReady()
+
+	if e.completionActive {
+		t.Error("a late arrival for another cursor position must not open a menu")
+	}
+	if e.awaitingCompletion != "" {
+		t.Error("a stale pending completion must be cleared, not left armed")
 	}
 }

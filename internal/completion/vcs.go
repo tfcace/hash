@@ -671,7 +671,14 @@ func defaultListJJChangeIDs(ctx context.Context) ([]string, error) {
 }
 
 func runIsolatedCommand(ctx context.Context, command string, args ...string) ([]string, error) {
+	return runIsolatedCommandIn(ctx, "", command, args...)
+}
+
+// runIsolatedCommandIn runs the command in dir ("" = inherit the process
+// working directory).
+func runIsolatedCommandIn(ctx context.Context, dir, command string, args ...string) ([]string, error) {
 	cmd := exec.CommandContext(ctx, command, args...)
+	cmd.Dir = dir
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = io.Discard
