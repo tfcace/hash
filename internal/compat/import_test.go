@@ -192,6 +192,97 @@ fi
 	}
 }
 
+func TestFilterWithDialect_BashSkipsPowerlevel10kInstantPromptBlock(t *testing.T) {
+	tmpDir := t.TempDir()
+	rcFile := filepath.Join(tmpDir, ".zshrc")
+	content := `if [[ -r "${XDG_CACHE_HOME:-$HOME/.cache}/p10k-instant-prompt-${(%):-%n}.zsh" ]]; then
+  source "${XDG_CACHE_HOME:-$HOME/.cache}/p10k-instant-prompt-${(%):-%n}.zsh"
+fi
+export PATH="$HOME/.local/bin:$PATH"
+`
+	if err := os.WriteFile(rcFile, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	filtered, report, err := FilterWithDialect(rcFile, "zsh", "bash")
+	if err != nil {
+		t.Fatalf("FilterWithDialect error = %v", err)
+	}
+	if report.Summary.Skipped != 2 {
+		t.Fatalf("Skipped = %d, want 2", report.Summary.Skipped)
+	}
+	if !strings.Contains(filtered, "if false; then # [hash-compat]") {
+		t.Fatalf("filtered startup file should disable the zsh conditional:\n%s", filtered)
+	}
+
+	parser := syntax.NewParser(syntax.Variant(syntax.LangBash))
+	if _, err := parser.Parse(strings.NewReader(filtered), rcFile); err != nil {
+		t.Fatalf("filtered startup file should parse as bash, got %v\nfiltered:\n%s", err, filtered)
+	}
+
+	zshFiltered, zshReport, err := FilterWithDialect(rcFile, "zsh", "zsh")
+	if err != nil {
+		t.Fatalf("FilterWithDialect(zsh) error = %v", err)
+	}
+	if zshReport.Summary.Skipped != 0 {
+		t.Fatalf("zsh Skipped = %d, want 0", zshReport.Summary.Skipped)
+	}
+	if !strings.Contains(zshFiltered, "${(%):-%n}") {
+		t.Fatalf("zsh startup file should retain zsh parameter expansion:\n%s", zshFiltered)
+	}
+}
+
+func TestFilterWithDialect_BashSkipsPowerlevel10kMultilineThen(t *testing.T) {
+	tmpDir := t.TempDir()
+	rcFile := filepath.Join(tmpDir, ".zshrc")
+	content := `if [[ -r "${XDG_CACHE_HOME:-$HOME/.cache}/p10k-instant-prompt-${(%):-%n}.zsh" ]]
+then
+  source "${XDG_CACHE_HOME:-$HOME/.cache}/p10k-instant-prompt-${(%):-%n}.zsh"
+fi
+`
+	if err := os.WriteFile(rcFile, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	filtered, report, err := FilterWithDialect(rcFile, "zsh", "bash")
+	if err != nil {
+		t.Fatalf("FilterWithDialect error = %v", err)
+	}
+	if report.Summary.Skipped != 2 {
+		t.Fatalf("Skipped = %d, want 2", report.Summary.Skipped)
+	}
+
+	parser := syntax.NewParser(syntax.Variant(syntax.LangBash))
+	if _, err := parser.Parse(strings.NewReader(filtered), rcFile); err != nil {
+		t.Fatalf("filtered startup file should parse as bash, got %v\nfiltered:\n%s", err, filtered)
+	}
+}
+
+func TestFilterWithDialect_BashSkipsPowerlevel10kInlineThenWhitespace(t *testing.T) {
+	tmpDir := t.TempDir()
+	rcFile := filepath.Join(tmpDir, ".zshrc")
+	content := `if [[ -r "${XDG_CACHE_HOME:-$HOME/.cache}/p10k-instant-prompt-${(%):-%n}.zsh" ]];  then # optional comment
+  source "${XDG_CACHE_HOME:-$HOME/.cache}/p10k-instant-prompt-${(%):-%n}.zsh"
+fi
+`
+	if err := os.WriteFile(rcFile, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	filtered, report, err := FilterWithDialect(rcFile, "zsh", "bash")
+	if err != nil {
+		t.Fatalf("FilterWithDialect error = %v", err)
+	}
+	if report.Summary.Skipped != 2 {
+		t.Fatalf("Skipped = %d, want 2", report.Summary.Skipped)
+	}
+
+	parser := syntax.NewParser(syntax.Variant(syntax.LangBash))
+	if _, err := parser.Parse(strings.NewReader(filtered), rcFile); err != nil {
+		t.Fatalf("filtered startup file should parse as bash, got %v\nfiltered:\n%s", err, filtered)
+	}
+}
+
 func TestCheckSourceChanged(t *testing.T) {
 	tmpDir := t.TempDir()
 	rcFile := filepath.Join(tmpDir, ".zshrc")

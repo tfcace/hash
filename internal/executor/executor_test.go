@@ -37,6 +37,25 @@ func TestExecute_SimpleCommand(t *testing.T) {
 	}
 }
 
+func TestExecute_CompletionRegistrationIsSilentNoop(t *testing.T) {
+	exec := New()
+	var stdout, stderr bytes.Buffer
+
+	result, err := exec.Execute(context.Background(), "complete -o default -F __nvm nvm; echo ready", &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("complete registration returned an error: %v", err)
+	}
+	if result.ExitCode != 0 {
+		t.Fatalf("complete registration exit code = %d, want 0", result.ExitCode)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("complete registration should not write stderr, got %q", stderr.String())
+	}
+	if got := stdout.String(); got != "ready\n" {
+		t.Fatalf("complete registration should be silent and allow following commands, got stdout %q", got)
+	}
+}
+
 func TestExecute_DefaultBashDialectRejectsZshSyntax(t *testing.T) {
 	exec := New()
 	ctx := context.Background()
