@@ -695,6 +695,11 @@ func (e *Executor) shellBuiltinHandler(ctx context.Context, args []string) ([]st
 	case "eval":
 		return e.handleEvalCall(ctx, args)
 
+	case "complete":
+		// Hash provides completion itself, so shell-specific completion
+		// registrations (for example, NVM's Bash completion) are inert.
+		return []string{":"}, nil
+
 	case "alias":
 		return e.handleBashAlias(ctx, args[1:])
 

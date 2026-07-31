@@ -111,7 +111,44 @@ func FilterWithDialect(path, shell, targetDialect string) (string, *Report, erro
 func hashCompatNoop(line string) string {
 	trimmedLeft := strings.TrimLeft(line, " \t")
 	indent := line[:len(line)-len(trimmedLeft)]
+	trimmed := strings.TrimSpace(line)
+
+	// A skipped Zsh-only conditional must retain valid control-flow syntax for
+	// the Bash parser. Powerlevel10k's instant prompt is one such conditional:
+	// its condition and body both use `${(%):-%n}`. Replacing the condition with
+	// false preserves the matching `fi` while ensuring the body never runs.
+	// `then` may be on this line or the next, so retain the form that matches
+	// the original layout.
+	if strings.HasPrefix(trimmed, "if ") {
+		if hasInlineThen(trimmed) {
+			return indent + "if false; then # [hash-compat] " + trimmed
+		}
+		return indent + "if false # [hash-compat] " + trimmed
+	}
+
 	return indent + ": # [hash-compat] " + strings.TrimSpace(line)
+}
+
+func hasInlineThen(line string) bool {
+	_, after, found := strings.Cut(line, ";")
+	if !found {
+		return false
+	}
+
+	after = strings.TrimLeft(after, " \t")
+	if !strings.HasPrefix(after, "then") {
+		return false
+	}
+	if len(after) == len("then") {
+		return true
+	}
+
+	switch after[len("then")] {
+	case ' ', '\t', '#':
+		return true
+	default:
+		return false
+	}
 }
 
 // SourceWithCompat sources a shell rc file with graceful error handling.
@@ -260,6 +297,12 @@ func shouldSkipLine(line, targetDialect string) string {
 
 	if strings.EqualFold(strings.TrimSpace(targetDialect), "zsh") {
 		return ""
+	}
+
+	// `${(%):...}` uses Zsh parameter-expansion flags. It appears in
+	// Powerlevel10k's instant-prompt setup and cannot be parsed as Bash.
+	if strings.Contains(line, "${(%):") {
+		return "zsh parameter expansion flags"
 	}
 
 	// Other common shell-specific inits that need native handling
