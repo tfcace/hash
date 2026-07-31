@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://runhash.dev/schemas/plugin-protocol-v1.json",
+  "title": "Hash plugin protocol v1",
+  "description": "One JSON-RPC 2.0 object per UTF-8 line on stdout/stdin.",
+  "oneOf": [
+    { "$ref": "#/$defs/request" },
+    { "$ref": "#/$defs/response" }
+  ],
+  "$defs": {
+    "request": {
+      "type": "object",
+      "required": ["jsonrpc", "method"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "type": "integer", "minimum": 1 },
+        "method": {
+          "enum": [
+            "initialize", "shutdown", "$/cancelRequest",
+            "session.start", "session.stop", "cwd.changed", "prompt.render",
+            "editor.suggest", "completion.provide", "command.before",
+            "command.finished", "history.added", "command.execute",
+            "host.history.query", "host.completion.query", "host.environment.get",
+            "host.output.write"
+          ]
+        },
+        "params": { "type": "object" }
+      },
+      "additionalProperties": false
+    },
+    "response": {
+      "type": "object",
+      "required": ["jsonrpc", "id"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "type": "integer", "minimum": 1 },
+        "result": {},
+        "error": {
+          "type": "object",
+          "required": ["code", "message"],
+          "properties": {
+            "code": { "type": "integer" },
+            "message": { "type": "string" },
+            "data": {}
+          },
+          "additionalProperties": true
+        }
+      },
+      "oneOf": [
+        { "required": ["result"] },
+        { "required": ["error"] }
+      ],
+      "additionalProperties": false
+    }
+  }
+}

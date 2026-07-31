@@ -13,6 +13,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"golang.org/x/sys/unix"
 	"golang.org/x/term"
@@ -29,6 +30,7 @@ import (
 	"github.com/tfcace/hash/internal/learning"
 	"github.com/tfcace/hash/internal/onboarding"
 	"github.com/tfcace/hash/internal/parser"
+	"github.com/tfcace/hash/internal/plugin"
 	"github.com/tfcace/hash/internal/prediction"
 	"github.com/tfcace/hash/internal/prompt"
 	"github.com/tfcace/hash/internal/readline"
@@ -68,6 +70,7 @@ type Shell struct {
 	colorPalette        prompt.Palette
 	allowlist           *allowlist.Manager
 	agentOutput         *AgentOutputCoordinator
+	plugins             *plugin.Manager
 	readKey             func(ctx context.Context) byte
 	agentReplyInputHook func(context.Context) (string, error)
 	lastExitCode        int
@@ -358,8 +361,9 @@ func New(cfg *config.Config) (*Shell, error) {
 		CompleteOutcomeFunc: makeEditorCompleteOutcomeFunc(router),
 		CompletionReadyCh:   completionReadyCh,
 		PrefetchFunc:        makeEditorPrefetchFunc(router),
-		SuggestionFunc:      makeEditorSuggestionFunc(historyStore, predictor),
-		MaxPasteSize:        cfg.Input.ParseMaxPasteSize(),
+		// Smart suggestions are supplied only by explicitly enabled plugins.
+		SuggestionFunc: nil,
+		MaxPasteSize:   cfg.Input.ParseMaxPasteSize(),
 	}
 
 	// Capture initial working directory for chpwd hook
@@ -444,6 +448,7 @@ func (s *Shell) Mode() Mode {
 // Run starts the shell REPL.
 func (s *Shell) Run(ctx context.Context) error {
 	defer s.readline.Close() //nolint:errcheck // cleanup on exit
+	defer s.stopPlugins()
 
 	// Run startup files and commands based on mode
 	if err := s.runStartup(ctx); err != nil {
@@ -452,6 +457,7 @@ func (s *Shell) Run(ctx context.Context) error {
 		}
 		return err
 	}
+	s.startPlugins(ctx)
 	s.showWelcomeIfNeeded()
 
 	// Generate first prompt and extract color palette concurrently.
@@ -1775,6 +1781,7 @@ func makeEditorSuggestionFunc(store *history.Store, pred *prediction.Predictor) 
 
 // Close releases shell resources.
 func (s *Shell) Close() error {
+	s.stopPlugins()
 	if s.history != nil {
 		_ = s.history.Close()
 	}
@@ -1785,6 +1792,66 @@ func (s *Shell) Close() error {
 		_ = s.predictor.Close()
 	}
 	return s.readline.Close()
+}
+
+func (s *Shell) startPlugins(ctx context.Context) {
+	if !s.mode.Interactive || s.config == nil || len(s.config.Plugins.Enabled) == 0 {
+		return
+	}
+	manager, err := plugin.DiscoverManager(s.config.Plugins.Enabled, s.config.Plugins.Settings)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "hash: plugin discovery: %v\n", err)
+		return
+	}
+	if err := manager.Start(ctx); err != nil {
+		fmt.Fprintf(os.Stderr, "hash: plugin startup: %v\n", err)
+		return
+	}
+	s.plugins = manager
+	cwd, _ := os.Getwd()
+	manager.Notify("session.start", map[string]any{
+		"cwd":     cwd,
+		"dialect": s.config.Shell.Dialect,
+	})
+	s.editorCfg.SuggestionFunc = s.pluginSuggestion
+}
+
+func (s *Shell) stopPlugins() {
+	if s.plugins == nil {
+		return
+	}
+	cwd, _ := os.Getwd()
+	s.plugins.Notify("session.stop", map[string]any{"cwd": cwd})
+	_ = s.plugins.Close()
+	s.plugins = nil
+}
+
+func (s *Shell) pluginSuggestion(input string) string {
+	if s.plugins == nil {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	var result struct {
+		Text string `json:"text"`
+	}
+	found, _ := s.plugins.CallFirst(ctx, "editor.suggest", map[string]any{
+		"line": input,
+		"cwd":  currentWorkingDirectory(),
+	}, &result)
+	if !found || !isStrictSuggestion(input, result.Text) {
+		return ""
+	}
+	return result.Text
+}
+
+func currentWorkingDirectory() string {
+	cwd, _ := os.Getwd()
+	return cwd
+}
+
+func isStrictSuggestion(input, candidate string) bool {
+	return candidate != input && strings.HasPrefix(candidate, input) && utf8.ValidString(candidate)
 }
 
 // recordCommand saves a command to history.
@@ -1811,7 +1878,14 @@ func (s *Shell) recordCommand(line string, exitCode int, duration time.Duration)
 		RawCommand: sudoResult.RawCommand,
 	}
 
-	_, _ = s.history.Add(cmd)
+	if _, err := s.history.Add(cmd); err == nil && s.plugins != nil {
+		s.plugins.Notify("history.added", map[string]any{
+			"line":        line,
+			"exit_code":   exitCode,
+			"duration_ms": duration.Milliseconds(),
+			"cwd":         cwd,
+		})
+	}
 }
 
 // detectGitBranch returns the current git branch, or empty string if not in a git repo.
@@ -1878,10 +1952,6 @@ func (s *Shell) handleAgentInterrupt(cancelFull context.CancelFunc) bool {
 
 // runChpwdHook runs configured chpwd hook commands if the working directory changed.
 func (s *Shell) runChpwdHook(ctx context.Context) {
-	if s.config == nil || len(s.config.Shell.Hooks.Chpwd) == 0 {
-		return
-	}
-
 	cwd, err := os.Getwd()
 	if err != nil {
 		return
@@ -1895,6 +1965,12 @@ func (s *Shell) runChpwdHook(ctx context.Context) {
 	}
 
 	s.prevCwd = cwd
+	if s.plugins != nil {
+		s.plugins.Notify("cwd.changed", map[string]any{"cwd": cwd})
+	}
+	if s.config == nil || len(s.config.Shell.Hooks.Chpwd) == 0 {
+		return
+	}
 	for _, cmd := range s.config.Shell.Hooks.Chpwd {
 		_, err := s.executor.Execute(ctx, cmd, nil, os.Stderr)
 		if err != nil {

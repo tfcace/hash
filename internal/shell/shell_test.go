@@ -29,6 +29,26 @@ func TestNewShell(t *testing.T) {
 	}
 }
 
+func TestIsStrictSuggestion(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		input     string
+		candidate string
+		want      bool
+	}{
+		{name: "strict extension", input: "git", candidate: "git status", want: true},
+		{name: "unchanged", input: "git", candidate: "git", want: false},
+		{name: "replacement", input: "git", candidate: "go test", want: false},
+		{name: "invalid utf8", input: "git", candidate: "git\xff", want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isStrictSuggestion(tc.input, tc.candidate); got != tc.want {
+				t.Fatalf("isStrictSuggestion(%q, %q) = %v, want %v", tc.input, tc.candidate, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestWriteAgentNotConfiguredHintUsesACPDefault(t *testing.T) {
 	var out strings.Builder
 

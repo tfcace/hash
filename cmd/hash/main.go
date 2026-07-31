@@ -29,6 +29,8 @@ func main() {
 		case "version":
 			printVersion()
 			os.Exit(0)
+		case "plugin":
+			os.Exit(runPlugin(args[1:], os.Stdout, os.Stderr))
 		}
 	}
 

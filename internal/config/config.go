@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"github.com/pelletier/go-toml/v2"
 )
@@ -21,6 +22,7 @@ type Config struct {
 	Completions CompletionsConfig        `toml:"completions"`
 	Clipboard   ClipboardConfig          `toml:"clipboard"`
 	Prediction  PredictionConfig         `toml:"prediction"`
+	Plugins     PluginsConfig            `toml:"plugins"`
 
 	// LoadIssue records what went wrong while loading this config, so the
 	// shell can surface it (e.g. in `hash status`). Nil when loading was clean.
@@ -129,6 +131,13 @@ type PredictionConfig struct {
 	PathRecencyHours    int      `toml:"path_recency_boost_hours"`
 }
 
+// PluginsConfig selects installed Hash plugins and forwards each plugin's
+// untyped settings table unchanged through the protocol handshake.
+type PluginsConfig struct {
+	Enabled  []string                  `toml:"enabled"`
+	Settings map[string]map[string]any `toml:"settings"`
+}
+
 // ParseMaxOutputSize parses the MaxOutputSize string and returns bytes.
 func (c *ClipboardConfig) ParseMaxOutputSize() (int64, error) {
 	return ParseSize(c.MaxOutputSize)
@@ -190,6 +199,10 @@ func Default() *Config {
 			PathMinCount:        2,
 			PathRecencyHours:    24,
 		},
+		Plugins: PluginsConfig{
+			Enabled:  []string{},
+			Settings: map[string]map[string]any{},
+		},
 	}
 }
 
@@ -230,6 +243,81 @@ func decodeAgentTables(data []byte) map[string]interface{} {
 		return nil
 	}
 	return doc.Agent
+}
+
+// SetPluginEnabled updates only the [plugins].enabled selection while retaining
+// all other TOML values, including per-plugin settings. It is used by the
+// explicit `hash plugin enable` and `hash plugin disable` commands.
+func SetPluginEnabled(configDir, id string, enabled bool) error {
+	if strings.TrimSpace(id) == "" {
+		return fmt.Errorf("plugin id is required")
+	}
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		return err
+	}
+	path := filepath.Join(configDir, "config.toml")
+	document := map[string]any{}
+	if data, err := os.ReadFile(path); err == nil {
+		if err := toml.Unmarshal(data, &document); err != nil {
+			return fmt.Errorf("parse %s: %w", path, err)
+		}
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+
+	plugins, ok := document["plugins"].(map[string]any)
+	if !ok {
+		plugins = map[string]any{}
+		document["plugins"] = plugins
+	}
+	var selected []string
+	switch values := plugins["enabled"].(type) {
+	case []any:
+		for _, value := range values {
+			if text, ok := value.(string); ok {
+				selected = append(selected, text)
+			}
+		}
+	case []string:
+		selected = append(selected, values...)
+	}
+	index := -1
+	for i, selectedID := range selected {
+		if selectedID == id {
+			index = i
+			break
+		}
+	}
+	if enabled && index < 0 {
+		selected = append(selected, id)
+	}
+	if !enabled && index >= 0 {
+		selected = append(selected[:index], selected[index+1:]...)
+	}
+	plugins["enabled"] = selected
+
+	data, err := toml.Marshal(document)
+	if err != nil {
+		return fmt.Errorf("encode %s: %w", path, err)
+	}
+	temporary, err := os.CreateTemp(configDir, ".config.toml-*")
+	if err != nil {
+		return err
+	}
+	temporaryPath := temporary.Name()
+	defer os.Remove(temporaryPath) //nolint:errcheck // no longer needed after rename
+	if _, err := temporary.Write(data); err != nil {
+		_ = temporary.Close()
+		return err
+	}
+	if err := temporary.Chmod(0o600); err != nil {
+		_ = temporary.Close()
+		return err
+	}
+	if err := temporary.Close(); err != nil {
+		return err
+	}
+	return os.Rename(temporaryPath, path)
 }
 
 // applyEmptyDefaults fills defaults for values the file left empty.

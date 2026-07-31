@@ -66,7 +66,33 @@ accept_keys = ["right", "tab"]
 confidence_threshold = 0.6
 path_min_count = 2
 path_recency_boost_hours = 24
+
+[plugins]
+enabled = ["io.example.my-plugin"]
+
+[plugins.settings."io.example.my-plugin"]
+strategy = "history"
 ```
+
+## `[plugins]`
+
+External plugins are discovered only from XDG user/system data locations and
+are disabled by default. `enabled` is an ordered array: its order sets
+single-winner priority and aggregate contribution order. Per-plugin settings
+are forwarded unchanged to the plugin's initialization request.
+
+```toml
+[plugins]
+enabled = ["io.example.my-plugin"]
+
+[plugins.settings."io.example.my-plugin"]
+minimum_length = 2
+```
+
+Use `hash plugin list`, `inspect`, `link`, `enable`, `disable`, and `doctor` to
+manage bundles. Plugin executables are trusted local programs with your user
+privileges; capability declarations are not a sandbox. See the complete
+[plugin developer guide](plugins/README.md).
 
 ## `[shell]`
 
