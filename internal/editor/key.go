@@ -115,6 +115,13 @@ func parseEscapeSequence(b []byte) Key {
 		return Key{} // No-op: discard terminal response
 	}
 
+	// vt220/xterm "tilde" keys: ESC [ <num> (; <mod>)? ~
+	// Home/End/Delete/PageUp/PageDown act; Insert and F-keys are discarded.
+	// Checked before other CSI forms so ESC[1;2~ is not misread as ESC[1;<mod><dir>.
+	if len(b) >= 4 && b[len(b)-1] == '~' {
+		return parseTildeKey(b[2 : len(b)-1])
+	}
+
 	// Simple arrow keys: ESC [ A/B/C/D
 	if len(b) == 3 {
 		if key, ok := parseSimpleCSI(b[2]); ok {
@@ -125,11 +132,6 @@ func parseEscapeSequence(b []byte) Key {
 	// Modified keys: ESC [ 1 ; <mod> <dir>
 	if len(b) >= 6 && b[2] == '1' && b[3] == ';' {
 		return parseModifiedKey(b[4], b[5])
-	}
-
-	// Delete key: ESC [ 3 ~
-	if len(b) >= 4 && b[2] == '3' && b[3] == '~' {
-		return Key{Special: KeyDelete}
 	}
 
 	// CSI u encoding for Enter: ESC [ 13 u or ESC [ 13 ; <mod> u
@@ -143,6 +145,39 @@ func parseEscapeSequence(b []byte) Key {
 	}
 
 	return Key{Special: KeyEscape}
+}
+
+// parseTildeKey parses vt220-style sequences: the bytes between "ESC[" and
+// the final "~", i.e. <num> optionally followed by ";<mod>". Unknown numbers
+// (Insert, function keys) return a zero Key so they are ignored instead of
+// being mistaken for Escape, which would silently switch editor modes.
+func parseTildeKey(inner []byte) Key {
+	num := 0
+	i := 0
+	for ; i < len(inner) && inner[i] >= '0' && inner[i] <= '9'; i++ {
+		num = num*10 + int(inner[i]-'0')
+	}
+
+	var key Key
+	switch num {
+	case 1, 7:
+		key = Key{Special: KeyHome}
+	case 4, 8:
+		key = Key{Special: KeyEnd}
+	case 3:
+		key = Key{Special: KeyDelete}
+	case 5:
+		key = Key{Special: KeyPageUp}
+	case 6:
+		key = Key{Special: KeyPageDown}
+	default:
+		return Key{}
+	}
+
+	if i < len(inner) && inner[i] == ';' && i+1 < len(inner) {
+		key = applyModifier(key, inner[i+1]-'0')
+	}
+	return key
 }
 
 // parseSimpleCSI parses simple CSI sequences (ESC [ X) for arrow/navigation keys.
