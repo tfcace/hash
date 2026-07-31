@@ -1,7 +1,10 @@
 // internal/editor/insert.go
 package editor
 
-import "unicode"
+import (
+	"strings"
+	"unicode"
+)
 
 // InsertMode is the default text entry mode.
 type InsertMode struct{}
@@ -21,7 +24,7 @@ func (m *InsertMode) HandleKey(key Key, state *EditorState) ModeResult {
 	// Handle bracketed paste
 	if key.Special == KeyPaste {
 		m.deleteSelection(state)
-		m.insertPasteContent(state, key.PasteText)
+		insertPasteContent(state, key.PasteText)
 		return ModeResult{Action: ActionPaste}
 	}
 
@@ -413,20 +416,16 @@ func (m *InsertMode) insertNewlineWithContinuation(state *EditorState) {
 	}
 }
 
-// insertPasteContent inserts pasted text with shell line continuations.
-// Adds " \" before each newline if the line doesn't already end with "\".
-func (m *InsertMode) insertPasteContent(state *EditorState, text string) {
+// insertPasteContent inserts pasted text literally. Only line endings are
+// normalized; rewriting the content (e.g. adding shell continuations) would
+// corrupt quoted strings and merge pasted commands into one.
+func insertPasteContent(state *EditorState, text string) {
 	if text == "" {
 		return
 	}
 
-	processed := text
-	// Process the pasted text to add continuations where needed
-	if state.LineContinuation {
-		processed = addLineContinuations(text)
-	}
+	processed := normalizePastedText(text)
 
-	// Insert the processed text
 	row, col := state.Cursor.Pos.Row, state.Cursor.Pos.Col
 	state.Buffer.Insert(row, col, processed)
 
@@ -441,6 +440,12 @@ func (m *InsertMode) insertPasteContent(state *EditorState, text string) {
 	}
 	state.Cursor.Pos.Row = row
 	state.Cursor.Pos.Col = col
+}
+
+// normalizePastedText canonicalizes pasted line endings to \n.
+func normalizePastedText(text string) string {
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	return strings.ReplaceAll(text, "\r", "\n")
 }
 
 // insertNewline inserts a plain newline without continuation.
@@ -459,52 +464,4 @@ func endsWithBackslash(s string) bool {
 		trimmed = trimmed[:len(trimmed)-1]
 	}
 	return trimmed != "" && trimmed[len(trimmed)-1] == '\\'
-}
-
-// addLineContinuations processes pasted text to add " \" before newlines
-// where the line doesn't already end with a backslash.
-func addLineContinuations(text string) string {
-	lines := splitLines(text)
-	if len(lines) <= 1 {
-		return text
-	}
-
-	var result []byte
-	for i, line := range lines {
-		if i > 0 {
-			result = append(result, '\n')
-		}
-		result = append(result, line...)
-
-		// Add continuation if this is not the last line and doesn't already have one
-		if i < len(lines)-1 && !endsWithBackslash(line) {
-			result = append(result, ' ', '\\')
-		}
-	}
-	return string(result)
-}
-
-// splitLines splits text into lines, preserving empty lines.
-func splitLines(text string) []string {
-	var lines []string
-	var current []byte
-	for i := 0; i < len(text); i++ {
-		switch text[i] {
-		case '\n':
-			lines = append(lines, string(current))
-			current = current[:0]
-		case '\r':
-			// Handle \r\n (skip \r, \n will be handled next)
-			if i+1 < len(text) && text[i+1] == '\n' {
-				continue
-			}
-			// Standalone \r treated as newline
-			lines = append(lines, string(current))
-			current = current[:0]
-		default:
-			current = append(current, text[i])
-		}
-	}
-	lines = append(lines, string(current))
-	return lines
 }
