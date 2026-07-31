@@ -16,6 +16,15 @@ func (m *NormalMode) Name() string {
 
 // HandleKey processes a key in normal mode.
 func (m *NormalMode) HandleKey(key Key, state *EditorState) ModeResult {
+	// Handle bracketed paste: insert literally, same as insert mode
+	if key.Special == KeyPaste {
+		if state.Cursor.HasSelection() {
+			m.deleteSelection(state)
+		}
+		insertPasteContent(state, key.PasteText)
+		return ModeResult{Action: ActionPaste}
+	}
+
 	// Universal bindings (Ctrl+A, Ctrl+E, etc.)
 	if key.Ctrl {
 		return m.handleCtrl(key, state)

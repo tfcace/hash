@@ -383,15 +383,15 @@ func TestIntegration_BracketedPaste_SingleLine(t *testing.T) {
 }
 
 func TestIntegration_BracketedPaste_Multiline(t *testing.T) {
-	// Test that multiline paste adds continuations
+	// Multiline paste is inserted literally: rewriting it would corrupt
+	// quoted strings and merge pasted commands
 	state := NewEditorState()
 	mode := NewInsertMode()
 
 	// Simulate pasting multiline text
 	mode.HandleKey(Key{Special: KeyPaste, PasteText: "echo hello\necho world"}, state)
 
-	// Should add continuation before newline
-	expected := "echo hello \\\necho world"
+	expected := "echo hello\necho world"
 	if state.Buffer.Content() != expected {
 		t.Errorf("Content = %q, want %q", state.Buffer.Content(), expected)
 	}
@@ -413,15 +413,14 @@ func TestIntegration_BracketedPaste_PreserveExistingContinuation(t *testing.T) {
 }
 
 func TestIntegration_BracketedPaste_MultipleLines(t *testing.T) {
-	// Test paste with multiple lines
+	// Paste with multiple lines stays byte-for-byte intact
 	state := NewEditorState()
 	mode := NewInsertMode()
 
 	// Simulate pasting 3 lines
 	mode.HandleKey(Key{Special: KeyPaste, PasteText: "line1\nline2\nline3"}, state)
 
-	// Should add continuation before each internal newline
-	expected := "line1 \\\nline2 \\\nline3"
+	expected := "line1\nline2\nline3"
 	if state.Buffer.Content() != expected {
 		t.Errorf("Content = %q, want %q", state.Buffer.Content(), expected)
 	}
