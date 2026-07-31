@@ -14,6 +14,53 @@ func (c *Client) StreamRequest(ctx context.Context, req Request) (<-chan string,
 	return c.transport.SendStreaming(ctx, req)
 }
 
+// StreamEvents returns ordered text and lifecycle events. Text-only
+// transports are adapted so callers can use one stream shape for every agent.
+func (c *Client) StreamEvents(ctx context.Context, req Request) (<-chan StreamEvent, <-chan error) {
+	if c != nil && c.transport != nil {
+		if transport, ok := c.transport.(EventStreamTransport); ok {
+			return transport.SendEventStream(ctx, req)
+		}
+	}
+
+	events := make(chan StreamEvent, 16)
+	errs := make(chan error, 1)
+	if c == nil || c.transport == nil {
+		errs <- &AgentError{Message: "no agent configured"}
+		close(events)
+		close(errs)
+		return events, errs
+	}
+
+	textCh, errCh := c.transport.SendStreaming(ctx, req)
+	go func() {
+		defer close(events)
+		defer close(errs)
+		for textCh != nil || errCh != nil {
+			select {
+			case text, ok := <-textCh:
+				if !ok {
+					textCh = nil
+					continue
+				}
+				if text != "" {
+					events <- StreamEvent{Type: StreamEventText, Text: text}
+				}
+			case err, ok := <-errCh:
+				if !ok {
+					errCh = nil
+					continue
+				}
+				if err != nil {
+					errs <- err
+				}
+			}
+		}
+	}()
+
+	return events, errs
+}
+
 // AgentError represents an error from the agent.
 type AgentError struct {
 	Message string

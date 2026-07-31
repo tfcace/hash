@@ -208,6 +208,46 @@ func TestACPTransport_SendStreamingAttemptEmitsCompletedToolCallContent(t *testi
 	}
 }
 
+func TestACPTransport_SendEventStreamingAttemptEmitsGenericToolLifecycle(t *testing.T) {
+	transport := &ACPTransport{
+		config:    ACPConfig{Command: "test"},
+		stdin:     newMockPipe(),
+		sessionID: "test-session",
+		messages:  make(chan []byte, 10),
+		done:      make(chan struct{}),
+	}
+	transport.messages <- []byte(`{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"test-session","update":{"sessionUpdate":"tool_call","toolCallId":"call-1","title":"pwd","kind":"execute","status":"pending"}}}`)
+	transport.messages <- []byte(`{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"test-session","update":{"sessionUpdate":"tool_call_update","toolCallId":"call-1","status":"completed"}}}`)
+	transport.messages <- []byte(`{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"test-session","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Done."}}}}`)
+	transport.messages <- []byte(`{"jsonrpc":"2.0","id":1,"result":{"stopReason":"end_turn"}}`)
+
+	events := make(chan StreamEvent, 10)
+	observed, err := transport.sendEventStreamingAttempt(context.Background(), Request{Prompt: "test"}, events)
+	if err != nil {
+		t.Fatalf("sendEventStreamingAttempt returned error: %v", err)
+	}
+	if !observed {
+		t.Fatal("tool lifecycle should count as observed activity")
+	}
+
+	got := make([]StreamEvent, 0, 3)
+	for len(events) > 0 {
+		got = append(got, <-events)
+	}
+	if len(got) != 3 {
+		t.Fatalf("event count = %d, want 3: %#v", len(got), got)
+	}
+	if got[0].Type != StreamEventToolCall || got[0].ToolCall.Title != "pwd" || got[0].ToolCall.Kind != "execute" || got[0].ToolCall.Status != ToolCallPending {
+		t.Fatalf("initial tool event = %#v", got[0])
+	}
+	if got[1].ToolCall.ID != "call-1" || got[1].ToolCall.Status != ToolCallCompleted {
+		t.Fatalf("completed tool event = %#v", got[1])
+	}
+	if got[2].Type != StreamEventText || got[2].Text != "Done." {
+		t.Fatalf("text event = %#v", got[2])
+	}
+}
+
 // Agent text that resumes after a tool call must be separated from the
 // pre-tool text, otherwise the two blocks glue together
 // ("Let me investigate." + "jj does see" -> "Let me investigate.jj does see").

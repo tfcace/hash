@@ -1084,8 +1084,11 @@ func (s *Shell) handleAgentInlineStreaming(ctx context.Context, parsed parser.Pa
 	requestCtx, timeoutCancel := context.WithTimeout(ctx, s.agentRequestTimeout())
 	defer timeoutCancel()
 
-	// Start streaming request
-	textCh, errCh := s.agentHandler.StreamRequest(requestCtx, parsed)
+	// Start a frame-paced event stream. The adapter keeps lifecycle events out
+	// of the editable ghost completion while preventing per-character redraws.
+	events, errCh := s.agentHandler.StreamEvents(requestCtx, parsed)
+	events, errCh = paceAgentEvents(requestCtx, events, errCh, agentStreamPacerOptions{})
+	textCh, errCh, statusCh := textStreamFromEvents(events, errCh)
 
 	// Build initial text for editor
 	initialText := parsed.Command
@@ -1105,6 +1108,7 @@ func (s *Shell) handleAgentInlineStreaming(ctx context.Context, parsed parser.Pa
 
 	// Set up streaming ghost text with model name
 	ed.SetGhostTextStreaming(textCh, errCh)
+	ed.SetGhostStatusStreaming(statusCh)
 	ed.SetStreamingModel(modelName)
 
 	// Run editor
@@ -1208,9 +1212,11 @@ func (s *Shell) handleAgentFullStreaming(ctx context.Context, parsed parser.Pars
 	s.responseUI.SetAgentModel(s.agentHandler.CurrentModel())
 	s.responseUI.ShowState(AgentStateThinking)
 
-	textCh, errCh := s.agentHandler.StreamRequest(requestCtx, parsed)
+	events, errCh := s.agentHandler.StreamEvents(requestCtx, parsed)
+	events, errCh = paceAgentEvents(requestCtx, events, errCh, agentStreamPacerOptions{})
+	s.agentOutput.BeginToolTurn()
 
-	streamResult := s.collectAgentStream(ctx, textCh, errCh, agentStreamCollectionOptions{
+	streamResult := s.collectAgentEventStream(ctx, events, errCh, agentStreamCollectionOptions{
 		onFirstChunk: func() {
 			// Stop the spinner before claiming the line. ClearActiveLine
 			// (not ClearLine) so an active permission prompt keeps its
@@ -1222,7 +1228,8 @@ func (s *Shell) handleAgentFullStreaming(ctx context.Context, parsed parser.Pars
 		writeRendered: func(rendered string) {
 			s.agentOutput.WriteStream(rendered)
 		},
-		flushDelay: 50 * time.Millisecond,
+	}, func(update agent.ToolCallUpdate) {
+		s.presentAgentToolUpdate(update, "")
 	})
 
 	if streamResult.canceled {
@@ -1292,6 +1299,35 @@ func (s *Shell) handleAgentFullStreaming(ctx context.Context, parsed parser.Pars
 	if s.handleAgentConfirmAction(ctx, action, confirmType, resp, responseText, lineCount) {
 		return
 	}
+}
+
+func (s *Shell) presentAgentToolUpdate(update agent.ToolCallUpdate, prefix string) {
+	if s.agentOutput == nil {
+		return
+	}
+	merged, finalized := s.agentOutput.RecordToolUpdate(update)
+	if finalized {
+		if s.responseUI != nil {
+			s.responseUI.ClearLine()
+		}
+		s.agentOutput.RenderToolResult(merged, prefix)
+		if s.responseUI != nil {
+			s.responseUI.ShowState(AgentStateThinking)
+		}
+		return
+	}
+
+	if s.responseUI != nil {
+		s.responseUI.ShowActivity(agentToolActivityLabel(merged))
+	}
+}
+
+func agentToolActivityLabel(update agent.ToolCallUpdate) string {
+	title := sanitizeTerminalText(update.Title)
+	if title == "" {
+		title = "tool call"
+	}
+	return "agent · running · " + truncateTerminalText(title, 72)
 }
 
 func (s *Shell) initialAgentConversationTranscript(parsed parser.ParseResult, responseText string) []agentConversationMessage {
@@ -1393,12 +1429,14 @@ func (s *Shell) streamAgentFollowUpTurn(
 	s.wireSpinnerGate()
 	s.responseUI.SetAgentModel(s.agentHandler.CurrentModel())
 	s.responseUI.ShowState(AgentStateThinking)
-	textCh, errCh := s.agentHandler.StreamFollowUp(requestCtx, reply, transcript)
+	events, errCh := s.agentHandler.StreamFollowUpEvents(requestCtx, reply, transcript)
+	events, errCh = paceAgentEvents(requestCtx, events, errCh, agentStreamPacerOptions{})
+	s.agentOutput.BeginToolTurn()
 	railPrefixer := newAgentConversationRailPrefixer(func(rendered string) {
 		s.agentOutput.WriteStream(rendered)
 	})
 
-	streamResult := s.collectAgentStream(ctx, textCh, errCh, agentStreamCollectionOptions{
+	streamResult := s.collectAgentEventStream(ctx, events, errCh, agentStreamCollectionOptions{
 		onFirstChunk: func() {
 			// Same permission-aware sequence as handleAgentFullStreaming.
 			s.responseUI.StopSpinner()
@@ -1408,7 +1446,10 @@ func (s *Shell) streamAgentFollowUpTurn(
 		writeRendered: func(rendered string) {
 			railPrefixer.Write(rendered)
 		},
-		flushDelay: 50 * time.Millisecond,
+	}, func(update agent.ToolCallUpdate) {
+		// Tool rows share the conversation rail without pretending they are
+		// assistant prose.
+		s.presentAgentToolUpdate(update, agentConversationAgentContinuation)
 	})
 
 	if streamResult.canceled {
@@ -1909,7 +1950,15 @@ func (s *Shell) handleToolPermission(ctx context.Context, req agent.ToolPermissi
 	})
 
 	if s.agentOutput != nil {
-		s.agentOutput.ClearPermissionPrompt(allow)
+		s.agentOutput.ClearPermissionPromptSilently(allow)
+		if update, finalized := s.agentOutput.ResolveToolPermission(req.ToolCallID, allow); finalized {
+			if s.responseUI != nil {
+				s.responseUI.ClearLine()
+			}
+			s.agentOutput.RenderToolResult(update, "")
+		} else if allow && s.responseUI != nil {
+			s.responseUI.ShowActivity(agentToolActivityLabel(update))
+		}
 	}
 
 	return allow, always

@@ -7,7 +7,47 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/tfcace/hash/internal/agent"
 )
+
+func TestAgentOutputCoordinator_ToolLifecycleFinalizesOnce(t *testing.T) {
+	var buf bytes.Buffer
+	aoc := NewAgentOutputCoordinator(&buf)
+	aoc.BeginToolTurn()
+
+	if update, final := aoc.RecordToolUpdate(agent.ToolCallUpdate{ID: "1", Title: "pwd", Kind: "execute", Status: agent.ToolCallPending}); final || update.Title != "pwd" {
+		t.Fatalf("pending result = %#v, final=%v", update, final)
+	}
+	update, final := aoc.RecordToolUpdate(agent.ToolCallUpdate{ID: "1", Status: agent.ToolCallCompleted})
+	if !final || update.Title != "pwd" || update.Kind != "execute" {
+		t.Fatalf("completed result = %#v, final=%v", update, final)
+	}
+	if _, final := aoc.RecordToolUpdate(agent.ToolCallUpdate{ID: "1", Status: agent.ToolCallCompleted}); final {
+		t.Fatal("duplicate completion should not finalize twice")
+	}
+
+	aoc.RenderToolResult(update, "")
+	if got := buf.String(); !strings.Contains(got, "execute") || !strings.Contains(got, "pwd") || !strings.Contains(got, "✓") {
+		t.Fatalf("tool result = %q", got)
+	}
+}
+
+func TestAgentOutputCoordinator_DeniedToolRendersSingleSafeRow(t *testing.T) {
+	var buf bytes.Buffer
+	aoc := NewAgentOutputCoordinator(&buf)
+	aoc.BeginToolTurn()
+	aoc.RecordToolUpdate(agent.ToolCallUpdate{ID: "1", Title: "bad\n\x1b[31m", Kind: "execute", Status: agent.ToolCallPending})
+	update, final := aoc.ResolveToolPermission("1", false)
+	if !final {
+		t.Fatal("denied tool should finalize immediately")
+	}
+	aoc.RenderToolResult(update, "")
+	got := buf.String()
+	if !strings.Contains(got, "denied") || strings.Contains(got, "\x1b[31m") || !strings.Contains(got, `bad\n\x1b[31m`) {
+		t.Fatalf("unsafe denied row = %q", got)
+	}
+}
 
 func TestAgentOutputCoordinator_InitialState(t *testing.T) {
 	var buf bytes.Buffer

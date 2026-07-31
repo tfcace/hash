@@ -40,6 +40,68 @@ type Response struct {
 	Error       string // Error message (if Type == ResponseTypeError)
 }
 
+// StreamEventType identifies one item emitted while an agent turn is active.
+// Text-only transports emit StreamEventText. ACP transports can additionally
+// emit StreamEventToolCall without leaking protocol JSON into the shell UI.
+type StreamEventType int
+
+const (
+	StreamEventText StreamEventType = iota
+	StreamEventToolCall
+)
+
+// ToolCallStatus is the ACP lifecycle status for a tool. It intentionally
+// remains a string so newer ACP servers can send future values safely.
+type ToolCallStatus string
+
+const (
+	ToolCallPending    ToolCallStatus = "pending"
+	ToolCallInProgress ToolCallStatus = "in_progress"
+	ToolCallCompleted  ToolCallStatus = "completed"
+	ToolCallFailed     ToolCallStatus = "failed"
+)
+
+// ToolCallUpdate is a partial lifecycle update. ACP permits update messages
+// to omit unchanged fields, so consumers should merge updates by ID.
+type ToolCallUpdate struct {
+	ID               string
+	Title            string
+	Kind             string
+	Status           ToolCallStatus
+	Content          string // Optional displayable fallback content for text-only turns.
+	PermissionDenied bool   // Local client decision; never sent over ACP.
+}
+
+// Merge applies non-empty fields from next while retaining known information.
+func (u ToolCallUpdate) Merge(next ToolCallUpdate) ToolCallUpdate {
+	if next.ID != "" {
+		u.ID = next.ID
+	}
+	if next.Title != "" {
+		u.Title = next.Title
+	}
+	if next.Kind != "" {
+		u.Kind = next.Kind
+	}
+	if next.Status != "" {
+		u.Status = next.Status
+	}
+	if next.Content != "" {
+		u.Content = next.Content
+	}
+	if next.PermissionDenied {
+		u.PermissionDenied = true
+	}
+	return u
+}
+
+// StreamEvent is one ordered item from an agent turn.
+type StreamEvent struct {
+	Type     StreamEventType
+	Text     string
+	ToolCall ToolCallUpdate
+}
+
 // ModelOption is a model the agent advertises for selection.
 type ModelOption struct {
 	Value       string // identifier sent back to the agent
@@ -80,6 +142,14 @@ type Transport interface {
 	// EnsureModelInfo establishes whatever connection/session is needed so that
 	// CurrentModel and AvailableModels report live data. No-op when not needed.
 	EnsureModelInfo(ctx context.Context) error
+}
+
+// EventStreamTransport is implemented by transports that can expose
+// structured lifecycle information in addition to assistant text. It is kept
+// separate from Transport so existing HTTP, mock, and third-party transports
+// remain source compatible.
+type EventStreamTransport interface {
+	SendEventStream(ctx context.Context, req Request) (<-chan StreamEvent, <-chan error)
 }
 
 // Client wraps a transport with convenience methods.

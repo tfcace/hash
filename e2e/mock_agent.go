@@ -187,6 +187,27 @@ func (m *ScenarioMockTransport) Name() string {
 	return "scenario-mock"
 }
 
+// CurrentModel reports no model because scenario tests do not emulate ACP
+// model selection.
+func (m *ScenarioMockTransport) CurrentModel() string {
+	return ""
+}
+
+// AvailableModels reports no model choices for the scenario transport.
+func (m *ScenarioMockTransport) AvailableModels() []agent.ModelOption {
+	return nil
+}
+
+// SetModel keeps the scenario transport source-compatible with agent.Transport.
+func (m *ScenarioMockTransport) SetModel(context.Context, string) error {
+	return errors.New("scenario transport does not support model selection")
+}
+
+// EnsureModelInfo is a no-op because the scenario transport has no models.
+func (m *ScenarioMockTransport) EnsureModelInfo(context.Context) error {
+	return nil
+}
+
 // Connect simulates connecting.
 func (m *ScenarioMockTransport) Connect(ctx context.Context) error {
 	m.mu.Lock()

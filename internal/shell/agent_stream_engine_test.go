@@ -4,7 +4,86 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/tfcace/hash/internal/agent"
 )
+
+func TestPaceAgentEvents_FlushesContinuousTextOnFrame(t *testing.T) {
+	in := make(chan agent.StreamEvent)
+	errs := make(chan error)
+	ticks := make(chan time.Time)
+	out, outErrs := paceAgentEvents(context.Background(), in, errs, agentStreamPacerOptions{ticks: ticks})
+
+	in <- agent.StreamEvent{Type: agent.StreamEventText, Text: "hel"}
+	in <- agent.StreamEvent{Type: agent.StreamEventText, Text: "lo"}
+	ticks <- time.Now()
+
+	select {
+	case event := <-out:
+		if event.Type != agent.StreamEventText || event.Text != "hello" {
+			t.Fatalf("event = %#v, want one paced hello frame", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for paced frame")
+	}
+
+	close(in)
+	close(errs)
+	for range out {
+	}
+	for err := range outErrs {
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	}
+}
+
+func TestPaceAgentEvents_FlushesTextBeforeToolEvent(t *testing.T) {
+	in := make(chan agent.StreamEvent)
+	errs := make(chan error)
+	out, _ := paceAgentEvents(context.Background(), in, errs, agentStreamPacerOptions{})
+
+	in <- agent.StreamEvent{Type: agent.StreamEventText, Text: "thinking"}
+	in <- agent.StreamEvent{Type: agent.StreamEventToolCall, ToolCall: agent.ToolCallUpdate{ID: "1", Title: "pwd", Status: agent.ToolCallPending}}
+
+	first := <-out
+	second := <-out
+	if first.Type != agent.StreamEventText || first.Text != "thinking" {
+		t.Fatalf("first event = %#v, want flushed text", first)
+	}
+	if second.Type != agent.StreamEventToolCall || second.ToolCall.Title != "pwd" {
+		t.Fatalf("second event = %#v, want tool event", second)
+	}
+
+	close(in)
+	close(errs)
+}
+
+func TestTextStreamFromEvents_ExposesTransientToolStatusOutsideGhostText(t *testing.T) {
+	events := make(chan agent.StreamEvent, 2)
+	errs := make(chan error)
+	events <- agent.StreamEvent{Type: agent.StreamEventToolCall, ToolCall: agent.ToolCallUpdate{ID: "1", Title: "pwd", Status: agent.ToolCallInProgress}}
+	events <- agent.StreamEvent{Type: agent.StreamEventText, Text: "ready"}
+	close(events)
+	close(errs)
+
+	text, streamErrs, status := textStreamFromEvents(events, errs)
+	if got := <-status; got != "Agent running pwd..." {
+		t.Fatalf("status = %q, want transient tool activity", got)
+	}
+	if got := <-status; got != "" {
+		t.Fatalf("status after text = %q, want cleared activity", got)
+	}
+	if got := <-text; got != "ready" {
+		t.Fatalf("ghost text = %q, want ready", got)
+	}
+	for err := range streamErrs {
+		if err != nil {
+			t.Fatalf("unexpected stream error: %v", err)
+		}
+	}
+}
 
 func TestCollectAgentStream_TrimLeadingNewlineOnce(t *testing.T) {
 	sh := &Shell{}

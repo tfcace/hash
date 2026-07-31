@@ -427,7 +427,7 @@ func (d *Display) Render(buf *Buffer, cur *Cursor, hasSelection bool) {
 // fromAgent indicates whether this is an agent suggestion (show hints) or prediction (fish-style).
 //
 //nolint:gocyclo // terminal rendering requires many conditional escape sequences
-func (d *Display) RenderWithGhost(buf *Buffer, cur *Cursor, hasSelection bool, ghostText string, streaming, fromAgent bool, modelName string) {
+func (d *Display) RenderWithGhost(buf *Buffer, cur *Cursor, hasSelection bool, ghostText string, streaming, fromAgent bool, modelName, streamingStatus string) {
 	if d.frame != nil {
 		d.renderWithFrame(buf, cur, hasSelection, ghostText, streaming, fromAgent, modelName)
 		return
@@ -490,7 +490,11 @@ func (d *Display) RenderWithGhost(buf *Buffer, cur *Cursor, hasSelection bool, g
 			if ghostText == "" && streaming {
 				// Show thinking indicator while waiting for first chunk (agent only)
 				// Use consistent text with response_ui states
-				sb.WriteString("\x1b[90;3m Agent thinking...\x1b[0m")
+				if streamingStatus != "" {
+					sb.WriteString("\x1b[90;3m " + streamingStatus + "\x1b[0m")
+				} else {
+					sb.WriteString("\x1b[90;3m Agent thinking...\x1b[0m")
+				}
 			} else if ghostText != "" {
 				// Get the first line of ghost text (for single-line display)
 				ghostFirstLine := ghostText

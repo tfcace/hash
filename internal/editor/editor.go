@@ -108,10 +108,12 @@ type Editor struct {
 	completionDrillStack  []completionDrillState // Stack of parent dirs for backspace-up
 
 	// Ghost text state (inline suggestions)
-	ghost          *GhostText
-	ghostTextChan  GhostTextChan // Channel for streaming ghost text updates
-	ghostErrChan   <-chan error  // Channel for ghost text errors
-	streamingModel string        // Model name for "Thinking..." display
+	ghost           *GhostText
+	ghostTextChan   GhostTextChan // Channel for streaming ghost text updates
+	ghostErrChan    <-chan error  // Channel for ghost text errors
+	streamingModel  string        // Model name for "Thinking..." display
+	ghostStatusChan <-chan string // Transient agent activity while ghost text streams
+	streamingStatus string
 }
 
 // New creates a new editor.
@@ -177,6 +179,12 @@ func (e *Editor) SetGhostTextStreaming(textCh <-chan string, errCh <-chan error)
 	e.ghost.FromAgent = true // Agent suggestions show hints
 	// Dismiss any active completion menu - ghost text takes precedence
 	e.dismissCompletion()
+}
+
+// SetGhostStatusStreaming provides transient agent activity without inserting
+// it into the editable completion text.
+func (e *Editor) SetGhostStatusStreaming(statusCh <-chan string) {
+	e.ghostStatusChan = statusCh
 }
 
 // SetStreamingModel sets the model name for "Thinking..." display.
@@ -379,6 +387,8 @@ func (e *Editor) runEventLoop(ctx context.Context, sigCh <-chan os.Signal, keyCh
 			e.handleCompletionReady()
 		case text, ok := <-e.ghostTextChan:
 			e.handleGhostTextUpdate(text, ok)
+		case status, ok := <-e.ghostStatusChan:
+			e.handleGhostStatusUpdate(status, ok)
 		case err, ok := <-e.ghostErrChan:
 			e.handleGhostTextError(err, ok)
 		case err, ok := <-keyErrCh:
@@ -419,6 +429,16 @@ func (e *Editor) handleCompletionReady() {
 	e.awaitingCompletion = ""
 	e.completionNotice = ""
 	e.triggerCompletion()
+}
+
+func (e *Editor) handleGhostStatusUpdate(status string, ok bool) {
+	if !ok {
+		e.ghostStatusChan = nil
+		e.streamingStatus = ""
+		e.render()
+		return
+	}
+	e.streamingStatus = status
 	e.render()
 }
 
@@ -686,7 +706,7 @@ func (e *Editor) render() {
 	if e.ghost.Active && !e.ghost.IsEmpty() {
 		ghostText = e.ghost.Remaining()
 	}
-	e.display.RenderWithGhost(e.state.Buffer, e.state.Cursor, hasSelection, ghostText, ghostStreaming, ghostFromAgent, e.streamingModel)
+	e.display.RenderWithGhost(e.state.Buffer, e.state.Cursor, hasSelection, ghostText, ghostStreaming, ghostFromAgent, e.streamingModel, e.streamingStatus)
 
 	// Render completion menu if active
 	if e.completionActive {

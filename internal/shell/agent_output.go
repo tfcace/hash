@@ -7,6 +7,8 @@ import (
 	"strings"
 	"sync"
 	"unicode"
+
+	"github.com/tfcace/hash/internal/agent"
 )
 
 // AgentOutputState represents the current mode of the agent output coordinator.
@@ -51,6 +53,13 @@ type AgentOutputCoordinator struct {
 	wasStreaming   bool            // Track if we were streaming before permission
 	pendingCommand string          // Command currently being prompted for permission
 	accentColorFn  func() string   // Callback to get current accent color
+	tools          map[string]toolDisplayState
+	toolSeq        int
+}
+
+type toolDisplayState struct {
+	update    agent.ToolCallUpdate
+	finalized bool
 }
 
 // NewAgentOutputCoordinator creates a new agent output coordinator.
@@ -67,6 +76,110 @@ func (aoc *AgentOutputCoordinator) SetAccentColorFunc(fn func() string) {
 	aoc.mu.Lock()
 	defer aoc.mu.Unlock()
 	aoc.accentColorFn = fn
+}
+
+// BeginToolTurn clears per-turn lifecycle state. The coordinator is reused for
+// the shell lifetime, while ACP tool IDs are only unique within a session turn.
+func (aoc *AgentOutputCoordinator) BeginToolTurn() {
+	aoc.mu.Lock()
+	defer aoc.mu.Unlock()
+	aoc.tools = make(map[string]toolDisplayState)
+	aoc.toolSeq = 0
+}
+
+// RecordToolUpdate merges an ACP lifecycle update and reports whether it just
+// reached a terminal state. Repeated terminal notifications are deduplicated.
+func (aoc *AgentOutputCoordinator) RecordToolUpdate(next agent.ToolCallUpdate) (agent.ToolCallUpdate, bool) {
+	aoc.mu.Lock()
+	defer aoc.mu.Unlock()
+
+	key := next.ID
+	if key == "" {
+		aoc.toolSeq++
+		key = fmt.Sprintf("__tool_%d", aoc.toolSeq)
+		next.ID = key
+	}
+	if aoc.tools == nil {
+		aoc.tools = make(map[string]toolDisplayState)
+	}
+	state := aoc.tools[key]
+	state.update = state.update.Merge(next)
+	terminal := state.update.PermissionDenied || state.update.Status == agent.ToolCallCompleted || state.update.Status == agent.ToolCallFailed
+	justFinalized := terminal && !state.finalized
+	if justFinalized {
+		state.finalized = true
+	}
+	aoc.tools[key] = state
+	return state.update, justFinalized
+}
+
+// ResolveToolPermission associates a local allow/deny decision with its ACP
+// lifecycle. A denial is terminal even when an agent omits a later update.
+func (aoc *AgentOutputCoordinator) ResolveToolPermission(id string, allowed bool) (agent.ToolCallUpdate, bool) {
+	aoc.mu.Lock()
+	defer aoc.mu.Unlock()
+
+	if aoc.tools == nil {
+		aoc.tools = make(map[string]toolDisplayState)
+	}
+	key := id
+	if key == "" {
+		aoc.toolSeq++
+		key = fmt.Sprintf("__tool_%d", aoc.toolSeq)
+	}
+	state := aoc.tools[key]
+	if state.update.ID == "" {
+		state.update.ID = key
+	}
+	if allowed || state.finalized {
+		aoc.tools[key] = state
+		return state.update, false
+	}
+	knownTool := state.update.Title != "" || state.update.Kind != "" || state.update.Status != ""
+	state.update.PermissionDenied = true
+	state.update.Status = agent.ToolCallFailed
+	if knownTool {
+		state.finalized = true
+	}
+	aoc.tools[key] = state
+	return state.update, knownTool
+}
+
+// RenderToolResult writes the one durable lifecycle row for a tool. Tool
+// content deliberately stays hidden; the agent's final response remains the
+// authoritative explanation of what happened.
+func (aoc *AgentOutputCoordinator) RenderToolResult(update agent.ToolCallUpdate, prefix string) {
+	kind := sanitizeTerminalText(update.Kind)
+	if kind == "" {
+		kind = "tool"
+	}
+	title := sanitizeTerminalText(update.Title)
+	if title == "" {
+		title = "tool call"
+	}
+	title = truncateTerminalText(title, 96)
+
+	icon, label, color := "✓", kind, "\x1b[32m"
+	if update.PermissionDenied {
+		icon, label, color = "–", "denied", "\x1b[33m"
+	} else if update.Status != agent.ToolCallCompleted {
+		icon, label, color = "✗", "failed", "\x1b[31m"
+	}
+
+	aoc.mu.Lock()
+	defer aoc.mu.Unlock()
+	fmt.Fprintf(aoc.out, "%s  %s%s\x1b[0m \x1b[90m%s · %s\x1b[0m\n", prefix, color, icon, label, title)
+}
+
+func truncateTerminalText(text string, limit int) string {
+	if limit <= 0 {
+		return ""
+	}
+	runes := []rune(text)
+	if len(runes) <= limit {
+		return text
+	}
+	return string(runes[:limit-1]) + "…"
 }
 
 // State returns the current output state.
@@ -274,6 +387,16 @@ func sanitizeTerminalText(text string) string {
 // canceled and Cancel already cleared it): clearing lines here would erase
 // unrelated output.
 func (aoc *AgentOutputCoordinator) ClearPermissionPrompt(allowed bool) {
+	aoc.clearPermissionPrompt(allowed, true)
+}
+
+// ClearPermissionPromptSilently removes the temporary permission box without
+// adding a second durable row. Tool lifecycle rendering owns the final result.
+func (aoc *AgentOutputCoordinator) ClearPermissionPromptSilently(allowed bool) {
+	aoc.clearPermissionPrompt(allowed, false)
+}
+
+func (aoc *AgentOutputCoordinator) clearPermissionPrompt(allowed, showFeedback bool) {
 	aoc.mu.Lock()
 
 	if aoc.state != AgentOutputStatePermission {
@@ -297,10 +420,12 @@ func (aoc *AgentOutputCoordinator) ClearPermissionPrompt(allowed bool) {
 		sb.WriteString("\r")
 		sb.WriteString(ansiClearLine)
 	}
-	if allowed {
-		fmt.Fprintf(&sb, "%s\x1b[32m✓\x1b[0m \x1b[90m%s\x1b[0m\n", permissionPad, cmd)
-	} else {
-		fmt.Fprintf(&sb, "%s\x1b[31m✗\x1b[0m \x1b[90m%s\x1b[0m\n", permissionPad, cmd)
+	if showFeedback {
+		if allowed {
+			fmt.Fprintf(&sb, "%s\x1b[32m✓\x1b[0m \x1b[90m%s\x1b[0m\n", permissionPad, cmd)
+		} else {
+			fmt.Fprintf(&sb, "%s\x1b[31m✗\x1b[0m \x1b[90m%s\x1b[0m\n", permissionPad, cmd)
+		}
 	}
 	aoc.out.Write([]byte(sb.String()))
 
