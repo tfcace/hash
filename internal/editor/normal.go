@@ -296,16 +296,7 @@ func (m *NormalMode) moveDown(state *EditorState) {
 
 func (m *NormalMode) moveWordForward(state *EditorState) {
 	line := state.Buffer.Line(state.Cursor.Pos.Row)
-	col := state.Cursor.Pos.Col
-
-	// Skip current word
-	for col < len(line) && line[col] != ' ' {
-		col++
-	}
-	// Skip spaces
-	for col < len(line) && line[col] == ' ' {
-		col++
-	}
+	col := nextWordStart(line, state.Cursor.Pos.Col)
 
 	// If at end of line, try next line
 	if col >= len(line) && state.Cursor.Pos.Row < state.Buffer.LineCount()-1 {
@@ -319,40 +310,12 @@ func (m *NormalMode) moveWordForward(state *EditorState) {
 
 func (m *NormalMode) moveWordBack(state *EditorState) {
 	line := state.Buffer.Line(state.Cursor.Pos.Row)
-	col := state.Cursor.Pos.Col
-
-	// Skip spaces
-	for col > 0 && (col > len(line) || line[col-1] == ' ') {
-		col--
-	}
-	// Skip word
-	for col > 0 && col <= len(line) && line[col-1] != ' ' {
-		col--
-	}
-	state.Cursor.Pos.Col = col
+	state.Cursor.Pos.Col = prevWordStart(line, state.Cursor.Pos.Col)
 }
 
 func (m *NormalMode) moveWordEnd(state *EditorState) {
 	line := state.Buffer.Line(state.Cursor.Pos.Row)
-	col := state.Cursor.Pos.Col
-
-	// Move forward one first
-	if col < len(line) {
-		col++
-	}
-	// Skip spaces
-	for col < len(line) && line[col] == ' ' {
-		col++
-	}
-	// Move to end of word
-	for col < len(line) && line[col] != ' ' {
-		col++
-	}
-	// Back one to be at last char
-	if col > 0 {
-		col = previousRuneBoundary(line, col)
-	}
-	state.Cursor.Pos.Col = col
+	state.Cursor.Pos.Col = wordEnd(line, state.Cursor.Pos.Col)
 }
 
 func (m *NormalMode) selectLine(state *EditorState) {
