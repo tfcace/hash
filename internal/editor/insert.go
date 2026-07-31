@@ -154,11 +154,11 @@ func (m *InsertMode) handleCtrl(key Key, state *EditorState) ModeResult {
 		if state.AllowContextPicker {
 			return ModeResult{ContextPicker: true}
 		}
-	case 'w': // Ctrl+W: delete word back
+	case 'w': // Ctrl+W: delete whitespace-delimited word back (bash werase)
 		if state.Cursor.HasSelection() {
 			m.deleteSelection(state)
 		} else {
-			m.deleteWordBack(state)
+			m.deleteTokenBack(state)
 		}
 		return ModeResult{Action: ActionDelete}
 	case 'u': // Ctrl+U: delete to line start
@@ -317,17 +317,7 @@ func (m *InsertMode) moveDown(state *EditorState) {
 
 func (m *InsertMode) moveWordBack(state *EditorState) {
 	line := state.Buffer.Line(state.Cursor.Pos.Row)
-	col := state.Cursor.Pos.Col
-
-	// Skip gaps between segments/tokens.
-	for col > 0 && (col > len(line) || isWordGap(line[col-1])) {
-		col--
-	}
-	// Skip the previous segment.
-	for col > 0 && col <= len(line) && !isWordGap(line[col-1]) {
-		col--
-	}
-	state.Cursor.Pos.Col = col
+	state.Cursor.Pos.Col = prevWordStart(line, state.Cursor.Pos.Col)
 }
 
 func (m *InsertMode) moveTokenBack(state *EditorState) {
@@ -351,31 +341,9 @@ func (m *InsertMode) deleteTokenBack(state *EditorState) {
 	state.Buffer.Delete(Position{row, endCol}, Position{row, startCol})
 }
 
-func (m *InsertMode) deleteWordBack(state *EditorState) {
-	startCol := state.Cursor.Pos.Col
-	m.moveWordBack(state)
-	endCol := state.Cursor.Pos.Col
-	row := state.Cursor.Pos.Row
-	state.Buffer.Delete(Position{row, endCol}, Position{row, startCol})
-}
-
 func (m *InsertMode) moveWordForward(state *EditorState) {
 	line := state.Buffer.Line(state.Cursor.Pos.Row)
-	col := state.Cursor.Pos.Col
-
-	// Skip the current segment if we're inside one.
-	for col < len(line) && !isWordGap(line[col]) {
-		col++
-	}
-	// Skip separators/spaces so we land on the next segment start.
-	for col < len(line) && isWordGap(line[col]) {
-		col++
-	}
-	state.Cursor.Pos.Col = col
-}
-
-func isWordGap(ch byte) bool {
-	return ch == ' '
+	state.Cursor.Pos.Col = nextWordStart(line, state.Cursor.Pos.Col)
 }
 
 func (m *InsertMode) deleteToLineStart(state *EditorState) {
