@@ -1,5 +1,10 @@
 package completion
 
+import (
+	"slices"
+	"sync"
+)
+
 // Built-in plugin specs use the exact same TOML format as user specs in
 // <config>/completions/. They double as reference examples and can be
 // overridden (or disabled) by a user spec that declares the same command.
@@ -230,11 +235,18 @@ value_column = 1
 description_column = 2
 `
 
-func builtinPluginSpecs() []*PluginSpec {
+// parsedBuiltinSpecs parses the built-in TOML once per process. The specs are
+// compile-time constants and are never mutated after ParsePluginSpec compiles
+// them, so every handler-table rebuild can share the same instances.
+var parsedBuiltinSpecs = sync.OnceValue(func() []*PluginSpec {
 	return []*PluginSpec{
 		mustParsePluginSpec(builtinDockerSpec),
 		mustParsePluginSpec(builtinHashSpec),
 	}
+})
+
+func builtinPluginSpecs() []*PluginSpec {
+	return slices.Clone(parsedBuiltinSpecs())
 }
 
 func mustParsePluginSpec(data string) *PluginSpec {

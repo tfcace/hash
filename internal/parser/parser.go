@@ -42,37 +42,66 @@ type ParseResult struct {
 }
 
 // makeInlineResult creates an inline agent result with tracing.
-func makeInlineResult(cmd, prompt, pattern string, idx int) ParseResult {
+func makeInlineResult(cmd, prompt, pattern string, idx int, traced bool) ParseResult {
 	result := ParseResult{
 		Type:        CommandTypeAgentInline,
 		Command:     cmd,
 		AgentPrompt: prompt,
 	}
-	trace.ParserHigh("detect_agent", map[string]any{
-		"pattern":  pattern,
-		"position": idx,
-	})
-	trace.ParserDetailed("parse_result", map[string]any{
-		"type":    result.Type.String(),
-		"command": result.Command,
-		"prompt":  result.AgentPrompt,
-	})
+	traceDetect(traced, pattern, idx)
+	traceResult(traced, result)
 	return result
 }
 
-// Parse analyzes a command line and determines how to process it.
-func Parse(line string) ParseResult {
-	trace.ParserDetailed("parse_start", map[string]any{
-		"input": line,
+// traceDetect emits a detect_agent event. The traced guard lives here so
+// Parse pays neither the map allocation nor extra branches when tracing is
+// off (the common case for every dispatched line).
+func traceDetect(traced bool, pattern string, position int) {
+	if !traced {
+		return
+	}
+	trace.ParserHigh("detect_agent", map[string]any{
+		"pattern":  pattern,
+		"position": position,
 	})
+}
+
+// traceResult emits a parse_result event carrying the same keys per command
+// type that the inline emissions historically used.
+func traceResult(traced bool, result ParseResult) {
+	if !traced {
+		return
+	}
+	data := map[string]any{"type": result.Type.String()}
+	switch result.Type {
+	case CommandTypeAgent:
+		data["prompt"] = result.AgentPrompt
+	case CommandTypeAgentPipe, CommandTypeAgentInline:
+		data["command"] = result.Command
+		data["prompt"] = result.AgentPrompt
+	case CommandTypeRegular:
+		data["command"] = result.Command
+	}
+	trace.ParserDetailed("parse_result", data)
+}
+
+// Parse analyzes a command line and determines how to process it.
+// Trace payloads are only built when the parser subsystem is being traced:
+// this runs on every dispatched line, and the map literals are otherwise
+// pure allocation for a no-op Emit.
+func Parse(line string) ParseResult {
+	traced := trace.Enabled("parser")
+	if traced {
+		trace.ParserDetailed("parse_start", map[string]any{
+			"input": line,
+		})
+	}
 
 	line = strings.TrimSpace(line)
 
 	if line == "" {
 		result := ParseResult{Type: CommandTypeEmpty}
-		trace.ParserDetailed("parse_result", map[string]any{
-			"type": result.Type.String(),
-		})
+		traceResult(traced, result)
 		return result
 	}
 
@@ -83,14 +112,8 @@ func Parse(line string) ParseResult {
 			Type:        CommandTypeAgent,
 			AgentPrompt: prompt,
 		}
-		trace.ParserHigh("detect_agent", map[string]any{
-			"pattern":  "prefix",
-			"position": 0,
-		})
-		trace.ParserDetailed("parse_result", map[string]any{
-			"type":   result.Type.String(),
-			"prompt": result.AgentPrompt,
-		})
+		traceDetect(traced, "prefix", 0)
+		traceResult(traced, result)
 		return result
 	}
 
@@ -105,15 +128,8 @@ func Parse(line string) ParseResult {
 				Command:     cmd,
 				AgentPrompt: prompt,
 			}
-			trace.ParserHigh("detect_agent", map[string]any{
-				"pattern":  "pipe_space",
-				"position": idx,
-			})
-			trace.ParserDetailed("parse_result", map[string]any{
-				"type":    result.Type.String(),
-				"command": result.Command,
-				"prompt":  result.AgentPrompt,
-			})
+			traceDetect(traced, "pipe_space", idx)
+			traceResult(traced, result)
 			return result
 		}
 	}
@@ -129,15 +145,8 @@ func Parse(line string) ParseResult {
 				Command:     cmd,
 				AgentPrompt: prompt,
 			}
-			trace.ParserHigh("detect_agent", map[string]any{
-				"pattern":  "pipe_nospace",
-				"position": idx,
-			})
-			trace.ParserDetailed("parse_result", map[string]any{
-				"type":    result.Type.String(),
-				"command": result.Command,
-				"prompt":  result.AgentPrompt,
-			})
+			traceDetect(traced, "pipe_nospace", idx)
+			traceResult(traced, result)
 			return result
 		}
 	}
@@ -151,14 +160,14 @@ func Parse(line string) ParseResult {
 			cmd = line[:idx]
 		}
 		prompt := strings.TrimSpace(line[idx+3:])
-		return makeInlineResult(cmd, prompt, "inline_space", idx)
+		return makeInlineResult(cmd, prompt, "inline_space", idx, traced)
 	}
 
 	// Check for ?? without leading space (like --sort-by=??)
 	if idx := strings.Index(line, "??"); idx > 0 {
 		cmd := line[:idx]
 		prompt := strings.TrimSpace(line[idx+2:])
-		return makeInlineResult(cmd, prompt, "inline_nospace", idx)
+		return makeInlineResult(cmd, prompt, "inline_nospace", idx, traced)
 	}
 
 	// Regular command
@@ -166,9 +175,6 @@ func Parse(line string) ParseResult {
 		Type:    CommandTypeRegular,
 		Command: line,
 	}
-	trace.ParserDetailed("parse_result", map[string]any{
-		"type":    result.Type.String(),
-		"command": result.Command,
-	})
+	traceResult(traced, result)
 	return result
 }

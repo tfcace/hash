@@ -640,11 +640,13 @@ func (s *Shell) handleIssueShortcut() {
 // dispatchCommand parses and executes a command line. Returns errExit if shell should exit.
 func (s *Shell) dispatchCommand(ctx context.Context, line string) error {
 	parsed := parser.Parse(line)
-	trace.ShellHigh("dispatch", map[string]any{
-		"type":    parsed.Type.String(),
-		"command": parsed.Command,
-		"prompt":  parsed.AgentPrompt,
-	})
+	if trace.Enabled("shell") {
+		trace.ShellHigh("dispatch", map[string]any{
+			"type":    parsed.Type.String(),
+			"command": parsed.Command,
+			"prompt":  parsed.AgentPrompt,
+		})
+	}
 
 	switch parsed.Type {
 	case parser.CommandTypeEmpty:

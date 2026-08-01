@@ -1,6 +1,7 @@
 package history
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"os"
@@ -12,7 +13,10 @@ import (
 
 // Store provides persistent command history.
 type Store struct {
-	db *sql.DB
+	db        *sql.DB
+	idx       *prefixIndex
+	idxDone   chan struct{} // closed when the background index load finishes
+	idxCancel context.CancelFunc
 }
 
 // NewStore creates or opens a history database.
@@ -28,11 +32,30 @@ func NewStore(dbPath string) (*Store, error) {
 		return nil, fmt.Errorf("open database: %w", err)
 	}
 
-	store := &Store{db: db}
+	// A plain in-memory DSN gives every pooled connection its own empty
+	// database, so the background index load (the first concurrent user of
+	// this pool) would see missing tables. Cap the pool at the one real
+	// connection; file-backed databases keep normal pooling under WAL.
+	if strings.Contains(dbPath, ":memory:") {
+		db.SetMaxOpenConns(1)
+	}
+
+	store := &Store{db: db, idx: &prefixIndex{}, idxDone: make(chan struct{})}
 	if err := store.migrate(); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
+
+	// Load the prefix index off the startup path: SearchByPrefix answers from
+	// SQL until the load lands, then from memory for the rest of the session.
+	// Close cancels the context and waits for the goroutine, so the load can
+	// never touch the database files after Close returns.
+	ctx, cancel := context.WithCancel(context.Background())
+	store.idxCancel = cancel
+	go func() {
+		defer close(store.idxDone)
+		store.loadPrefixIndex(ctx)
+	}()
 
 	return store, nil
 }
@@ -84,6 +107,10 @@ func (s *Store) Add(cmd Command) (int64, error) {
 
 	if err != nil {
 		return 0, err
+	}
+
+	if cmd.ExitCode == 0 && s.idx != nil {
+		s.idx.record(cmd.Command)
 	}
 
 	return result.LastInsertId()
@@ -243,15 +270,15 @@ func (s *Store) GetAgentInteractions(prompt string, limit int) ([]AgentInteracti
 	for rows.Next() {
 		var i AgentInteraction
 		var commandID sql.NullInt64
-		var context sql.NullString
+		var interactionContext sql.NullString
 
-		err := rows.Scan(&i.ID, &i.Prompt, &i.Response, &i.Accepted, &commandID, &context, &i.LatencyMs, &i.Agent, &i.Timestamp)
+		err := rows.Scan(&i.ID, &i.Prompt, &i.Response, &i.Accepted, &commandID, &interactionContext, &i.LatencyMs, &i.Agent, &i.Timestamp)
 		if err != nil {
 			return nil, err
 		}
 
 		i.CommandID = commandID.Int64
-		i.Context = context.String
+		i.Context = interactionContext.String
 		interactions = append(interactions, i)
 	}
 
@@ -261,9 +288,19 @@ func (s *Store) GetAgentInteractions(prompt string, limit int) ([]AgentInteracti
 // SearchByPrefix returns the most recent successful commands matching a prefix.
 // The results are deduplicated (by command text) and ordered by most recent first.
 // Returns nil for empty prefix or if no matches are found.
+//
+// This runs on every keystroke (ghost-text suggestions), so once the in-memory
+// prefix index has loaded it answers from there; SQL is only the fallback for
+// the brief window before the background load completes.
 func (s *Store) SearchByPrefix(prefix string, limit int) ([]string, error) {
 	if prefix == "" {
 		return nil, nil
+	}
+
+	if s.idx != nil {
+		if cmds, ok := s.idx.search(prefix, limit); ok {
+			return cmds, nil
+		}
 	}
 
 	escaped := escapeGlob(prefix)
@@ -292,6 +329,47 @@ func (s *Store) SearchByPrefix(prefix string, limit int) ([]string, error) {
 	return commands, rows.Err()
 }
 
+// loadPrefixIndex runs the distinct-successful-commands aggregation once and
+// hands the result to the in-memory index. On any error the index simply
+// stays unloaded and SearchByPrefix keeps answering from SQL, so a failure
+// here only costs speed, never correctness.
+func (s *Store) loadPrefixIndex(ctx context.Context) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT command, MAX(timestamp) as latest
+		FROM commands
+		WHERE exit_code = 0
+		GROUP BY command
+		ORDER BY latest DESC
+	`)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+
+	var cmds []string
+	for rows.Next() {
+		var cmd string
+		var latest interface{}
+		if err := rows.Scan(&cmd, &latest); err != nil {
+			return
+		}
+		cmds = append(cmds, cmd)
+	}
+	if rows.Err() != nil {
+		return
+	}
+	s.idx.install(cmds)
+}
+
+// waitPrefixIndex blocks until the background index load has finished and
+// reports whether the index is serving lookups. Test and benchmark helper.
+func (s *Store) waitPrefixIndex() bool {
+	<-s.idxDone
+	s.idx.mu.RLock()
+	defer s.idx.mu.RUnlock()
+	return s.idx.loaded
+}
+
 // escapeGlob escapes special glob characters in a string for safe use in GLOB queries.
 func escapeGlob(s string) string {
 	var b strings.Builder
@@ -316,7 +394,16 @@ func (s *Store) Count() (int64, error) {
 	return count, err
 }
 
-// Close closes the database connection.
+// Close closes the database connection, first stopping the background index
+// load: an in-flight load holds a live SQLite connection past db.Close (the
+// pool only reaps it when the query finishes), and its WAL activity can race
+// whoever removes the database files next — t.TempDir cleanup in tests.
 func (s *Store) Close() error {
+	if s.idxCancel != nil {
+		s.idxCancel()
+	}
+	if s.idxDone != nil {
+		<-s.idxDone
+	}
 	return s.db.Close()
 }
