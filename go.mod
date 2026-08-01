@@ -1,8 +1,8 @@
 module github.com/tfcace/hash
 
-// Local v1.5.1 fork moves WaitGroup.Add before its terminal goroutine starts,
-// preventing Close from racing Wait against Add under go test -race.
-replace github.com/chzyer/readline => ./third_party/readline
+// The fork moves WaitGroup.Add before its terminal goroutine starts, preventing
+// Close from racing Wait against Add under go test -race.
+replace github.com/chzyer/readline => github.com/roeyazroel/readline v1.5.1-hash.1
 
 go 1.25.0
 
