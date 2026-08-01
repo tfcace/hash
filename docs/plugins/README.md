@@ -88,6 +88,29 @@ history_limit = 100
 max_candidates = 3
 ```
 
+Adaptive prediction is opt-in and must not compete with Hash's built-in
+predictor. Keep the built-in data available for rollback, but disable its
+runtime surface explicitly:
+
+```toml
+[prediction]
+enabled = false
+
+[plugins]
+enabled = ["io.runhash.autocorrection", "io.runhash.adaptive-prediction"]
+
+[plugins.settings."io.runhash.adaptive-prediction"]
+confidence_threshold = 0.6
+learn_from_other_shells = false
+shells = ["zsh", "bash", "fish"]
+```
+
+Cross-shell learning is one-time and disabled by default. A missing plugin
+database is the bootstrap gate: enabling it after the database exists does
+not scan history. Disable the plugin, exit Hash, and delete
+`$XDG_DATA_HOME/hash/plugin-data/io.runhash.adaptive-prediction/prediction.db`
+only when you intentionally want to re-import.
+
 Enabled-list order is priority order. Strategies are ordered and unique;
 allowed values are exactly `executable`, `subcommand`, and `long_flag`.
 `history_limit` is 1-500 (host calls remain capped at 100) and
@@ -199,14 +222,43 @@ agents, network providers, and recursion:
 {"jsonrpc":"2.0","id":21,"result":{"items":[{"label":"status","insert_text":"status"}]}}
 ```
 
+## `editor.suggest`
+
+This is an operational request hook for interactive prediction plugins. Hash
+calls it once at prompt creation (`trigger: "prompt"`) and again while the user
+types (`trigger: "edit"`). The request is bounded by 100 ms and includes the
+current generation, complete visible line, cursor, cwd, dialect, and the last
+command outcome when one exists. The first valid result in enabled-list order
+wins; timeout, cancellation, malformed output, unsafe text, or a stale
+generation falls back to the normal core ghost.
+
+```json
+{"jsonrpc":"2.0","id":7,"method":"editor.suggest","params":{"generation":42,"trigger":"prompt","line":"","cursor":0,"cwd":"/work","dialect":"bash","previous":{"line":"git status","cwd":"/work","exit_code":0,"canceled":false}}}
+```
+
+```json
+{"jsonrpc":"2.0","id":7,"result":{"text":"git pull"}}
+```
+
+`text` must be valid UTF-8, one line, free of controls, parseable by the
+active dialect, at most 16 KiB, and a strict extension of the input. A prompt
+prediction is ghost text: Right fills it without executing, while Enter
+dismisses it and submits only visible input. Editing retains the existing
+two-character minimum. A plugin must return an empty string after a failed,
+canceled, interrupted, or signaled previous command.
+
+`initialize` includes `session_kind: "interactive"`. `hash plugin doctor`
+uses `session_kind: "doctor"`; diagnostic sessions must validate the handshake
+without creating plugin databases or importing shell history.
+
 ## Reserved interfaces
 
 `prompt.render`, `completion.provide`, `command.before`, `command.execute`,
 `host.environment.get`, and `host.output.write` are reserved but unavailable in
-this release. `session.start`, `session.stop`, `cwd.changed`, `history.added`,
-and `editor.suggest` are existing framework surfaces, not part of the
-production autocorrection compatibility promise. Do not ship a correction
-plugin that depends on them.
+this release. `session.start`, `session.stop`, `cwd.changed`, and
+`history.added` remain lifecycle/observation surfaces. The schemas directory is
+the canonical contract for every method; plugins should not depend on reserved
+methods until a later protocol release documents them as operational.
 
 ## Packaging and troubleshooting
 

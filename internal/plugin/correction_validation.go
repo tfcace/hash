@@ -13,6 +13,30 @@ type simpleCommandShape struct {
 	lits []string
 }
 
+// ValidateCommandSuggestion verifies that a complete editor suggestion is
+// syntactically valid for the active shell dialect. Unlike a correction, a
+// learned command may contain a compound command; the editor still enforces
+// the language-neutral single-line and control checks before calling here.
+func ValidateCommandSuggestion(candidate, dialect string) error {
+	if strings.TrimSpace(candidate) == "" {
+		return fmt.Errorf("suggestion is empty")
+	}
+	lang := syntax.LangBash
+	if strings.EqualFold(strings.TrimSpace(dialect), "zsh") {
+		lang = syntax.LangZsh
+	} else if dialect != "" && !strings.EqualFold(strings.TrimSpace(dialect), "bash") {
+		return fmt.Errorf("unsupported dialect %q", dialect)
+	}
+	file, err := syntax.NewParser(syntax.Variant(lang)).Parse(strings.NewReader(candidate), "suggestion")
+	if err != nil {
+		return fmt.Errorf("parse suggestion: %w", err)
+	}
+	if len(file.Stmts) == 0 {
+		return fmt.Errorf("suggestion has no command")
+	}
+	return nil
+}
+
 // ValidateCommandCorrection requires an identical top-level simple-command
 // structure with exactly one eligible static token changed. All assignments,
 // whitespace, quoting around unchanged tokens, and redirections must remain

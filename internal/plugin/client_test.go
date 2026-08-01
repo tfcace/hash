@@ -51,6 +51,27 @@ func TestProcessClient_InitializesAndCallsHook(t *testing.T) {
 	}
 }
 
+func TestProcessClient_SendsSessionKindDuringInitialize(t *testing.T) {
+	if os.Getenv("HASH_PLUGIN_TEST_HELPER") != "" {
+		return
+	}
+	t.Setenv("HASH_PLUGIN_TEST_HELPER", "1")
+	t.Setenv("HASH_PLUGIN_EXPECT_SESSION_KIND", "doctor")
+	bundle := t.TempDir()
+	helper := filepath.Join(bundle, "helper")
+	if err := os.Symlink(os.Args[0], helper); err != nil {
+		t.Fatal(err)
+	}
+	manifest := Manifest{ManifestVersion: 1, ID: "io.runhash.session-kind", Name: "Session kind", Version: "0.1.0", ProtocolVersion: 1, Entrypoint: "helper", Directory: bundle}
+	client, err := StartProcessWithSession(context.Background(), manifest, nil, nil, SessionContext{CWD: "/tmp", Dialect: "bash", Kind: "doctor"})
+	if err != nil {
+		t.Fatalf("StartProcessWithSession() error = %v", err)
+	}
+	if err := client.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+}
+
 func TestProcessClient_HandlesNestedHostRequest(t *testing.T) {
 	if os.Getenv("HASH_PLUGIN_TEST_HELPER") != "" {
 		return
@@ -148,6 +169,15 @@ func TestProcessClientHelper(t *testing.T) {
 				}
 				_ = json.Unmarshal(request.Params, &params)
 				_ = os.Setenv("HASH_PLUGIN_PRIORITY_ID", params.Plugin.ID)
+			}
+			if expected := os.Getenv("HASH_PLUGIN_EXPECT_SESSION_KIND"); expected != "" {
+				var params struct {
+					SessionKind string `json:"session_kind"`
+				}
+				_ = json.Unmarshal(request.Params, &params)
+				if params.SessionKind != expected {
+					os.Exit(8)
+				}
 			}
 			_ = encoder.Encode(map[string]any{"jsonrpc": "2.0", "id": request.ID, "result": map[string]any{"protocol_version": ProtocolVersion}})
 		case "editor.suggest":

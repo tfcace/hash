@@ -951,9 +951,13 @@ func (s *Shell) readLineWithEditor(ctx context.Context) (string, error) {
 			ed.SetInitialText(initialText)
 		}
 
-		// Ghost text: learned fix for the last failure, else prediction
+		// Plugin predictions are requested at the empty prompt as well as after
+		// edits. A valid plugin result owns the prompt ghost; core ghosts remain
+		// the fallback when no plugin has a suggestion.
 		if !hasCorrection {
-			if ghost, source := s.promptGhostOwned(); ghost != "" {
+			if ghost := s.pluginSuggestion("", "prompt"); ghost != "" {
+				ed.SetGhostTextOwned(ghost, editor.GhostSourceSuggestion)
+			} else if ghost, source := s.promptGhostOwned(); ghost != "" {
 				ed.SetGhostTextOwned(ghost, source)
 			}
 		}
@@ -1902,7 +1906,7 @@ func (s *Shell) startPlugins(ctx context.Context) {
 		return
 	}
 	cwd, _ := os.Getwd()
-	if err := manager.StartWithSession(ctx, s.handlePluginHostService, plugin.SessionContext{CWD: cwd, Dialect: s.config.Shell.Dialect}); err != nil {
+	if err := manager.StartWithSession(ctx, s.handlePluginHostService, plugin.SessionContext{CWD: cwd, Dialect: s.config.Shell.Dialect, Kind: "interactive"}); err != nil {
 		fmt.Fprintf(os.Stderr, "hash: plugin startup: %v\n", err)
 		return
 	}
@@ -1911,7 +1915,9 @@ func (s *Shell) startPlugins(ctx context.Context) {
 		"cwd":     cwd,
 		"dialect": s.config.Shell.Dialect,
 	})
-	s.editorCfg.SuggestionFunc = s.pluginSuggestion
+	s.editorCfg.SuggestionFunc = func(input string) string {
+		return s.pluginSuggestion(input, "edit")
+	}
 }
 
 func (s *Shell) handlePluginHostService(ctx context.Context, _ plugin.Manifest, method string, raw json.RawMessage) (any, *plugin.RPCError) {
@@ -1966,20 +1972,41 @@ func (s *Shell) stopPlugins() {
 	s.plugins = nil
 }
 
-func (s *Shell) pluginSuggestion(input string) string {
+func (s *Shell) editorSuggestParams(input, trigger string) plugin.EditorSuggestParams {
+	dialect := "bash"
+	if s.config != nil && s.config.Shell.Dialect != "" {
+		dialect = s.config.Shell.Dialect
+	}
+	params := plugin.EditorSuggestParams{
+		Generation: s.commandGeneration,
+		Trigger:    trigger,
+		Line:       input,
+		Cursor:     len(input),
+		CWD:        currentWorkingDirectory(),
+		Dialect:    dialect,
+	}
+	if s.lastCommand != "" {
+		params.Previous = &plugin.PreviousCommandOutcome{Line: s.lastCommand, CWD: s.lastCwd, ExitCode: s.lastExitCode}
+	}
+	return params
+}
+
+func (s *Shell) pluginSuggestion(input, trigger string) string {
 	if s.plugins == nil {
 		return ""
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
-	var result struct {
-		Text string `json:"text"`
+	params := s.editorSuggestParams(input, trigger)
+	var result plugin.EditorSuggestResult
+	found, _ := s.plugins.CallFirst(ctx, "editor.suggest", params, &result)
+	if params.Generation != s.commandGeneration {
+		return ""
 	}
-	found, _ := s.plugins.CallFirst(ctx, "editor.suggest", map[string]any{
-		"line": input,
-		"cwd":  currentWorkingDirectory(),
-	}, &result)
-	if !found || !isStrictSuggestion(input, result.Text) {
+	if !found || plugin.ValidateSuggestionCandidate(input, result.Text) != nil || !isStrictSuggestion(input, result.Text) {
+		return ""
+	}
+	if plugin.ValidateCommandSuggestion(result.Text, params.Dialect) != nil {
 		return ""
 	}
 	return result.Text

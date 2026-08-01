@@ -17,7 +17,8 @@
         "hooks": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
         "settings": {"type": "object"},
         "cwd": {"type": "string"},
-        "dialect": {"enum": ["bash", "zsh"]}
+        "dialect": {"enum": ["bash", "zsh"]},
+        "session_kind": {"enum": ["interactive", "doctor"]}
       },
       "additionalProperties": false
     }

@@ -53,6 +53,7 @@ type HostServiceHandler func(context.Context, Manifest, string, json.RawMessage)
 type SessionContext struct {
 	CWD     string
 	Dialect string
+	Kind    string
 }
 
 type pendingResponse struct {
@@ -102,6 +103,9 @@ func StartProcessWithSession(ctx context.Context, manifest Manifest, settings ma
 	if err := manifest.Validate(); err != nil {
 		return nil, err
 	}
+	if session.Kind == "" {
+		session.Kind = "interactive"
+	}
 	cmd := exec.Command(manifest.Executable()) //nolint:gosec // manifest is explicitly enabled by the user
 	cmd.Stderr = os.Stderr
 	stdin, err := cmd.StdinPipe()
@@ -145,10 +149,11 @@ func StartProcessWithSession(ctx context.Context, manifest Manifest, settings ma
 			"id":      manifest.ID,
 			"version": manifest.Version,
 		},
-		"hooks":    manifest.Hooks,
-		"settings": settings,
-		"cwd":      session.CWD,
-		"dialect":  session.Dialect,
+		"hooks":        manifest.Hooks,
+		"settings":     settings,
+		"cwd":          session.CWD,
+		"dialect":      session.Dialect,
+		"session_kind": session.Kind,
 	}, &result)
 	if err != nil {
 		_ = client.Close()

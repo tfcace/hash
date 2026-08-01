@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -18,6 +19,12 @@ type pluginLifecycle interface {
 	Upgrade(context.Context, string, string) (plugin.InstallResult, error)
 	Uninstall(string) error
 }
+
+type pluginIDInstaller interface {
+	InstallForID(context.Context, string, string) (plugin.InstallResult, error)
+}
+
+var installPluginIDPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*(\.[a-z0-9][a-z0-9-]*)+$`)
 
 func runPlugin(args []string, stdout, stderr io.Writer) int { //nolint:gocyclo // CLI subcommand dispatch is intentionally explicit
 	if len(args) == 0 {
@@ -136,11 +143,23 @@ func runPluginLifecycle(args []string, lifecycle pluginLifecycle, stdout, stderr
 }
 
 func runPluginInstall(ctx context.Context, args []string, lifecycle pluginLifecycle, stdout, stderr io.Writer) int {
-	if len(args) != 2 {
-		fmt.Fprintln(stderr, "Usage: hash plugin install <github-repository-or-artifact-url>")
+	source, id, ok := parseInstallArgs(args)
+	if !ok {
+		fmt.Fprintln(stderr, "Usage: hash plugin install [--id <plugin-id>] <github-repository-or-artifact-url>")
 		return 2
 	}
-	result, err := lifecycle.Install(ctx, args[1])
+	var result plugin.InstallResult
+	var err error
+	if id != "" {
+		installer, supportsIDs := lifecycle.(pluginIDInstaller)
+		if !supportsIDs {
+			fmt.Fprintln(stderr, "hash: this installer does not support selecting a plugin ID")
+			return 1
+		}
+		result, err = installer.InstallForID(ctx, source, id)
+	} else {
+		result, err = lifecycle.Install(ctx, source)
+	}
 	if err != nil {
 		fmt.Fprintf(stderr, "hash: install plugin: %v\n", err)
 		return 1
@@ -156,6 +175,38 @@ func runPluginInstall(ctx context.Context, args []string, lifecycle pluginLifecy
 	fmt.Fprintf(stdout, "Installed %s %s\nSource: %s\n", result.ID, result.Version, result.Source)
 	fmt.Fprintln(stdout, "Security: this trusted executable receives your OS user privileges. The plugin remains disabled until explicitly enabled.")
 	return 0
+}
+
+func parseInstallArgs(args []string) (source, id string, ok bool) {
+	if len(args) < 2 || len(args) > 4 || args[0] != "install" {
+		return "", "", false
+	}
+	for n := 1; n < len(args); n++ {
+		arg := args[n]
+		if arg == "--id" {
+			if id != "" || n+1 >= len(args) {
+				return "", "", false
+			}
+			id = args[n+1]
+			n++
+			continue
+		}
+		if strings.HasPrefix(arg, "--id=") {
+			if id != "" {
+				return "", "", false
+			}
+			id = strings.TrimPrefix(arg, "--id=")
+			continue
+		}
+		if strings.HasPrefix(arg, "-") || source != "" {
+			return "", "", false
+		}
+		source = arg
+	}
+	if source == "" || (id != "" && !installPluginIDPattern.MatchString(id)) {
+		return "", "", false
+	}
+	return source, id, true
 }
 
 func runPluginUpgrade(ctx context.Context, args []string, lifecycle pluginLifecycle, stdout, stderr io.Writer) int {
@@ -261,7 +312,7 @@ func doctorPlugins(manifests []plugin.Manifest, selectedID string, stdout, stder
 			continue
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		client, err := plugin.StartProcess(ctx, manifest, cfg.Plugins.Settings[id])
+		client, err := plugin.StartProcessWithSession(ctx, manifest, cfg.Plugins.Settings[id], nil, plugin.SessionContext{CWD: "", Dialect: cfg.Shell.Dialect, Kind: "doctor"})
 		cancel()
 		if err != nil {
 			fmt.Fprintf(stdout, "FAIL %s: handshake failed: %v\n", id, err)

@@ -14,6 +14,7 @@ import (
 	"github.com/tfcace/hash/internal/allowlist"
 	"github.com/tfcace/hash/internal/config"
 	"github.com/tfcace/hash/internal/executor"
+	"github.com/tfcace/hash/internal/plugin"
 	"github.com/tfcace/hash/internal/prompt"
 )
 
@@ -75,6 +76,28 @@ func TestIsStrictSuggestion(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestEditorSuggestParamsCarriesPreviousOutcome(t *testing.T) {
+	cfg := config.Default()
+	cfg.Shell.Dialect = "bash"
+	s := &Shell{config: cfg, commandGeneration: 42, lastCommand: "git status", lastExitCode: 0}
+
+	got := s.editorSuggestParams("", "prompt")
+	if got.Generation != 42 || got.Trigger != "prompt" || got.Line != "" || got.Cursor != 0 || got.Dialect != "bash" {
+		t.Fatalf("editorSuggestParams() = %+v", got)
+	}
+	if got.Previous == nil || got.Previous.Line != "git status" || got.Previous.ExitCode != 0 || got.Previous.Canceled {
+		t.Fatalf("previous outcome = %+v", got.Previous)
+	}
+
+	if empty := (&Shell{config: cfg}).editorSuggestParams("ec", "edit"); empty.Previous != nil {
+		t.Fatalf("first prompt should omit previous outcome: %+v", empty.Previous)
+	}
+}
+
+func TestEditorSuggestParamsUsesPluginProtocolType(t *testing.T) {
+	var _ plugin.EditorSuggestParams = (&Shell{config: config.Default()}).editorSuggestParams("git", "edit")
 }
 
 func TestIsSingleTokenCorrection(t *testing.T) {

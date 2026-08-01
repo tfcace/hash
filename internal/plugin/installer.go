@@ -101,6 +101,14 @@ func (i *Installer) Install(ctx context.Context, source string) (InstallResult, 
 	return i.install(ctx, source, "", false)
 }
 
+// InstallForID selects a plugin from a multi-plugin GitHub release index.
+func (i *Installer) InstallForID(ctx context.Context, source, id string) (InstallResult, error) {
+	if !pluginIDPattern.MatchString(id) {
+		return InstallResult{}, fmt.Errorf("invalid plugin ID %q", id)
+	}
+	return i.install(ctx, source, id, false)
+}
+
 // Upgrade resolves the saved unpinned source (or an explicit replacement),
 // retains the previous bundle, and atomically switches the active symlink.
 func (i *Installer) Upgrade(ctx context.Context, id, source string) (InstallResult, error) {
@@ -160,7 +168,7 @@ func (i *Installer) Uninstall(id string) error {
 }
 
 func (i *Installer) install(ctx context.Context, source, expectedID string, replace bool) (InstallResult, error) {
-	artifact, archive, actualChecksum, err := i.fetchArtifact(ctx, source)
+	artifact, archive, actualChecksum, err := i.fetchArtifact(ctx, source, expectedID)
 	if err != nil {
 		return InstallResult{}, err
 	}
@@ -194,8 +202,8 @@ func (i *Installer) install(ctx context.Context, source, expectedID string, repl
 	return newInstallResult(manifest, artifact, actualChecksum, true), nil
 }
 
-func (i *Installer) fetchArtifact(ctx context.Context, source string) (artifact resolvedArtifact, archive []byte, checksum string, err error) {
-	artifact, err = i.resolve(ctx, source)
+func (i *Installer) fetchArtifact(ctx context.Context, source, expectedID string) (artifact resolvedArtifact, archive []byte, checksum string, err error) {
+	artifact, err = i.resolve(ctx, source, expectedID)
 	if err != nil {
 		return resolvedArtifact{}, nil, "", err
 	}
@@ -384,11 +392,11 @@ func (i *Installer) installedMetadata(id string) (Manifest, installMetadata, err
 	return manifest, metadata, nil
 }
 
-func (i *Installer) resolve(ctx context.Context, source string) (resolvedArtifact, error) {
+func (i *Installer) resolve(ctx context.Context, source, expectedID string) (resolvedArtifact, error) {
 	if ref, ok, err := parseGitHubSource(source); err != nil {
 		return resolvedArtifact{}, err
 	} else if ok {
-		return i.resolveGitHub(ctx, ref)
+		return i.resolveGitHub(ctx, ref, expectedID)
 	}
 	u, err := url.Parse(strings.TrimSpace(source))
 	if err != nil || u.Host == "" {
@@ -457,7 +465,7 @@ func parseGitHubSource(source string) (githubSource, bool, error) {
 	return ref, true, nil
 }
 
-func (i *Installer) resolveGitHub(ctx context.Context, ref githubSource) (resolvedArtifact, error) {
+func (i *Installer) resolveGitHub(ctx context.Context, ref githubSource, expectedID string) (resolvedArtifact, error) {
 	endpoint := strings.TrimRight(i.githubAPIBase, "/") + "/repos/" + url.PathEscape(ref.owner) + "/" + url.PathEscape(ref.repo) + "/releases/latest"
 	if ref.tag != "" {
 		endpoint = strings.TrimSuffix(endpoint, "/latest") + "/tags/" + url.PathEscape(ref.tag)
@@ -477,20 +485,23 @@ func (i *Installer) resolveGitHub(ctx context.Context, ref githubSource) (resolv
 		return resolvedArtifact{}, fmt.Errorf("decode GitHub release: %w", decodeErr)
 	}
 	suffix := "_" + i.goos + "_" + i.goarch + ".tar.gz"
-	var artifactName, artifactURL, checksumURL string
+	var artifactName, artifactURL, checksumURL, indexURL string
+	artifactCount := 0
+	assetURLs := map[string]string{}
 	for _, asset := range release.Assets {
+		assetURLs[asset.Name] = asset.URL
 		switch {
 		case strings.HasSuffix(asset.Name, suffix):
-			if artifactURL != "" {
-				return resolvedArtifact{}, fmt.Errorf("release has multiple artifacts for %s/%s", i.goos, i.goarch)
-			}
+			artifactCount++
 			artifactName, artifactURL = asset.Name, asset.URL
 		case asset.Name == "SHA256SUMS":
 			checksumURL = asset.URL
+		case asset.Name == "HASH_PLUGINS.json":
+			indexURL = asset.URL
 		}
 	}
-	if artifactURL == "" {
-		return resolvedArtifact{}, fmt.Errorf("release has no artifact for %s/%s", i.goos, i.goarch)
+	if artifactCount > 1 && indexURL == "" {
+		return resolvedArtifact{}, fmt.Errorf("release has multiple artifacts for %s/%s", i.goos, i.goarch)
 	}
 	if checksumURL == "" {
 		return resolvedArtifact{}, fmt.Errorf("release has no SHA256SUMS asset")
@@ -498,6 +509,58 @@ func (i *Installer) resolveGitHub(ctx context.Context, ref githubSource) (resolv
 	checksums, err := i.download(ctx, checksumURL, maxAPIResponseBytes)
 	if err != nil {
 		return resolvedArtifact{}, fmt.Errorf("download release checksums: %w", err)
+	}
+	if indexURL != "" {
+		indexData, downloadErr := i.download(ctx, indexURL, maxAPIResponseBytes)
+		if downloadErr != nil {
+			return resolvedArtifact{}, fmt.Errorf("download release index: %w", downloadErr)
+		}
+		indexChecksum := checksumForAsset(checksums, "HASH_PLUGINS.json")
+		if indexChecksum == "" {
+			return resolvedArtifact{}, fmt.Errorf("SHA256SUMS does not contain HASH_PLUGINS.json")
+		}
+		digest := sha256.Sum256(indexData)
+		if !strings.EqualFold(hex.EncodeToString(digest[:]), indexChecksum) {
+			return resolvedArtifact{}, fmt.Errorf("release index checksum mismatch")
+		}
+		var index struct {
+			Default string `json:"default"`
+			Plugins map[string]struct {
+				Artifacts map[string]struct {
+					Name   string `json:"name"`
+					SHA256 string `json:"sha256"`
+				} `json:"artifacts"`
+			} `json:"plugins"`
+		}
+		if json.Unmarshal(indexData, &index) != nil {
+			return resolvedArtifact{}, fmt.Errorf("decode release index")
+		}
+		id := expectedID
+		if id == "" {
+			id = index.Default
+		}
+		entry, ok := index.Plugins[id]
+		if !ok {
+			return resolvedArtifact{}, fmt.Errorf("release index has no plugin %q", id)
+		}
+		artifact, ok := entry.Artifacts[i.goos+"/"+i.goarch]
+		if !ok {
+			artifact, ok = entry.Artifacts[i.goos+"_"+i.goarch]
+		}
+		if !ok || artifact.Name == "" || path.Base(artifact.Name) != artifact.Name || !strings.HasSuffix(artifact.Name, ".tar.gz") {
+			return resolvedArtifact{}, fmt.Errorf("release index has no safe artifact for %s/%s", i.goos, i.goarch)
+		}
+		artifactName = artifact.Name
+		version := strings.TrimPrefix(release.TagName, "v")
+		artifactName = strings.ReplaceAll(artifactName, "{{version}}", version)
+		artifactName = strings.ReplaceAll(artifactName, "{{ .Version }}", version)
+		artifactURL = assetURLs[artifactName]
+		if artifactURL == "" {
+			return resolvedArtifact{}, fmt.Errorf("release index artifact is incomplete")
+		}
+	}
+	if artifactURL == "" {
+		return resolvedArtifact{}, fmt.Errorf("release has no artifact for %s/%s", i.goos, i.goarch)
 	}
 	checksum := checksumForAsset(checksums, artifactName)
 	if checksum == "" {

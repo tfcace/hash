@@ -312,6 +312,10 @@ Local command and path prediction.
 | `path_min_count` | integer | `2` | Minimum uses before a path becomes eligible for suggestions. |
 | `path_recency_boost_hours` | integer | `24` | Recency window for prediction scoring. |
 
+To use `io.runhash.adaptive-prediction`, set the built-in `enabled = false`
+while retaining its database for rollback, then enable the external plugin
+through `[plugins]`. The external plugin has independent settings and data.
+
 ## Builtins
 
 Interactive builtins:

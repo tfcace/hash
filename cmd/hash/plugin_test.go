@@ -75,6 +75,20 @@ func TestRunPluginLifecycleInstallUpgradeAndUninstall(t *testing.T) {
 	}
 }
 
+func TestParseInstallArgsSupportsIDBeforeOrAfterSource(t *testing.T) {
+	for _, tc := range []struct{ args []string; source, id string }{
+		{[]string{"install", "github:owner/repo", "--id", "io.runhash.adaptive-prediction"}, "github:owner/repo", "io.runhash.adaptive-prediction"},
+		{[]string{"install", "--id=io.runhash.adaptive-prediction", "github:owner/repo"}, "github:owner/repo", "io.runhash.adaptive-prediction"},
+		{[]string{"install", "github:owner/repo"}, "github:owner/repo", ""},
+	} {
+		source, id, ok := parseInstallArgs(tc.args)
+		if !ok || source != tc.source || id != tc.id { t.Fatalf("parseInstallArgs(%v) = %q, %q, %v", tc.args, source, id, ok) }
+	}
+	for _, args := range [][]string{{"install", "--id"}, {"install", "--nope", "x"}, {"install", "x", "--id", "bad"}} {
+		if _, _, ok := parseInstallArgs(args); ok { t.Fatalf("parseInstallArgs(%v) accepted invalid input", args) }
+	}
+}
+
 func TestRunPluginLifecycleRollsBackInstallWhenConfigurationCannotBeDisabled(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "not-a-directory")
 	if err := os.WriteFile(configPath, []byte("blocked"), 0o600); err != nil {

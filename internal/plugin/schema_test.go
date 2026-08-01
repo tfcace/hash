@@ -13,6 +13,7 @@ import (
 func TestProtocolMethodSchemasCompileAndValidateCanonicalMessages(t *testing.T) {
 	dir := filepath.Join("..", "..", "docs", "plugins", "schemas")
 	examples := map[string]string{
+		"editor-suggest.schema.json":   `{"jsonrpc":"2.0","id":7,"method":"editor.suggest","params":{"generation":42,"trigger":"prompt","line":"","cursor":0,"cwd":"/work","dialect":"bash","previous":{"line":"git status","exit_code":0,"canceled":false}}}`,
 		"initialize.schema.json":       `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocol_version":1,"hash_version":"0.9.0","plugin":{"id":"io.runhash.autocorrection","version":"0.1.0"},"hooks":["command.finished"],"settings":{"max_candidates":3},"cwd":"/work","dialect":"bash"}}`,
 		"cancellation.schema.json":     `{"jsonrpc":"2.0","method":"$/cancelRequest","params":{"id":6}}`,
 		"command-finished.schema.json": `{"jsonrpc":"2.0","id":6,"method":"command.finished","params":{"generation":42,"original_line":"git sttaus","executed_line":"git sttaus","exit_code":1,"duration_ms":18,"failure_kind":"exit_status","error_message":"","stdout_tail":"","stderr_tail":"git: unknown subcommand sttaus","output_streams_merged":false,"cwd":"/work","dialect":"bash","canceled":false}}`,

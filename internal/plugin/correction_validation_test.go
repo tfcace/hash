@@ -33,3 +33,24 @@ func TestValidateCommandCorrectionRejectsUnsafeStructure(t *testing.T) {
 		}
 	}
 }
+
+func TestValidateCommandSuggestionAcceptsValidDialectSyntax(t *testing.T) {
+	for _, tc := range []struct {
+		candidate string
+		dialect   string
+	}{
+		{candidate: "git status", dialect: "bash"},
+		{candidate: "echo ok && echo done", dialect: "bash"},
+		{candidate: "print -r -- ok", dialect: "zsh"},
+	} {
+		if err := ValidateCommandSuggestion(tc.candidate, tc.dialect); err != nil {
+			t.Errorf("ValidateCommandSuggestion(%q, %q) = %v", tc.candidate, tc.dialect, err)
+		}
+	}
+}
+
+func TestValidateCommandSuggestionRejectsInvalidSyntax(t *testing.T) {
+	if err := ValidateCommandSuggestion("echo 'unterminated", "bash"); err == nil {
+		t.Fatal("expected invalid syntax to be rejected")
+	}
+}
