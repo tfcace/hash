@@ -14,7 +14,6 @@ import (
 	"github.com/tfcace/hash/internal/allowlist"
 	"github.com/tfcace/hash/internal/config"
 	"github.com/tfcace/hash/internal/executor"
-	"github.com/tfcace/hash/internal/plugin"
 	"github.com/tfcace/hash/internal/prompt"
 )
 
@@ -97,7 +96,10 @@ func TestEditorSuggestParamsCarriesPreviousOutcome(t *testing.T) {
 }
 
 func TestEditorSuggestParamsUsesPluginProtocolType(t *testing.T) {
-	var _ plugin.EditorSuggestParams = (&Shell{config: config.Default()}).editorSuggestParams("git", "edit")
+	got := (&Shell{config: config.Default()}).editorSuggestParams("git", "edit")
+	if got.Line != "git" || got.Trigger != "edit" {
+		t.Fatalf("editorSuggestParams() = %+v", got)
+	}
 }
 
 func TestIsSingleTokenCorrection(t *testing.T) {

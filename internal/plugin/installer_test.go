@@ -300,3 +300,17 @@ func TestParseGitHubSource(t *testing.T) {
 		t.Fatalf("empty GitHub tag accepted: ok=%v err=%v", ok, err)
 	}
 }
+
+func TestSelectGitHubAssetsRequiresAnIndexForMultiplePlatformArtifacts(t *testing.T) {
+	release := githubRelease{
+		Assets: []githubAsset{
+			{Name: "hash-autocorrection_0.2.1_darwin_arm64.tar.gz", URL: "artifact"},
+			{Name: "hash-adaptive-prediction_0.2.1_darwin_arm64.tar.gz", URL: "other"},
+			{Name: "SHA256SUMS", URL: "checksums"},
+		},
+	}
+
+	if _, err := selectGitHubAssets(release, "darwin", "arm64"); err == nil {
+		t.Fatal("selectGitHubAssets accepted multiple platform artifacts without an index")
+	}
+}

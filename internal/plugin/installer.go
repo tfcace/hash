@@ -420,6 +420,39 @@ type githubSource struct {
 	canonical        string
 }
 
+type githubRelease struct {
+	TagName string        `json:"tag_name"`
+	Assets  []githubAsset `json:"assets"`
+}
+
+type githubAsset struct {
+	Name string `json:"name"`
+	URL  string `json:"browser_download_url"`
+}
+
+type githubAssetSelection struct {
+	artifactName  string
+	artifactURL   string
+	checksumURL   string
+	indexURL      string
+	artifactCount int
+	assetURLs     map[string]string
+}
+
+type githubReleaseIndex struct {
+	Default string                         `json:"default"`
+	Plugins map[string]githubPluginRelease `json:"plugins"`
+}
+
+type githubPluginRelease struct {
+	Artifacts map[string]githubReleaseArtifact `json:"artifacts"`
+}
+
+type githubReleaseArtifact struct {
+	Name   string `json:"name"`
+	SHA256 string `json:"sha256"`
+}
+
 func parseGitHubSource(source string) (githubSource, bool, error) {
 	source = strings.TrimSpace(source)
 	ref := githubSource{}
@@ -466,97 +499,23 @@ func parseGitHubSource(source string) (githubSource, bool, error) {
 }
 
 func (i *Installer) resolveGitHub(ctx context.Context, ref githubSource, expectedID string) (resolvedArtifact, error) {
-	endpoint := strings.TrimRight(i.githubAPIBase, "/") + "/repos/" + url.PathEscape(ref.owner) + "/" + url.PathEscape(ref.repo) + "/releases/latest"
-	if ref.tag != "" {
-		endpoint = strings.TrimSuffix(endpoint, "/latest") + "/tags/" + url.PathEscape(ref.tag)
-	}
-	data, err := i.download(ctx, endpoint, maxAPIResponseBytes)
+	release, err := i.fetchGitHubRelease(ctx, ref)
 	if err != nil {
 		return resolvedArtifact{}, fmt.Errorf("resolve GitHub release: %w", err)
 	}
-	var release struct {
-		TagName string `json:"tag_name"`
-		Assets  []struct {
-			Name string `json:"name"`
-			URL  string `json:"browser_download_url"`
-		} `json:"assets"`
+	selection, err := selectGitHubAssets(release, i.goos, i.goarch)
+	if err != nil {
+		return resolvedArtifact{}, err
 	}
-	if decodeErr := json.Unmarshal(data, &release); decodeErr != nil {
-		return resolvedArtifact{}, fmt.Errorf("decode GitHub release: %w", decodeErr)
-	}
-	suffix := "_" + i.goos + "_" + i.goarch + ".tar.gz"
-	var artifactName, artifactURL, checksumURL, indexURL string
-	artifactCount := 0
-	assetURLs := map[string]string{}
-	for _, asset := range release.Assets {
-		assetURLs[asset.Name] = asset.URL
-		switch {
-		case strings.HasSuffix(asset.Name, suffix):
-			artifactCount++
-			artifactName, artifactURL = asset.Name, asset.URL
-		case asset.Name == "SHA256SUMS":
-			checksumURL = asset.URL
-		case asset.Name == "HASH_PLUGINS.json":
-			indexURL = asset.URL
-		}
-	}
-	if artifactCount > 1 && indexURL == "" {
-		return resolvedArtifact{}, fmt.Errorf("release has multiple artifacts for %s/%s", i.goos, i.goarch)
-	}
-	if checksumURL == "" {
-		return resolvedArtifact{}, fmt.Errorf("release has no SHA256SUMS asset")
-	}
-	checksums, err := i.download(ctx, checksumURL, maxAPIResponseBytes)
+	checksums, err := i.download(ctx, selection.checksumURL, maxAPIResponseBytes)
 	if err != nil {
 		return resolvedArtifact{}, fmt.Errorf("download release checksums: %w", err)
 	}
-	if indexURL != "" {
-		indexData, downloadErr := i.download(ctx, indexURL, maxAPIResponseBytes)
-		if downloadErr != nil {
-			return resolvedArtifact{}, fmt.Errorf("download release index: %w", downloadErr)
-		}
-		indexChecksum := checksumForAsset(checksums, "HASH_PLUGINS.json")
-		if indexChecksum == "" {
-			return resolvedArtifact{}, fmt.Errorf("SHA256SUMS does not contain HASH_PLUGINS.json")
-		}
-		digest := sha256.Sum256(indexData)
-		if !strings.EqualFold(hex.EncodeToString(digest[:]), indexChecksum) {
-			return resolvedArtifact{}, fmt.Errorf("release index checksum mismatch")
-		}
-		var index struct {
-			Default string `json:"default"`
-			Plugins map[string]struct {
-				Artifacts map[string]struct {
-					Name   string `json:"name"`
-					SHA256 string `json:"sha256"`
-				} `json:"artifacts"`
-			} `json:"plugins"`
-		}
-		if json.Unmarshal(indexData, &index) != nil {
-			return resolvedArtifact{}, fmt.Errorf("decode release index")
-		}
-		id := expectedID
-		if id == "" {
-			id = index.Default
-		}
-		entry, ok := index.Plugins[id]
-		if !ok {
-			return resolvedArtifact{}, fmt.Errorf("release index has no plugin %q", id)
-		}
-		artifact, ok := entry.Artifacts[i.goos+"/"+i.goarch]
-		if !ok {
-			artifact, ok = entry.Artifacts[i.goos+"_"+i.goarch]
-		}
-		if !ok || artifact.Name == "" || path.Base(artifact.Name) != artifact.Name || !strings.HasSuffix(artifact.Name, ".tar.gz") {
-			return resolvedArtifact{}, fmt.Errorf("release index has no safe artifact for %s/%s", i.goos, i.goarch)
-		}
-		artifactName = artifact.Name
-		version := strings.TrimPrefix(release.TagName, "v")
-		artifactName = strings.ReplaceAll(artifactName, "{{version}}", version)
-		artifactName = strings.ReplaceAll(artifactName, "{{ .Version }}", version)
-		artifactURL = assetURLs[artifactName]
-		if artifactURL == "" {
-			return resolvedArtifact{}, fmt.Errorf("release index artifact is incomplete")
+	artifactName, artifactURL := selection.artifactName, selection.artifactURL
+	if selection.indexURL != "" {
+		artifactName, artifactURL, err = i.resolveIndexedGitHubArtifact(ctx, release, selection, checksums, expectedID)
+		if err != nil {
+			return resolvedArtifact{}, err
 		}
 	}
 	if artifactURL == "" {
@@ -568,6 +527,111 @@ func (i *Installer) resolveGitHub(ctx context.Context, ref githubSource, expecte
 	}
 	version := strings.TrimPrefix(release.TagName, "v")
 	return resolvedArtifact{url: artifactURL, checksum: checksum, source: ref.canonical, expectedVersion: version}, nil
+}
+
+func (i *Installer) fetchGitHubRelease(ctx context.Context, ref githubSource) (githubRelease, error) {
+	endpoint := strings.TrimRight(i.githubAPIBase, "/") + "/repos/" + url.PathEscape(ref.owner) + "/" + url.PathEscape(ref.repo) + "/releases/latest"
+	if ref.tag != "" {
+		endpoint = strings.TrimSuffix(endpoint, "/latest") + "/tags/" + url.PathEscape(ref.tag)
+	}
+	data, err := i.download(ctx, endpoint, maxAPIResponseBytes)
+	if err != nil {
+		return githubRelease{}, err
+	}
+	var release githubRelease
+	if err := json.Unmarshal(data, &release); err != nil {
+		return githubRelease{}, fmt.Errorf("decode GitHub release: %w", err)
+	}
+	return release, nil
+}
+
+func selectGitHubAssets(release githubRelease, goos, goarch string) (githubAssetSelection, error) {
+	selection := githubAssetSelection{assetURLs: map[string]string{}}
+	suffix := "_" + goos + "_" + goarch + ".tar.gz"
+	for _, asset := range release.Assets {
+		selection.assetURLs[asset.Name] = asset.URL
+		switch {
+		case strings.HasSuffix(asset.Name, suffix):
+			selection.artifactCount++
+			selection.artifactName, selection.artifactURL = asset.Name, asset.URL
+		case asset.Name == "SHA256SUMS":
+			selection.checksumURL = asset.URL
+		case asset.Name == "HASH_PLUGINS.json":
+			selection.indexURL = asset.URL
+		}
+	}
+	if selection.artifactCount > 1 && selection.indexURL == "" {
+		return githubAssetSelection{}, fmt.Errorf("release has multiple artifacts for %s/%s", goos, goarch)
+	}
+	if selection.checksumURL == "" {
+		return githubAssetSelection{}, fmt.Errorf("release has no SHA256SUMS asset")
+	}
+	return selection, nil
+}
+
+func (i *Installer) resolveIndexedGitHubArtifact(ctx context.Context, release githubRelease, selection githubAssetSelection, checksums []byte, expectedID string) (artifactName, artifactURL string, err error) {
+	indexData, err := i.download(ctx, selection.indexURL, maxAPIResponseBytes)
+	if err != nil {
+		return "", "", fmt.Errorf("download release index: %w", err)
+	}
+	indexChecksum := checksumForAsset(checksums, "HASH_PLUGINS.json")
+	if indexChecksum == "" {
+		return "", "", fmt.Errorf("SHA256SUMS does not contain HASH_PLUGINS.json")
+	}
+	digest := sha256.Sum256(indexData)
+	if !strings.EqualFold(hex.EncodeToString(digest[:]), indexChecksum) {
+		return "", "", fmt.Errorf("release index checksum mismatch")
+	}
+	index, err := decodeGitHubReleaseIndex(indexData)
+	if err != nil {
+		return "", "", err
+	}
+	id := expectedID
+	if id == "" {
+		id = index.Default
+	}
+	entry, ok := index.Plugins[id]
+	if !ok {
+		return "", "", fmt.Errorf("release index has no plugin %q", id)
+	}
+	artifact, ok := entry.Artifacts[releasePlatformKey(i.goos, i.goarch)]
+	if !ok {
+		artifact, ok = entry.Artifacts[i.goos+"_"+i.goarch]
+	}
+	if !ok {
+		return "", "", fmt.Errorf("release index has no safe artifact for %s/%s", i.goos, i.goarch)
+	}
+	artifactName = expandGitHubArtifactName(artifact.Name, release.TagName)
+	if !safeGitHubArtifactName(artifactName) {
+		return "", "", fmt.Errorf("release index has no safe artifact for %s/%s", i.goos, i.goarch)
+	}
+	artifactURL = selection.assetURLs[artifactName]
+	if artifactURL == "" {
+		return "", "", fmt.Errorf("release index artifact is incomplete")
+	}
+	return artifactName, artifactURL, nil
+}
+
+func decodeGitHubReleaseIndex(data []byte) (githubReleaseIndex, error) {
+	var index githubReleaseIndex
+	if err := json.Unmarshal(data, &index); err != nil {
+		return githubReleaseIndex{}, fmt.Errorf("decode release index")
+	}
+	return index, nil
+}
+
+func releasePlatformKey(goos, goarch string) string {
+	return goos + "/" + goarch
+}
+
+func expandGitHubArtifactName(name, tag string) string {
+	version := strings.TrimPrefix(tag, "v")
+	name = strings.ReplaceAll(name, "{{version}}", version)
+	return strings.ReplaceAll(name, "{{ .Version }}", version)
+}
+
+func safeGitHubArtifactName(name string) bool {
+	return name != "" && path.Base(name) == name && strings.HasSuffix(name, ".tar.gz")
 }
 
 func checksumForAsset(data []byte, name string) string {
