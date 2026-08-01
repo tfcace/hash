@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/tfcace/hash/internal/agent"
+	"github.com/tfcace/hash/internal/editor"
 	"github.com/tfcace/hash/internal/markdown"
 )
 
@@ -19,6 +20,8 @@ type agentStreamPacerOptions struct {
 // paceAgentEvents batches only adjacent text deltas. Unlike a debounce, its
 // fixed tick never moves while the agent is busy, so character-sized ACP
 // chunks remain visible during a continuous response.
+//
+//nolint:gocritic,gocyclo // coordinated stream, timer, cancellation, and error state machine
 func paceAgentEvents(
 	ctx context.Context,
 	events <-chan agent.StreamEvent,
@@ -41,12 +44,23 @@ func paceAgentEvents(
 		}
 
 		var pending strings.Builder
-		flush := func() {
-			if pending.Len() == 0 {
-				return
+		emit := func(event agent.StreamEvent) bool {
+			select {
+			case out <- event:
+				return true
+			case <-ctx.Done():
+				return false
 			}
-			out <- agent.StreamEvent{Type: agent.StreamEventText, Text: pending.String()}
+		}
+		flush := func() bool {
+			if pending.Len() == 0 {
+				return true
+			}
+			if !emit(agent.StreamEvent{Type: agent.StreamEventText, Text: pending.String()}) {
+				return false
+			}
 			pending.Reset()
+			return true
 		}
 
 		for events != nil || errs != nil {
@@ -54,10 +68,14 @@ func paceAgentEvents(
 			case <-ctx.Done():
 				return
 			case <-ticks:
-				flush()
+				if !flush() {
+					return
+				}
 			case event, ok := <-events:
 				if !ok {
-					flush()
+					if !flush() {
+						return
+					}
 					events = nil
 					continue
 				}
@@ -68,16 +86,23 @@ func paceAgentEvents(
 					}
 					continue
 				}
-				flush()
-				out <- event
+				if !flush() || !emit(event) {
+					return
+				}
 			case err, ok := <-errs:
 				if !ok {
 					errs = nil
 					continue
 				}
-				flush()
+				if !flush() {
+					return
+				}
 				if err != nil {
-					outErrs <- err
+					select {
+					case outErrs <- err:
+					case <-ctx.Done():
+						return
+					}
 				}
 			}
 		}
@@ -89,47 +114,45 @@ func paceAgentEvents(
 // textStreamFromEvents adapts paced events for editor ghost completion. Tool
 // events are intentionally not inserted into the editable command text, but
 // their transient status remains visible in the ghost area.
-func textStreamFromEvents(events <-chan agent.StreamEvent, errs <-chan error) (<-chan string, <-chan error, <-chan string) {
-	textCh := make(chan string, 16)
+//
+//nolint:gocritic,gocyclo // coordinated event, cancellation, and error state machine
+func textStreamFromEvents(ctx context.Context, events <-chan agent.StreamEvent, errs <-chan error) (<-chan editor.GhostStreamUpdate, <-chan error) {
+	updates := make(chan editor.GhostStreamUpdate)
 	errCh := make(chan error, 1)
-	statusCh := make(chan string, 8)
 	go func() {
-		defer close(textCh)
+		defer close(updates)
 		defer close(errCh)
-		defer close(statusCh)
-		sendStatus := func(status string) {
+		sendUpdate := func(update editor.GhostStreamUpdate) bool {
 			select {
-			case statusCh <- status:
-				return
-			default:
-			}
-			// The ghost renderer only needs the newest transient state. Replacing
-			// a stale update prevents a fast ACP tool lifecycle from blocking the
-			// text stream when the editor is busy redrawing.
-			select {
-			case <-statusCh:
-			default:
-			}
-			select {
-			case statusCh <- status:
-			default:
+			case updates <- update:
+				return true
+			case <-ctx.Done():
+				return false
 			}
 		}
 		for events != nil || errs != nil {
 			select {
+			case <-ctx.Done():
+				return
 			case event, ok := <-events:
 				if !ok {
 					events = nil
 					continue
 				}
 				if event.Type == agent.StreamEventText && event.Text != "" {
-					sendStatus("")
-					textCh <- event.Text
+					if !sendUpdate(editor.GhostStreamUpdate{Text: event.Text}) {
+						return
+					}
 				} else if event.Type == agent.StreamEventToolCall {
 					if event.ToolCall.Status == agent.ToolCallCompleted || event.ToolCall.Status == agent.ToolCallFailed {
-						sendStatus("")
+						if !sendUpdate(editor.GhostStreamUpdate{}) {
+							return
+						}
 					} else {
-						sendStatus(inlineToolActivityLabel(event.ToolCall))
+						label := inlineToolActivityLabel(event.ToolCall)
+						if !sendUpdate(editor.GhostStreamUpdate{Status: label}) {
+							return
+						}
 					}
 				}
 			case err, ok := <-errs:
@@ -143,7 +166,7 @@ func textStreamFromEvents(events <-chan agent.StreamEvent, errs <-chan error) (<
 			}
 		}
 	}()
-	return textCh, errCh, statusCh
+	return updates, errCh
 }
 
 func inlineToolActivityLabel(update agent.ToolCallUpdate) string {
@@ -282,6 +305,8 @@ collectLoop:
 // collectAgentEventStream collects a frame-paced event stream. Text frames are
 // flushed immediately because pacing has already bounded their latency; tool
 // events force a boundary so activity rows never splice into markdown output.
+//
+//nolint:gocritic,gocyclo // stream, markdown, cancellation, and tool lifecycle state machine
 func (s *Shell) collectAgentEventStream(
 	ctx context.Context,
 	events <-chan agent.StreamEvent,

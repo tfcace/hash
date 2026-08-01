@@ -1088,7 +1088,7 @@ func (s *Shell) handleAgentInlineStreaming(ctx context.Context, parsed parser.Pa
 	// of the editable ghost completion while preventing per-character redraws.
 	events, errCh := s.agentHandler.StreamEvents(requestCtx, parsed)
 	events, errCh = paceAgentEvents(requestCtx, events, errCh, agentStreamPacerOptions{})
-	textCh, errCh, statusCh := textStreamFromEvents(events, errCh)
+	updates, errCh := textStreamFromEvents(requestCtx, events, errCh)
 
 	// Build initial text for editor
 	initialText := parsed.Command
@@ -1107,8 +1107,7 @@ func (s *Shell) handleAgentInlineStreaming(ctx context.Context, parsed parser.Pa
 	}
 
 	// Set up streaming ghost text with model name
-	ed.SetGhostTextStreaming(textCh, errCh)
-	ed.SetGhostStatusStreaming(statusCh)
+	ed.SetGhostTextStreaming(updates, errCh)
 	ed.SetStreamingModel(modelName)
 
 	// Run editor

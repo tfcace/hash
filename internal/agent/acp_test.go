@@ -12,6 +12,34 @@ import (
 	"time"
 )
 
+// sendStreamingAttempt preserves the legacy text-only assertions in this test
+// file while production code exposes only the event stream implementation.
+func (t *ACPTransport) sendStreamingAttempt(ctx context.Context, req Request, textCh chan<- string) (bool, error) {
+	events := make(chan StreamEvent, 64)
+	result := make(chan struct {
+		observed bool
+		err      error
+	}, 1)
+	go func() {
+		observed, err := t.sendEventStreamingAttempt(ctx, req, events)
+		close(events)
+		result <- struct {
+			observed bool
+			err      error
+		}{observed, err}
+	}()
+
+	receivedText := false
+	for event := range events {
+		if event.Type == StreamEventText && event.Text != "" {
+			textCh <- event.Text
+			receivedText = true
+		}
+	}
+	outcome := <-result
+	return receivedText || outcome.observed, outcome.err
+}
+
 func TestACPTransport_New(t *testing.T) {
 	cfg := ACPConfig{
 		Command: "claude-agent-acp",
@@ -245,6 +273,69 @@ func TestACPTransport_SendEventStreamingAttemptEmitsGenericToolLifecycle(t *test
 	}
 	if got[2].Type != StreamEventText || got[2].Text != "Done." {
 		t.Fatalf("text event = %#v", got[2])
+	}
+}
+
+func TestACPTransport_SendEventStreamingAttemptTreatsTextAsObservedOutput(t *testing.T) {
+	transport := &ACPTransport{
+		config:    ACPConfig{Command: "test"},
+		stdin:     newMockPipe(),
+		sessionID: "test-session",
+		messages:  make(chan []byte, 10),
+		done:      make(chan struct{}),
+	}
+	transport.messages <- []byte(`{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"test-session","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"partial"}}}}`)
+	transport.messages <- []byte(`{"jsonrpc":"2.0","id":1,"result":{"stopReason":"end_turn"}}`)
+
+	events := make(chan StreamEvent, 2)
+	observed, err := transport.sendEventStreamingAttempt(context.Background(), Request{Prompt: "test"}, events)
+	if err != nil {
+		t.Fatalf("sendEventStreamingAttempt returned error: %v", err)
+	}
+	if !observed {
+		t.Fatal("assistant text should count as observed output and suppress a retry")
+	}
+}
+
+func TestACPTransport_StreamEventsWithRetryDoesNotReplayVisibleOutput(t *testing.T) {
+	transport := NewACPTransport(ACPConfig{Command: "test"})
+	events := make(chan StreamEvent, 2)
+	var attempts, resets int
+	err := transport.streamEventsWithRetry(context.Background(), Request{Prompt: "test"}, events,
+		func(context.Context, Request, chan<- StreamEvent) (bool, error) {
+			attempts++
+			events <- StreamEvent{Type: StreamEventText, Text: "partial"}
+			return true, ErrACPConnectionClosed
+		},
+		func() { resets++ },
+	)
+	if !errors.Is(err, ErrACPConnectionClosed) {
+		t.Fatalf("error = %v, want ErrACPConnectionClosed", err)
+	}
+	if attempts != 1 || resets != 0 {
+		t.Fatalf("attempts=%d resets=%d, want no replay after text", attempts, resets)
+	}
+}
+
+func TestACPTransport_StreamEventsWithRetryRetriesBeforeVisibleOutput(t *testing.T) {
+	transport := NewACPTransport(ACPConfig{Command: "test"})
+	events := make(chan StreamEvent, 1)
+	var attempts, resets int
+	err := transport.streamEventsWithRetry(context.Background(), Request{Prompt: "test"}, events,
+		func(context.Context, Request, chan<- StreamEvent) (bool, error) {
+			attempts++
+			if attempts == 1 {
+				return false, ErrACPConnectionClosed
+			}
+			return false, nil
+		},
+		func() { resets++ },
+	)
+	if err != nil {
+		t.Fatalf("streamEventsWithRetry returned error: %v", err)
+	}
+	if attempts != 2 || resets != 1 {
+		t.Fatalf("attempts=%d resets=%d, want one retry before output", attempts, resets)
 	}
 }
 

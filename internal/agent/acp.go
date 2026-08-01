@@ -1291,6 +1291,8 @@ func idleTimeoutForContext(ctx context.Context) time.Duration {
 
 // SendStreaming implements the legacy text-only Transport interface. Rich ACP
 // callers should use SendEventStream through Client.StreamEvents instead.
+//
+//nolint:gocritic // interface parity with Transport
 func (t *ACPTransport) SendStreaming(ctx context.Context, req Request) (<-chan string, <-chan error) {
 	textCh := make(chan string, 64)
 	errCh := make(chan error, 1)
@@ -1335,40 +1337,48 @@ func (t *ACPTransport) SendEventStream(ctx context.Context, req Request) (<-chan
 		defer close(eventCh)
 		defer close(errCh)
 
-		const maxAttempts = 2 // Initial try + one transparent reconnect retry
-		for attempt := 0; attempt < maxAttempts; attempt++ {
-			observedActivity, err := t.sendEventStreamingAttempt(ctx, req, eventCh)
-			if err == nil {
-				return
-			}
-
-			if ctx.Err() != nil {
-				errCh <- ctx.Err()
-				return
-			}
-
-			// Tool activity can be side-effecting even before assistant text is
-			// available. Never retry such a turn transparently.
-			if attempt < maxAttempts-1 && !observedActivity && IsRetryableError(err) {
-				t.resetConnection()
-				continue
-			}
-
+		if err := t.streamEventsWithRetry(ctx, req, eventCh, t.sendEventStreamingAttempt, t.resetConnection); err != nil {
 			errCh <- err
-			return
 		}
 	}()
 
 	return eventCh, errCh
 }
 
-// sendStreamingAttempt performs one ACP streaming attempt.
-// Returns whether any text chunks were emitted before completion/failure.
+// streamEventsWithRetry retries only before an event becomes visible. Replaying
+// a prompt after text or a tool lifecycle risks duplicated output or effects.
+func (t *ACPTransport) streamEventsWithRetry(
+	ctx context.Context,
+	req Request,
+	eventCh chan<- StreamEvent,
+	attemptFn func(context.Context, Request, chan<- StreamEvent) (bool, error),
+	resetFn func(),
+) error {
+	const maxAttempts = 2 // Initial try + one transparent reconnect retry.
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		observedOutput, err := attemptFn(ctx, req, eventCh)
+		if err == nil {
+			return nil
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if attempt < maxAttempts-1 && !observedOutput && IsRetryableError(err) {
+			resetFn()
+			continue
+		}
+		return err
+	}
+	return nil
+}
+
+// sendEventStreamingAttempt performs one ACP streaming attempt. Its boolean
+// result reports whether anything user-visible was emitted before failure.
 func (t *ACPTransport) sendEventStreamingAttempt( //nolint:gocyclo // streaming protocol handler with multiple message types
 	ctx context.Context,
 	req Request,
 	eventCh chan<- StreamEvent,
-) (observedActivity bool, retErr error) {
+) (observedOutput bool, retErr error) {
 	t.mu.Lock()
 
 	// Lazy connect
@@ -1451,21 +1461,31 @@ func (t *ACPTransport) sendEventStreamingAttempt( //nolint:gocyclo // streaming 
 		}
 		return b.String()
 	}
-	emitToolFallback := func() bool {
-		if agentTextAfterLatestTool {
+	emit := func(event StreamEvent) bool {
+		select {
+		case eventCh <- event:
+			return true
+		case <-ctx.Done():
 			return false
+		}
+	}
+	emitToolFallback := func() error {
+		if agentTextAfterLatestTool {
+			return nil
 		}
 		text := toolFallbackText()
 		if strings.TrimSpace(text) == "" {
-			return false
+			return nil
 		}
-		if receivedText {
-			eventCh <- StreamEvent{Type: StreamEventText, Text: "\n"}
+		if receivedText && !emit(StreamEvent{Type: StreamEventText, Text: "\n"}) {
+			return ctx.Err()
 		}
-		eventCh <- StreamEvent{Type: StreamEventText, Text: text}
+		if !emit(StreamEvent{Type: StreamEventText, Text: text}) {
+			return ctx.Err()
+		}
 		receivedText = true
 		agentTextAfterLatestTool = true
-		return true
+		return nil
 	}
 
 	// Stream response text as it arrives
@@ -1473,7 +1493,7 @@ func (t *ACPTransport) sendEventStreamingAttempt( //nolint:gocyclo // streaming 
 		select {
 		case <-ctx.Done():
 			t.sendCancel()
-			return observedActivity, ctx.Err()
+			return observedOutput, ctx.Err()
 
 		case <-idleTimer.C:
 			// Don't timeout while we're waiting on a local permission prompt.
@@ -1488,7 +1508,7 @@ func (t *ACPTransport) sendEventStreamingAttempt( //nolint:gocyclo // streaming 
 			t.sendCancel()
 			// Force reconnect after idle timeout: the process may be hung.
 			t.resetConnection()
-			return observedActivity, errors.Join(
+			return observedOutput, errors.Join(
 				ErrACPIdleTimeout,
 				fmt.Errorf("agent idle timeout (%v without response)", idleTimeout),
 			)
@@ -1497,7 +1517,7 @@ func (t *ACPTransport) sendEventStreamingAttempt( //nolint:gocyclo // streaming 
 			if !ok {
 				// Connection closed (readLoop exited) - reset for reconnect.
 				t.resetConnection()
-				return observedActivity, fmt.Errorf("%w: connection closed", ErrACPConnectionClosed)
+				return observedOutput, fmt.Errorf("%w: connection closed", ErrACPConnectionClosed)
 			}
 
 			// Reset idle timer on any message.
@@ -1534,13 +1554,15 @@ func (t *ACPTransport) sendEventStreamingAttempt( //nolint:gocyclo // streaming 
 			// Check if it's our response (end of prompt).
 			if msg.ID != nil && *msg.ID == id {
 				if msg.Error != nil {
-					return observedActivity, fmt.Errorf("rpc error %d: %s", msg.Error.Code, msg.Error.Message)
+					return observedOutput, fmt.Errorf("rpc error %d: %s", msg.Error.Code, msg.Error.Message)
 				}
-				emitToolFallback()
+				if err := emitToolFallback(); err != nil {
+					return observedOutput, err
+				}
 				if !receivedText {
-					return observedActivity, noOutputPromptError(msg.Result, toolUpdateCount)
+					return observedOutput, noOutputPromptError(msg.Result, toolUpdateCount)
 				}
-				return observedActivity, nil
+				return observedOutput, nil
 			}
 
 			// Handle session/update notification - stream text chunks.
@@ -1558,9 +1580,9 @@ func (t *ACPTransport) sendEventStreamingAttempt( //nolint:gocyclo // streaming 
 				case "tool_call", "tool_call_update":
 					toolUpdateCount++
 					sawToolSinceText = true
-					observedActivity = true
+					observedOutput = true
 					content, _ := toolCallUpdateText(updateParams.Update)
-					eventCh <- StreamEvent{
+					if !emit(StreamEvent{
 						Type: StreamEventToolCall,
 						ToolCall: ToolCallUpdate{
 							ID:      updateParams.Update.ToolCallID,
@@ -1569,6 +1591,8 @@ func (t *ACPTransport) sendEventStreamingAttempt( //nolint:gocyclo // streaming 
 							Status:  ToolCallStatus(updateParams.Update.Status),
 							Content: content,
 						},
+					}) {
+						return observedOutput, ctx.Err()
 					}
 				case "config_option_update":
 					// The agent switched a config option on its own (e.g. model
@@ -1581,11 +1605,16 @@ func (t *ACPTransport) sendEventStreamingAttempt( //nolint:gocyclo // streaming 
 					// Separate this text block from a preceding one that was
 					// split off by a tool call, so the two don't glue together.
 					if sawToolSinceText && receivedText {
-						eventCh <- StreamEvent{Type: StreamEventText, Text: "\n\n"}
+						if !emit(StreamEvent{Type: StreamEventText, Text: "\n\n"}) {
+							return observedOutput, ctx.Err()
+						}
 					}
 					sawToolSinceText = false
 					// Send text chunk immediately.
-					eventCh <- StreamEvent{Type: StreamEventText, Text: text}
+					if !emit(StreamEvent{Type: StreamEventText, Text: text}) {
+						return observedOutput, ctx.Err()
+					}
+					observedOutput = true
 					receivedText = true
 					agentTextAfterLatestTool = true
 					continue
@@ -1597,34 +1626,6 @@ func (t *ACPTransport) sendEventStreamingAttempt( //nolint:gocyclo // streaming 
 			}
 		}
 	}
-}
-
-// sendStreamingAttempt remains as a small test-facing compatibility helper.
-// Production paths use sendEventStreamingAttempt through SendEventStream.
-func (t *ACPTransport) sendStreamingAttempt(ctx context.Context, req Request, textCh chan<- string) (bool, error) {
-	events := make(chan StreamEvent, 64)
-	result := make(chan struct {
-		observed bool
-		err      error
-	}, 1)
-	go func() {
-		observed, err := t.sendEventStreamingAttempt(ctx, req, events)
-		close(events)
-		result <- struct {
-			observed bool
-			err      error
-		}{observed, err}
-	}()
-
-	receivedText := false
-	for event := range events {
-		if event.Type == StreamEventText && event.Text != "" {
-			textCh <- event.Text
-			receivedText = true
-		}
-	}
-	outcome := <-result
-	return receivedText || outcome.observed, outcome.err
 }
 
 // Compile-time check

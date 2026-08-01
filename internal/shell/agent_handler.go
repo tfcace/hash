@@ -211,6 +211,8 @@ func (h *AgentHandler) StreamRequest(ctx context.Context, parsed parser.ParseRes
 // StreamEvents processes a parsed request and exposes typed lifecycle events
 // when the underlying agent supports them. Text-only transports are adapted by
 // agent.Client, so callers do not need vendor-specific branches.
+//
+//nolint:gocritic // unnamedResult: can't name receive-only channel returns
 func (h *AgentHandler) StreamEvents(ctx context.Context, parsed parser.ParseResult) (<-chan agent.StreamEvent, <-chan error) {
 	if h.client == nil {
 		errCh := make(chan error, 1)
@@ -284,6 +286,7 @@ func (h *AgentHandler) StreamFollowUp(ctx context.Context, reply string, transcr
 	return h.client.StreamRequest(ctx, req)
 }
 
+//nolint:gocritic // unnamedResult: can't name receive-only channel returns
 func (h *AgentHandler) StreamFollowUpEvents(ctx context.Context, reply string, transcript []agentConversationMessage) (<-chan agent.StreamEvent, <-chan error) {
 	if h.client == nil {
 		errCh := make(chan error, 1)

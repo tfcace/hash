@@ -68,20 +68,35 @@ func TestTextStreamFromEvents_ExposesTransientToolStatusOutsideGhostText(t *test
 	close(events)
 	close(errs)
 
-	text, streamErrs, status := textStreamFromEvents(events, errs)
-	if got := <-status; got != "Agent running pwd..." {
-		t.Fatalf("status = %q, want transient tool activity", got)
+	updates, streamErrs := textStreamFromEvents(context.Background(), events, errs)
+	if got := <-updates; got.Status != "Agent running pwd..." || got.Text != "" {
+		t.Fatalf("first ghost update = %#v, want transient tool activity", got)
 	}
-	if got := <-status; got != "" {
-		t.Fatalf("status after text = %q, want cleared activity", got)
-	}
-	if got := <-text; got != "ready" {
-		t.Fatalf("ghost text = %q, want ready", got)
+	if got := <-updates; got.Status != "" || got.Text != "ready" {
+		t.Fatalf("second ghost update = %#v, want text with cleared activity", got)
 	}
 	for err := range streamErrs {
 		if err != nil {
 			t.Fatalf("unexpected stream error: %v", err)
 		}
+	}
+}
+
+func TestTextStreamFromEvents_StopsWhenContextCanceledWithoutEditorReader(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	events := make(chan agent.StreamEvent)
+	errs := make(chan error)
+	close(errs)
+
+	updates, _ := textStreamFromEvents(ctx, events, errs)
+	select {
+	case _, ok := <-updates:
+		if ok {
+			t.Fatal("adapter emitted an update with an already-canceled context")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("adapter did not stop after cancellation")
 	}
 }
 

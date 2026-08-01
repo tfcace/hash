@@ -75,9 +75,6 @@ type Result struct {
 	ContextPicker bool // Ctrl+P - launch context picker
 }
 
-// GhostTextChan is a channel that receives ghost text updates.
-type GhostTextChan <-chan string
-
 // Editor is the main editor instance.
 type Editor struct {
 	config  Config
@@ -109,11 +106,9 @@ type Editor struct {
 
 	// Ghost text state (inline suggestions)
 	ghost           *GhostText
-	ghostTextChan   GhostTextChan // Channel for streaming ghost text updates
-	ghostErrChan    <-chan error  // Channel for ghost text errors
-	streamingModel  string        // Model name for "Thinking..." display
-	ghostStatusChan <-chan string // Transient agent activity while ghost text streams
-	streamingStatus string
+	ghostStreamChan <-chan GhostStreamUpdate // Unified streamed text and status.
+	ghostErrChan    <-chan error             // Channel for ghost text errors
+	streamingModel  string                   // Model name for "Thinking..." display
 }
 
 // New creates a new editor.
@@ -171,20 +166,14 @@ func (e *Editor) SetGhostText(text string) {
 
 // SetGhostTextStreaming sets up streaming ghost text from channels.
 // Text chunks arrive on textCh, errors on errCh.
-func (e *Editor) SetGhostTextStreaming(textCh <-chan string, errCh <-chan error) {
-	e.ghostTextChan = textCh
+func (e *Editor) SetGhostTextStreaming(updates <-chan GhostStreamUpdate, errCh <-chan error) {
+	e.ghostStreamChan = updates
 	e.ghostErrChan = errCh
 	e.ghost.Clear()
 	e.ghost.SetStreaming(true)
 	e.ghost.FromAgent = true // Agent suggestions show hints
 	// Dismiss any active completion menu - ghost text takes precedence
 	e.dismissCompletion()
-}
-
-// SetGhostStatusStreaming provides transient agent activity without inserting
-// it into the editable completion text.
-func (e *Editor) SetGhostStatusStreaming(statusCh <-chan string) {
-	e.ghostStatusChan = statusCh
 }
 
 // SetStreamingModel sets the model name for "Thinking..." display.
@@ -195,7 +184,7 @@ func (e *Editor) SetStreamingModel(model string) {
 // ClearGhostText removes any ghost text.
 func (e *Editor) ClearGhostText() {
 	e.ghost.Clear()
-	e.ghostTextChan = nil
+	e.ghostStreamChan = nil
 	e.ghostErrChan = nil
 }
 
@@ -385,10 +374,8 @@ func (e *Editor) runEventLoop(ctx context.Context, sigCh <-chan os.Signal, keyCh
 			e.handleResize()
 		case <-e.config.CompletionReadyCh:
 			e.handleCompletionReady()
-		case text, ok := <-e.ghostTextChan:
-			e.handleGhostTextUpdate(text, ok)
-		case status, ok := <-e.ghostStatusChan:
-			e.handleGhostStatusUpdate(status, ok)
+		case update, ok := <-e.ghostStreamChan:
+			e.handleGhostStreamUpdate(update, ok)
 		case err, ok := <-e.ghostErrChan:
 			e.handleGhostTextError(err, ok)
 		case err, ok := <-keyErrCh:
@@ -431,27 +418,21 @@ func (e *Editor) handleCompletionReady() {
 	e.triggerCompletion()
 }
 
-func (e *Editor) handleGhostStatusUpdate(status string, ok bool) {
-	if !ok {
-		e.ghostStatusChan = nil
-		e.streamingStatus = ""
-		e.render()
-		return
-	}
-	e.streamingStatus = status
-	e.render()
-}
-
-// handleGhostTextUpdate processes ghost text streaming updates.
-func (e *Editor) handleGhostTextUpdate(text string, ok bool) {
+// handleGhostStreamUpdate processes streamed ghost text and activity together.
+func (e *Editor) handleGhostStreamUpdate(update GhostStreamUpdate, ok bool) {
 	if !ok {
 		e.ghost.SetStreaming(false)
-		e.ghostTextChan = nil
+		e.ghostStreamChan = nil
 		e.ghostErrChan = nil
 		e.render()
 		return
 	}
-	e.ghost.Append(text)
+	e.ghost.Status = update.Status
+	if update.Text == "" {
+		e.render()
+		return
+	}
+	e.ghost.Append(update.Text)
 	if e.completionActive {
 		e.dismissCompletion()
 	}
@@ -466,7 +447,7 @@ func (e *Editor) handleGhostTextError(err error, ok bool) {
 	}
 	if err != nil {
 		e.ghost.Clear()
-		e.ghostTextChan = nil
+		e.ghostStreamChan = nil
 		e.ghostErrChan = nil
 		e.render()
 	}
@@ -542,7 +523,7 @@ func (e *Editor) handleControlKey(key Key) (Result, bool, bool) {
 func (e *Editor) cancelInput() Result {
 	e.dismissCompletion()
 	e.ghost.Clear()
-	e.ghostTextChan = nil
+	e.ghostStreamChan = nil
 	e.ghostErrChan = nil
 	return Result{Canceled: true}
 }
@@ -550,9 +531,9 @@ func (e *Editor) cancelInput() Result {
 // handleCtrlC handles Ctrl+C key press.
 func (e *Editor) handleCtrlC() (Result, bool) {
 	e.dismissCompletion()
-	if e.ghost.Streaming || e.ghostTextChan != nil {
+	if e.ghost.Streaming || e.ghostStreamChan != nil {
 		e.ghost.Clear()
-		e.ghostTextChan = nil
+		e.ghostStreamChan = nil
 		e.ghostErrChan = nil
 		return Result{Canceled: true}, true
 	}
@@ -701,12 +682,15 @@ func (e *Editor) render() {
 
 	// Pass ghost text to display for inline rendering
 	ghostText := ""
-	ghostStreaming := e.ghost.Streaming
-	ghostFromAgent := e.ghost.FromAgent
 	if e.ghost.Active && !e.ghost.IsEmpty() {
 		ghostText = e.ghost.Remaining()
 	}
-	e.display.RenderWithGhost(e.state.Buffer, e.state.Cursor, hasSelection, ghostText, ghostStreaming, ghostFromAgent, e.streamingModel, e.streamingStatus)
+	e.display.RenderWithGhost(e.state.Buffer, e.state.Cursor, hasSelection, ghostText, GhostRenderState{
+		Streaming: e.ghost.Streaming,
+		FromAgent: e.ghost.FromAgent,
+		ModelName: e.streamingModel,
+		Status:    e.ghost.Status,
+	})
 
 	// Render completion menu if active
 	if e.completionActive {
@@ -760,7 +744,7 @@ func (e *Editor) handleGhostTextKey(key Key) bool {
 			// For history predictions: Tab dismisses ghost and triggers completion instead.
 			// Use Right arrow to accept predictions (fish-style).
 			e.ghost.Clear()
-			e.ghostTextChan = nil
+			e.ghostStreamChan = nil
 			e.ghostErrChan = nil
 			return false // Fall through to completion/mode handler
 		}
@@ -775,7 +759,7 @@ func (e *Editor) handleGhostTextKey(key Key) bool {
 			e.insertText(text)
 		}
 		// Stop any active streaming
-		e.ghostTextChan = nil
+		e.ghostStreamChan = nil
 		e.ghostErrChan = nil
 		return true
 
@@ -791,7 +775,7 @@ func (e *Editor) handleGhostTextKey(key Key) bool {
 			e.insertText(text)
 		}
 		// Stop any active streaming
-		e.ghostTextChan = nil
+		e.ghostStreamChan = nil
 		e.ghostErrChan = nil
 		return true
 
@@ -802,7 +786,7 @@ func (e *Editor) handleGhostTextKey(key Key) bool {
 			"action": "dismiss",
 		})
 		e.ghost.Clear()
-		e.ghostTextChan = nil
+		e.ghostStreamChan = nil
 		e.ghostErrChan = nil
 		return true
 
@@ -827,7 +811,7 @@ func (e *Editor) handleGhostTextKey(key Key) bool {
 			if text != "" {
 				e.insertText(text)
 			}
-			e.ghostTextChan = nil
+			e.ghostStreamChan = nil
 			e.ghostErrChan = nil
 			// Don't return true - let Enter propagate to submit
 			return false
@@ -838,7 +822,7 @@ func (e *Editor) handleGhostTextKey(key Key) bool {
 			"action": "dismiss_and_submit",
 		})
 		e.ghost.Clear()
-		e.ghostTextChan = nil
+		e.ghostStreamChan = nil
 		e.ghostErrChan = nil
 		// Don't return true - let Enter propagate to submit
 		return false

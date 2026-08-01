@@ -16,6 +16,8 @@ func (c *Client) StreamRequest(ctx context.Context, req Request) (<-chan string,
 
 // StreamEvents returns ordered text and lifecycle events. Text-only
 // transports are adapted so callers can use one stream shape for every agent.
+//
+//nolint:gocritic // unnamedResult: can't name receive-only channel returns
 func (c *Client) StreamEvents(ctx context.Context, req Request) (<-chan StreamEvent, <-chan error) {
 	if c != nil && c.transport != nil {
 		if transport, ok := c.transport.(EventStreamTransport); ok {
@@ -23,7 +25,9 @@ func (c *Client) StreamEvents(ctx context.Context, req Request) (<-chan StreamEv
 		}
 	}
 
-	events := make(chan StreamEvent, 16)
+	// Apply backpressure to text-only transports instead of buffering an
+	// arbitrary number of chunks while their consumer is busy rendering.
+	events := make(chan StreamEvent)
 	errs := make(chan error, 1)
 	if c == nil || c.transport == nil {
 		errs <- &AgentError{Message: "no agent configured"}

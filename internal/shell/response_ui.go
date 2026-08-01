@@ -198,8 +198,21 @@ func (u *ResponseUI) showError(err string) {
 func (u *ResponseUI) ShowState(state AgentState) {
 	u.spinnerMu.Lock()
 	defer u.spinnerMu.Unlock()
+	u.showSpinnerLocked(agentStateLabel(state, u.agentModel))
+}
 
-	text := agentStateLabel(state, u.agentModel)
+// ShowActivity updates the existing response spinner with structured agent
+// activity. It shares the same animation and lifecycle as ShowState.
+func (u *ResponseUI) ShowActivity(label string) {
+	if strings.TrimSpace(label) == "" {
+		label = "agent · working"
+	}
+	u.spinnerMu.Lock()
+	defer u.spinnerMu.Unlock()
+	u.showSpinnerLocked(label)
+}
+
+func (u *ResponseUI) showSpinnerLocked(text string) {
 
 	if u.spinnerRunning {
 		// Update the spinner text
@@ -216,28 +229,6 @@ func (u *ResponseUI) ShowState(state AgentState) {
 	// Start OSC progress bar
 	u.progress.Start()
 
-	go u.runSpinner()
-}
-
-// ShowActivity updates the live status line for a tool or other structured
-// agent activity. It intentionally omits the model label: the action itself is
-// the most useful information while the agent is working.
-func (u *ResponseUI) ShowActivity(label string) {
-	u.spinnerMu.Lock()
-	defer u.spinnerMu.Unlock()
-
-	if strings.TrimSpace(label) == "" {
-		label = "agent · working"
-	}
-	if u.spinnerRunning {
-		u.spinnerText = label
-		return
-	}
-	u.spinnerText = label
-	u.spinnerStop = make(chan struct{})
-	u.spinnerDone = make(chan struct{})
-	u.spinnerRunning = true
-	u.progress.Start()
 	go u.runSpinner()
 }
 
