@@ -17,8 +17,9 @@ import (
 // loader hands over commands most-recent-first and numbers them downward from
 // -1, while live additions count up from 0. Anything executed in this session
 // therefore outranks anything loaded from disk, and no timestamp parsing is
-// needed. Commands written to the shared history database by another
-// concurrently running shell only appear here on that shell's own index.
+// needed. Commands written to the shared history database by other
+// concurrently running shells only appear after the next install; a
+// hook-triggered refresh is planned (see TODO.md, cross-shell freshness).
 type prefixIndex struct {
 	mu      sync.RWMutex
 	loaded  bool
