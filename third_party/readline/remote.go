@@ -267,10 +267,11 @@ func ReadMessage(r io.Reader) (*Message, error) {
 	if length < 2 || length > maxRemoteMessageSize {
 		return nil, fmt.Errorf("invalid remote message length %d", length)
 	}
-	m.Data = make([]byte, int(length)-2)
-	if _, err := io.ReadFull(r, m.Data); err != nil {
+	var data bytes.Buffer
+	if _, err := io.CopyN(&data, r, int64(length)-2); err != nil {
 		return nil, err
 	}
+	m.Data = data.Bytes()
 	return m, nil
 }
 
