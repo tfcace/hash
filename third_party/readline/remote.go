@@ -280,12 +280,18 @@ func NewMessage(t MsgType, data []byte) *Message {
 }
 
 func (m *Message) WriteTo(w io.Writer) (int, error) {
-	buf := bytes.NewBuffer(make([]byte, 0, len(m.Data)+2+4))
-	binary.Write(buf, binary.BigEndian, int32(len(m.Data)+2))
-	binary.Write(buf, binary.BigEndian, m.Type)
-	buf.Write(m.Data)
-	n, err := buf.WriteTo(w)
-	return int(n), err
+	if len(m.Data) > int(maxRemoteMessageSize)-2 {
+		return 0, fmt.Errorf("remote message payload is too large: %d", len(m.Data))
+	}
+	var header [6]byte
+	binary.BigEndian.PutUint32(header[:4], uint32(len(m.Data)+2))
+	binary.BigEndian.PutUint16(header[4:], uint16(m.Type))
+	headerBytes, err := io.Copy(w, bytes.NewReader(header[:]))
+	if err != nil {
+		return int(headerBytes), err
+	}
+	payloadBytes, err := io.Copy(w, bytes.NewReader(m.Data))
+	return int(headerBytes + payloadBytes), err
 }
 
 // -----------------------------------------------------------------------------
