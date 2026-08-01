@@ -573,6 +573,11 @@ func extractPluginArchive(archive []byte, destination string) error {
 		return fmt.Errorf("open plugin archive: %w", err)
 	}
 	defer func() { _ = gzipReader.Close() }()
+	root, err := os.OpenRoot(destination)
+	if err != nil {
+		return fmt.Errorf("open extraction root: %w", err)
+	}
+	defer func() { _ = root.Close() }()
 	tarReader := tar.NewReader(gzipReader)
 	entries := 0
 	var total int64
@@ -592,27 +597,23 @@ func extractPluginArchive(archive []byte, destination string) error {
 		if total > maxExtractedBytes {
 			return fmt.Errorf("plugin archive exceeds extracted-size limit")
 		}
-		if err := extractArchiveEntry(tarReader, header, destination); err != nil {
+		if err := extractArchiveEntry(tarReader, header, root); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func extractArchiveEntry(tarReader *tar.Reader, header *tar.Header, destination string) error {
+func extractArchiveEntry(tarReader *tar.Reader, header *tar.Header, root *os.Root) error {
 	clean := path.Clean(header.Name)
 	if clean == "." || path.IsAbs(clean) || clean == ".." || strings.HasPrefix(clean, "../") {
 		return fmt.Errorf("unsafe archive path %q", header.Name)
 	}
-	target := filepath.Join(destination, filepath.FromSlash(clean))
-	if !pathWithin(destination, target) {
-		return fmt.Errorf("unsafe archive path %q", header.Name)
-	}
 	switch header.Typeflag {
 	case tar.TypeDir:
-		return os.MkdirAll(target, 0o755) //nolint:gosec // extracted bundle directory
+		return root.MkdirAll(clean, 0o755) //nolint:gosec // extraction is confined by os.Root
 	case tar.TypeReg:
-		return extractArchiveFile(tarReader, header, target)
+		return extractArchiveFile(tarReader, header, clean, root)
 	case tar.TypeXHeader, tar.TypeXGlobalHeader:
 		return nil
 	default:
@@ -620,15 +621,15 @@ func extractArchiveEntry(tarReader *tar.Reader, header *tar.Header, destination 
 	}
 }
 
-func extractArchiveFile(tarReader *tar.Reader, header *tar.Header, target string) error {
-	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil { //nolint:gosec // extracted bundle directory
+func extractArchiveFile(tarReader *tar.Reader, header *tar.Header, name string, root *os.Root) error {
+	if err := root.MkdirAll(path.Dir(name), 0o755); err != nil { //nolint:gosec // extraction is confined by os.Root
 		return err
 	}
 	mode := os.FileMode(0o644)
 	if header.Mode&0o111 != 0 {
 		mode = 0o755
 	}
-	file, err := os.OpenFile(target, os.O_CREATE|os.O_EXCL|os.O_WRONLY, mode) //nolint:gosec // archive permissions are clamped
+	file, err := root.OpenFile(name, os.O_CREATE|os.O_EXCL|os.O_WRONLY, mode) //nolint:gosec // extraction is confined by os.Root
 	if err != nil {
 		return err
 	}
