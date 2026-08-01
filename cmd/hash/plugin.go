@@ -125,64 +125,76 @@ func runPluginLifecycle(args []string, lifecycle pluginLifecycle, stdout, stderr
 	defer cancel()
 	switch args[0] {
 	case "install":
-		if len(args) != 2 {
-			fmt.Fprintln(stderr, "Usage: hash plugin install <github-repository-or-artifact-url>")
-			return 2
-		}
-		result, err := lifecycle.Install(ctx, args[1])
-		if err != nil {
-			fmt.Fprintf(stderr, "hash: install plugin: %v\n", err)
-			return 1
-		}
-		if err := config.SetPluginEnabled(getConfigDir(), result.ID, false); err != nil {
-			if rollbackErr := lifecycle.Uninstall(result.ID); rollbackErr != nil {
-				fmt.Fprintf(stderr, "hash: disable installed plugin: %v (rollback also failed: %v)\n", err, rollbackErr)
-			} else {
-				fmt.Fprintf(stderr, "hash: disable installed plugin: %v (installation rolled back)\n", err)
-			}
-			return 1
-		}
-		fmt.Fprintf(stdout, "Installed %s %s\nSource: %s\n", result.ID, result.Version, result.Source)
-		fmt.Fprintln(stdout, "Security: this trusted executable receives your OS user privileges. The plugin remains disabled until explicitly enabled.")
-		return 0
+		return runPluginInstall(ctx, args, lifecycle, stdout, stderr)
 	case "upgrade":
-		if len(args) < 2 || len(args) > 3 {
-			fmt.Fprintln(stderr, "Usage: hash plugin upgrade <id> [github-repository-or-artifact-url]")
-			return 2
-		}
-		source := ""
-		if len(args) == 3 {
-			source = args[2]
-		}
-		result, err := lifecycle.Upgrade(ctx, args[1], source)
-		if err != nil {
-			fmt.Fprintf(stderr, "hash: upgrade plugin: %v\n", err)
-			return 1
-		}
-		if !result.Changed {
-			fmt.Fprintf(stdout, "%s is already at %s\n", result.ID, result.Version)
-			return 0
-		}
-		fmt.Fprintf(stdout, "Upgraded %s %s -> %s\nRestart Hash to load the new plugin process.\n", result.ID, result.PreviousVersion, result.Version)
-		return 0
+		return runPluginUpgrade(ctx, args, lifecycle, stdout, stderr)
 	case "uninstall":
-		if len(args) != 2 {
-			fmt.Fprintln(stderr, "Usage: hash plugin uninstall <id>")
-			return 2
-		}
-		if err := lifecycle.Uninstall(args[1]); err != nil {
-			fmt.Fprintf(stderr, "hash: uninstall plugin: %v\n", err)
-			return 1
-		}
-		if err := config.SetPluginEnabled(getConfigDir(), args[1], false); err != nil {
-			fmt.Fprintf(stderr, "hash: disable uninstalled plugin: %v\n", err)
-			return 1
-		}
-		fmt.Fprintf(stdout, "Uninstalled %s\n", args[1])
-		return 0
+		return runPluginUninstall(args, lifecycle, stdout, stderr)
 	default:
 		return 2
 	}
+}
+
+func runPluginInstall(ctx context.Context, args []string, lifecycle pluginLifecycle, stdout, stderr io.Writer) int {
+	if len(args) != 2 {
+		fmt.Fprintln(stderr, "Usage: hash plugin install <github-repository-or-artifact-url>")
+		return 2
+	}
+	result, err := lifecycle.Install(ctx, args[1])
+	if err != nil {
+		fmt.Fprintf(stderr, "hash: install plugin: %v\n", err)
+		return 1
+	}
+	if err := config.SetPluginEnabled(getConfigDir(), result.ID, false); err != nil {
+		if rollbackErr := lifecycle.Uninstall(result.ID); rollbackErr != nil {
+			fmt.Fprintf(stderr, "hash: disable installed plugin: %v (rollback also failed: %v)\n", err, rollbackErr)
+		} else {
+			fmt.Fprintf(stderr, "hash: disable installed plugin: %v (installation rolled back)\n", err)
+		}
+		return 1
+	}
+	fmt.Fprintf(stdout, "Installed %s %s\nSource: %s\n", result.ID, result.Version, result.Source)
+	fmt.Fprintln(stdout, "Security: this trusted executable receives your OS user privileges. The plugin remains disabled until explicitly enabled.")
+	return 0
+}
+
+func runPluginUpgrade(ctx context.Context, args []string, lifecycle pluginLifecycle, stdout, stderr io.Writer) int {
+	if len(args) < 2 || len(args) > 3 {
+		fmt.Fprintln(stderr, "Usage: hash plugin upgrade <id> [github-repository-or-artifact-url]")
+		return 2
+	}
+	source := ""
+	if len(args) == 3 {
+		source = args[2]
+	}
+	result, err := lifecycle.Upgrade(ctx, args[1], source)
+	if err != nil {
+		fmt.Fprintf(stderr, "hash: upgrade plugin: %v\n", err)
+		return 1
+	}
+	if !result.Changed {
+		fmt.Fprintf(stdout, "%s is already at %s\n", result.ID, result.Version)
+		return 0
+	}
+	fmt.Fprintf(stdout, "Upgraded %s %s -> %s\nRestart Hash to load the new plugin process.\n", result.ID, result.PreviousVersion, result.Version)
+	return 0
+}
+
+func runPluginUninstall(args []string, lifecycle pluginLifecycle, stdout, stderr io.Writer) int {
+	if len(args) != 2 {
+		fmt.Fprintln(stderr, "Usage: hash plugin uninstall <id>")
+		return 2
+	}
+	if err := lifecycle.Uninstall(args[1]); err != nil {
+		fmt.Fprintf(stderr, "hash: uninstall plugin: %v\n", err)
+		return 1
+	}
+	if err := config.SetPluginEnabled(getConfigDir(), args[1], false); err != nil {
+		fmt.Fprintf(stderr, "hash: disable uninstalled plugin: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "Uninstalled %s\n", args[1])
+	return 0
 }
 
 func linkPlugin(source string, stdout, stderr io.Writer) int {

@@ -160,100 +160,159 @@ func (i *Installer) Uninstall(id string) error {
 }
 
 func (i *Installer) install(ctx context.Context, source, expectedID string, replace bool) (InstallResult, error) {
-	artifact, err := i.resolve(ctx, source)
+	artifact, archive, actualChecksum, err := i.fetchArtifact(ctx, source)
 	if err != nil {
 		return InstallResult{}, err
 	}
-	archive, err := i.download(ctx, artifact.url, maxArtifactBytes)
-	if err != nil {
-		return InstallResult{}, fmt.Errorf("download plugin artifact: %w", err)
-	}
-	digest := sha256.Sum256(archive)
-	actualChecksum := hex.EncodeToString(digest[:])
-	if !strings.EqualFold(actualChecksum, artifact.checksum) {
-		return InstallResult{}, fmt.Errorf("artifact checksum mismatch: got %s, want %s", actualChecksum, artifact.checksum)
-	}
-
-	if err := os.MkdirAll(i.bundleRoot, 0o755); err != nil { //nolint:gosec // XDG data directory
-		return InstallResult{}, err
-	}
-	staging, err := os.MkdirTemp(i.bundleRoot, ".staging-")
+	staging, manifest, err := i.stageArtifact(archive)
 	if err != nil {
 		return InstallResult{}, err
 	}
 	defer os.RemoveAll(staging) //nolint:errcheck // cleanup after rename is harmless
-	if err := extractPluginArchive(archive, staging); err != nil {
+	if validationErr := validateArtifactManifest(manifest, artifact, expectedID); validationErr != nil {
+		return InstallResult{}, validationErr
+	}
+	final, current, err := i.prepareDestination(manifest, replace)
+	if err != nil {
 		return InstallResult{}, err
+	}
+	if current != nil {
+		manifest.Directory = current.Directory
+		return newInstallResult(manifest, artifact, actualChecksum, false), nil
+	}
+	if metadataErr := writeInstallMetadata(staging, manifest, artifact, actualChecksum); metadataErr != nil {
+		return InstallResult{}, metadataErr
+	}
+	if err = os.Rename(staging, final); err != nil {
+		return InstallResult{}, fmt.Errorf("commit plugin bundle: %w", err)
+	}
+	if err = i.activate(manifest.ID, final, replace); err != nil {
+		_ = os.RemoveAll(final)
+		return InstallResult{}, err
+	}
+	manifest.Directory = final
+	return newInstallResult(manifest, artifact, actualChecksum, true), nil
+}
+
+func (i *Installer) fetchArtifact(ctx context.Context, source string) (artifact resolvedArtifact, archive []byte, checksum string, err error) {
+	artifact, err = i.resolve(ctx, source)
+	if err != nil {
+		return resolvedArtifact{}, nil, "", err
+	}
+	archive, err = i.download(ctx, artifact.url, maxArtifactBytes)
+	if err != nil {
+		return resolvedArtifact{}, nil, "", fmt.Errorf("download plugin artifact: %w", err)
+	}
+	digest := sha256.Sum256(archive)
+	checksum = hex.EncodeToString(digest[:])
+	if !strings.EqualFold(checksum, artifact.checksum) {
+		return resolvedArtifact{}, nil, "", fmt.Errorf("artifact checksum mismatch: got %s, want %s", checksum, artifact.checksum)
+	}
+	return artifact, archive, checksum, nil
+}
+
+func (i *Installer) stageArtifact(archive []byte) (string, Manifest, error) {
+	if err := os.MkdirAll(i.bundleRoot, 0o755); err != nil { //nolint:gosec // XDG data directory
+		return "", Manifest{}, err
+	}
+	staging, err := os.MkdirTemp(i.bundleRoot, ".staging-")
+	if err != nil {
+		return "", Manifest{}, err
+	}
+	if err = extractPluginArchive(archive, staging); err != nil {
+		_ = os.RemoveAll(staging)
+		return "", Manifest{}, err
 	}
 	manifest, err := LoadManifest(staging)
 	if err != nil {
-		return InstallResult{}, fmt.Errorf("invalid plugin bundle: %w", err)
+		_ = os.RemoveAll(staging)
+		return "", Manifest{}, fmt.Errorf("invalid plugin bundle: %w", err)
 	}
+	return staging, manifest, nil
+}
+
+func validateArtifactManifest(manifest Manifest, artifact resolvedArtifact, expectedID string) error {
 	if expectedID != "" && manifest.ID != expectedID {
-		return InstallResult{}, fmt.Errorf("artifact plugin ID %q does not match installed plugin %q", manifest.ID, expectedID)
+		return fmt.Errorf("artifact plugin ID %q does not match installed plugin %q", manifest.ID, expectedID)
 	}
 	if artifact.expectedVersion != "" && manifest.Version != artifact.expectedVersion {
-		return InstallResult{}, fmt.Errorf("manifest version %q does not match release %q", manifest.Version, artifact.expectedVersion)
+		return fmt.Errorf("manifest version %q does not match release %q", manifest.Version, artifact.expectedVersion)
 	}
 	if !installVersionPattern.MatchString(manifest.Version) {
-		return InstallResult{}, fmt.Errorf("version %q is not safe for managed installation", manifest.Version)
+		return fmt.Errorf("version %q is not safe for managed installation", manifest.Version)
 	}
 	executableInfo, err := os.Stat(manifest.Executable())
 	if err != nil || !executableInfo.Mode().IsRegular() || executableInfo.Mode().Perm()&0o111 == 0 {
-		return InstallResult{}, fmt.Errorf("plugin entrypoint is not an executable regular file: %s", manifest.Entrypoint)
+		return fmt.Errorf("plugin entrypoint is not an executable regular file: %s", manifest.Entrypoint)
 	}
+	return nil
+}
 
+func (i *Installer) prepareDestination(manifest Manifest, replace bool) (string, *Manifest, error) {
 	active := filepath.Join(i.pluginRoot, manifest.ID)
 	if !replace {
-		if _, err := os.Lstat(active); err == nil {
-			return InstallResult{}, fmt.Errorf("plugin %q is already installed; use hash plugin upgrade", manifest.ID)
-		} else if !os.IsNotExist(err) {
-			return InstallResult{}, err
+		_, statErr := os.Lstat(active)
+		if statErr == nil {
+			return "", nil, fmt.Errorf("plugin %q is already installed; use hash plugin upgrade", manifest.ID)
+		}
+		if !os.IsNotExist(statErr) {
+			return "", nil, statErr
 		}
 	}
 	final := filepath.Join(i.bundleRoot, manifest.ID, manifest.Version)
 	if replace {
-		if current, _, metadataErr := i.installedMetadata(manifest.ID); metadataErr != nil {
-			return InstallResult{}, metadataErr
-		} else if current.Version == manifest.Version {
-			manifest.Directory = current.Directory
-			return InstallResult{Manifest: manifest, ID: manifest.ID, Version: manifest.Version, Source: artifact.source, ArtifactURL: artifact.url, Checksum: actualChecksum, Changed: false}, nil
+		current, _, metadataErr := i.installedMetadata(manifest.ID)
+		if metadataErr != nil {
+			return "", nil, metadataErr
+		}
+		if current.Version == manifest.Version {
+			return final, &current, nil
 		}
 	}
-	if _, err := os.Stat(final); err == nil {
-		return InstallResult{}, fmt.Errorf("managed plugin version already exists: %s", final)
-	} else if !os.IsNotExist(err) {
-		return InstallResult{}, err
+	_, statErr := os.Stat(final)
+	if statErr == nil {
+		return "", nil, fmt.Errorf("managed plugin version already exists: %s", final)
 	}
-	if err := os.MkdirAll(filepath.Dir(final), 0o755); err != nil { //nolint:gosec // XDG data directory
-		return InstallResult{}, err
+	if !os.IsNotExist(statErr) {
+		return "", nil, statErr
 	}
+	if mkdirErr := os.MkdirAll(filepath.Dir(final), 0o755); mkdirErr != nil { //nolint:gosec // XDG data directory
+		return "", nil, mkdirErr
+	}
+	return final, nil, nil
+}
+
+func writeInstallMetadata(staging string, manifest Manifest, artifact resolvedArtifact, checksum string) error {
 	metadata := installMetadata{
 		SchemaVersion: 1,
 		ID:            manifest.ID,
 		Version:       manifest.Version,
 		Source:        artifact.source,
 		ArtifactURL:   artifact.url,
-		SHA256:        actualChecksum,
+		SHA256:        checksum,
 		InstalledAt:   time.Now().UTC(),
 	}
 	metadataBytes, err := json.MarshalIndent(metadata, "", "  ")
 	if err != nil {
-		return InstallResult{}, err
+		return err
 	}
 	metadataBytes = append(metadataBytes, '\n')
 	if err := os.WriteFile(filepath.Join(staging, installMetadataFilename), metadataBytes, 0o644); err != nil { //nolint:gosec // non-secret install metadata
-		return InstallResult{}, err
+		return err
 	}
-	if err := os.Rename(staging, final); err != nil {
-		return InstallResult{}, fmt.Errorf("commit plugin bundle: %w", err)
+	return nil
+}
+
+func newInstallResult(manifest Manifest, artifact resolvedArtifact, checksum string, changed bool) InstallResult {
+	return InstallResult{
+		Manifest:    manifest,
+		ID:          manifest.ID,
+		Version:     manifest.Version,
+		Source:      artifact.source,
+		ArtifactURL: artifact.url,
+		Checksum:    checksum,
+		Changed:     changed,
 	}
-	if err := i.activate(manifest.ID, final, replace); err != nil {
-		_ = os.RemoveAll(final)
-		return InstallResult{}, err
-	}
-	manifest.Directory = final
-	return InstallResult{Manifest: manifest, ID: manifest.ID, Version: manifest.Version, Source: artifact.source, ArtifactURL: artifact.url, Checksum: actualChecksum, Changed: true}, nil
 }
 
 func (i *Installer) activate(id, target string, replace bool) error {
@@ -275,12 +334,12 @@ func (i *Installer) activate(id, target string, replace bool) error {
 		return err
 	}
 	temporary := placeholder.Name()
-	if err := placeholder.Close(); err != nil {
+	if closeErr := placeholder.Close(); closeErr != nil {
 		_ = os.Remove(temporary)
-		return err
+		return closeErr
 	}
-	if err := os.Remove(temporary); err != nil {
-		return err
+	if removeErr := os.Remove(temporary); removeErr != nil {
+		return removeErr
 	}
 	absTarget, err := filepath.Abs(target)
 	if err != nil {
@@ -314,7 +373,8 @@ func (i *Installer) installedMetadata(id string) (Manifest, installMetadata, err
 		return Manifest{}, installMetadata{}, fmt.Errorf("plugin %q is not managed by Hash", id)
 	}
 	var metadata installMetadata
-	if err := json.Unmarshal(data, &metadata); err != nil || metadata.SchemaVersion != 1 || metadata.ID != id {
+	decodeErr := json.Unmarshal(data, &metadata)
+	if decodeErr != nil || metadata.SchemaVersion != 1 || metadata.ID != id {
 		return Manifest{}, installMetadata{}, fmt.Errorf("plugin %q has invalid install metadata", id)
 	}
 	manifest, err := LoadManifest(target)
@@ -371,18 +431,22 @@ func parseGitHubSource(source string) (githubSource, bool, error) {
 		ref.owner, ref.repo = parts[0], strings.TrimSuffix(parts[1], ".git")
 	} else {
 		u, err := url.Parse(source)
-		if err != nil || !strings.EqualFold(u.Hostname(), "github.com") {
+		if err != nil {
+			return githubSource{}, false, fmt.Errorf("parse plugin source: %w", err)
+		}
+		if !strings.EqualFold(u.Hostname(), "github.com") {
 			return githubSource{}, false, nil
 		}
 		if u.Scheme != "https" {
 			return githubSource{}, true, fmt.Errorf("GitHub repository URL must use HTTPS")
 		}
 		parts := strings.Split(strings.Trim(u.Path, "/"), "/")
-		if len(parts) == 2 {
+		switch {
+		case len(parts) == 2:
 			ref.owner, ref.repo = parts[0], strings.TrimSuffix(parts[1], ".git")
-		} else if len(parts) == 5 && parts[2] == "releases" && parts[3] == "tag" {
+		case len(parts) == 5 && parts[2] == "releases" && parts[3] == "tag":
 			ref.owner, ref.repo, ref.tag = parts[0], strings.TrimSuffix(parts[1], ".git"), parts[4]
-		} else {
+		default:
 			return githubSource{}, false, nil
 		}
 	}
@@ -409,8 +473,8 @@ func (i *Installer) resolveGitHub(ctx context.Context, ref githubSource) (resolv
 			URL  string `json:"browser_download_url"`
 		} `json:"assets"`
 	}
-	if err := json.Unmarshal(data, &release); err != nil {
-		return resolvedArtifact{}, fmt.Errorf("decode GitHub release: %w", err)
+	if decodeErr := json.Unmarshal(data, &release); decodeErr != nil {
+		return resolvedArtifact{}, fmt.Errorf("decode GitHub release: %w", decodeErr)
 	}
 	suffix := "_" + i.goos + "_" + i.goarch + ".tar.gz"
 	var artifactName, artifactURL, checksumURL string
@@ -466,10 +530,10 @@ func (i *Installer) download(ctx context.Context, location string, limit int64) 
 	if err != nil {
 		return nil, err
 	}
-	if err := i.validateRemoteURL(u); err != nil {
-		return nil, err
+	if validationErr := i.validateRemoteURL(u); validationErr != nil {
+		return nil, validationErr
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), http.NoBody)
 	if err != nil {
 		return nil, err
 	}
@@ -508,7 +572,7 @@ func extractPluginArchive(archive []byte, destination string) error {
 	if err != nil {
 		return fmt.Errorf("open plugin archive: %w", err)
 	}
-	defer gzipReader.Close()
+	defer func() { _ = gzipReader.Close() }()
 	tarReader := tar.NewReader(gzipReader)
 	entries := 0
 	var total int64
@@ -528,46 +592,52 @@ func extractPluginArchive(archive []byte, destination string) error {
 		if total > maxExtractedBytes {
 			return fmt.Errorf("plugin archive exceeds extracted-size limit")
 		}
-		clean := path.Clean(header.Name)
-		if clean == "." || path.IsAbs(clean) || clean == ".." || strings.HasPrefix(clean, "../") {
-			return fmt.Errorf("unsafe archive path %q", header.Name)
-		}
-		target := filepath.Join(destination, filepath.FromSlash(clean))
-		if !pathWithin(destination, target) {
-			return fmt.Errorf("unsafe archive path %q", header.Name)
-		}
-		switch header.Typeflag {
-		case tar.TypeDir:
-			if err := os.MkdirAll(target, 0o755); err != nil { //nolint:gosec // extracted bundle directory
-				return err
-			}
-		case tar.TypeReg, tar.TypeRegA:
-			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil { //nolint:gosec // extracted bundle directory
-				return err
-			}
-			mode := os.FileMode(0o644)
-			if header.Mode&0o111 != 0 {
-				mode = 0o755
-			}
-			file, err := os.OpenFile(target, os.O_CREATE|os.O_EXCL|os.O_WRONLY, mode) //nolint:gosec // archive permissions are clamped
-			if err != nil {
-				return err
-			}
-			_, copyErr := io.Copy(file, tarReader)
-			closeErr := file.Close()
-			if copyErr != nil {
-				return copyErr
-			}
-			if closeErr != nil {
-				return closeErr
-			}
-		case tar.TypeXHeader, tar.TypeXGlobalHeader:
-			continue
-		default:
-			return fmt.Errorf("unsupported archive entry %q", header.Name)
+		if err := extractArchiveEntry(tarReader, header, destination); err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+func extractArchiveEntry(tarReader *tar.Reader, header *tar.Header, destination string) error {
+	clean := path.Clean(header.Name)
+	if clean == "." || path.IsAbs(clean) || clean == ".." || strings.HasPrefix(clean, "../") {
+		return fmt.Errorf("unsafe archive path %q", header.Name)
+	}
+	target := filepath.Join(destination, filepath.FromSlash(clean))
+	if !pathWithin(destination, target) {
+		return fmt.Errorf("unsafe archive path %q", header.Name)
+	}
+	switch header.Typeflag {
+	case tar.TypeDir:
+		return os.MkdirAll(target, 0o755) //nolint:gosec // extracted bundle directory
+	case tar.TypeReg:
+		return extractArchiveFile(tarReader, header, target)
+	case tar.TypeXHeader, tar.TypeXGlobalHeader:
+		return nil
+	default:
+		return fmt.Errorf("unsupported archive entry %q", header.Name)
+	}
+}
+
+func extractArchiveFile(tarReader *tar.Reader, header *tar.Header, target string) error {
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil { //nolint:gosec // extracted bundle directory
+		return err
+	}
+	mode := os.FileMode(0o644)
+	if header.Mode&0o111 != 0 {
+		mode = 0o755
+	}
+	file, err := os.OpenFile(target, os.O_CREATE|os.O_EXCL|os.O_WRONLY, mode) //nolint:gosec // archive permissions are clamped
+	if err != nil {
+		return err
+	}
+	_, copyErr := io.CopyN(file, tarReader, header.Size)
+	closeErr := file.Close()
+	if copyErr != nil {
+		return copyErr
+	}
+	return closeErr
 }
 
 func pathWithin(root, candidate string) bool {
