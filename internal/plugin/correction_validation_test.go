@@ -5,6 +5,8 @@ import "testing"
 func TestValidateCommandCorrectionAllowsOneStaticTokenAndPreservesLayout(t *testing.T) {
 	for _, tc := range []struct{ original, candidate string }{
 		{"git sttaus", "git status"},
+		{"git pukk", "git pull"},
+		{"git pukk", "git push"},
 		{"FOO=bar  git sttaus >out", "FOO=bar  git status >out"},
 		{"gti status", "git status"},
 		{"tool --vrsion x", "tool --version x"},
