@@ -13,16 +13,10 @@ import (
 // PluginRoots returns only the user and system data locations permitted for
 // plugin discovery. Repository-local directories are intentionally excluded.
 func PluginRoots() []string {
-	dataHome := os.Getenv("XDG_DATA_HOME")
-	if dataHome == "" {
-		home, err := os.UserHomeDir()
-		if err == nil {
-			dataHome = filepath.Join(home, ".local", "share")
-		}
-	}
+	userRoot := UserPluginRoot()
 	roots := make([]string, 0, 3)
-	if dataHome != "" {
-		roots = append(roots, filepath.Join(dataHome, "hash", "plugins"))
+	if userRoot != "" {
+		roots = append(roots, userRoot)
 	}
 	dataDirs := os.Getenv("XDG_DATA_DIRS")
 	if dataDirs == "" {
@@ -34,6 +28,22 @@ func PluginRoots() []string {
 		}
 	}
 	return roots
+}
+
+// UserPluginRoot returns the writable user discovery root used by link and
+// managed installation commands.
+func UserPluginRoot() string {
+	dataHome := os.Getenv("XDG_DATA_HOME")
+	if dataHome == "" {
+		home, err := os.UserHomeDir()
+		if err == nil {
+			dataHome = filepath.Join(home, ".local", "share")
+		}
+	}
+	if dataHome == "" {
+		return ""
+	}
+	return filepath.Join(dataHome, "hash", "plugins")
 }
 
 // Manager selects enabled plugins in configuration order and owns their warm

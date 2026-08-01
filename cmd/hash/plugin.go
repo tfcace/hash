@@ -13,10 +13,24 @@ import (
 	"github.com/tfcace/hash/internal/plugin"
 )
 
+type pluginLifecycle interface {
+	Install(context.Context, string) (plugin.InstallResult, error)
+	Upgrade(context.Context, string, string) (plugin.InstallResult, error)
+	Uninstall(string) error
+}
+
 func runPlugin(args []string, stdout, stderr io.Writer) int { //nolint:gocyclo // CLI subcommand dispatch is intentionally explicit
 	if len(args) == 0 {
 		printPluginHelp(stdout)
 		return 2
+	}
+	if args[0] == "install" || args[0] == "upgrade" || args[0] == "uninstall" {
+		lifecycle, err := newPluginLifecycle()
+		if err != nil {
+			fmt.Fprintf(stderr, "hash: plugin lifecycle: %v\n", err)
+			return 1
+		}
+		return runPluginLifecycle(args, lifecycle, stdout, stderr)
 	}
 	manifests, discoveryErr := plugin.Discover(plugin.PluginRoots())
 	if discoveryErr != nil {
@@ -93,6 +107,80 @@ func runPlugin(args []string, stdout, stderr io.Writer) int { //nolint:gocyclo /
 	default:
 		fmt.Fprintf(stderr, "hash: unknown plugin command %q\n", args[0])
 		printPluginHelp(stderr)
+		return 2
+	}
+}
+
+func newPluginLifecycle() (pluginLifecycle, error) {
+	pluginRoot := plugin.UserPluginRoot()
+	if pluginRoot == "" {
+		return nil, fmt.Errorf("no XDG user data directory is available")
+	}
+	bundleRoot := filepath.Join(filepath.Dir(pluginRoot), "plugin-bundles")
+	return plugin.NewInstaller(pluginRoot, bundleRoot), nil
+}
+
+func runPluginLifecycle(args []string, lifecycle pluginLifecycle, stdout, stderr io.Writer) int {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	switch args[0] {
+	case "install":
+		if len(args) != 2 {
+			fmt.Fprintln(stderr, "Usage: hash plugin install <github-repository-or-artifact-url>")
+			return 2
+		}
+		result, err := lifecycle.Install(ctx, args[1])
+		if err != nil {
+			fmt.Fprintf(stderr, "hash: install plugin: %v\n", err)
+			return 1
+		}
+		if err := config.SetPluginEnabled(getConfigDir(), result.ID, false); err != nil {
+			if rollbackErr := lifecycle.Uninstall(result.ID); rollbackErr != nil {
+				fmt.Fprintf(stderr, "hash: disable installed plugin: %v (rollback also failed: %v)\n", err, rollbackErr)
+			} else {
+				fmt.Fprintf(stderr, "hash: disable installed plugin: %v (installation rolled back)\n", err)
+			}
+			return 1
+		}
+		fmt.Fprintf(stdout, "Installed %s %s\nSource: %s\n", result.ID, result.Version, result.Source)
+		fmt.Fprintln(stdout, "Security: this trusted executable receives your OS user privileges. The plugin remains disabled until explicitly enabled.")
+		return 0
+	case "upgrade":
+		if len(args) < 2 || len(args) > 3 {
+			fmt.Fprintln(stderr, "Usage: hash plugin upgrade <id> [github-repository-or-artifact-url]")
+			return 2
+		}
+		source := ""
+		if len(args) == 3 {
+			source = args[2]
+		}
+		result, err := lifecycle.Upgrade(ctx, args[1], source)
+		if err != nil {
+			fmt.Fprintf(stderr, "hash: upgrade plugin: %v\n", err)
+			return 1
+		}
+		if !result.Changed {
+			fmt.Fprintf(stdout, "%s is already at %s\n", result.ID, result.Version)
+			return 0
+		}
+		fmt.Fprintf(stdout, "Upgraded %s %s -> %s\nRestart Hash to load the new plugin process.\n", result.ID, result.PreviousVersion, result.Version)
+		return 0
+	case "uninstall":
+		if len(args) != 2 {
+			fmt.Fprintln(stderr, "Usage: hash plugin uninstall <id>")
+			return 2
+		}
+		if err := lifecycle.Uninstall(args[1]); err != nil {
+			fmt.Fprintf(stderr, "hash: uninstall plugin: %v\n", err)
+			return 1
+		}
+		if err := config.SetPluginEnabled(getConfigDir(), args[1], false); err != nil {
+			fmt.Fprintf(stderr, "hash: disable uninstalled plugin: %v\n", err)
+			return 1
+		}
+		fmt.Fprintf(stdout, "Uninstalled %s\n", args[1])
+		return 0
+	default:
 		return 2
 	}
 }
@@ -201,5 +289,5 @@ func listOrNone(values []string) string {
 }
 
 func printPluginHelp(w io.Writer) {
-	fmt.Fprintln(w, "Usage: hash plugin <list|inspect|enable|disable|link|doctor> [arguments]")
+	fmt.Fprintln(w, "Usage: hash plugin <list|inspect|install|upgrade|uninstall|enable|disable|link|doctor> [arguments]")
 }

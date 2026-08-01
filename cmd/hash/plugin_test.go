@@ -2,10 +2,95 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/tfcace/hash/internal/config"
+	"github.com/tfcace/hash/internal/plugin"
 )
+
+type fakePluginLifecycle struct {
+	installedSource string
+	upgradedID      string
+	upgradedSource  string
+	uninstalledID   string
+}
+
+func (f *fakePluginLifecycle) Install(_ context.Context, source string) (plugin.InstallResult, error) {
+	f.installedSource = source
+	return plugin.InstallResult{ID: "io.runhash.demo", Version: "0.1.0", Source: "github:owner/repo", Changed: true}, nil
+}
+
+func (f *fakePluginLifecycle) Upgrade(_ context.Context, id, source string) (plugin.InstallResult, error) {
+	f.upgradedID, f.upgradedSource = id, source
+	return plugin.InstallResult{ID: id, Version: "0.1.1", PreviousVersion: "0.1.0", Changed: true}, nil
+}
+
+func (f *fakePluginLifecycle) Uninstall(id string) error {
+	f.uninstalledID = id
+	return nil
+}
+
+func TestRunPluginLifecycleInstallUpgradeAndUninstall(t *testing.T) {
+	configDir := t.TempDir()
+	t.Setenv("HASH_CONFIG_DIR", configDir)
+	if err := config.SetPluginEnabled(configDir, "io.runhash.demo", true); err != nil {
+		t.Fatal(err)
+	}
+	lifecycle := &fakePluginLifecycle{}
+
+	var stdout, stderr bytes.Buffer
+	if code := runPluginLifecycle([]string{"install", "github:owner/repo@v0.1.0"}, lifecycle, &stdout, &stderr); code != 0 {
+		t.Fatalf("install exit=%d stderr=%s", code, stderr.String())
+	}
+	if lifecycle.installedSource != "github:owner/repo@v0.1.0" || !bytes.Contains(stdout.Bytes(), []byte("Installed io.runhash.demo 0.1.0")) {
+		t.Fatalf("install source/output = %q / %s", lifecycle.installedSource, stdout.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := runPluginLifecycle([]string{"upgrade", "io.runhash.demo"}, lifecycle, &stdout, &stderr); code != 0 {
+		t.Fatalf("upgrade exit=%d stderr=%s", code, stderr.String())
+	}
+	if lifecycle.upgradedID != "io.runhash.demo" || !bytes.Contains(stdout.Bytes(), []byte("0.1.0 -> 0.1.1")) {
+		t.Fatalf("upgrade state/output = %+v / %s", lifecycle, stdout.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := runPluginLifecycle([]string{"uninstall", "io.runhash.demo"}, lifecycle, &stdout, &stderr); code != 0 {
+		t.Fatalf("uninstall exit=%d stderr=%s", code, stderr.String())
+	}
+	if lifecycle.uninstalledID != "io.runhash.demo" {
+		t.Fatalf("uninstalled ID = %q", lifecycle.uninstalledID)
+	}
+	cfg, err := config.Load(configDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Plugins.Enabled) != 0 {
+		t.Fatalf("uninstall left plugin enabled: %v", cfg.Plugins.Enabled)
+	}
+}
+
+func TestRunPluginLifecycleRollsBackInstallWhenConfigurationCannotBeDisabled(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(configPath, []byte("blocked"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HASH_CONFIG_DIR", configPath)
+	lifecycle := &fakePluginLifecycle{}
+
+	var stdout, stderr bytes.Buffer
+	if code := runPluginLifecycle([]string{"install", "github:owner/repo"}, lifecycle, &stdout, &stderr); code != 1 {
+		t.Fatalf("install exit=%d, want 1; stderr=%s", code, stderr.String())
+	}
+	if lifecycle.uninstalledID != "io.runhash.demo" {
+		t.Fatalf("failed configuration left installed plugin; rollback ID=%q", lifecycle.uninstalledID)
+	}
+}
 
 func TestRunPluginLinkAndEnable(t *testing.T) {
 	data := t.TempDir()

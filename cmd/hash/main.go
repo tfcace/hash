@@ -103,6 +103,7 @@ Options:
 Subcommands:
   version         Show version
   migrate         Import compatible bash/zsh settings
+  plugin          Install and manage external plugins
 
 Interactive builtins:
   tips            Show common Hash shortcuts and AI syntax

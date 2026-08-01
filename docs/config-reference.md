@@ -93,8 +93,10 @@ enabled = ["io.example.my-plugin"]
 minimum_length = 2
 ```
 
-Use `hash plugin list`, `inspect`, `link`, `enable`, `disable`, and `doctor` to
-manage bundles. Plugin executables are trusted local programs with your user
+Use `hash plugin install`, `upgrade`, `uninstall`, `list`, `inspect`, `link`,
+`enable`, `disable`, and `doctor` to manage bundles. Install accepts a GitHub
+release repository or a checksummed HTTPS artifact and never enables the plugin
+automatically. Plugin executables are trusted local programs with your user
 privileges; capability declarations are not a sandbox. See the complete
 [plugin developer guide](plugins/README.md).
 

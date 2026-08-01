@@ -8,6 +8,39 @@ manifests are ignored, and a fresh installation enables no plugin.
 ## Quickstart
 
 ```sh
+hash plugin install github:roeyazroel/hash-plugins
+hash plugin inspect io.runhash.autocorrection
+hash plugin enable io.runhash.autocorrection
+hash plugin doctor io.runhash.autocorrection
+# Start a new interactive Hash session.
+hash plugin upgrade io.runhash.autocorrection
+hash plugin disable io.runhash.autocorrection
+hash plugin uninstall io.runhash.autocorrection
+```
+
+The GitHub form resolves a release, selects the current OS/architecture archive,
+and verifies it using the release's `SHA256SUMS`. Pin an install with
+`github:owner/repository@v1.2.3` or a GitHub release URL. A plain repository
+source records the unpinned origin so `upgrade` can resolve the latest release.
+The archive contains the executable and `hash-plugin.toml`; users do not need
+the source repository or a compiler.
+
+Direct release artifacts are also supported when they use HTTPS and carry an
+explicit digest:
+
+```sh
+hash plugin install 'https://downloads.example/plugin_1.2.3_darwin_arm64.tar.gz#sha256=<64-hex-digest>'
+```
+
+Installation is atomic and leaves the plugin disabled. Managed versions live
+under `$XDG_DATA_HOME/hash/plugin-bundles/`; discovery uses an active symlink
+under `$XDG_DATA_HOME/hash/plugins/`. Upgrade retains older versions for manual
+rollback, while uninstall disables the plugin and removes its managed versions.
+It refuses bundles created with the developer-only `link` command.
+
+To develop against a local bundle instead:
+
+```sh
 hash plugin link /absolute/path/to/plugin-bundle
 hash plugin inspect io.runhash.autocorrection
 hash plugin enable io.runhash.autocorrection
@@ -177,9 +210,13 @@ plugin that depends on them.
 
 ## Packaging and troubleshooting
 
-Ship the executable and matching manifest in one bundle. Keep the entrypoint
-executable and never enable during installation. Hash provides no downloader or
-remote registry. Use `inspect` to review privileges, `doctor ID` to reproduce a
+Ship the executable and matching manifest in a `.tar.gz` bundle, with both at
+the archive root. Keep the entrypoint executable and never enable during
+installation. GitHub repositories are release sources, not a registry: each
+release needs one `_<os>_<arch>.tar.gz` asset plus `SHA256SUMS`. Direct artifact
+URLs require an explicit SHA-256 fragment. Hash rejects HTTP, traversal,
+symlinks, oversized archives, checksum mismatches, and manifest/release version
+mismatches. Use `inspect` to review privileges, `doctor ID` to reproduce a
 handshake/version/shutdown failure, and plugin stderr for diagnostics. An
 unexpected stdout log is a malformed protocol frame. Disable for immediate
-rollback; remove only the explicit user-data symlink after disabling.
+rollback; use `uninstall` only for remotely installed managed bundles.
