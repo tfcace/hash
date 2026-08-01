@@ -181,6 +181,9 @@ func (c *ProcessClient) Call(ctx context.Context, method string, params, result 
 	}()
 	if err := c.write(ctx, rpcRequest{JSONRPC: "2.0", ID: id, Method: method, Params: params}); err != nil {
 		c.removePending(id)
+		if ctx.Err() != nil {
+			c.sendCancel(id)
+		}
 		return err
 	}
 
@@ -201,13 +204,17 @@ func (c *ProcessClient) Call(ctx context.Context, method string, params, result 
 		return nil
 	case <-ctx.Done():
 		c.removePending(id)
-		cancelCtx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
-		_ = c.enqueueNotification(cancelCtx, rpcRequest{JSONRPC: "2.0", Method: "$/cancelRequest", Params: map[string]int64{"id": id}})
-		cancel()
+		c.sendCancel(id)
 		return ctx.Err()
 	case <-c.done:
 		return c.failure()
 	}
+}
+
+func (c *ProcessClient) sendCancel(id int64) {
+	cancelCtx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	_ = c.enqueueNotification(cancelCtx, rpcRequest{JSONRPC: "2.0", Method: "$/cancelRequest", Params: map[string]int64{"id": id}})
 }
 
 // Notify sends a JSON-RPC notification without waiting for a response.
