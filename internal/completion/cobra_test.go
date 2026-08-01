@@ -78,6 +78,41 @@ func TestCobraCompleter_NonCobraCommand(t *testing.T) {
 	}
 }
 
+func TestCobraCompleter_RejectsSuccessfulNonCobraOutput(t *testing.T) {
+	tmpDir := t.TempDir()
+	cmdPath := filepath.Join(tmpDir, "echoargs")
+	if err := os.WriteFile(cmdPath, []byte("#!/bin/sh\nprintf '%s\\n' \"$@\"\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile(%q): %v", cmdPath, err)
+	}
+
+	completer := NewCobraCompleter()
+	ready := false
+	completer.SetOnReady(func() { ready = true })
+	cacheKey := cmdPath + ":__complete "
+	completer.doPrefetch(cmdPath, []string{"__complete", ""}, cacheKey)
+	checkedAt := time.Now()
+
+	if completer.supportsComplete(cmdPath) {
+		t.Fatal("successful non-Cobra command must not be marked Cobra-capable")
+	}
+	completer.cacheMu.RLock()
+	cached, ok := completer.cache[cacheKey]
+	completer.cacheMu.RUnlock()
+	if !ok {
+		t.Fatal("successful non-Cobra output should be cached as a failed probe")
+	}
+	if len(cached.result.Items) != 0 {
+		t.Fatalf("successful non-Cobra output leaked as completion items: %#v", cached.result.Items)
+	}
+	remainingTTL := cached.expiresAt.Sub(checkedAt)
+	if remainingTTL <= 0 || remainingTTL > cobraFailedPrefetchTTL {
+		t.Fatalf("failed probe remaining TTL = %v, want > 0 and <= %v", remainingTTL, cobraFailedPrefetchTTL)
+	}
+	if !ready {
+		t.Fatal("successful non-Cobra probe should notify readiness so pending UI can clear")
+	}
+}
+
 func TestCobraCompleter_CompleteUsesCacheOnly(t *testing.T) {
 	tmpDir := t.TempDir()
 	cmdPath := filepath.Join(tmpDir, "fakecobra")
@@ -471,8 +506,12 @@ func TestCobraCompleter_ParseOutputLimitsLargeResultSet(t *testing.T) {
 		b.WriteString(strconv.Itoa(i))
 		b.WriteString("\tdescription\n")
 	}
+	b.WriteString(":4\n")
 
-	result := NewCobraCompleter().parseOutput(b.String())
+	result, valid := NewCobraCompleter().parseOutput(b.String())
+	if !valid {
+		t.Fatal("parseOutput rejected output with a valid final directive")
+	}
 	if len(result.Items) > completionItemLimit {
 		t.Fatalf("parseOutput returned %d items, want at most %d", len(result.Items), completionItemLimit)
 	}
@@ -484,6 +523,103 @@ func TestCobraCompleter_ParseOutputLimitsLargeResultSet(t *testing.T) {
 			result.Items[0].Value,
 			result.Items[len(result.Items)-1].Value,
 		)
+	}
+}
+
+func TestCobraCompleter_ParseOutputValidatesDirective(t *testing.T) {
+	tests := []struct {
+		name      string
+		output    string
+		wantValid bool
+		wantItems []Item
+	}{
+		{
+			name:   "missing directive",
+			output: "pods\tpod resources\n",
+		},
+		{
+			name:   "malformed directive",
+			output: "pods\tpod resources\n:not-a-number\n",
+		},
+		{
+			name:   "leading whitespace",
+			output: "pods\tpod resources\n :4\n",
+		},
+		{
+			name:   "trailing whitespace",
+			output: "pods\tpod resources\n:4 \n",
+		},
+		{
+			name:   "plus sign",
+			output: "pods\tpod resources\n:+4\n",
+		},
+		{
+			name:   "minus sign",
+			output: "pods\tpod resources\n:-4\n",
+		},
+		{
+			name:   "empty digits",
+			output: "pods\tpod resources\n:\n",
+		},
+		{
+			name:   "suffix text",
+			output: "pods\tpod resources\n:4suffix\n",
+		},
+		{
+			name:   "Unicode digits",
+			output: "pods\tpod resources\n:٤\n",
+		},
+		{
+			name:   "non-final directive",
+			output: "pods\tpod resources\n:4\nservices\tservice resources\n",
+		},
+		{
+			name:      "valid empty response",
+			output:    ":0\n",
+			wantValid: true,
+		},
+		{
+			name:      "valid CRLF response",
+			output:    "pods\tpod resources\r\n:4\r\n",
+			wantValid: true,
+			wantItems: []Item{
+				{Value: "pods", Display: "pods", Description: "pod resources"},
+			},
+		},
+		{
+			name:      "valid described candidates",
+			output:    "pods\tpod resources\nservices\tservice resources\n:4\n\n",
+			wantValid: true,
+			wantItems: []Item{
+				{Value: "pods", Display: "pods", Description: "pod resources"},
+				{Value: "services", Display: "services", Description: "service resources"},
+			},
+		},
+		{
+			name:      "only final directive is removed",
+			output:    ":candidate\tdescription\n:4\n",
+			wantValid: true,
+			wantItems: []Item{
+				{Value: ":candidate", Display: ":candidate", Description: "description"},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, valid := NewCobraCompleter().parseOutput(tt.output)
+			if valid != tt.wantValid {
+				t.Fatalf("parseOutput validity = %v, want %v", valid, tt.wantValid)
+			}
+			if len(result.Items) != len(tt.wantItems) {
+				t.Fatalf("parseOutput items = %#v, want %#v", result.Items, tt.wantItems)
+			}
+			for i := range tt.wantItems {
+				if result.Items[i] != tt.wantItems[i] {
+					t.Fatalf("parseOutput item %d = %#v, want %#v", i, result.Items[i], tt.wantItems[i])
+				}
+			}
+		})
 	}
 }
 

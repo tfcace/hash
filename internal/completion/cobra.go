@@ -361,19 +361,22 @@ func (c *CobraCompleter) doPrefetch(cmdPath string, args []string, cacheKey stri
 		// Command doesn't support __complete or timed out. Cache the empty
 		// result briefly so a pending Complete stops re-reporting pending,
 		// and notify so a "fetching" menu can clear itself and fall back.
-		c.cacheMu.Lock()
-		c.cache[cacheKey] = cachedResult{expiresAt: time.Now().Add(cobraFailedPrefetchTTL)}
-		c.cacheMu.Unlock()
-		c.notifyReady()
+		c.cacheFailedPrefetch(cacheKey)
+		return
+	}
+
+	// A successful exit alone does not prove Cobra support: ordinary commands
+	// such as echo also accept arbitrary arguments. Cobra's __complete protocol
+	// always terminates stdout with a numeric directive line.
+	result, valid := c.parseOutput(stdout.String())
+	if !valid {
+		c.cacheFailedPrefetch(cacheKey)
 		return
 	}
 
 	// The tool answered __complete: cache misses for it may now report
 	// pending instead of falling through to unrelated completers.
 	c.markSupportsComplete(cmdPath)
-
-	// Parse output
-	result := c.parseOutput(stdout.String())
 
 	// Cache result (even empty results to avoid re-fetching)
 	c.cacheMu.Lock()
@@ -385,20 +388,37 @@ func (c *CobraCompleter) doPrefetch(cmdPath string, args []string, cacheKey stri
 	c.notifyReady()
 }
 
+func (c *CobraCompleter) cacheFailedPrefetch(cacheKey string) {
+	c.cacheMu.Lock()
+	c.cache[cacheKey] = cachedResult{expiresAt: time.Now().Add(cobraFailedPrefetchTTL)}
+	c.cacheMu.Unlock()
+	c.notifyReady()
+}
+
 // parseOutput parses Cobra __complete output.
-// Format: one completion per line, with optional :description suffix
-func (c *CobraCompleter) parseOutput(output string) Result {
+// Format: one completion per line, with an optional tab-separated description,
+// followed by a final :<unsigned integer> directive line.
+func (c *CobraCompleter) parseOutput(output string) (Result, bool) {
 	var items []Item
 
 	lines := strings.Split(output, "\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" {
+	lastNonEmpty := -1
+	for i := len(lines) - 1; i >= 0; i-- {
+		if strings.TrimSpace(lines[i]) != "" {
+			lastNonEmpty = i
+			break
+		}
+	}
+	if lastNonEmpty < 0 || !isCobraDirectiveLine(strings.TrimSuffix(lines[lastNonEmpty], "\r")) {
+		return Result{}, false
+	}
+
+	for i, line := range lines {
+		if i == lastNonEmpty {
 			continue
 		}
-
-		// Skip directive lines (start with :)
-		if strings.HasPrefix(line, ":") {
+		line = strings.TrimSpace(line)
+		if line == "" {
 			continue
 		}
 
@@ -420,7 +440,19 @@ func (c *CobraCompleter) parseOutput(output string) Result {
 		}
 	}
 
-	return Result{Items: items}
+	return Result{Items: items}, true
+}
+
+func isCobraDirectiveLine(line string) bool {
+	if len(line) < 2 || line[0] != ':' {
+		return false
+	}
+	for _, r := range line[1:] {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func isShellBuiltinForCobra(cmd string) bool {
