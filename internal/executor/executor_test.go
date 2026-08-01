@@ -7,6 +7,7 @@ import (
 	"os"
 	osexec "os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -184,6 +185,22 @@ func TestExecute_HashVersionReachesBinary(t *testing.T) {
 				t.Errorf("stdout = %q, want %q", stdout.String(), want)
 			}
 		})
+	}
+}
+
+func TestHandleHashCallRoutesPluginCommandsToHashBinary(t *testing.T) {
+	exec := New()
+	got, err := exec.handleHashCall(context.Background(), []string{"hash", "plugin", "list"})
+	if err != nil {
+		t.Fatalf("handleHashCall() error = %v", err)
+	}
+	wantExecutable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{wantExecutable, "plugin", "list"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("handleHashCall() = %q, want %q", got, want)
 	}
 }
 

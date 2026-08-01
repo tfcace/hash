@@ -1908,7 +1908,6 @@ func (s *Shell) startPlugins(ctx context.Context) {
 	cwd, _ := os.Getwd()
 	if err := manager.StartWithSession(ctx, s.handlePluginHostService, plugin.SessionContext{CWD: cwd, Dialect: s.config.Shell.Dialect, Kind: "interactive"}); err != nil {
 		fmt.Fprintf(os.Stderr, "hash: plugin startup: %v\n", err)
-		return
 	}
 	s.plugins = manager
 	manager.Notify("session.start", map[string]any{
@@ -1991,6 +1990,10 @@ func (s *Shell) editorSuggestParams(input, trigger string) plugin.EditorSuggestP
 	return params
 }
 
+type editorSuggestionCaller interface {
+	CallFirstValid(context.Context, string, any, func(json.RawMessage) bool, any) (bool, error)
+}
+
 func (s *Shell) pluginSuggestion(input, trigger string) string {
 	if s.plugins == nil {
 		return ""
@@ -1998,18 +2001,32 @@ func (s *Shell) pluginSuggestion(input, trigger string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 	params := s.editorSuggestParams(input, trigger)
-	var result plugin.EditorSuggestResult
-	found, _ := s.plugins.CallFirst(ctx, "editor.suggest", params, &result)
-	if params.Generation != s.commandGeneration {
+	return callEditorSuggestion(ctx, s.plugins, params, func() uint64 { return s.commandGeneration })
+}
+
+func callEditorSuggestion(ctx context.Context, caller editorSuggestionCaller, params plugin.EditorSuggestParams, currentGeneration func() uint64) string {
+	var selected plugin.EditorSuggestResult
+	found, _ := caller.CallFirstValid(ctx, "editor.suggest", params, func(raw json.RawMessage) bool {
+		if params.Generation != currentGeneration() || !utf8.Valid(raw) {
+			return false
+		}
+		var candidate plugin.EditorSuggestResult
+		if err := json.Unmarshal(raw, &candidate); err != nil {
+			return false
+		}
+		if plugin.ValidateSuggestionCandidate(params.Line, candidate.Text) != nil || !isStrictSuggestion(params.Line, candidate.Text) {
+			return false
+		}
+		if plugin.ValidateCommandSuggestion(candidate.Text, params.Dialect) != nil {
+			return false
+		}
+		selected = candidate
+		return true
+	}, nil)
+	if !found || params.Generation != currentGeneration() {
 		return ""
 	}
-	if !found || plugin.ValidateSuggestionCandidate(input, result.Text) != nil || !isStrictSuggestion(input, result.Text) {
-		return ""
-	}
-	if plugin.ValidateCommandSuggestion(result.Text, params.Dialect) != nil {
-		return ""
-	}
-	return result.Text
+	return selected.Text
 }
 
 func currentWorkingDirectory() string {

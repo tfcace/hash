@@ -3,6 +3,7 @@ package plugin
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -133,8 +134,7 @@ func (m *Manager) StartWithSession(ctx context.Context, host HostServiceHandler,
 	defer m.mu.Unlock()
 	m.host = host
 	m.session = session
-	started := 0
-	var lastErr error
+	var startErrors []error
 	for _, plugin := range m.enabled {
 		if plugin.client != nil {
 			continue
@@ -142,17 +142,13 @@ func (m *Manager) StartWithSession(ctx context.Context, host HostServiceHandler,
 		client, err := StartProcessWithSession(ctx, plugin.manifest, plugin.settings, host, session)
 		if err != nil {
 			plugin.failures++
-			lastErr = err
+			startErrors = append(startErrors, err)
 			continue
 		}
 		plugin.client = client
 		plugin.failures = 0
-		started++
 	}
-	if started == 0 && len(m.enabled) > 0 {
-		return lastErr
-	}
-	return nil
+	return errors.Join(startErrors...)
 }
 
 // Notify broadcasts an observe-only hook in enabled-list order. A failed

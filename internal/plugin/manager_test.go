@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -76,6 +77,38 @@ func TestManagerUsesHealthyLowerPriorityResultAtDeadline(t *testing.T) {
 	manager.mu.RUnlock()
 	if !disabled {
 		t.Fatal("slow plugin was not disabled after three deadlines")
+	}
+}
+
+func TestManagerReportsPartialStartupFailureAndKeepsHealthyPlugin(t *testing.T) {
+	if os.Getenv("HASH_PLUGIN_TEST_HELPER") != "" {
+		return
+	}
+	t.Setenv("HASH_PLUGIN_TEST_HELPER", "reject-one")
+	bundle := t.TempDir()
+	if err := os.Symlink(os.Args[0], filepath.Join(bundle, "helper")); err != nil {
+		t.Fatal(err)
+	}
+	makeManifest := func(id string) Manifest {
+		return Manifest{ManifestVersion: 1, ID: id, Name: id, Version: "0.1.0", ProtocolVersion: 1, Entrypoint: "helper", Directory: bundle}
+	}
+	healthy := makeManifest("io.runhash.healthy")
+	broken := makeManifest("io.runhash.broken")
+	manager, err := NewManager([]Manifest{healthy, broken}, []string{healthy.ID, broken.ID}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = manager.Close() })
+	err = manager.Start(context.Background())
+	if err == nil || !strings.Contains(err.Error(), broken.ID) {
+		t.Fatalf("Start() error = %v, want error naming %q", err, broken.ID)
+	}
+	manager.mu.RLock()
+	healthyStarted := manager.enabled[0].client != nil
+	brokenStarted := manager.enabled[1].client != nil
+	manager.mu.RUnlock()
+	if !healthyStarted || brokenStarted {
+		t.Fatalf("healthy started=%v, broken started=%v", healthyStarted, brokenStarted)
 	}
 }
 

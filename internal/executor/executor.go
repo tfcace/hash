@@ -760,7 +760,9 @@ func (e *Executor) shellBuiltinHandler(ctx context.Context, args []string) ([]st
 }
 
 // handleHashCall lets `hash version` / `hash --version` / `hash -v` (and
-// --help/-h) report Hash's own version/help from within the Hash shell.
+// --help/-h) report Hash's own version/help from within the Hash shell. Plugin
+// lifecycle commands are routed back through the running Hash executable so
+// the POSIX hash builtin cannot silently swallow them.
 // The command name "hash" collides with the POSIX hash builtin, which mvdan/sh
 // stubs as a no-op; without this override these would print nothing. Genuine
 // POSIX hash usage (`hash`, `hash -r`, `hash name`, ...) falls through to that
@@ -776,6 +778,12 @@ func (e *Executor) handleHashCall(ctx context.Context, args []string) ([]string,
 			hc := interp.HandlerCtx(ctx)
 			fmt.Fprint(hc.Stdout, hashHelpText)
 			return []string{":"}, nil
+		case "plugin":
+			executable, err := os.Executable()
+			if err != nil {
+				return nil, fmt.Errorf("resolve Hash executable: %w", err)
+			}
+			return append([]string{executable}, args[1:]...), nil
 		}
 	}
 	return args, nil

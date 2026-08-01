@@ -141,7 +141,7 @@ func TestProcessClient_RejectsMalformedProtocolOutput(t *testing.T) {
 
 func TestProcessClientHelper(t *testing.T) {
 	mode := os.Getenv("HASH_PLUGIN_TEST_HELPER")
-	if mode != "1" && mode != "nested" && mode != "crash-once" && mode != "priority" && mode != "no-shutdown" && mode != "malformed" {
+	if mode != "1" && mode != "nested" && mode != "crash-once" && mode != "priority" && mode != "no-shutdown" && mode != "malformed" && mode != "reject-one" {
 		return
 	}
 	scanner := bufio.NewScanner(os.Stdin)
@@ -169,6 +169,18 @@ func TestProcessClientHelper(t *testing.T) {
 				}
 				_ = json.Unmarshal(request.Params, &params)
 				_ = os.Setenv("HASH_PLUGIN_PRIORITY_ID", params.Plugin.ID)
+			}
+			if mode == "reject-one" {
+				var params struct {
+					Plugin struct {
+						ID string `json:"id"`
+					} `json:"plugin"`
+				}
+				_ = json.Unmarshal(request.Params, &params)
+				if strings.Contains(params.Plugin.ID, "broken") {
+					_ = encoder.Encode(map[string]any{"jsonrpc": "2.0", "id": request.ID, "error": map[string]any{"code": -32001, "message": "storage unavailable"}})
+					continue
+				}
 			}
 			if expected := os.Getenv("HASH_PLUGIN_EXPECT_SESSION_KIND"); expected != "" {
 				var params struct {

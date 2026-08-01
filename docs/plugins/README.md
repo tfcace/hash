@@ -244,8 +244,10 @@ generation falls back to the normal core ghost.
 active dialect, at most 16 KiB, and a strict extension of the input. A prompt
 prediction is ghost text: Right fills it without executing, while Enter
 dismisses it and submits only visible input. Editing retains the existing
-two-character minimum. A plugin must return an empty string after a failed,
-canceled, interrupted, or signaled previous command.
+two-character minimum. Next-command providers must return an empty prompt
+result after a failed, canceled, interrupted, or signaled previous command.
+History providers may still answer an edit trigger after such a failure when
+the user has typed a nonempty prefix.
 
 `initialize` includes `session_kind: "interactive"`. `hash plugin doctor`
 uses `session_kind: "doctor"`; diagnostic sessions must validate the handshake
