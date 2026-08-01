@@ -212,10 +212,24 @@ func Load(configDir string) (*Config, error) {
 		return recoverConfig(configPath, data, err)
 	}
 
-	cfg.loadNamedAgents(data)
+	cfg.loadNamedAgents(decodeAgentTables(data))
 	applyEmptyDefaults(cfg)
 
 	return cfg, nil
+}
+
+// decodeAgentTables decodes just the [agent] section into a raw map. The
+// named [agent.<name>] tables aren't fields of Config, so they need a raw
+// decode; targeting only the agent key lets the decoder skip every other
+// section instead of building a map of the whole file.
+func decodeAgentTables(data []byte) map[string]interface{} {
+	var doc struct {
+		Agent map[string]interface{} `toml:"agent"`
+	}
+	if err := toml.Unmarshal(data, &doc); err != nil {
+		return nil
+	}
+	return doc.Agent
 }
 
 // applyEmptyDefaults fills defaults for values the file left empty.
@@ -266,7 +280,9 @@ func recoverConfig(configPath string, data []byte, cause error) (*Config, error)
 	}
 	sort.Strings(bad)
 
-	cfg.loadNamedAgents(data)
+	// The raw document is already decoded; no need to parse the file again.
+	agentRaw, _ := raw["agent"].(map[string]interface{})
+	cfg.loadNamedAgents(agentRaw)
 	applyEmptyDefaults(cfg)
 
 	cfg.LoadIssue = &LoadError{Path: configPath, BadSections: bad, Detail: detail, Err: cause}
@@ -314,14 +330,9 @@ func (c *Config) EffectiveAgent() AgentConfig {
 	return agent
 }
 
-func (c *Config) loadNamedAgents(data []byte) {
-	var raw map[string]interface{}
-	if err := toml.Unmarshal(data, &raw); err != nil {
-		return
-	}
-
-	agentRaw, ok := raw["agent"].(map[string]interface{})
-	if !ok {
+// loadNamedAgents fills c.Agents from the already-decoded [agent] section.
+func (c *Config) loadNamedAgents(agentRaw map[string]interface{}) {
+	if len(agentRaw) == 0 {
 		return
 	}
 
