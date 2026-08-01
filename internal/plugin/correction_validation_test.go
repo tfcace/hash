@@ -7,7 +7,7 @@ func TestValidateCommandCorrectionAllowsOneStaticTokenAndPreservesLayout(t *test
 		{"git sttaus", "git status"},
 		{"FOO=bar  git sttaus >out", "FOO=bar  git status >out"},
 		{"gti status", "git status"},
-		{"tool --verison x", "tool --version x"},
+		{"tool --vrsion x", "tool --version x"},
 		{"git 'sttaus'", "git 'status'"},
 	} {
 		if err := ValidateCommandCorrection(tc.original, tc.candidate, "bash"); err != nil {

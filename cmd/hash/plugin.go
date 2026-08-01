@@ -13,7 +13,7 @@ import (
 	"github.com/tfcace/hash/internal/plugin"
 )
 
-func runPlugin(args []string, stdout, stderr io.Writer) int {
+func runPlugin(args []string, stdout, stderr io.Writer) int { //nolint:gocyclo // CLI subcommand dispatch is intentionally explicit
 	if len(args) == 0 {
 		printPluginHelp(stdout)
 		return 2
@@ -36,7 +36,8 @@ func runPlugin(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintln(stdout, "No Hash plugins installed.")
 			return 0
 		}
-		for _, manifest := range manifests {
+		for i := range manifests {
+			manifest := &manifests[i]
 			state := "disabled"
 			if enabled[manifest.ID] {
 				state = "enabled"
@@ -120,7 +121,7 @@ func linkPlugin(source string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "hash: inspect plugin target: %v\n", err)
 		return 1
 	}
-	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil { //nolint:gosec // XDG user data directories are conventionally world-readable
 		fmt.Fprintf(stderr, "hash: create plugin directory: %v\n", err)
 		return 1
 	}
@@ -139,8 +140,8 @@ func doctorPlugins(manifests []plugin.Manifest, selectedID string, stdout, stder
 		return 1
 	}
 	installed := make(map[string]plugin.Manifest, len(manifests))
-	for _, manifest := range manifests {
-		installed[manifest.ID] = manifest
+	for i := range manifests {
+		installed[manifests[i].ID] = manifests[i]
 	}
 	failed := false
 	ids := append([]string(nil), cfg.Plugins.Enabled...)
@@ -184,9 +185,9 @@ func doctorPlugins(manifests []plugin.Manifest, selectedID string, stdout, stder
 }
 
 func findPlugin(manifests []plugin.Manifest, id string) (plugin.Manifest, bool) {
-	for _, manifest := range manifests {
-		if manifest.ID == id {
-			return manifest, true
+	for i := range manifests {
+		if manifests[i].ID == id {
+			return manifests[i], true
 		}
 	}
 	return plugin.Manifest{}, false

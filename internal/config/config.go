@@ -248,21 +248,21 @@ func decodeAgentTables(data []byte) map[string]interface{} {
 // SetPluginEnabled updates only the [plugins].enabled selection while retaining
 // all other TOML values, including per-plugin settings. It is used by the
 // explicit `hash plugin enable` and `hash plugin disable` commands.
-func SetPluginEnabled(configDir, id string, enabled bool) error {
+func SetPluginEnabled(configDir, id string, enabled bool) error { //nolint:gocyclo // preserves arbitrary TOML while updating one ordered selection
 	if strings.TrimSpace(id) == "" {
 		return fmt.Errorf("plugin id is required")
 	}
-	if err := os.MkdirAll(configDir, 0o755); err != nil {
+	if err := os.MkdirAll(configDir, 0o755); err != nil { //nolint:gosec // standard user configuration directory permissions
 		return err
 	}
 	path := filepath.Join(configDir, "config.toml")
 	document := map[string]any{}
-	if data, err := os.ReadFile(path); err == nil {
-		if err := toml.Unmarshal(data, &document); err != nil {
-			return fmt.Errorf("parse %s: %w", path, err)
+	if data, readErr := os.ReadFile(path); readErr == nil {
+		if unmarshalErr := toml.Unmarshal(data, &document); unmarshalErr != nil {
+			return fmt.Errorf("parse %s: %w", path, unmarshalErr)
 		}
-	} else if !os.IsNotExist(err) {
-		return err
+	} else if !os.IsNotExist(readErr) {
+		return readErr
 	}
 
 	plugins, ok := document["plugins"].(map[string]any)

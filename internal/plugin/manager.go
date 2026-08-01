@@ -58,11 +58,12 @@ type managedPlugin struct {
 // preserved exactly as it appears in [plugins].enabled.
 func NewManager(manifests []Manifest, enabled []string, settings map[string]map[string]any) (*Manager, error) {
 	available := make(map[string]Manifest, len(manifests))
-	for _, manifest := range manifests {
+	for i := range manifests {
+		manifest := &manifests[i]
 		if _, exists := available[manifest.ID]; exists {
 			return nil, fmt.Errorf("duplicate plugin ID %q", manifest.ID)
 		}
-		available[manifest.ID] = manifest
+		available[manifest.ID] = *manifest
 	}
 	manager := &Manager{}
 	seen := make(map[string]struct{}, len(enabled))
@@ -158,13 +159,13 @@ func (m *Manager) Notify(method string, params any) {
 
 // CallFirst asks enabled plugins that declare method, in priority order, until
 // a handler returns a result. The caller supplies the hook deadline.
-func (m *Manager) CallFirst(ctx context.Context, method string, params any, result any) (bool, error) {
+func (m *Manager) CallFirst(ctx context.Context, method string, params, result any) (bool, error) {
 	return m.CallFirstValid(ctx, method, params, nil, result)
 }
 
 // CallFirstValid asks every declaring plugin concurrently, then selects the
 // first result accepted by validate in enabled-list priority order.
-func (m *Manager) CallFirstValid(ctx context.Context, method string, params any, validate func(json.RawMessage) bool, result any) (bool, error) {
+func (m *Manager) CallFirstValid(ctx context.Context, method string, params any, validate func(json.RawMessage) bool, result any) (bool, error) { //nolint:gocyclo // concurrent priority selection and health accounting share one bounded dispatch loop
 	type target struct {
 		index  int
 		plugin *managedPlugin

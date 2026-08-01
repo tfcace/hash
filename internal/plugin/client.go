@@ -113,9 +113,9 @@ func StartProcessWithSession(ctx context.Context, manifest Manifest, settings ma
 		_ = stdin.Close()
 		return nil, fmt.Errorf("plugin stdout: %w", err)
 	}
-	if err := cmd.Start(); err != nil {
+	if startErr := cmd.Start(); startErr != nil {
 		_ = stdin.Close()
-		return nil, fmt.Errorf("start plugin %q: %w", manifest.ID, err)
+		return nil, fmt.Errorf("start plugin %q: %w", manifest.ID, startErr)
 	}
 
 	client := &ProcessClient{
@@ -162,7 +162,7 @@ func StartProcessWithSession(ctx context.Context, manifest Manifest, settings ma
 }
 
 // Call invokes a plugin method and decodes its result into result.
-func (c *ProcessClient) Call(ctx context.Context, method string, params any, result any) error {
+func (c *ProcessClient) Call(ctx context.Context, method string, params, result any) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -298,7 +298,7 @@ func (c *ProcessClient) writeLoop() {
 	}
 }
 
-func (c *ProcessClient) readLoop(stdout io.Reader) {
+func (c *ProcessClient) readLoop(stdout io.Reader) { //nolint:gocyclo // JSON-RPC frame classification is an explicit protocol state machine
 	scanner := bufio.NewScanner(stdout)
 	buffer := make([]byte, 0, 64*1024)
 	scanner.Buffer(buffer, 1<<20)

@@ -14,6 +14,8 @@ import (
 
 type MsgType int16
 
+const maxRemoteMessageSize int32 = 16 << 20
+
 const (
 	T_DATA = MsgType(iota)
 	T_WIDTH
@@ -261,6 +263,9 @@ func ReadMessage(r io.Reader) (*Message, error) {
 	}
 	if err := binary.Read(r, binary.BigEndian, &m.Type); err != nil {
 		return nil, err
+	}
+	if length < 2 || length > maxRemoteMessageSize {
+		return nil, fmt.Errorf("invalid remote message length %d", length)
 	}
 	m.Data = make([]byte, int(length)-2)
 	if _, err := io.ReadFull(r, m.Data); err != nil {

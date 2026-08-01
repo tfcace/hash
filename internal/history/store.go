@@ -388,6 +388,7 @@ func (s *Store) QuerySuccessful(prefix, cwd string, limit int) ([]Command, error
 		args = append(args, cwd)
 	}
 	args = append(args, limit)
+	//nolint:gosec // G202: conditions contain only fixed fragments; all user values remain bound parameters
 	rows, err := s.db.Query(`
 		SELECT id, command, cwd, exit_code, duration_ms, timestamp, git_branch, kube_context, is_sudo, sudo_user, raw_command
 		FROM commands

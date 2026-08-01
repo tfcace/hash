@@ -125,12 +125,17 @@ func (o *opHistory) rewriteLocked() {
 
 	// replace history file
 	if err = os.Rename(tmpFile, o.cfg.HistoryFile); err != nil {
-		fd.Close()
+		if closeErr := fd.Close(); closeErr != nil {
+			return
+		}
 		return
 	}
 
 	if o.fd != nil {
-		o.fd.Close()
+		if closeErr := o.fd.Close(); closeErr != nil {
+			// The replacement file has already been committed. Continue with its
+			// valid descriptor even if closing the previous descriptor failed.
+		}
 	}
 	// fd is write only, just satisfy what we need.
 	o.fd = fd
@@ -140,7 +145,9 @@ func (o *opHistory) Close() {
 	o.fdLock.Lock()
 	defer o.fdLock.Unlock()
 	if o.fd != nil {
-		o.fd.Close()
+		if closeErr := o.fd.Close(); closeErr != nil {
+			return
+		}
 	}
 }
 

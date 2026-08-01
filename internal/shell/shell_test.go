@@ -2,6 +2,7 @@ package shell
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
 	"os/exec"
@@ -15,6 +16,33 @@ import (
 	"github.com/tfcace/hash/internal/executor"
 	"github.com/tfcace/hash/internal/prompt"
 )
+
+func TestCommandFailureKind(t *testing.T) {
+	tests := []struct {
+		name         string
+		result       *executor.Result
+		err          error
+		exitCode     int
+		wantKind     string
+		wantCanceled bool
+	}{
+		{name: "success"},
+		{name: "context cancellation", err: context.Canceled, exitCode: 1, wantKind: "canceled", wantCanceled: true},
+		{name: "result cancellation", result: &executor.Result{Canceled: true}, exitCode: 1, wantKind: "canceled", wantCanceled: true},
+		{name: "interrupt", result: &executor.Result{Interrupted: true}, exitCode: 130, wantKind: "interrupted"},
+		{name: "signal", result: &executor.Result{Signal: "terminated"}, exitCode: 143, wantKind: "signal"},
+		{name: "executor error", err: errors.New("execute failed"), exitCode: 1, wantKind: "executor_error"},
+		{name: "exit status", exitCode: 2, wantKind: "exit_status"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			kind, canceled := commandFailureKind(tt.result, tt.err, tt.exitCode)
+			if kind != tt.wantKind || canceled != tt.wantCanceled {
+				t.Fatalf("commandFailureKind() = (%q, %v), want (%q, %v)", kind, canceled, tt.wantKind, tt.wantCanceled)
+			}
+		})
+	}
+}
 
 func TestNewShell(t *testing.T) {
 	cfg := config.Default()

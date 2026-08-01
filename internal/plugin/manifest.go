@@ -82,7 +82,7 @@ func (m Manifest) Executable() string {
 }
 
 // Validate checks that a manifest is safe to launch from its bundle directory.
-func (m Manifest) Validate() error {
+func (m Manifest) Validate() error { //nolint:gocyclo // manifest validation intentionally reports the first field-specific failure
 	if m.ManifestVersion != 1 {
 		return fmt.Errorf("unsupported manifest_version %d", m.ManifestVersion)
 	}

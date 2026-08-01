@@ -17,7 +17,7 @@ type simpleCommandShape struct {
 // structure with exactly one eligible static token changed. All assignments,
 // whitespace, quoting around unchanged tokens, and redirections must remain
 // byte-for-byte identical.
-func ValidateCommandCorrection(original, candidate, dialect string) error {
+func ValidateCommandCorrection(original, candidate, dialect string) error { //nolint:gocyclo // conservative validation keeps every rejection rule explicit
 	before, err := parseSimpleCommandShape(original, dialect)
 	if err != nil {
 		return err
@@ -89,7 +89,7 @@ func unsafeCorrectionWrapper(command string) bool {
 	}
 }
 
-func parseSimpleCommandShape(line, dialect string) (simpleCommandShape, error) {
+func parseSimpleCommandShape(line, dialect string) (simpleCommandShape, error) { //nolint:gocyclo // shell AST eligibility is a linear safety checklist
 	lang := syntax.LangBash
 	if strings.EqualFold(strings.TrimSpace(dialect), "zsh") {
 		lang = syntax.LangZsh
@@ -167,8 +167,10 @@ func staticWord(word *syntax.Word) (string, bool) {
 	return value.String(), true
 }
 
-func wordOffsets(word *syntax.Word) (int, int) {
-	return int(word.Pos().Offset()), int(word.End().Offset())
+func wordOffsets(word *syntax.Word) (start, end int) {
+	// Parser positions originate from indexes into an in-memory Go string, so
+	// they are necessarily representable as int on the current architecture.
+	return int(word.Pos().Offset()), int(word.End().Offset()) //nolint:gosec // G115: parser offsets are bounded by string length
 }
 
 func sourceForWord(line string, word *syntax.Word) string {

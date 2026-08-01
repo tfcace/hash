@@ -767,21 +767,7 @@ func (s *Shell) requestCorrections(line string, result *executor.Result, execErr
 	if s.plugins == nil {
 		return
 	}
-	failureKind := ""
-	canceled := errors.Is(execErr, context.Canceled) || result != nil && result.Canceled
-	if canceled {
-		failureKind = "canceled"
-	} else if result != nil && result.Interrupted {
-		failureKind = "interrupted"
-	} else if result != nil && result.Signal != "" {
-		failureKind = "signal"
-	} else if executor.IsCommandNotFound(execErr) {
-		failureKind = "command_not_found"
-	} else if execErr != nil {
-		failureKind = "executor_error"
-	} else if s.lastExitCode != 0 {
-		failureKind = "exit_status"
-	}
+	failureKind, canceled := commandFailureKind(result, execErr, s.lastExitCode)
 	errorMessage := ""
 	if execErr != nil {
 		errorMessage = execErr.Error()
@@ -821,6 +807,26 @@ func (s *Shell) requestCorrections(line string, result *executor.Result, execErr
 		return
 	}
 	s.pendingCorrections = append(s.pendingCorrections, response.Corrections...)
+}
+
+func commandFailureKind(result *executor.Result, execErr error, exitCode int) (kind string, canceled bool) {
+	canceled = errors.Is(execErr, context.Canceled) || result != nil && result.Canceled
+	switch {
+	case canceled:
+		return "canceled", true
+	case result != nil && result.Interrupted:
+		return "interrupted", false
+	case result != nil && result.Signal != "":
+		return "signal", false
+	case executor.IsCommandNotFound(execErr):
+		return "command_not_found", false
+	case execErr != nil:
+		return "executor_error", false
+	case exitCode != 0:
+		return "exit_status", false
+	default:
+		return "", false
+	}
 }
 
 func boundedTail(value string, limit int) string {
@@ -1872,22 +1878,6 @@ func makeEditorPrefetchFunc(router *completion.Router) func(string, int) {
 	}
 }
 
-func makeEditorSuggestionFunc(store *history.Store, pred *prediction.Predictor) func(string) string {
-	return func(input string) string {
-		// Try history prefix search first
-		if store != nil {
-			matches, err := store.SearchByPrefix(input, 1)
-			if err == nil && len(matches) > 0 {
-				return matches[0]
-			}
-		}
-
-		_ = pred // predictor fallback reserved for future use
-
-		return ""
-	}
-}
-
 // Close releases shell resources.
 func (s *Shell) Close() error {
 	s.stopPlugins()
@@ -1940,7 +1930,8 @@ func (s *Shell) handlePluginHostService(ctx context.Context, _ plugin.Manifest, 
 			return nil, &plugin.RPCError{Code: -32603, Message: "history query failed"}
 		}
 		result := plugin.HistoryQueryResult{Entries: make([]plugin.HistoryEntry, 0, len(commands))}
-		for _, command := range commands {
+		for i := range commands {
+			command := &commands[i]
 			result.Entries = append(result.Entries, plugin.HistoryEntry{Line: command.Command, CWD: command.Cwd, ExitCode: command.ExitCode, Timestamp: command.Timestamp.UTC().Format(time.RFC3339Nano)})
 		}
 		return result, nil

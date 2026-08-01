@@ -746,7 +746,7 @@ func (e *Editor) render() {
 
 // handleGhostTextKey processes keys when ghost text is active.
 // Returns true if the key was handled.
-func (e *Editor) handleGhostTextKey(key Key) bool {
+func (e *Editor) handleGhostTextKey(key Key) bool { //nolint:gocyclo // owned ghost key dispatch is explicit to preserve per-source semantics
 	if e.ghost.Source == GhostSourceCorrection {
 		switch key.Special {
 		case KeyRight:

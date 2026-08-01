@@ -295,9 +295,19 @@ func debugList(l *list.List) {
 
 // append log info to another file
 func Debug(o ...interface{}) {
-	f, _ := os.OpenFile("debug.tmp", os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
-	fmt.Fprintln(f, o...)
-	f.Close()
+	f, err := os.OpenFile("debug.tmp", os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
+	if err != nil {
+		return
+	}
+	if _, err := fmt.Fprintln(f, o...); err != nil {
+		if closeErr := f.Close(); closeErr != nil {
+			return
+		}
+		return
+	}
+	if err := f.Close(); err != nil {
+		return
+	}
 }
 
 func CaptureExitSignal(f func()) {

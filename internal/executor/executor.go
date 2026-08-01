@@ -1954,13 +1954,14 @@ func normalizeExternalCommandError(err error) error {
 	}
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) {
-		if waitStatus, ok := exitErr.ProcessState.Sys().(syscall.WaitStatus); ok && waitStatus.Signaled() {
-			signal := waitStatus.Signal()
-			code := 128 + int(signal)
+		if waitStatus, ok := exitErr.Sys().(syscall.WaitStatus); ok && waitStatus.Signaled() {
+			terminationSignal := waitStatus.Signal()
+			code := 128 + int(terminationSignal)
 			if code > 255 {
 				code = 1
 			}
-			return &processTerminationError{status: interp.ExitStatus(code), signal: signal}
+			//nolint:gosec // G115: code is clamped to the uint8 range immediately above.
+			return &processTerminationError{status: interp.ExitStatus(code), signal: terminationSignal}
 		}
 		code := exitErr.ExitCode()
 		if code < 0 || code > 255 {

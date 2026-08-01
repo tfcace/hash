@@ -81,9 +81,7 @@ func ValidateCorrections(executed string, candidates []string) ([]string, error)
 		if candidate == executed || candidate == "" || len(candidate) > maxCorrectionBytes || !utf8.ValidString(candidate) {
 			continue
 		}
-		if strings.ContainsAny(candidate, "\r\n") || strings.IndexFunc(candidate, func(r rune) bool {
-			return unicode.IsControl(r)
-		}) >= 0 {
+		if strings.ContainsAny(candidate, "\r\n") || strings.IndexFunc(candidate, unicode.IsControl) >= 0 {
 			continue
 		}
 		if _, exists := seen[candidate]; exists {
