@@ -45,3 +45,30 @@ entrypoint = "bin/demo"
 		t.Fatalf("config does not enable plugin: %s", contents)
 	}
 }
+
+func TestPluginDoctorPerformsHandshakeForSelectedID(t *testing.T) {
+	data := t.TempDir()
+	configDir := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", data)
+	t.Setenv("XDG_DATA_DIRS", t.TempDir())
+	t.Setenv("HASH_CONFIG_DIR", configDir)
+	bundle := filepath.Join(data, "hash", "plugins", "io.runhash.doctor")
+	if err := os.MkdirAll(filepath.Join(bundle, "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	manifest := "manifest_version = 1\nid = \"io.runhash.doctor\"\nname = \"Doctor\"\nversion = \"0.1.0\"\nprotocol_version = 1\nentrypoint = \"bin/doctor\"\n"
+	if err := os.WriteFile(filepath.Join(bundle, "hash-plugin.toml"), []byte(manifest), 0o644); err != nil { //nolint:gosec
+		t.Fatal(err)
+	}
+	script := "#!/bin/sh\nread init\nprintf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocol_version\":1}}'\nread shutdown\nprintf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{}}'\n"
+	if err := os.WriteFile(filepath.Join(bundle, "bin", "doctor"), []byte(script), 0o755); err != nil { //nolint:gosec
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := runPlugin([]string{"doctor", "io.runhash.doctor"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("doctor exit=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if !bytes.Contains(stdout.Bytes(), []byte("handshake and shutdown passed")) {
+		t.Fatalf("doctor did not validate protocol: %s", stdout.String())
+	}
+}

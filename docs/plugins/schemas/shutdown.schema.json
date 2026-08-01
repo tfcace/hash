@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "shutdown request",
+  "type": "object",
+  "required": ["jsonrpc", "id", "method", "params"],
+  "properties": {
+    "jsonrpc": {"const": "2.0"}, "id": {"type": "integer", "minimum": 1}, "method": {"const": "shutdown"}, "params": {"type": "object", "maxProperties": 0}
+  },
+  "additionalProperties": false
+}

@@ -370,6 +370,37 @@ func (s *Store) waitPrefixIndex() bool {
 	return s.idx.loaded
 }
 
+// QuerySuccessful returns bounded successful history for plugin host services.
+// Prefix is literal and cwd is optional.
+func (s *Store) QuerySuccessful(prefix, cwd string, limit int) ([]Command, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 100
+	}
+	conditions := []string{"exit_code = 0"}
+	args := make([]any, 0, 3)
+	if prefix != "" {
+		conditions = append(conditions, "command LIKE ? ESCAPE '\\'")
+		escaped := strings.NewReplacer("\\", "\\\\", "%", "\\%", "_", "\\_").Replace(prefix)
+		args = append(args, escaped+"%")
+	}
+	if cwd != "" {
+		conditions = append(conditions, "cwd = ?")
+		args = append(args, cwd)
+	}
+	args = append(args, limit)
+	rows, err := s.db.Query(`
+		SELECT id, command, cwd, exit_code, duration_ms, timestamp, git_branch, kube_context, is_sudo, sudo_user, raw_command
+		FROM commands
+		WHERE `+strings.Join(conditions, " AND ")+`
+		ORDER BY timestamp DESC
+		LIMIT ?`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return s.scanCommands(rows)
+}
+
 // escapeGlob escapes special glob characters in a string for safe use in GLOB queries.
 func escapeGlob(s string) string {
 	var b strings.Builder

@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "initialize request",
+  "type": "object",
+  "required": ["jsonrpc", "id", "method", "params"],
+  "properties": {
+    "jsonrpc": {"const": "2.0"},
+    "id": {"type": "integer", "minimum": 1},
+    "method": {"const": "initialize"},
+    "params": {
+      "type": "object",
+      "required": ["protocol_version", "hash_version", "plugin", "hooks", "settings", "cwd", "dialect"],
+      "properties": {
+        "protocol_version": {"const": 1},
+        "hash_version": {"type": "string"},
+        "plugin": {"type": "object", "required": ["id", "version"], "properties": {"id": {"type": "string"}, "version": {"type": "string"}}, "additionalProperties": false},
+        "hooks": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+        "settings": {"type": "object"},
+        "cwd": {"type": "string"},
+        "dialect": {"enum": ["bash", "zsh"]}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

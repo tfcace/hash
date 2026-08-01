@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "JSON-RPC error response",
+  "type": "object",
+  "required": ["jsonrpc", "id", "error"],
+  "properties": {
+    "jsonrpc": {"const": "2.0"}, "id": {"type": "integer", "minimum": 1},
+    "error": {"type": "object", "required": ["code", "message"], "properties": {"code": {"type": "integer"}, "message": {"type": "string"}, "data": {}}, "additionalProperties": false}
+  },
+  "additionalProperties": false
+}

@@ -32,6 +32,7 @@ var HostServiceMethods = []string{
 }
 
 var pluginIDPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*(\.[a-z0-9][a-z0-9-]*)+$`)
+var pluginCommandPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]*$`)
 
 // Manifest describes an installed plugin bundle.
 type Manifest struct {
@@ -105,6 +106,48 @@ func (m Manifest) Validate() error {
 	}
 	if filepath.IsAbs(m.Entrypoint) || containsParentDirectory(m.Entrypoint) {
 		return fmt.Errorf("entrypoint must stay inside the plugin bundle")
+	}
+	if err := validateDeclaredNames("hook", m.Hooks, HookMethods, false); err != nil {
+		return err
+	}
+	services := make([]string, len(HostServiceMethods))
+	for i, method := range HostServiceMethods {
+		services[i] = strings.TrimPrefix(method, "host.")
+	}
+	if err := validateDeclaredNames("host service", m.Capabilities.HostServices, services, true); err != nil {
+		return err
+	}
+	seenCommands := make(map[string]bool, len(m.Commands))
+	for _, command := range m.Commands {
+		if !pluginCommandPattern.MatchString(command) {
+			return fmt.Errorf("invalid plugin command %q", command)
+		}
+		if seenCommands[command] {
+			return fmt.Errorf("duplicate plugin command %q", command)
+		}
+		seenCommands[command] = true
+	}
+	return nil
+}
+
+func validateDeclaredNames(kind string, values, allowed []string, trimHostPrefix bool) error {
+	allowedSet := make(map[string]bool, len(allowed))
+	for _, value := range allowed {
+		allowedSet[value] = true
+	}
+	seen := make(map[string]bool, len(values))
+	for _, original := range values {
+		value := original
+		if trimHostPrefix {
+			value = strings.TrimPrefix(value, "host.")
+		}
+		if !allowedSet[value] {
+			return fmt.Errorf("unknown %s %q", kind, original)
+		}
+		if seen[value] {
+			return fmt.Errorf("duplicate %s %q", kind, original)
+		}
+		seen[value] = true
 	}
 	return nil
 }

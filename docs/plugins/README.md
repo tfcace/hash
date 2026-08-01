@@ -1,147 +1,185 @@
-# Hash plugins (protocol v1)
+# Hash plugins: production autocorrection slice (protocol v1)
 
-Hash plugins are trusted, separately-built executables. Hash discovers their
-`hash-plugin.toml` files from `$XDG_DATA_HOME/hash/plugins/<id>/` and each
-`$XDG_DATA_DIRS/hash/plugins/<id>/`; it never searches a project directory.
-Duplicate IDs stop discovery. A fresh installation has an empty enabled list.
+Hash plugins are trusted, separately built executables. Hash discovers
+`hash-plugin.toml` only below `$XDG_DATA_HOME/hash/plugins/<id>/` and each
+`$XDG_DATA_DIRS/hash/plugins/<id>/`. Duplicate IDs are errors, project-local
+manifests are ignored, and a fresh installation enables no plugin.
 
 ## Quickstart
 
-Build a plugin bundle, then link and explicitly enable it:
-
 ```sh
-hash plugin link /absolute/path/to/my-plugin
-hash plugin inspect io.example.my-plugin
-hash plugin enable io.example.my-plugin
-hash plugin doctor
-# start a new interactive Hash session
-hash plugin disable io.example.my-plugin
+hash plugin link /absolute/path/to/plugin-bundle
+hash plugin inspect io.runhash.autocorrection
+hash plugin enable io.runhash.autocorrection
+hash plugin doctor io.runhash.autocorrection
+# Start a new interactive Hash session.
+hash plugin disable io.runhash.autocorrection
 ```
 
-`link` creates one user-data symlink and refuses to overwrite an existing
-bundle. `enable` changes only the ordered `[plugins].enabled` list in the user
-configuration. `doctor` checks enabled bundles and entrypoint executability.
+`link` creates a user-data symlink and never overwrites an installed bundle.
+`enable` changes the ordered `[plugins].enabled` list. `doctor [id]` validates
+the executable, initialize handshake, protocol version, and bounded shutdown;
+without an ID it checks every enabled plugin. Plugins never start for `hash -c`
+or non-interactive scripts.
 
-## Manifest and configuration
+## Manifest, configuration, and security
 
 ```toml
 manifest_version = 1
-id = "io.example.my-plugin"       # required, globally unique
-name = "My Plugin"                # required display name
-version = "0.1.0"                 # required plugin version
-protocol_version = 1               # must equal the Hash protocol version
-entrypoint = "bin/my-plugin"      # required, relative and cannot escape bundle
-hooks = ["editor.suggest"]        # methods this executable implements
-commands = ["my-command"]         # declared top-level commands
+id = "io.runhash.autocorrection"
+name = "Hash Autocorrection"
+version = "0.1.0"
+protocol_version = 1
+entrypoint = "bin/hash-autocorrection"
+hooks = ["command.finished"]
+commands = []
 
 [capabilities]
-context = ["editor", "history", "cwd"]
+context = ["history", "cwd"]
 host_services = ["history.query", "completion.query"]
 ```
 
-`manifest_version`, `protocol_version`, `id`, `name`, `version`, and
-`entrypoint` are required. Absolute and parent-directory entrypoints are
-rejected. `hooks` and `commands` are declarations, not permissions.
+The manifest version and protocol version must be `1`. ID is a lowercase
+reverse-DNS name. Name, version, and entrypoint are required; entrypoint must be
+relative and stay in the bundle. Hooks, commands, context, and host services
+must be arrays of unique declared names. Capabilities describe intent; they are
+not an OS sandbox.
 
 ```toml
 [plugins]
-# This exact order is priority order for single-winner hooks.
-enabled = ["io.example.my-plugin"]
+enabled = ["io.runhash.autocorrection"]
 
-[plugins.settings."io.example.my-plugin"]
-strategy = "history"
-minimum_length = 2
+[plugins.settings."io.runhash.autocorrection"]
+strategies = ["executable", "subcommand", "long_flag"]
+history_limit = 100
+max_candidates = 3
 ```
 
-Settings are untyped TOML data passed unchanged in `initialize`. Plugin
-executables receive your operating-system user privileges. The capability list
-is useful for review in `hash plugin inspect`, but is **not an OS sandbox**.
+Enabled-list order is priority order. Strategies are ordered and unique;
+allowed values are exactly `executable`, `subcommand`, and `long_flag`.
+`history_limit` is 1-500 (host calls remain capped at 100) and
+`max_candidates` is 1-5. Missing settings use the displayed defaults.
 
-## Lifecycle, concurrency, and failures
+Enabling a plugin runs its executable with the user's operating-system
+privileges and environment. Review its code and manifest first. Hash v1 does
+not sandbox filesystem, process, or network access; the official correction
+plugin independently promises local-only, network-free, telemetry-free
+operation and never logs commands, diagnostics, history, output, or environment
+values.
 
-Hash starts one warm process per enabled plugin after interactive startup files
-finish; it never starts plugins for `hash -c` or non-interactive scripts.
-Stdout is protocol-only and stderr is diagnostic-only. Requests are multiplexed
-over newline-delimited JSON-RPC 2.0. A request is canceled with
-`$/cancelRequest` when its editor generation becomes stale or its deadline
-expires. Responses that are malformed, late, or fail validation are dropped.
+## Framing, lifecycle, cancellation, and failures
 
-Single-winner hooks run concurrently conceptually but select the first valid
-result in enabled-list priority. Prompt and completion contributions aggregate
-in enabled-list order. Hash isolates plugin failure; v1 allows one restart and
-disables a process after its second exit or three consecutive request failures.
-Shutdown sends `shutdown`, allows 250 ms, then terminates the child.
-
-| Operation | Deadline | Fallback |
-|---|---:|---|
-| `initialize` | 500 ms | plugin unavailable |
-| `prompt.render` | 50 ms | omit contribution |
-| `editor.suggest` | 100 ms | no ghost text |
-| `completion.provide` | 150 ms | core completion only |
-| `command.before`, `command.finished` | 150 ms | original execution / no diagnostic |
-| notifications | non-blocking; canceled after 500 ms | ignored |
-
-## Framing, initialization, errors, and shutdown
-
-The canonical envelope schema is [protocol-v1.schema.json](protocol-v1.schema.json).
-Every line is one UTF-8 JSON object. A successful handshake is:
+Stdin and stdout carry one UTF-8 JSON-RPC 2.0 object per line. Stdout is
+protocol-only; diagnostics go to stderr. Hash maintains one warm process per
+enabled plugin per interactive session. Request and response IDs are correlated
+independently in both directions, and handlers may run concurrently.
 
 ```json
-{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocol_version":1,"plugin":{"id":"io.example.my-plugin","version":"0.1.0"},"settings":{"strategy":"history"}}}
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocol_version":1,"hash_version":"0.9.0","plugin":{"id":"io.runhash.autocorrection","version":"0.1.0"},"hooks":["command.finished"],"settings":{"max_candidates":3},"cwd":"/work","dialect":"bash"}}
+```
+
+```json
 {"jsonrpc":"2.0","id":1,"result":{"protocol_version":1}}
 ```
 
-Both sides must return protocol version `1`; no compatible version means Hash
-closes the process. For a canceled request Hash writes:
+Both sides must select protocol version 1. Initialization has a 500 ms
+deadline. A hook canceled or expired by its parent receives:
 
 ```json
-{"jsonrpc":"2.0","method":"$/cancelRequest","params":{"id":7}}
+{"jsonrpc":"2.0","method":"$/cancelRequest","params":{"id":6}}
 ```
 
-Return standard JSON-RPC errors, for example
-`{"jsonrpc":"2.0","id":7,"error":{"code":-32602,"message":"invalid line"}}`.
-On shutdown Hash sends `{"jsonrpc":"2.0","id":8,"method":"shutdown","params":{}}`;
-reply normally and exit.
+Handlers stop work and nested calls when their context is canceled. Standard
+JSON-RPC errors are supported:
 
-## Hooks
+```json
+{"jsonrpc":"2.0","id":6,"error":{"code":-32602,"message":"invalid params"}}
+```
 
-All handler snippets use pseudocode: `reply(id, value)` writes a one-line
-JSON-RPC response; notifications have no response. Values are illustrative but
-complete JSON messages.
+Malformed, late, or invalid results are dropped. Three consecutive request
+failures disable that plugin while healthy peers remain active. Hash restarts a
+plugin once after its first unexpected exit and disables it after the second.
+Shutdown sends `shutdown`, waits at most 250 ms, then terminates the child:
 
-| Method | Kind, time, order, validation and fallback | Minimal handler and terminal effect |
-|---|---|---|
-| `session.start` | Notification after startup; non-blocking; enabled order; failure ignored. Request: `{"jsonrpc":"2.0","method":"session.start","params":{"cwd":"/work","dialect":"bash"}}`. | `if method=="session.start": warm_cache()`; no visible terminal change. |
-| `session.stop` | Notification before shutdown; non-blocking; failure ignored. Request: `{"jsonrpc":"2.0","method":"session.stop","params":{"cwd":"/work"}}`. | `flush_state()`; no visible change. |
-| `cwd.changed` | Notification after Hash commits `cd`; non-blocking; failure ignored. Request: `{"jsonrpc":"2.0","method":"cwd.changed","params":{"cwd":"/tmp"}}`. | `cache.clear()`; no visible change. |
-| `prompt.render` | Request, 50 ms, aggregate in enabled order. Request: `{"jsonrpc":"2.0","id":2,"method":"prompt.render","params":{"cwd":"/work","exit_code":0}}`; response: `{"jsonrpc":"2.0","id":2,"result":{"segments":[{"text":"dev","style":"muted","placement":"prefix"}]}}`. ANSI, controls, newlines, unapproved style or placement are rejected; omitted on failure. | `reply(id,{segments:[{text:"dev",style:"muted",placement:"prefix"}]})`; a typed prefix appears before the core prompt. |
-| `editor.suggest` | Request, 100 ms; priority winner, canceled on newer editor generation. Request: `{"jsonrpc":"2.0","id":3,"method":"editor.suggest","params":{"line":"git","cwd":"/work"}}`; response: `{"jsonrpc":"2.0","id":3,"result":{"text":"git status"}}`. Must be valid UTF-8 strict end-of-buffer extension; otherwise no ghost. | `reply(id,{text:history_prefix(line)})`; `git` displays a dim ` status`; Right accepts it. |
-| `completion.provide` | Request, 150 ms; aggregate enabled order. Request: `{"jsonrpc":"2.0","id":4,"method":"completion.provide","params":{"line":"git ch","cursor":6}}`; response: `{"jsonrpc":"2.0","id":4,"result":{"items":[{"label":"checkout","insert_text":"checkout","replace_start":4,"replace_end":6}]}}`. Hash bounds spans/items, deduplicates, and excludes plugin/agent/network recursion; invalid items are dropped. | `reply(id,{items:[...]})`; Tab menu merges it with core candidates. |
-| `command.before` | Request, 150 ms, priority winner once per submission. Request: `{"jsonrpc":"2.0","id":5,"method":"command.before","params":{"line":"gti status","cwd":"/work"}}`; response: `{"jsonrpc":"2.0","id":5,"result":{"line":"git status","message":"fix typo"}}`. One transformed line only; Hash validates it and does not rerun hooks. | `reply(id,{line:"git status",message:"fix typo"})`; Yes executes transformed, No original, Escape cancels. |
-| `command.finished` | Request, 150 ms after execution. Request: `{"jsonrpc":"2.0","id":6,"method":"command.finished","params":{"original_line":"git sttaus","executed_line":"git sttaus","exit_code":1,"stdout_tail":"","stderr_tail":"git: ...","cwd":"/work","dialect":"bash"}}`; response: `{"jsonrpc":"2.0","id":6,"result":{"corrections":["git status"]}}`. Hash bounds output and drops invalid corrections. | `reply(id,{corrections:["git status"]})`; one correction is a protected Right-accept ghost; several open selection, and a second Enter executes. Never auto-executes. |
-| `history.added` | Notification after successful persistence; request: `{"jsonrpc":"2.0","method":"history.added","params":{"line":"git status","exit_code":0,"duration_ms":12,"cwd":"/work"}}`. Observe-only, non-blocking, ignored on failure. | `observe(params)`; no visible change. |
-| `command.execute` | Request for a declared top-level command; streamed through `host.output.write`. Request: `{"jsonrpc":"2.0","id":7,"method":"command.execute","params":{"command":"my-command","args":["x"]}}`; response: `{"jsonrpc":"2.0","id":7,"result":{"exit_code":0}}`. Hash supports redirection/pipes, but rejects piped stdin and PTY takeover. | `write("stdout","done\\n"); reply(id,{exit_code:0})`; `my-command x > out` writes `done` to `out`. |
+```json
+{"jsonrpc":"2.0","id":8,"method":"shutdown","params":{}}
+```
 
-## Host services
+The method-specific canonical contracts live in [schemas/](schemas/).
 
-Plugins issue these ordinary JSON-RPC requests to Hash. Calls are correlated by
-ID, limited to their declared informational capability, and honor their parent
-hook deadline. They never provide direct database, PTY, or arbitrary shell
-state access.
+## `command.finished`
 
-| Service | Complete request / response | Handler use |
-|---|---|---|
-| `host.history.query` | `{"jsonrpc":"2.0","id":20,"method":"host.history.query","params":{"prefix":"git","limit":5}}` → `{"jsonrpc":"2.0","id":20,"result":{"entries":[{"line":"git status","exit_code":0}]}}` | `entries = host.call("host.history.query", {prefix: line, limit: 5})` |
-| `host.completion.query` | `{"jsonrpc":"2.0","id":21,"method":"host.completion.query","params":{"line":"git ch","cursor":6}}` → `{"jsonrpc":"2.0","id":21,"result":{"items":[{"label":"checkout","insert_text":"checkout"}]}}` | `core = host.call("host.completion.query", request)`; it excludes plugins, agents, network, and recursion. |
-| `host.environment.get` | `{"jsonrpc":"2.0","id":22,"method":"host.environment.get","params":{"names":["PATH","HOME"]}}` → `{"jsonrpc":"2.0","id":22,"result":{"values":{"PATH":"/bin","HOME":"/home/u"}}}` | `env = host.call("host.environment.get", {names:["PATH"]})` after shell exports. |
-| `host.output.write` | `{"jsonrpc":"2.0","id":23,"method":"host.output.write","params":{"stream":"stdout","text":"done\\n"}}` → `{"jsonrpc":"2.0","id":23,"result":{}}` | `host.call("host.output.write", {stream:"stdout",text:"done\\n"})` for command streaming. |
+This 150 ms request fires after Hash has committed command state and persisted
+history, for successful and failed outcomes. Enabled handlers run concurrently;
+the first valid non-empty result in configured priority order wins. Empty,
+failed, timed-out, or disabled plugin results fall back to learned fixes and
+prediction.
+
+```json
+{"jsonrpc":"2.0","id":6,"method":"command.finished","params":{"generation":42,"original_line":"git sttaus","executed_line":"git sttaus","exit_code":1,"duration_ms":18,"failure_kind":"exit_status","error_message":"","stdout_tail":"","stderr_tail":"git: 'sttaus' is not a git command","output_streams_merged":false,"cwd":"/work","dialect":"bash","canceled":false}}
+```
+
+```json
+{"jsonrpc":"2.0","id":6,"result":{"corrections":["git status"]}}
+```
+
+A minimal handler decodes the request, immediately returns no candidates for
+success/cancellation/interruption/signal termination, optionally calls declared
+host services with `parent_request_id: 6`, then returns at most five lines.
+Hash requires valid UTF-8, no controls/newlines, successful active-dialect
+parsing, and exactly one eligible static executable, subcommand, or long-flag
+token change. Assignments, whitespace, quoting around unchanged tokens, and
+redirections must stay byte-identical. Compounds, pipelines, substitutions,
+heredocs, wrappers, multiple edits, stale generations, and ambiguous repeated
+tokens are rejected.
+
+One candidate appears as a correction-owned ghost. Right fills without
+submitting; Enter or Escape dismisses; printable input dismisses then edits.
+Several candidates open a chooser: Up/Down and Ctrl-P/Ctrl-N select, Enter fills
+and closes, and only the next ordinary Enter submits.
+
+## Operational host services
+
+Every plugin-originated call must be declared in the manifest and include the
+active parent hook request ID. Calls inherit the parent's 150 ms deadline. Hash
+rejects unknown, canceled, expired, recursive, and undeclared calls.
+
+`host.history.query` returns at most 100 successful entries, optionally filtered
+by literal command prefix and cwd:
+
+```json
+{"jsonrpc":"2.0","id":20,"method":"host.history.query","params":{"parent_request_id":6,"prefix":"git","cwd":"/work","limit":5}}
+```
+
+```json
+{"jsonrpc":"2.0","id":20,"result":{"entries":[{"line":"git status","cwd":"/work","exit_code":0,"timestamp":"2026-08-01T12:00:00Z"}]}}
+```
+
+`host.completion.query` uses core-local completion only, excluding plugins,
+agents, network providers, and recursion:
+
+```json
+{"jsonrpc":"2.0","id":21,"method":"host.completion.query","params":{"parent_request_id":6,"line":"git sttaus","cursor":4}}
+```
+
+```json
+{"jsonrpc":"2.0","id":21,"result":{"items":[{"label":"status","insert_text":"status"}]}}
+```
+
+## Reserved interfaces
+
+`prompt.render`, `completion.provide`, `command.before`, `command.execute`,
+`host.environment.get`, and `host.output.write` are reserved but unavailable in
+this release. `session.start`, `session.stop`, `cwd.changed`, `history.added`,
+and `editor.suggest` are existing framework surfaces, not part of the
+production autocorrection compatibility promise. Do not ship a correction
+plugin that depends on them.
 
 ## Packaging and troubleshooting
 
-Ship a bundle directory containing the manifest and executable. Keep the
-entrypoint executable, use a stable reverse-DNS ID, and declare only protocol
-v1. Hash does not download plugins, install a registry, or enable them for
-you. Use `hash plugin inspect ID` to review the executable and requested
-capability metadata, `hash plugin doctor` for installation problems, and
-stderr from the plugin for diagnostics. Malformed stdout is a protocol failure:
-write logs only to stderr.
+Ship the executable and matching manifest in one bundle. Keep the entrypoint
+executable and never enable during installation. Hash provides no downloader or
+remote registry. Use `inspect` to review privileges, `doctor ID` to reproduce a
+handshake/version/shutdown failure, and plugin stderr for diagnostics. An
+unexpected stdout log is a malformed protocol frame. Disable for immediate
+rollback; remove only the explicit user-data symlink after disabling.

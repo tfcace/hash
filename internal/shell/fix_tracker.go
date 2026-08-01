@@ -3,6 +3,7 @@ package shell
 import (
 	"os"
 
+	"github.com/tfcace/hash/internal/editor"
 	"github.com/tfcace/hash/internal/learning"
 )
 
@@ -115,12 +116,19 @@ func (s *Shell) observeCommandOutcome(line string) {
 // Either way the ghost renders bare (fish-style); the keys are taught by the
 // banner above the prompt, not on the input line.
 func (s *Shell) promptGhost() string {
+	text, _ := s.promptGhostOwned()
+	return text
+}
+
+func (s *Shell) promptGhostOwned() (string, editor.GhostSource) {
 	if fix := s.fixes.SuggestedFix(); fix != "" {
-		return fix
+		return fix, editor.GhostSourceLearnedFix
 	}
 	if s.predictor != nil && s.lastCommand != "" {
 		cwd, _ := os.Getwd()
-		return s.predictor.PredictCommand(s.lastCommand, cwd)
+		if predicted := s.predictor.PredictCommand(s.lastCommand, cwd); predicted != "" {
+			return predicted, editor.GhostSourcePrediction
+		}
 	}
-	return ""
+	return "", editor.GhostSourceNone
 }

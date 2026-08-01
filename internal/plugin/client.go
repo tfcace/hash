@@ -9,12 +9,18 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/tfcace/hash/internal/version"
 )
 
-const initializeTimeout = 500 * time.Millisecond
+const (
+	initializeTimeout     = 500 * time.Millisecond
+	pluginWriterQueueSize = 64
+)
 
 type rpcRequest struct {
 	JSONRPC string `json:"jsonrpc"`
@@ -27,21 +33,37 @@ type rpcResponse struct {
 	JSONRPC string          `json:"jsonrpc"`
 	ID      int64           `json:"id"`
 	Result  json.RawMessage `json:"result"`
-	Error   *rpcError       `json:"error"`
+	Error   *RPCError       `json:"error"`
 }
 
-type rpcError struct {
+// RPCError is a JSON-RPC error returned across the plugin boundary.
+type RPCError struct {
 	Code    int    `json:"code"`
 	Message string `json:"message"`
 }
 
-func (e *rpcError) Error() string {
+func (e *RPCError) Error() string {
 	return e.Message
+}
+
+// HostServiceHandler handles a plugin-originated host.* request.
+type HostServiceHandler func(context.Context, Manifest, string, json.RawMessage) (any, *RPCError)
+
+// SessionContext is the immutable interactive context sent during initialize.
+type SessionContext struct {
+	CWD     string
+	Dialect string
 }
 
 type pendingResponse struct {
 	response rpcResponse
 	err      error
+}
+
+type queuedWrite struct {
+	ctx  context.Context
+	data []byte
+	done chan error
 }
 
 // ProcessClient owns one warm plugin process and multiplexes JSON-RPC calls.
@@ -50,18 +72,33 @@ type ProcessClient struct {
 	cmd      *exec.Cmd
 	stdin    io.WriteCloser
 
-	writeMu sync.Mutex
-	mu      sync.Mutex
-	pending map[int64]chan pendingResponse
-	closed  bool
-	err     error
-	nextID  atomic.Int64
-	done    chan struct{}
+	mu         sync.Mutex
+	pending    map[int64]chan pendingResponse
+	active     map[int64]context.Context
+	hostActive map[int64]context.CancelFunc
+	host       HostServiceHandler
+	closed     bool
+	err        error
+	nextID     atomic.Int64
+	done       chan struct{}
+	writes     chan queuedWrite
 }
 
 // StartProcess launches manifest.Entrypoint and completes the protocol
 // handshake. Plugin processes inherit the shell environment by design.
 func StartProcess(ctx context.Context, manifest Manifest, settings map[string]any) (*ProcessClient, error) {
+	return StartProcessWithHandler(ctx, manifest, settings, nil)
+}
+
+// StartProcessWithHandler launches a plugin with bidirectional host services.
+func StartProcessWithHandler(ctx context.Context, manifest Manifest, settings map[string]any, host HostServiceHandler) (*ProcessClient, error) {
+	cwd, _ := os.Getwd()
+	return StartProcessWithSession(ctx, manifest, settings, host, SessionContext{CWD: cwd, Dialect: "bash"})
+}
+
+// StartProcessWithSession launches a plugin and sends the complete protocol-v1
+// initialization context.
+func StartProcessWithSession(ctx context.Context, manifest Manifest, settings map[string]any, host HostServiceHandler, session SessionContext) (*ProcessClient, error) {
 	if err := manifest.Validate(); err != nil {
 		return nil, err
 	}
@@ -82,12 +119,17 @@ func StartProcess(ctx context.Context, manifest Manifest, settings map[string]an
 	}
 
 	client := &ProcessClient{
-		manifest: manifest,
-		cmd:      cmd,
-		stdin:    stdin,
-		pending:  make(map[int64]chan pendingResponse),
-		done:     make(chan struct{}),
+		manifest:   manifest,
+		cmd:        cmd,
+		stdin:      stdin,
+		pending:    make(map[int64]chan pendingResponse),
+		active:     make(map[int64]context.Context),
+		hostActive: make(map[int64]context.CancelFunc),
+		host:       host,
+		done:       make(chan struct{}),
+		writes:     make(chan queuedWrite, pluginWriterQueueSize),
 	}
+	go client.writeLoop()
 	go client.readLoop(stdout)
 	go client.waitLoop()
 
@@ -98,11 +140,15 @@ func StartProcess(ctx context.Context, manifest Manifest, settings map[string]an
 	}
 	err = client.Call(initializeCtx, "initialize", map[string]any{
 		"protocol_version": ProtocolVersion,
+		"hash_version":     version.String(),
 		"plugin": map[string]string{
 			"id":      manifest.ID,
 			"version": manifest.Version,
 		},
+		"hooks":    manifest.Hooks,
 		"settings": settings,
+		"cwd":      session.CWD,
+		"dialect":  session.Dialect,
 	}, &result)
 	if err != nil {
 		_ = client.Close()
@@ -125,7 +171,15 @@ func (c *ProcessClient) Call(ctx context.Context, method string, params any, res
 	if err := c.registerPending(id, pending); err != nil {
 		return err
 	}
-	if err := c.write(rpcRequest{JSONRPC: "2.0", ID: id, Method: method, Params: params}); err != nil {
+	c.mu.Lock()
+	c.active[id] = ctx
+	c.mu.Unlock()
+	defer func() {
+		c.mu.Lock()
+		delete(c.active, id)
+		c.mu.Unlock()
+	}()
+	if err := c.write(ctx, rpcRequest{JSONRPC: "2.0", ID: id, Method: method, Params: params}); err != nil {
 		c.removePending(id)
 		return err
 	}
@@ -147,7 +201,9 @@ func (c *ProcessClient) Call(ctx context.Context, method string, params any, res
 		return nil
 	case <-ctx.Done():
 		c.removePending(id)
-		_ = c.Notify("$/cancelRequest", map[string]int64{"id": id})
+		cancelCtx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+		_ = c.enqueueNotification(cancelCtx, rpcRequest{JSONRPC: "2.0", Method: "$/cancelRequest", Params: map[string]int64{"id": id}})
+		cancel()
 		return ctx.Err()
 	case <-c.done:
 		return c.failure()
@@ -156,7 +212,9 @@ func (c *ProcessClient) Call(ctx context.Context, method string, params any, res
 
 // Notify sends a JSON-RPC notification without waiting for a response.
 func (c *ProcessClient) Notify(method string, params any) error {
-	return c.write(rpcRequest{JSONRPC: "2.0", Method: method, Params: params})
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	return c.write(ctx, rpcRequest{JSONRPC: "2.0", Method: method, Params: params})
 }
 
 func (c *ProcessClient) registerPending(id int64, pending chan pendingResponse) error {
@@ -178,29 +236,66 @@ func (c *ProcessClient) removePending(id int64) {
 	c.mu.Unlock()
 }
 
-func (c *ProcessClient) write(request rpcRequest) error {
-	c.writeMu.Lock()
-	defer c.writeMu.Unlock()
-	c.mu.Lock()
-	closed := c.closed
-	err := c.err
-	c.mu.Unlock()
-	if closed {
-		if err != nil {
-			return err
-		}
-		return errors.New("plugin client is closed")
-	}
+func (c *ProcessClient) write(ctx context.Context, request any) error {
 	data, err := json.Marshal(request)
 	if err != nil {
 		return err
 	}
 	data = append(data, '\n')
-	if _, err := c.stdin.Write(data); err != nil {
-		c.fail(fmt.Errorf("write plugin %q: %w", c.manifest.ID, err))
+	job := queuedWrite{ctx: ctx, data: data, done: make(chan error, 1)}
+	select {
+	case c.writes <- job:
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-c.done:
 		return c.failure()
 	}
-	return nil
+	select {
+	case err := <-job.done:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-c.done:
+		return c.failure()
+	}
+}
+
+func (c *ProcessClient) enqueueNotification(ctx context.Context, request any) error {
+	data, err := json.Marshal(request)
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	job := queuedWrite{ctx: context.Background(), data: data, done: make(chan error, 1)}
+	select {
+	case c.writes <- job:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-c.done:
+		return c.failure()
+	}
+}
+
+func (c *ProcessClient) writeLoop() {
+	for {
+		select {
+		case job := <-c.writes:
+			if err := job.ctx.Err(); err != nil {
+				job.done <- err
+				continue
+			}
+			if _, err := c.stdin.Write(job.data); err != nil {
+				wrapped := fmt.Errorf("write plugin %q: %w", c.manifest.ID, err)
+				job.done <- wrapped
+				c.abort(wrapped)
+				return
+			}
+			job.done <- nil
+		case <-c.done:
+			return
+		}
+	}
 }
 
 func (c *ProcessClient) readLoop(stdout io.Reader) {
@@ -208,15 +303,51 @@ func (c *ProcessClient) readLoop(stdout io.Reader) {
 	buffer := make([]byte, 0, 64*1024)
 	scanner.Buffer(buffer, 1<<20)
 	for scanner.Scan() {
-		var response rpcResponse
-		if err := json.Unmarshal(scanner.Bytes(), &response); err != nil {
-			c.fail(fmt.Errorf("plugin %q emitted invalid JSON-RPC: %w", c.manifest.ID, err))
+		var message struct {
+			JSONRPC string          `json:"jsonrpc"`
+			ID      *int64          `json:"id"`
+			Method  string          `json:"method"`
+			Params  json.RawMessage `json:"params"`
+			Result  json.RawMessage `json:"result"`
+			Error   *RPCError       `json:"error"`
+		}
+		if err := json.Unmarshal(scanner.Bytes(), &message); err != nil {
+			c.abort(fmt.Errorf("plugin %q emitted invalid JSON-RPC: %w", c.manifest.ID, err))
 			return
 		}
-		if response.JSONRPC != "2.0" || response.ID <= 0 || (response.Error != nil && len(response.Result) != 0) || (response.Error == nil && len(response.Result) == 0) {
-			c.fail(fmt.Errorf("plugin %q emitted an unsupported JSON-RPC message", c.manifest.ID))
+		if message.JSONRPC != "2.0" {
+			c.abort(fmt.Errorf("plugin %q emitted an unsupported JSON-RPC message", c.manifest.ID))
 			return
 		}
+		if message.Method == "$/cancelRequest" && message.ID == nil {
+			var cancelParams struct {
+				ID int64 `json:"id"`
+			}
+			if err := json.Unmarshal(message.Params, &cancelParams); err != nil || cancelParams.ID <= 0 {
+				c.abort(fmt.Errorf("plugin %q emitted invalid cancellation", c.manifest.ID))
+				return
+			}
+			c.mu.Lock()
+			cancel := c.hostActive[cancelParams.ID]
+			c.mu.Unlock()
+			if cancel != nil {
+				cancel()
+			}
+			continue
+		}
+		if message.ID == nil || *message.ID <= 0 {
+			c.abort(fmt.Errorf("plugin %q emitted an unsupported JSON-RPC message", c.manifest.ID))
+			return
+		}
+		if message.Method != "" {
+			go c.handleHostRequest(*message.ID, message.Method, message.Params)
+			continue
+		}
+		if (message.Error != nil && len(message.Result) != 0) || (message.Error == nil && len(message.Result) == 0) {
+			c.abort(fmt.Errorf("plugin %q emitted an invalid JSON-RPC response", c.manifest.ID))
+			return
+		}
+		response := rpcResponse{JSONRPC: message.JSONRPC, ID: *message.ID, Result: message.Result, Error: message.Error}
 		c.mu.Lock()
 		pending := c.pending[response.ID]
 		delete(c.pending, response.ID)
@@ -226,8 +357,85 @@ func (c *ProcessClient) readLoop(stdout io.Reader) {
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		c.fail(fmt.Errorf("read plugin %q: %w", c.manifest.ID, err))
+		c.abort(fmt.Errorf("read plugin %q: %w", c.manifest.ID, err))
+		return
 	}
+	c.abort(fmt.Errorf("plugin %q closed protocol stdout", c.manifest.ID))
+}
+
+func (c *ProcessClient) abort(err error) {
+	c.fail(err)
+	if c.cmd.Process != nil {
+		_ = c.cmd.Process.Kill()
+	}
+}
+
+// Exited reports that the peer has closed or been terminated.
+func (c *ProcessClient) Exited() bool {
+	select {
+	case <-c.done:
+		return true
+	default:
+		return false
+	}
+}
+
+func (c *ProcessClient) handleHostRequest(id int64, method string, params json.RawMessage) {
+	responseCtx := context.Background()
+	respond := func(result any, rpcErr *RPCError) {
+		message := map[string]any{"jsonrpc": "2.0", "id": id}
+		if rpcErr != nil {
+			message["error"] = rpcErr
+		} else {
+			message["result"] = result
+		}
+		ctx, cancel := context.WithTimeout(responseCtx, 500*time.Millisecond)
+		defer cancel()
+		_ = c.write(ctx, message)
+	}
+	if !strings.HasPrefix(method, "host.") || !declaresHostService(c.manifest, strings.TrimPrefix(method, "host.")) {
+		respond(nil, &RPCError{Code: -32601, Message: "host service not declared"})
+		return
+	}
+	parentID, err := parentRequestID(params)
+	if err != nil {
+		respond(nil, &RPCError{Code: -32602, Message: err.Error()})
+		return
+	}
+	c.mu.Lock()
+	parentCtx := c.active[parentID]
+	c.mu.Unlock()
+	if parentCtx == nil || parentCtx.Err() != nil {
+		respond(nil, &RPCError{Code: -32800, Message: "parent request is not active"})
+		return
+	}
+	responseCtx = parentCtx
+	if c.host == nil {
+		respond(nil, &RPCError{Code: -32601, Message: "host services unavailable"})
+		return
+	}
+	hostCtx, cancel := context.WithCancel(parentCtx)
+	c.mu.Lock()
+	c.hostActive[id] = cancel
+	c.mu.Unlock()
+	defer func() {
+		cancel()
+		c.mu.Lock()
+		delete(c.hostActive, id)
+		c.mu.Unlock()
+	}()
+	responseCtx = hostCtx
+	result, rpcErr := c.host(hostCtx, c.manifest, method, params)
+	respond(result, rpcErr)
+}
+
+func declaresHostService(manifest Manifest, service string) bool {
+	for _, declared := range manifest.Capabilities.HostServices {
+		if declared == service || declared == "host."+service {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *ProcessClient) waitLoop() {
@@ -276,15 +484,18 @@ func (c *ProcessClient) Close() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
 	defer cancel()
 	var ignored map[string]any
-	_ = c.Call(ctx, "shutdown", map[string]any{}, &ignored)
+	shutdownErr := c.Call(ctx, "shutdown", map[string]any{}, &ignored)
 	_ = c.stdin.Close()
 	select {
 	case <-c.done:
-		return nil
+		return shutdownErr
 	case <-ctx.Done():
 		if c.cmd.Process != nil {
 			_ = c.cmd.Process.Kill()
 		}
-		return nil
+		if shutdownErr != nil {
+			return fmt.Errorf("plugin shutdown: %w", shutdownErr)
+		}
+		return fmt.Errorf("plugin shutdown timed out")
 	}
 }

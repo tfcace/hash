@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "cancel notification",
+  "type": "object",
+  "required": ["jsonrpc", "method", "params"],
+  "properties": {
+    "jsonrpc": {"const": "2.0"},
+    "method": {"const": "$/cancelRequest"},
+    "params": {"type": "object", "required": ["id"], "properties": {"id": {"type": "integer", "minimum": 1}}, "additionalProperties": false}
+  },
+  "additionalProperties": false
+}

@@ -92,6 +92,19 @@ func TestPTYStderr_KeepsTailOfLongOutput(t *testing.T) {
 	}
 }
 
+func TestPTYStderrPrefersRollingMergedTail(t *testing.T) {
+	result := &executor.Result{
+		ExitCode:            1,
+		UsedPTY:             true,
+		OutputStreamsMerged: true,
+		CapturedOutput:      "stale capture",
+		StderrTail:          "\x1b[31mlatest merged error\x1b[0m\r\n",
+	}
+	if got := ptyStderrFallback(result); got != "latest merged error" {
+		t.Fatalf("got %q", got)
+	}
+}
+
 func TestStripTerminalSequences(t *testing.T) {
 	in := "\x1b]0;title\x07plain \x1b[1;31mred\x1b[0m \x1b[2Kcleared\x1b[3A moved"
 	got := stripTerminalSequences(in)

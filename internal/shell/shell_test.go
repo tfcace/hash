@@ -49,6 +49,22 @@ func TestIsStrictSuggestion(t *testing.T) {
 	}
 }
 
+func TestIsSingleTokenCorrection(t *testing.T) {
+	for _, tc := range []struct {
+		original, candidate string
+		want                bool
+	}{
+		{"git sttaus", "git status", true},
+		{"gti sttaus", "git status", false},
+		{"git status", "git status --short", false},
+		{"", "git status", false},
+	} {
+		if got := isSingleTokenCorrection(tc.original, tc.candidate); got != tc.want {
+			t.Errorf("isSingleTokenCorrection(%q, %q) = %v", tc.original, tc.candidate, got)
+		}
+	}
+}
+
 func TestWriteAgentNotConfiguredHintUsesACPDefault(t *testing.T) {
 	var out strings.Builder
 

@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/creack/pty"
 	"github.com/tfcace/hash/internal/progress"
@@ -52,6 +53,43 @@ type limitedWriter struct {
 	limit     int64 // Original limit
 	truncated bool  // Whether truncation occurred
 	original  int64 // Total bytes attempted (before truncation)
+}
+
+const commandOutputTailSize = 10 * 1024
+
+type rollingTailWriter struct {
+	data  []byte
+	limit int
+}
+
+func newRollingTailWriter(limit int) *rollingTailWriter {
+	return &rollingTailWriter{limit: limit}
+}
+
+func (w *rollingTailWriter) Write(p []byte) (int, error) {
+	if w.limit <= 0 {
+		return len(p), nil
+	}
+	if len(p) >= w.limit {
+		w.data = append(w.data[:0], p[len(p)-w.limit:]...)
+		return len(p), nil
+	}
+	w.data = append(w.data, p...)
+	if len(w.data) > w.limit {
+		w.data = append(w.data[:0], w.data[len(w.data)-w.limit:]...)
+	}
+	return len(p), nil
+}
+
+func (w *rollingTailWriter) String() string {
+	data := append([]byte(nil), w.data...)
+	for len(data) > 0 && !utf8.RuneStart(data[0]) {
+		data = data[1:]
+	}
+	for len(data) > 0 && !utf8.Valid(data) {
+		data = data[:len(data)-1]
+	}
+	return string(data)
 }
 
 func newLimitedWriter(w io.Writer, limit int64) *limitedWriter {
@@ -535,11 +573,17 @@ func signalProcessGroup(cmd *exec.Cmd, sig syscall.Signal) {
 
 // Result contains the outcome of a command execution.
 type Result struct {
-	ExitCode       int
-	Duration       time.Duration
-	Command        string
-	CapturedOutput string
-	UsedPTY        bool // True if command ran with PTY (TUI apps, interactive programs)
+	ExitCode            int
+	Duration            time.Duration
+	Command             string
+	CapturedOutput      string
+	StdoutTail          string
+	StderrTail          string
+	OutputStreamsMerged bool
+	UsedPTY             bool // True if command ran with PTY (TUI apps, interactive programs)
+	Canceled            bool
+	Interrupted         bool
+	Signal              string
 }
 
 // Executor runs shell commands using mvdan/sh interpreter.
@@ -1224,6 +1268,8 @@ func (e *Executor) Execute(ctx context.Context, command string, stdout, stderr i
 
 	// Set up capture buffer
 	var captureBuf bytes.Buffer
+	stdoutTail := newRollingTailWriter(commandOutputTailSize)
+	stderrTail := newRollingTailWriter(commandOutputTailSize)
 	var captureWriter io.Writer
 	var lw *limitedWriter
 	switch {
@@ -1238,14 +1284,14 @@ func (e *Executor) Execute(ctx context.Context, command string, stdout, stderr i
 
 	// Switch writers for this execution
 	if stdout != nil {
-		e.switchStdout.Set(io.MultiWriter(stdout, captureWriter))
+		e.switchStdout.Set(io.MultiWriter(stdout, captureWriter, stdoutTail))
 	} else {
-		e.switchStdout.Set(captureWriter)
+		e.switchStdout.Set(io.MultiWriter(captureWriter, stdoutTail))
 	}
 	if stderr != nil {
-		e.switchStderr.Set(stderr)
+		e.switchStderr.Set(io.MultiWriter(stderr, stderrTail))
 	} else {
-		e.switchStderr.Set(io.Discard)
+		e.switchStderr.Set(stderrTail)
 	}
 
 	// Create persistent runner on first use (lazy init)
@@ -1271,25 +1317,50 @@ func (e *Executor) Execute(ctx context.Context, command string, stdout, stderr i
 
 	// Capture PTY usage before returning
 	usedPTY := e.ptyActive.Load()
+	stdoutTailText, stderrTailText := stdoutTail.String(), stderrTail.String()
+	if usedPTY {
+		stderrTailText = stdoutTailText + stderrTailText
+		stdoutTailText = ""
+	}
+	canceled := ctx.Err() != nil
+	interrupted := false
+	signalName := ""
+	var termination *processTerminationError
+	if errors.As(err, &termination) {
+		signalName = termination.signal.String()
+		interrupted = termination.signal == syscall.SIGINT
+	}
 
 	// Return CommandNotFoundError to caller for special handling
 	var cnf *CommandNotFoundError
 	if errors.As(err, &cnf) {
 		return &Result{
-			ExitCode:       127,
-			Duration:       time.Since(start),
-			Command:        command,
-			CapturedOutput: captureBuf.String(),
-			UsedPTY:        usedPTY,
+			ExitCode:            127,
+			Duration:            time.Since(start),
+			Command:             command,
+			CapturedOutput:      captureBuf.String(),
+			StdoutTail:          stdoutTailText,
+			StderrTail:          stderrTailText,
+			OutputStreamsMerged: usedPTY,
+			UsedPTY:             usedPTY,
+			Canceled:            canceled,
+			Interrupted:         interrupted,
+			Signal:              signalName,
 		}, cnf
 	}
 
 	return &Result{
-		ExitCode:       exitCodeFromError(err),
-		Duration:       time.Since(start),
-		Command:        command,
-		CapturedOutput: captureBuf.String(),
-		UsedPTY:        usedPTY,
+		ExitCode:            exitCodeFromError(err),
+		Duration:            time.Since(start),
+		Command:             command,
+		CapturedOutput:      captureBuf.String(),
+		StdoutTail:          stdoutTailText,
+		StderrTail:          stderrTailText,
+		OutputStreamsMerged: usedPTY,
+		UsedPTY:             usedPTY,
+		Canceled:            canceled,
+		Interrupted:         interrupted,
+		Signal:              signalName,
 	}, nil
 }
 
@@ -1883,6 +1954,14 @@ func normalizeExternalCommandError(err error) error {
 	}
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) {
+		if waitStatus, ok := exitErr.ProcessState.Sys().(syscall.WaitStatus); ok && waitStatus.Signaled() {
+			signal := waitStatus.Signal()
+			code := 128 + int(signal)
+			if code > 255 {
+				code = 1
+			}
+			return &processTerminationError{status: interp.ExitStatus(code), signal: signal}
+		}
 		code := exitErr.ExitCode()
 		if code < 0 || code > 255 {
 			code = 1
@@ -1893,6 +1972,14 @@ func normalizeExternalCommandError(err error) error {
 	}
 	return err
 }
+
+type processTerminationError struct {
+	status interp.ExitStatus
+	signal syscall.Signal
+}
+
+func (e *processTerminationError) Error() string { return e.signal.String() }
+func (e *processTerminationError) Unwrap() error { return e.status }
 
 // exitCodeFromError extracts exit code from interpreter error.
 func exitCodeFromError(err error) int {

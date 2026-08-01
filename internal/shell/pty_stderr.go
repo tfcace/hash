@@ -17,11 +17,17 @@ var terminalSeq = regexp.MustCompile(`\x1b(?:\][^\x07\x1b]*(?:\x07|\x1b\\)|\[[0-
 // stays empty; the sanitized tail of the captured merged output is the best
 // available record of what went wrong.
 func ptyStderrFallback(result *executor.Result) string {
-	if result == nil || !result.UsedPTY || result.ExitCode == 0 || result.CapturedOutput == "" {
+	if result == nil || !result.UsedPTY || result.ExitCode == 0 {
 		return ""
 	}
 
-	text := result.CapturedOutput
+	text := result.StderrTail
+	if text == "" {
+		text = result.CapturedOutput
+	}
+	if text == "" {
+		return ""
+	}
 	text = strings.ReplaceAll(text, "\r\n", "\n")
 	text = strings.ReplaceAll(text, "\r", "\n") // carriage-return progress lines
 	text = stripTerminalSequences(text)

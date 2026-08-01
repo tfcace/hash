@@ -2,6 +2,7 @@ package shell
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -66,6 +67,7 @@ type Shell struct {
 	branchLister        func() []string // Local git branches for did-you-mean; nil = gitBranches
 	clipboard           *clipboard.Buffer
 	predictor           *prediction.Predictor
+	completionRouter    *completion.Router
 	suggestor           *CommandSuggestor
 	colorPalette        prompt.Palette
 	allowlist           *allowlist.Manager
@@ -78,6 +80,8 @@ type Shell struct {
 	lastCommand         string // Last executed command
 	lastStderr          string // Stderr from last command (truncated)
 	lastCwd             string // Working directory of last command
+	commandGeneration   uint64
+	pendingCorrections  []string
 
 	osc *integration.Emitter // OSC shell integration emitter
 
@@ -370,31 +374,31 @@ func New(cfg *config.Config) (*Shell, error) {
 	initialCwd, _ := os.Getwd()
 
 	shell := &Shell{
-		config:       cfg,
-		executor:     e,
-		prompt:       p,
-		readline:     rl,
-		inputHandler: inputHandler,
-		editorCfg:    editorCfg,
-		agentHandler: agentHandler,
-		responseUI:   NewResponseUI(os.Stdout),
-		history:      historyStore,
-		historyPath:  historyPath,
-		learning:     learningStore,
-		fixes:        newFixTracker(learningStore),
-		errors:       NewErrorHandler(),
-		clipboard:    clipboardBuf,
-		predictor:    predictor,
-		suggestor:    suggestor,
-		colorPalette: colorPalette,
-		allowlist:    allowlistMgr,
-		agentOutput:  agentOutput,
-		readKey:      readSingleKey,
-		historyIndex: -1, // Start before history (current line)
-		osc:          osc,
-		prevCwd:      initialCwd,
-
-		pluginCompleter: pluginCompleter,
+		config:           cfg,
+		executor:         e,
+		prompt:           p,
+		readline:         rl,
+		inputHandler:     inputHandler,
+		editorCfg:        editorCfg,
+		agentHandler:     agentHandler,
+		responseUI:       NewResponseUI(os.Stdout),
+		history:          historyStore,
+		historyPath:      historyPath,
+		learning:         learningStore,
+		fixes:            newFixTracker(learningStore),
+		errors:           NewErrorHandler(),
+		clipboard:        clipboardBuf,
+		predictor:        predictor,
+		completionRouter: router,
+		suggestor:        suggestor,
+		colorPalette:     colorPalette,
+		allowlist:        allowlistMgr,
+		agentOutput:      agentOutput,
+		readKey:          readSingleKey,
+		historyIndex:     -1, // Start before history (current line)
+		osc:              osc,
+		prevCwd:          initialCwd,
+		pluginCompleter:  pluginCompleter,
 	}
 
 	if acpTransport != nil {
@@ -670,6 +674,7 @@ func (s *Shell) dispatchCommand(ctx context.Context, line string) error {
 
 // executeRegularCommand executes a regular shell command.
 func (s *Shell) executeRegularCommand(ctx context.Context, line string) error {
+	s.commandGeneration++
 	// Check for builtins first
 	handled, err := s.executeBuiltin(ctx, line)
 	if err == errExit {
@@ -680,6 +685,8 @@ func (s *Shell) executeRegularCommand(ctx context.Context, line string) error {
 		s.setLastCommandFailure(line, err, 1)
 		s.recordCommand(line, s.lastExitCode, s.lastDuration)
 		s.observeCommandOutcome(line)
+		s.lastCwd, _ = os.Getwd()
+		s.requestCorrections(line, nil, err)
 		s.updatePrompt()
 		return nil
 	}
@@ -688,6 +695,9 @@ func (s *Shell) executeRegularCommand(ctx context.Context, line string) error {
 		s.lastDuration = 0
 		s.recordCommand(line, 0, 0)
 		s.observeCommandOutcome(line)
+		s.lastCommand = line
+		s.lastCwd, _ = os.Getwd()
+		s.requestCorrections(line, &executor.Result{ExitCode: 0, Command: line}, nil)
 		s.updatePrompt()
 		return nil
 	}
@@ -710,6 +720,11 @@ func (s *Shell) executeRegularCommand(ctx context.Context, line string) error {
 func (s *Shell) handleExecutionResult(line string, result *executor.Result, err error, stderrCap *stderrCapture) {
 	if err != nil {
 		s.handleExecutionError(err)
+		if result != nil {
+			s.lastDuration = result.Duration
+		} else {
+			s.lastDuration = 0
+		}
 	} else {
 		s.lastExitCode = result.ExitCode
 		s.lastDuration = result.Duration
@@ -744,6 +759,93 @@ func (s *Shell) handleExecutionResult(line string, result *executor.Result, err 
 		cwd, _ := os.Getwd()
 		s.predictor.Record(prevCommand, line, cwd, nil)
 	}
+	s.requestCorrections(line, result, err)
+}
+
+func (s *Shell) requestCorrections(line string, result *executor.Result, execErr error) {
+	s.pendingCorrections = nil
+	if s.plugins == nil {
+		return
+	}
+	failureKind := ""
+	canceled := errors.Is(execErr, context.Canceled) || result != nil && result.Canceled
+	if canceled {
+		failureKind = "canceled"
+	} else if result != nil && result.Interrupted {
+		failureKind = "interrupted"
+	} else if result != nil && result.Signal != "" {
+		failureKind = "signal"
+	} else if executor.IsCommandNotFound(execErr) {
+		failureKind = "command_not_found"
+	} else if execErr != nil {
+		failureKind = "executor_error"
+	} else if s.lastExitCode != 0 {
+		failureKind = "exit_status"
+	}
+	errorMessage := ""
+	if execErr != nil {
+		errorMessage = execErr.Error()
+	}
+	stdoutTail := ""
+	merged := false
+	if result != nil {
+		merged = result.OutputStreamsMerged
+		if !merged {
+			stdoutTail = result.StdoutTail
+		}
+	}
+	params := plugin.CommandFinishedParams{
+		Generation: s.commandGeneration, OriginalLine: line, ExecutedLine: line,
+		ExitCode: s.lastExitCode, DurationMS: s.lastDuration.Milliseconds(),
+		FailureKind: failureKind, ErrorMessage: errorMessage,
+		StdoutTail: stdoutTail, StderrTail: boundedTail(s.lastStderr, maxStderrCapture),
+		OutputStreamsMerged: merged, CWD: s.lastCwd, Dialect: s.config.Shell.Dialect, Canceled: canceled,
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	var response plugin.CommandFinishedResult
+	found, _ := s.plugins.CallFirstValid(ctx, "command.finished", params, func(raw json.RawMessage) bool {
+		var candidateResult plugin.CommandFinishedResult
+		if err := json.Unmarshal(raw, &candidateResult); err != nil {
+			return false
+		}
+		candidates, _ := plugin.ValidateCorrections(line, candidateResult.Corrections)
+		for _, candidate := range candidates {
+			if plugin.ValidateCommandCorrection(line, candidate, s.config.Shell.Dialect) == nil {
+				response.Corrections = append(response.Corrections, candidate)
+			}
+		}
+		return len(response.Corrections) > 0
+	}, nil)
+	if !found || params.Generation != s.commandGeneration {
+		return
+	}
+	s.pendingCorrections = append(s.pendingCorrections, response.Corrections...)
+}
+
+func boundedTail(value string, limit int) string {
+	if len(value) <= limit {
+		return value
+	}
+	value = value[len(value)-limit:]
+	for value != "" && !utf8.RuneStart(value[0]) {
+		value = value[1:]
+	}
+	return value
+}
+
+func isSingleTokenCorrection(original, candidate string) bool {
+	before, after := strings.Fields(original), strings.Fields(candidate)
+	if len(before) == 0 || len(before) != len(after) {
+		return false
+	}
+	differences := 0
+	for i := range before {
+		if before[i] != after[i] {
+			differences++
+		}
+	}
+	return differences == 1
 }
 
 // handleExecutionError handles errors from command execution.
@@ -833,6 +935,11 @@ func (s *Shell) readLineWithEditor(ctx context.Context) (string, error) {
 		// Get current prompt for editor
 		cfg := s.editorCfg
 		cfg.Prompt = s.currentPromptLine()
+		hasCorrection := len(s.pendingCorrections) > 0
+		if len(s.pendingCorrections) > 0 {
+			cfg.CorrectionCandidates = append([]string(nil), s.pendingCorrections...)
+			s.pendingCorrections = nil
+		}
 
 		ed := editor.New(cfg, os.Stdin, os.Stdout)
 		if initialText != "" {
@@ -840,8 +947,10 @@ func (s *Shell) readLineWithEditor(ctx context.Context) (string, error) {
 		}
 
 		// Ghost text: learned fix for the last failure, else prediction
-		if ghost := s.promptGhost(); ghost != "" {
-			ed.SetGhostText(ghost)
+		if !hasCorrection {
+			if ghost, source := s.promptGhostOwned(); ghost != "" {
+				ed.SetGhostTextOwned(ghost, source)
+			}
 		}
 
 		result, err := ed.Run(ctx)
@@ -1803,17 +1912,58 @@ func (s *Shell) startPlugins(ctx context.Context) {
 		fmt.Fprintf(os.Stderr, "hash: plugin discovery: %v\n", err)
 		return
 	}
-	if err := manager.Start(ctx); err != nil {
+	cwd, _ := os.Getwd()
+	if err := manager.StartWithSession(ctx, s.handlePluginHostService, plugin.SessionContext{CWD: cwd, Dialect: s.config.Shell.Dialect}); err != nil {
 		fmt.Fprintf(os.Stderr, "hash: plugin startup: %v\n", err)
 		return
 	}
 	s.plugins = manager
-	cwd, _ := os.Getwd()
 	manager.Notify("session.start", map[string]any{
 		"cwd":     cwd,
 		"dialect": s.config.Shell.Dialect,
 	})
 	s.editorCfg.SuggestionFunc = s.pluginSuggestion
+}
+
+func (s *Shell) handlePluginHostService(ctx context.Context, _ plugin.Manifest, method string, raw json.RawMessage) (any, *plugin.RPCError) {
+	switch method {
+	case "host.history.query":
+		if s.history == nil {
+			return plugin.HistoryQueryResult{}, nil
+		}
+		var params plugin.HistoryQueryParams
+		if err := json.Unmarshal(raw, &params); err != nil || params.Limit < 1 || params.Limit > 100 {
+			return nil, &plugin.RPCError{Code: -32602, Message: "invalid history query"}
+		}
+		commands, err := s.history.QuerySuccessful(params.Prefix, params.CWD, params.Limit)
+		if err != nil {
+			return nil, &plugin.RPCError{Code: -32603, Message: "history query failed"}
+		}
+		result := plugin.HistoryQueryResult{Entries: make([]plugin.HistoryEntry, 0, len(commands))}
+		for _, command := range commands {
+			result.Entries = append(result.Entries, plugin.HistoryEntry{Line: command.Command, CWD: command.Cwd, ExitCode: command.ExitCode, Timestamp: command.Timestamp.UTC().Format(time.RFC3339Nano)})
+		}
+		return result, nil
+	case "host.completion.query":
+		if s.completionRouter == nil {
+			return plugin.CompletionQueryResult{}, nil
+		}
+		var params plugin.CompletionQueryParams
+		if err := json.Unmarshal(raw, &params); err != nil || params.Cursor < 0 || params.Cursor > len(params.Line) {
+			return nil, &plugin.RPCError{Code: -32602, Message: "invalid completion query"}
+		}
+		result, err := s.completionRouter.CompleteCore(ctx, params.Line, params.Cursor)
+		if err != nil {
+			return nil, &plugin.RPCError{Code: -32603, Message: "completion query failed"}
+		}
+		items := make([]plugin.CompletionItem, 0, len(result.Items))
+		for _, item := range result.Items {
+			items = append(items, plugin.CompletionItem{Label: item.Display, InsertText: item.Value})
+		}
+		return plugin.CompletionQueryResult{Items: items}, nil
+	default:
+		return nil, &plugin.RPCError{Code: -32601, Message: "unknown host service"}
+	}
 }
 
 func (s *Shell) stopPlugins() {

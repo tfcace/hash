@@ -1,11 +1,13 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/tfcace/hash/internal/config"
 	"github.com/tfcace/hash/internal/plugin"
@@ -78,7 +80,15 @@ func runPlugin(args []string, stdout, stderr io.Writer) int {
 		}
 		return linkPlugin(args[1], stdout, stderr)
 	case "doctor":
-		return doctorPlugins(manifests, stdout, stderr)
+		if len(args) > 2 {
+			fmt.Fprintln(stderr, "Usage: hash plugin doctor [id]")
+			return 2
+		}
+		id := ""
+		if len(args) == 2 {
+			id = args[1]
+		}
+		return doctorPlugins(manifests, id, stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "hash: unknown plugin command %q\n", args[0])
 		printPluginHelp(stderr)
@@ -122,7 +132,7 @@ func linkPlugin(source string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-func doctorPlugins(manifests []plugin.Manifest, stdout, stderr io.Writer) int {
+func doctorPlugins(manifests []plugin.Manifest, selectedID string, stdout, stderr io.Writer) int {
 	cfg, err := config.Load(getConfigDir())
 	if err != nil {
 		fmt.Fprintf(stderr, "hash: configuration: %v\n", err)
@@ -133,7 +143,11 @@ func doctorPlugins(manifests []plugin.Manifest, stdout, stderr io.Writer) int {
 		installed[manifest.ID] = manifest
 	}
 	failed := false
-	for _, id := range cfg.Plugins.Enabled {
+	ids := append([]string(nil), cfg.Plugins.Enabled...)
+	if selectedID != "" {
+		ids = []string{selectedID}
+	}
+	for _, id := range ids {
 		manifest, ok := installed[id]
 		if !ok {
 			fmt.Fprintf(stdout, "FAIL %s: enabled but not installed\n", id)
@@ -145,9 +159,22 @@ func doctorPlugins(manifests []plugin.Manifest, stdout, stderr io.Writer) int {
 			failed = true
 			continue
 		}
-		fmt.Fprintf(stdout, "OK   %s: ready\n", id)
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		client, err := plugin.StartProcess(ctx, manifest, cfg.Plugins.Settings[id])
+		cancel()
+		if err != nil {
+			fmt.Fprintf(stdout, "FAIL %s: handshake failed: %v\n", id, err)
+			failed = true
+			continue
+		}
+		if err := client.Close(); err != nil {
+			fmt.Fprintf(stdout, "FAIL %s: shutdown failed: %v\n", id, err)
+			failed = true
+			continue
+		}
+		fmt.Fprintf(stdout, "OK   %s: executable, protocol version, handshake and shutdown passed\n", id)
 	}
-	if len(cfg.Plugins.Enabled) == 0 {
+	if len(ids) == 0 {
 		fmt.Fprintln(stdout, "OK   no plugins enabled (fresh-install default)")
 	}
 	if failed {

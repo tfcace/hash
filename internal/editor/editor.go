@@ -54,6 +54,7 @@ type Config struct {
 	DisableContextPicker    bool                                         // Disable Ctrl+P context picker
 	ClearOnCancel           bool                                         // Clear display when Ctrl+C cancels input
 	CancelOnEscape          bool                                         // Treat Escape as canceled input instead of mode/completion handling
+	CorrectionCandidates    []string                                     // Protected post-command corrections for the next prompt
 }
 
 // CompletionOutcome is the result of a completion request, distinguishing
@@ -109,6 +110,7 @@ type Editor struct {
 	ghostStreamChan <-chan GhostStreamUpdate // Unified streamed text and status.
 	ghostErrChan    <-chan error             // Channel for ghost text errors
 	streamingModel  string                   // Model name for "Thinking..." display
+	correctionMode  bool
 }
 
 // New creates a new editor.
@@ -147,7 +149,7 @@ func New(cfg Config, in io.Reader, out io.Writer) *Editor {
 	state.AllowHistorySearch = !cfg.DisableHistorySearch
 	state.AllowContextPicker = !cfg.DisableContextPicker
 
-	return &Editor{
+	ed := &Editor{
 		config:  cfg,
 		input:   inputReader,
 		display: display,
@@ -157,11 +159,31 @@ func New(cfg Config, in io.Reader, out io.Writer) *Editor {
 		out:     out,
 		ghost:   NewGhostText(),
 	}
+	switch len(cfg.CorrectionCandidates) {
+	case 1:
+		ed.ghost.Set(cfg.CorrectionCandidates[0])
+		ed.ghost.Source = GhostSourceCorrection
+	case 2, 3, 4, 5:
+		ed.correctionMode = true
+		ed.completionActive = true
+		ed.completionItems = make([]Completion, 0, len(cfg.CorrectionCandidates))
+		for _, candidate := range cfg.CorrectionCandidates {
+			ed.completionItems = append(ed.completionItems, Completion{Text: candidate, Description: "correction"})
+		}
+	}
+	return ed
 }
 
 // SetGhostText sets inline suggestion text that appears after the cursor.
 func (e *Editor) SetGhostText(text string) {
+	e.SetGhostTextOwned(text, GhostSourcePrediction)
+}
+
+// SetGhostTextOwned sets protected inline text and records its owner so key
+// handling and precedence remain explicit.
+func (e *Editor) SetGhostTextOwned(text string, source GhostSource) {
 	e.ghost.Set(text)
+	e.ghost.Source = source
 }
 
 // SetGhostTextStreaming sets up streaming ghost text from channels.
@@ -172,6 +194,7 @@ func (e *Editor) SetGhostTextStreaming(updates <-chan GhostStreamUpdate, errCh <
 	e.ghost.Clear()
 	e.ghost.SetStreaming(true)
 	e.ghost.FromAgent = true // Agent suggestions show hints
+	e.ghost.Source = GhostSourceAgent
 	// Dismiss any active completion menu - ghost text takes precedence
 	e.dismissCompletion()
 }
@@ -666,6 +689,7 @@ func (e *Editor) updateSuggestion() {
 		if suffix != "" {
 			e.ghost.Set(suffix)
 			e.ghost.FromAgent = false
+			e.ghost.Source = GhostSourceSuggestion
 			return
 		}
 	}
@@ -723,6 +747,21 @@ func (e *Editor) render() {
 // handleGhostTextKey processes keys when ghost text is active.
 // Returns true if the key was handled.
 func (e *Editor) handleGhostTextKey(key Key) bool {
+	if e.ghost.Source == GhostSourceCorrection {
+		switch key.Special {
+		case KeyRight:
+			text := e.ghost.AcceptAll()
+			if text != "" {
+				e.insertText(text)
+			}
+			return true
+		case KeyEnter, KeyEscape:
+			e.ghost.Clear()
+			return true
+		default:
+			return false
+		}
+	}
 	// Modified Tab accepts one word at a time. Check this before plain Tab so
 	// Alt/Ctrl+Tab does not get swallowed by the accept-all path.
 	if key.Special == KeyTab && (key.Alt || key.Ctrl) {
@@ -1266,6 +1305,23 @@ func (e *Editor) handleCompletionKey(key Key) bool {
 	}
 
 	filtered := e.filteredCompletionItems()
+	if e.correctionMode && key.Ctrl {
+		switch key.Rune {
+		case 'n':
+			if len(filtered) > 0 {
+				e.completionIndex = (e.completionIndex + 1) % len(filtered)
+			}
+			return true
+		case 'p':
+			if len(filtered) > 0 {
+				e.completionIndex--
+				if e.completionIndex < 0 {
+					e.completionIndex = len(filtered) - 1
+				}
+			}
+			return true
+		}
+	}
 
 	switch key.Special {
 	case KeyDown:
@@ -1294,6 +1350,7 @@ func (e *Editor) handleCompletionKey(key Key) bool {
 		// Enter always accepts the selected item and closes the menu
 		if len(filtered) > 0 {
 			e.acceptCompletion(filtered[e.completionIndex])
+			e.correctionMode = false
 		} else {
 			e.dismissCompletion()
 		}
@@ -1313,6 +1370,7 @@ func (e *Editor) handleCompletionKey(key Key) bool {
 		return true
 
 	case KeyEscape:
+		e.correctionMode = false
 		e.dismissCompletion()
 		return true
 

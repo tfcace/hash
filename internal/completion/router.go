@@ -81,6 +81,16 @@ func (r *Router) Register(c Completer, priority Priority) {
 
 // Complete tries each completer in priority order until one returns results.
 func (r *Router) Complete(ctx context.Context, line string, pos int) (Result, error) {
+	return r.completeUntil(ctx, line, pos, PriorityAgent)
+}
+
+// CompleteCore runs only local core completers. Agent and future plugin or
+// network tiers are excluded so host.completion.query cannot recurse.
+func (r *Router) CompleteCore(ctx context.Context, line string, pos int) (Result, error) {
+	return r.completeUntil(ctx, line, pos, PriorityFilesystem)
+}
+
+func (r *Router) completeUntil(ctx context.Context, line string, pos int, maxPriority Priority) (Result, error) {
 	start := time.Now()
 	traceEnabled := trace.Enabled("completion")
 
@@ -97,6 +107,9 @@ func (r *Router) Complete(ctx context.Context, line string, pos int) (Result, er
 	}
 
 	for _, rc := range r.completers {
+		if rc.priority > maxPriority {
+			continue
+		}
 		if ctx.Err() != nil {
 			if traceEnabled {
 				trace.Emit("completion", "router_canceled", trace.LevelDetailed, map[string]any{

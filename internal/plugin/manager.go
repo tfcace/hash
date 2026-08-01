@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -40,12 +41,17 @@ func PluginRoots() []string {
 type Manager struct {
 	mu      sync.RWMutex
 	enabled []*managedPlugin
+	host    HostServiceHandler
+	session SessionContext
 }
 
 type managedPlugin struct {
 	manifest Manifest
 	settings map[string]any
 	client   *ProcessClient
+	failures int
+	disabled bool
+	restarts int
 }
 
 // NewManager validates enablement against the discovered manifests. Ordering is
@@ -101,18 +107,39 @@ func (m *Manager) EnabledIDs() []string {
 // Start launches all selected plugin processes. It is called only after an
 // interactive session has completed startup processing.
 func (m *Manager) Start(ctx context.Context) error {
+	return m.StartWithHandler(ctx, nil)
+}
+
+// StartWithHandler launches selected plugins with bidirectional host services.
+func (m *Manager) StartWithHandler(ctx context.Context, host HostServiceHandler) error {
+	cwd, _ := os.Getwd()
+	return m.StartWithSession(ctx, host, SessionContext{CWD: cwd, Dialect: "bash"})
+}
+
+// StartWithSession launches selected plugins with the current shell context.
+func (m *Manager) StartWithSession(ctx context.Context, host HostServiceHandler, session SessionContext) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.host = host
+	m.session = session
+	started := 0
+	var lastErr error
 	for _, plugin := range m.enabled {
 		if plugin.client != nil {
 			continue
 		}
-		client, err := StartProcess(ctx, plugin.manifest, plugin.settings)
+		client, err := StartProcessWithSession(ctx, plugin.manifest, plugin.settings, host, session)
 		if err != nil {
-			m.closeLocked()
-			return err
+			plugin.failures++
+			lastErr = err
+			continue
 		}
 		plugin.client = client
+		plugin.failures = 0
+		started++
+	}
+	if started == 0 && len(m.enabled) > 0 {
+		return lastErr
 	}
 	return nil
 }
@@ -132,18 +159,112 @@ func (m *Manager) Notify(method string, params any) {
 // CallFirst asks enabled plugins that declare method, in priority order, until
 // a handler returns a result. The caller supplies the hook deadline.
 func (m *Manager) CallFirst(ctx context.Context, method string, params any, result any) (bool, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	for _, plugin := range m.enabled {
-		if plugin.client == nil || !declaresHook(plugin.manifest, method) {
-			continue
-		}
-		if err := plugin.client.Call(ctx, method, params, result); err != nil {
-			continue
-		}
-		return true, nil
+	return m.CallFirstValid(ctx, method, params, nil, result)
+}
+
+// CallFirstValid asks every declaring plugin concurrently, then selects the
+// first result accepted by validate in enabled-list priority order.
+func (m *Manager) CallFirstValid(ctx context.Context, method string, params any, validate func(json.RawMessage) bool, result any) (bool, error) {
+	type target struct {
+		index  int
+		plugin *managedPlugin
+		client *ProcessClient
 	}
-	return false, nil
+	m.mu.RLock()
+	var targets []target
+	for index, candidate := range m.enabled {
+		if candidate.client != nil && !candidate.disabled && declaresHook(candidate.manifest, method) {
+			targets = append(targets, target{index: index, plugin: candidate, client: candidate.client})
+		}
+	}
+	m.mu.RUnlock()
+	if len(targets) == 0 {
+		return false, nil
+	}
+	type outcome struct {
+		index int
+		raw   json.RawMessage
+		err   error
+	}
+	ch := make(chan outcome, len(targets))
+	for _, t := range targets {
+		go func(t target) {
+			var raw json.RawMessage
+			err := t.client.Call(ctx, method, params, &raw)
+			ch <- outcome{index: t.index, raw: raw, err: err}
+		}(t)
+	}
+	outcomes := make(map[int]outcome, len(targets))
+	deadlineErr := error(nil)
+	for len(outcomes) < len(targets) {
+		select {
+		case out := <-ch:
+			outcomes[out.index] = out
+		case <-ctx.Done():
+			deadlineErr = ctx.Err()
+			for _, target := range targets {
+				if _, exists := outcomes[target.index]; !exists {
+					outcomes[target.index] = outcome{index: target.index, err: ctx.Err()}
+				}
+			}
+		}
+	}
+	for _, t := range targets {
+		out := outcomes[t.index]
+		m.mu.Lock()
+		if out.err != nil {
+			t.plugin.failures++
+			exited := t.client.Exited()
+			if exited && t.plugin.restarts >= 1 {
+				t.plugin.disabled = true
+			} else if t.plugin.failures >= 3 {
+				t.plugin.disabled = true
+			}
+		} else {
+			t.plugin.failures = 0
+		}
+		m.mu.Unlock()
+		if out.err != nil && t.client.Exited() {
+			m.restartOnce(ctx, t.plugin, t.client)
+		}
+		if out.err == nil {
+			if validate != nil && !validate(out.raw) {
+				continue
+			}
+			if result != nil && len(out.raw) > 0 {
+				if err := json.Unmarshal(out.raw, result); err != nil {
+					continue
+				}
+			}
+			return true, nil
+		}
+	}
+	return false, deadlineErr
+}
+
+func (m *Manager) restartOnce(ctx context.Context, target *managedPlugin, failedClient *ProcessClient) {
+	m.mu.Lock()
+	if target.disabled || target.client != failedClient || target.restarts >= 1 {
+		m.mu.Unlock()
+		return
+	}
+	target.restarts++
+	manifest, settings := target.manifest, target.settings
+	host, session := m.host, m.session
+	m.mu.Unlock()
+
+	client, err := StartProcessWithSession(ctx, manifest, settings, host, session)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err != nil {
+		target.disabled = true
+		return
+	}
+	if target.client == failedClient && !target.disabled {
+		target.client = client
+		return
+	}
+	_ = client.Close()
 }
 
 func declaresHook(manifest Manifest, method string) bool {

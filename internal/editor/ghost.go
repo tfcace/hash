@@ -1,6 +1,18 @@
 // internal/editor/ghost.go
 package editor
 
+// GhostSource identifies who owns protected ghost text.
+type GhostSource uint8
+
+const (
+	GhostSourceNone GhostSource = iota
+	GhostSourceSuggestion
+	GhostSourceCorrection
+	GhostSourceLearnedFix
+	GhostSourcePrediction
+	GhostSourceAgent
+)
+
 // GhostText represents inline suggestion text that appears after the cursor.
 // Ghost text is shown in dim gray and can be accepted with Tab or dismissed with Esc.
 type GhostText struct {
@@ -10,13 +22,13 @@ type GhostText struct {
 	Streaming  bool   // Whether more text is still arriving
 	FromAgent  bool   // True for agent suggestions (show hints), false for predictions (fish-style)
 	Status     string // Transient activity; never accepted as command text.
-}
 
 // GhostStreamUpdate keeps streamed ghost text and its transient agent state
 // together so the editor owns one coherent render state.
 type GhostStreamUpdate struct {
 	Text   string
 	Status string
+	Source     GhostSource
 }
 
 // NewGhostText creates a new ghost text state.
@@ -45,6 +57,7 @@ func (g *GhostText) Clear() {
 	g.Streaming = false
 	g.FromAgent = false
 	g.Status = ""
+	g.Source = GhostSourceNone
 }
 
 // Remaining returns the unaccepted portion of ghost text.
