@@ -10,6 +10,7 @@ Hash reads TOML configuration from `~/.config/hash/config.toml`.
 | `~/.hashrc` | Interactive shell setup |
 | `~/.hash_profile` | Login shell setup |
 | `~/.local/share/hash/history.db` | Default command history database |
+| `~/.local/share/hash/learning.db` | Adaptive learned-fix database |
 
 Set `HASH_CONFIG_DIR` to use a different config directory. Set `XDG_CONFIG_HOME`
 or `XDG_DATA_HOME` to change the default config/data roots.
@@ -59,6 +60,9 @@ plugins_enabled = true
 max_output_size = "1MB"
 buffer_size = 100
 preserve_colors = false
+
+[learning]
+enabled = true
 
 [prediction]
 enabled = true
@@ -281,6 +285,18 @@ In-memory command/output capture for copy shortcuts and context.
 | `preserve_colors` | boolean | `false` | Reserved; copied output is currently plain text. |
 
 `HASH_CLIPBOARD_MAX_OUTPUT_SIZE` overrides `clipboard.max_output_size`.
+
+## `[learning]`
+
+Adaptive post-failure fix learning.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `enabled` | boolean | `true` | Record successful commands following failures and offer matching learned fixes. |
+
+Set `enabled = false` to stop opening, updating, and consulting
+`learning.db`. Existing learned data is preserved in case learning is enabled
+again. Restart Hash after changing this setting.
 
 ## `[prediction]`
 

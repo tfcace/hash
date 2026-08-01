@@ -28,6 +28,30 @@ func TestLoadConfig_DefaultValues(t *testing.T) {
 	if cfg.Prompt.Mode != "starship" {
 		t.Errorf("Prompt.Mode = %q, want %q", cfg.Prompt.Mode, "starship")
 	}
+	if !cfg.Learning.Enabled {
+		t.Error("Learning.Enabled = false, want true by default")
+	}
+}
+
+func TestLoadConfig_LearningCanBeDisabled(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.toml")
+
+	content := []byte(`
+[learning]
+enabled = false
+`)
+	if err := os.WriteFile(configPath, content, 0o644); err != nil { //nolint:gosec // test config
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(tmpDir)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Learning.Enabled {
+		t.Error("Learning.Enabled = true, want false")
+	}
 }
 
 func TestLoadConfig_FromFile(t *testing.T) {

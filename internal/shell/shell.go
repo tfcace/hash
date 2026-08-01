@@ -278,8 +278,7 @@ func New(cfg *config.Config) (*Shell, error) {
 
 	// Initialize learning store
 	var learningStore *learning.FixStore
-	learningPath := filepath.Join(getDataDir(), "learning.db")
-	learningStore, err = learning.NewFixStore(learningPath)
+	learningStore, err = openLearningStore(cfg.Learning.Enabled)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "hash: warning: learning unavailable: %v\n", err)
 	}

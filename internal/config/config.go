@@ -21,6 +21,7 @@ type Config struct {
 	History     HistoryConfig            `toml:"history"`
 	Completions CompletionsConfig        `toml:"completions"`
 	Clipboard   ClipboardConfig          `toml:"clipboard"`
+	Learning    LearningConfig           `toml:"learning"`
 	Prediction  PredictionConfig         `toml:"prediction"`
 	Plugins     PluginsConfig            `toml:"plugins"`
 
@@ -122,6 +123,11 @@ type ClipboardConfig struct {
 	PreserveColors bool   `toml:"preserve_colors"`
 }
 
+// LearningConfig controls adaptive post-failure fix learning.
+type LearningConfig struct {
+	Enabled bool `toml:"enabled"`
+}
+
 // PredictionConfig configures command and path prediction.
 type PredictionConfig struct {
 	Enabled             bool     `toml:"enabled"`
@@ -191,6 +197,9 @@ func Default() *Config {
 			MaxOutputSize:  "1MB",
 			BufferSize:     100,
 			PreserveColors: false,
+		},
+		Learning: LearningConfig{
+			Enabled: true,
 		},
 		Prediction: PredictionConfig{
 			Enabled:             true,

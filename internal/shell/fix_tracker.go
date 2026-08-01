@@ -2,6 +2,7 @@ package shell
 
 import (
 	"os"
+	"path/filepath"
 
 	"github.com/tfcace/hash/internal/editor"
 	"github.com/tfcace/hash/internal/learning"
@@ -26,6 +27,14 @@ type fixTracker struct {
 // newFixTracker creates a tracker backed by the given fix store.
 func newFixTracker(store *learning.FixStore) *fixTracker {
 	return &fixTracker{store: store}
+}
+
+// openLearningStore returns no store when adaptive learning is disabled.
+func openLearningStore(enabled bool) (*learning.FixStore, error) {
+	if !enabled {
+		return nil, nil
+	}
+	return learning.NewFixStore(filepath.Join(getDataDir(), "learning.db"))
 }
 
 // Observe processes a finished command. For failures it returns the learned
