@@ -14,7 +14,7 @@ func TestPrefixIndex_UnloadedReportsNotOK(t *testing.T) {
 
 func TestPrefixIndex_LiveRecordOutranksLoaded(t *testing.T) {
 	idx := &prefixIndex{}
-	idx.record("git branch") // Recorded while the load is still running.
+	idx.record("git branch")                             // Recorded while the load is still running.
 	idx.install([]string{"git actions", "git checkout"}) // Most recent first.
 
 	results, ok := idx.search("git", 3)

@@ -48,18 +48,41 @@ func makeInlineResult(cmd, prompt, pattern string, idx int, traced bool) ParseRe
 		Command:     cmd,
 		AgentPrompt: prompt,
 	}
-	if traced {
-		trace.ParserHigh("detect_agent", map[string]any{
-			"pattern":  pattern,
-			"position": idx,
-		})
-		trace.ParserDetailed("parse_result", map[string]any{
-			"type":    result.Type.String(),
-			"command": result.Command,
-			"prompt":  result.AgentPrompt,
-		})
-	}
+	traceDetect(traced, pattern, idx)
+	traceResult(traced, result)
 	return result
+}
+
+// traceDetect emits a detect_agent event. The traced guard lives here so
+// Parse pays neither the map allocation nor extra branches when tracing is
+// off (the common case for every dispatched line).
+func traceDetect(traced bool, pattern string, position int) {
+	if !traced {
+		return
+	}
+	trace.ParserHigh("detect_agent", map[string]any{
+		"pattern":  pattern,
+		"position": position,
+	})
+}
+
+// traceResult emits a parse_result event carrying the same keys per command
+// type that the inline emissions historically used.
+func traceResult(traced bool, result ParseResult) {
+	if !traced {
+		return
+	}
+	data := map[string]any{"type": result.Type.String()}
+	switch result.Type {
+	case CommandTypeAgent:
+		data["prompt"] = result.AgentPrompt
+	case CommandTypeAgentPipe, CommandTypeAgentInline:
+		data["command"] = result.Command
+		data["prompt"] = result.AgentPrompt
+	case CommandTypeRegular:
+		data["command"] = result.Command
+	}
+	trace.ParserDetailed("parse_result", data)
 }
 
 // Parse analyzes a command line and determines how to process it.
@@ -78,11 +101,7 @@ func Parse(line string) ParseResult {
 
 	if line == "" {
 		result := ParseResult{Type: CommandTypeEmpty}
-		if traced {
-			trace.ParserDetailed("parse_result", map[string]any{
-				"type": result.Type.String(),
-			})
-		}
+		traceResult(traced, result)
 		return result
 	}
 
@@ -93,16 +112,8 @@ func Parse(line string) ParseResult {
 			Type:        CommandTypeAgent,
 			AgentPrompt: prompt,
 		}
-		if traced {
-			trace.ParserHigh("detect_agent", map[string]any{
-				"pattern":  "prefix",
-				"position": 0,
-			})
-			trace.ParserDetailed("parse_result", map[string]any{
-				"type":   result.Type.String(),
-				"prompt": result.AgentPrompt,
-			})
-		}
+		traceDetect(traced, "prefix", 0)
+		traceResult(traced, result)
 		return result
 	}
 
@@ -117,17 +128,8 @@ func Parse(line string) ParseResult {
 				Command:     cmd,
 				AgentPrompt: prompt,
 			}
-			if traced {
-				trace.ParserHigh("detect_agent", map[string]any{
-					"pattern":  "pipe_space",
-					"position": idx,
-				})
-				trace.ParserDetailed("parse_result", map[string]any{
-					"type":    result.Type.String(),
-					"command": result.Command,
-					"prompt":  result.AgentPrompt,
-				})
-			}
+			traceDetect(traced, "pipe_space", idx)
+			traceResult(traced, result)
 			return result
 		}
 	}
@@ -143,17 +145,8 @@ func Parse(line string) ParseResult {
 				Command:     cmd,
 				AgentPrompt: prompt,
 			}
-			if traced {
-				trace.ParserHigh("detect_agent", map[string]any{
-					"pattern":  "pipe_nospace",
-					"position": idx,
-				})
-				trace.ParserDetailed("parse_result", map[string]any{
-					"type":    result.Type.String(),
-					"command": result.Command,
-					"prompt":  result.AgentPrompt,
-				})
-			}
+			traceDetect(traced, "pipe_nospace", idx)
+			traceResult(traced, result)
 			return result
 		}
 	}
@@ -182,11 +175,6 @@ func Parse(line string) ParseResult {
 		Type:    CommandTypeRegular,
 		Command: line,
 	}
-	if traced {
-		trace.ParserDetailed("parse_result", map[string]any{
-			"type":    result.Type.String(),
-			"command": result.Command,
-		})
-	}
+	traceResult(traced, result)
 	return result
 }
