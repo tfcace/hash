@@ -1,6 +1,7 @@
 package history
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"testing"
@@ -67,7 +68,7 @@ func seedStore(b *testing.B, total int) *Store {
 	// The background index load raced the direct SQL seeding above: wait it
 	// out, then load again so the index reflects the seeded rows.
 	store.waitPrefixIndex()
-	store.loadPrefixIndex()
+	store.loadPrefixIndex(context.Background())
 	return store
 }
 

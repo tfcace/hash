@@ -1,6 +1,7 @@
 package history
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"os"
@@ -12,9 +13,10 @@ import (
 
 // Store provides persistent command history.
 type Store struct {
-	db      *sql.DB
-	idx     *prefixIndex
-	idxDone chan struct{} // closed when the background index load finishes
+	db        *sql.DB
+	idx       *prefixIndex
+	idxDone   chan struct{} // closed when the background index load finishes
+	idxCancel context.CancelFunc
 }
 
 // NewStore creates or opens a history database.
@@ -46,9 +48,13 @@ func NewStore(dbPath string) (*Store, error) {
 
 	// Load the prefix index off the startup path: SearchByPrefix answers from
 	// SQL until the load lands, then from memory for the rest of the session.
+	// Close cancels the context and waits for the goroutine, so the load can
+	// never touch the database files after Close returns.
+	ctx, cancel := context.WithCancel(context.Background())
+	store.idxCancel = cancel
 	go func() {
 		defer close(store.idxDone)
-		store.loadPrefixIndex()
+		store.loadPrefixIndex(ctx)
 	}()
 
 	return store, nil
@@ -264,15 +270,15 @@ func (s *Store) GetAgentInteractions(prompt string, limit int) ([]AgentInteracti
 	for rows.Next() {
 		var i AgentInteraction
 		var commandID sql.NullInt64
-		var context sql.NullString
+		var interactionContext sql.NullString
 
-		err := rows.Scan(&i.ID, &i.Prompt, &i.Response, &i.Accepted, &commandID, &context, &i.LatencyMs, &i.Agent, &i.Timestamp)
+		err := rows.Scan(&i.ID, &i.Prompt, &i.Response, &i.Accepted, &commandID, &interactionContext, &i.LatencyMs, &i.Agent, &i.Timestamp)
 		if err != nil {
 			return nil, err
 		}
 
 		i.CommandID = commandID.Int64
-		i.Context = context.String
+		i.Context = interactionContext.String
 		interactions = append(interactions, i)
 	}
 
@@ -327,8 +333,8 @@ func (s *Store) SearchByPrefix(prefix string, limit int) ([]string, error) {
 // hands the result to the in-memory index. On any error the index simply
 // stays unloaded and SearchByPrefix keeps answering from SQL, so a failure
 // here only costs speed, never correctness.
-func (s *Store) loadPrefixIndex() {
-	rows, err := s.db.Query(`
+func (s *Store) loadPrefixIndex(ctx context.Context) {
+	rows, err := s.db.QueryContext(ctx, `
 		SELECT command, MAX(timestamp) as latest
 		FROM commands
 		WHERE exit_code = 0
@@ -388,7 +394,16 @@ func (s *Store) Count() (int64, error) {
 	return count, err
 }
 
-// Close closes the database connection.
+// Close closes the database connection, first stopping the background index
+// load: an in-flight load holds a live SQLite connection past db.Close (the
+// pool only reaps it when the query finishes), and its WAL activity can race
+// whoever removes the database files next — t.TempDir cleanup in tests.
 func (s *Store) Close() error {
+	if s.idxCancel != nil {
+		s.idxCancel()
+	}
+	if s.idxDone != nil {
+		<-s.idxDone
+	}
 	return s.db.Close()
 }
