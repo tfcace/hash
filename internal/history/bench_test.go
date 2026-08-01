@@ -63,6 +63,11 @@ func seedStore(b *testing.B, total int) *Store {
 	if err := tx.Commit(); err != nil {
 		b.Fatal(err)
 	}
+
+	// The background index load raced the direct SQL seeding above: wait it
+	// out, then load again so the index reflects the seeded rows.
+	store.waitPrefixIndex()
+	store.loadPrefixIndex()
 	return store
 }
 

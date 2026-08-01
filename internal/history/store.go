@@ -12,7 +12,9 @@ import (
 
 // Store provides persistent command history.
 type Store struct {
-	db *sql.DB
+	db      *sql.DB
+	idx     *prefixIndex
+	idxDone chan struct{} // closed when the background index load finishes
 }
 
 // NewStore creates or opens a history database.
@@ -28,11 +30,26 @@ func NewStore(dbPath string) (*Store, error) {
 		return nil, fmt.Errorf("open database: %w", err)
 	}
 
-	store := &Store{db: db}
+	// A plain in-memory DSN gives every pooled connection its own empty
+	// database, so the background index load (the first concurrent user of
+	// this pool) would see missing tables. Cap the pool at the one real
+	// connection; file-backed databases keep normal pooling under WAL.
+	if strings.Contains(dbPath, ":memory:") {
+		db.SetMaxOpenConns(1)
+	}
+
+	store := &Store{db: db, idx: &prefixIndex{}, idxDone: make(chan struct{})}
 	if err := store.migrate(); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
+
+	// Load the prefix index off the startup path: SearchByPrefix answers from
+	// SQL until the load lands, then from memory for the rest of the session.
+	go func() {
+		defer close(store.idxDone)
+		store.loadPrefixIndex()
+	}()
 
 	return store, nil
 }
@@ -84,6 +101,10 @@ func (s *Store) Add(cmd Command) (int64, error) {
 
 	if err != nil {
 		return 0, err
+	}
+
+	if cmd.ExitCode == 0 && s.idx != nil {
+		s.idx.record(cmd.Command)
 	}
 
 	return result.LastInsertId()
@@ -261,9 +282,19 @@ func (s *Store) GetAgentInteractions(prompt string, limit int) ([]AgentInteracti
 // SearchByPrefix returns the most recent successful commands matching a prefix.
 // The results are deduplicated (by command text) and ordered by most recent first.
 // Returns nil for empty prefix or if no matches are found.
+//
+// This runs on every keystroke (ghost-text suggestions), so once the in-memory
+// prefix index has loaded it answers from there; SQL is only the fallback for
+// the brief window before the background load completes.
 func (s *Store) SearchByPrefix(prefix string, limit int) ([]string, error) {
 	if prefix == "" {
 		return nil, nil
+	}
+
+	if s.idx != nil {
+		if cmds, ok := s.idx.search(prefix, limit); ok {
+			return cmds, nil
+		}
 	}
 
 	escaped := escapeGlob(prefix)
@@ -290,6 +321,47 @@ func (s *Store) SearchByPrefix(prefix string, limit int) ([]string, error) {
 		commands = append(commands, cmd)
 	}
 	return commands, rows.Err()
+}
+
+// loadPrefixIndex runs the distinct-successful-commands aggregation once and
+// hands the result to the in-memory index. On any error the index simply
+// stays unloaded and SearchByPrefix keeps answering from SQL, so a failure
+// here only costs speed, never correctness.
+func (s *Store) loadPrefixIndex() {
+	rows, err := s.db.Query(`
+		SELECT command, MAX(timestamp) as latest
+		FROM commands
+		WHERE exit_code = 0
+		GROUP BY command
+		ORDER BY latest DESC
+	`)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+
+	var cmds []string
+	for rows.Next() {
+		var cmd string
+		var latest interface{}
+		if err := rows.Scan(&cmd, &latest); err != nil {
+			return
+		}
+		cmds = append(cmds, cmd)
+	}
+	if rows.Err() != nil {
+		return
+	}
+	s.idx.install(cmds)
+}
+
+// waitPrefixIndex blocks until the background index load has finished and
+// reports whether the index is serving lookups. Test and benchmark helper.
+func (s *Store) waitPrefixIndex() bool {
+	<-s.idxDone
+	s.idx.mu.RLock()
+	defer s.idx.mu.RUnlock()
+	return s.idx.loaded
 }
 
 // escapeGlob escapes special glob characters in a string for safe use in GLOB queries.
