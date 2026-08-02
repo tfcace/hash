@@ -28,7 +28,6 @@ func TestAgentResultRecall_PersistsCompletedFullAndPipeTurns(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := config.Default()
-			cfg.History.AgentResultsEnabled = true
 			var out strings.Builder
 			sh := &Shell{
 				config:       cfg,
@@ -63,7 +62,6 @@ func TestAgentResultRecall_StoresEffectiveBareErrorPrompt(t *testing.T) {
 	}
 	defer store.Close()
 	cfg := config.Default()
-	cfg.History.AgentResultsEnabled = true
 	sh := &Shell{
 		config:       cfg,
 		history:      store,
@@ -93,7 +91,6 @@ func TestAgentResultRecall_PersistsCompletedConversationTurn(t *testing.T) {
 	}
 	defer store.Close()
 	cfg := config.Default()
-	cfg.History.AgentResultsEnabled = true
 	var out strings.Builder
 	sh := &Shell{
 		config:       cfg,

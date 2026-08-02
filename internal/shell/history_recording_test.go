@@ -10,7 +10,7 @@ import (
 	"github.com/tfcace/hash/internal/parser"
 )
 
-func TestRecordAgentResult_OptInAndAcceptance(t *testing.T) {
+func TestRecordAgentResult_DefaultAndOptOut(t *testing.T) {
 	store, err := history.NewStore(":memory:")
 	if err != nil {
 		t.Fatal(err)
@@ -25,12 +25,12 @@ func TestRecordAgentResult_OptInAndAcceptance(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(interactions) != 0 {
-		t.Fatalf("opt-out interaction count = %d, want 0", len(interactions))
+	if len(interactions) != 1 {
+		t.Fatalf("default interaction count = %d, want 1", len(interactions))
 	}
 
-	sh.config.History.AgentResultsEnabled = true
-	sh.recordAgentResult(parser.ParseResult{Type: parser.CommandTypeAgentPipe, AgentPrompt: "find logs"}, agent.Response{
+	sh.config.History.AgentResultsEnabled = false
+	sh.recordAgentResult(parser.ParseResult{Type: parser.CommandTypeAgentPipe, AgentPrompt: "skip logs"}, agent.Response{
 		Type: agent.ResponseTypeCommand, Command: "rg --files | rg log",
 	}, "rg --files | rg log", 25*time.Millisecond)
 	interactions, err = store.GetAgentInteractions("find logs", 10)
@@ -38,7 +38,14 @@ func TestRecordAgentResult_OptInAndAcceptance(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(interactions) != 1 || interactions[0].ResponseKind != history.AgentResponseKindCommand || interactions[0].Context != "" || interactions[0].LatencyMs != 25 {
-		t.Fatalf("stored interaction = %#v, want opt-in command result without selected context", interactions)
+		t.Fatalf("stored interaction = %#v, want default command result without selected context", interactions)
+	}
+	skipped, err := store.GetAgentInteractions("skip logs", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(skipped) != 0 {
+		t.Fatalf("explicit opt-out interaction count = %d, want 0", len(skipped))
 	}
 
 	sh.markLatestAgentResultAccepted()
@@ -58,7 +65,6 @@ func TestRecordAgentResult_SkipsInlineErrorsAndEmptyResponses(t *testing.T) {
 	}
 	defer store.Close()
 	sh := &Shell{history: store, config: config.Default()}
-	sh.config.History.AgentResultsEnabled = true
 
 	for _, tc := range []struct {
 		name   string

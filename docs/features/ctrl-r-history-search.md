@@ -1,6 +1,6 @@
 # Interactive History Search (Ctrl+R)
 
-Hash includes a powerful interactive history search feature, inspired by the `reverse-i-search` functionality found in Bash and other Unix shells. Press **Ctrl+R** at any time to open the search interface on its **Commands** tab. Press **Tab** to select saved Agent results or **Shift+Tab** to return to commands when `[history].agent_results_enabled = true`.
+Hash includes a powerful interactive history search feature, inspired by the `reverse-i-search` functionality found in Bash and other Unix shells. Press **Ctrl+R** at any time to open the search interface on its **Commands** tab. Press **Tab** to select saved Agent results or **Shift+Tab** to return to commands. Agent-result persistence is enabled by default; set `[history].agent_results_enabled = false` to opt out.
 
 ## Quick Start
 
@@ -68,8 +68,9 @@ As you type, the search results update in real-time:
 
 ### Agent Results
 
-When `agent_results_enabled = true`, use the visible **Agent results** tab with
-**Tab** to search saved full, pipe, and conversation agent turns without losing the current query.
+Use the visible **Agent results** tab with **Tab** to search saved full, pipe, and
+conversation agent turns without losing the current query. Set
+`agent_results_enabled = false` under `[history]` to opt out of saving new results.
 Use **Shift+Tab** to return to Commands. Agent rows show the prompt,
 response kind, timestamp, and acceptance status. Only command-kind responses can be
 inserted with **Enter**; explanations and legacy unknown responses remain preview and

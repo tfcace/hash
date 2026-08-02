@@ -168,9 +168,10 @@ func Default() *Config {
 			AllowedCommandsScope: "project",
 		},
 		History: HistoryConfig{
-			Enabled:    true,
-			MaxEntries: "unlimited",
-			MaxAge:     "forever",
+			Enabled:             true,
+			MaxEntries:          "unlimited",
+			MaxAge:              "forever",
+			AgentResultsEnabled: true,
 		},
 		Completions: CompletionsConfig{
 			Fuzzy:            true,

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -27,25 +28,35 @@ func TestLoadConfig_DefaultValues(t *testing.T) {
 	if cfg.Prompt.Mode != "starship" {
 		t.Errorf("Prompt.Mode = %q, want %q", cfg.Prompt.Mode, "starship")
 	}
-	if cfg.History.AgentResultsEnabled {
-		t.Error("History.AgentResultsEnabled = true, want false by default")
+	if !cfg.History.AgentResultsEnabled {
+		t.Error("History.AgentResultsEnabled = false, want true by default")
 	}
 }
 
-func TestLoadConfig_AgentResultsHistoryOptIn(t *testing.T) {
-	tmpDir := t.TempDir()
-	configPath := filepath.Join(tmpDir, "config.toml")
+func TestLoadConfig_AgentResultsHistoryExplicitValue(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		value bool
+	}{
+		{name: "enabled", value: true},
+		{name: "opt out", value: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			configPath := filepath.Join(tmpDir, "config.toml")
+			content := []byte("[history]\nagent_results_enabled = " + strconv.FormatBool(tc.value) + "\n")
+			if err := os.WriteFile(configPath, content, 0o644); err != nil { //nolint:gosec // G306: test file
+				t.Fatal(err)
+			}
 
-	if err := os.WriteFile(configPath, []byte("[history]\nagent_results_enabled = true\n"), 0o644); err != nil { //nolint:gosec // G306: test file
-		t.Fatal(err)
-	}
-
-	cfg, err := Load(tmpDir)
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
-	}
-	if !cfg.History.AgentResultsEnabled {
-		t.Fatal("History.AgentResultsEnabled = false, want config opt-in true")
+			cfg, err := Load(tmpDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.History.AgentResultsEnabled != tc.value {
+				t.Fatalf("History.AgentResultsEnabled = %v, want %v", cfg.History.AgentResultsEnabled, tc.value)
+			}
+		})
 	}
 }
 
