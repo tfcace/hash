@@ -358,9 +358,10 @@ func newLatestSwitchingIndexedReleaseServer(t *testing.T, first, second map[stri
 				return
 			}
 			_, _ = w.Write(archive)
-			if parts[0] == "v"+firstRelease.version {
+			switch parts[0] {
+			case "v" + firstRelease.version:
 				latest = "v" + secondRelease.version
-			} else if parts[0] == "v"+secondRelease.version {
+			case "v" + secondRelease.version:
 				latest = "v" + firstRelease.version
 			}
 		}

@@ -195,12 +195,29 @@ func (i *Installer) UpgradeAll(ctx context.Context, source string) (UpgradeAllRe
 		return UpgradeAllResult{}, err
 	}
 	result := UpgradeAllResult{Skipped: skipped}
-	sources := make(map[string]string, len(ids))
-	snapshots := make(map[string]upgradeSnapshot, len(ids))
+	sources, snapshots, metadataFailures := i.collectUpgradeSources(ids, source)
+	result.Failures = append(result.Failures, metadataFailures...)
+	pinnedSources, pinErrors := i.pinUpgradeSources(ctx, sources)
+	upgraded, upgradeFailures := i.upgradePlugins(ctx, ids, sources, pinnedSources, pinErrors)
+	result.Results = upgraded
+	result.Failures = append(result.Failures, upgradeFailures...)
+	if len(result.Failures) > 0 && len(result.Results) > 0 {
+		if rollbackErrors := i.rollbackUpgrades(result.Results, snapshots); len(rollbackErrors) > 0 {
+			result.Failures = append(result.Failures, rollbackErrors...)
+		}
+		// Do not report successful upgrades that were reverted.
+		result.Results = nil
+	}
+	return result, nil
+}
+
+func (i *Installer) collectUpgradeSources(ids []string, source string) (sources map[string]string, snapshots map[string]upgradeSnapshot, failures []UpgradeFailure) {
+	sources = make(map[string]string, len(ids))
+	snapshots = make(map[string]upgradeSnapshot, len(ids))
 	for _, id := range ids {
 		manifest, metadata, metadataErr := i.installedMetadata(id)
 		if metadataErr != nil {
-			result.Failures = append(result.Failures, UpgradeFailure{ID: id, Err: metadataErr})
+			failures = append(failures, UpgradeFailure{ID: id, Err: metadataErr})
 			continue
 		}
 		snapshots[id] = upgradeSnapshot{id: id, target: manifest.Directory}
@@ -210,8 +227,12 @@ func (i *Installer) UpgradeAll(ctx context.Context, source string) (UpgradeAllRe
 		}
 		sources[id] = upgradeSource
 	}
-	pinnedSources := make(map[string]string, len(sources))
-	pinErrors := make(map[string]error, len(sources))
+	return sources, snapshots, failures
+}
+
+func (i *Installer) pinUpgradeSources(ctx context.Context, sources map[string]string) (pinnedSources map[string]string, pinErrors map[string]error) {
+	pinnedSources = make(map[string]string, len(sources))
+	pinErrors = make(map[string]error, len(sources))
 	uniqueSources := make([]string, 0, len(sources))
 	for _, upgradeSource := range sources {
 		if _, seen := pinnedSources[upgradeSource]; !seen {
@@ -228,30 +249,29 @@ func (i *Installer) UpgradeAll(ctx context.Context, source string) (UpgradeAllRe
 		}
 		pinnedSources[upgradeSource] = pinnedSource
 	}
+	return pinnedSources, pinErrors
+}
+
+func (i *Installer) upgradePlugins(ctx context.Context, ids []string, sources, pinnedSources map[string]string, pinErrors map[string]error) ([]InstallResult, []UpgradeFailure) {
+	var results []InstallResult
+	var failures []UpgradeFailure
 	for _, id := range ids {
 		upgradeSource, ok := sources[id]
 		if !ok {
 			continue
 		}
 		if pinErr := pinErrors[upgradeSource]; pinErr != nil {
-			result.Failures = append(result.Failures, UpgradeFailure{ID: id, Err: fmt.Errorf("resolve plugin catalog: %w", pinErr)})
+			failures = append(failures, UpgradeFailure{ID: id, Err: fmt.Errorf("resolve plugin catalog: %w", pinErr)})
 			continue
 		}
 		upgraded, err := i.Upgrade(ctx, id, pinnedSources[upgradeSource])
 		if err != nil {
-			result.Failures = append(result.Failures, UpgradeFailure{ID: id, Err: err})
+			failures = append(failures, UpgradeFailure{ID: id, Err: err})
 			continue
 		}
-		result.Results = append(result.Results, upgraded)
+		results = append(results, upgraded)
 	}
-	if len(result.Failures) > 0 && len(result.Results) > 0 {
-		if rollbackErrors := i.rollbackUpgrades(result.Results, snapshots); len(rollbackErrors) > 0 {
-			result.Failures = append(result.Failures, rollbackErrors...)
-		}
-		// Do not report successful upgrades that were reverted.
-		result.Results = nil
-	}
-	return result, nil
+	return results, failures
 }
 
 func (i *Installer) rollbackUpgrades(results []InstallResult, snapshots map[string]upgradeSnapshot) []UpgradeFailure {
@@ -802,7 +822,7 @@ func (i *Installer) resolveCatalogPlugin(ctx context.Context, catalogRef githubS
 	return resolvedArtifact{url: artifactURL, checksum: checksum, source: catalogRef.canonical, expectedVersion: catalogEntry.Version}, nil
 }
 
-func (i *Installer) indexedGitHubPluginIDs(ctx context.Context, source string) ([]string, string, error) {
+func (i *Installer) indexedGitHubPluginIDs(ctx context.Context, source string) (ids []string, pinnedSource string, err error) {
 	ref, ok, err := parseGitHubSource(source)
 	if err != nil {
 		return nil, "", err
@@ -832,18 +852,18 @@ func (i *Installer) indexedGitHubPluginIDs(ctx context.Context, source string) (
 	if err != nil {
 		return nil, "", err
 	}
-	ids := make([]string, 0, len(index.Plugins))
+	pluginIDs := make([]string, 0, len(index.Plugins))
 	for id := range index.Plugins {
 		if !pluginIDPattern.MatchString(id) {
 			return nil, "", fmt.Errorf("release index contains invalid plugin ID %q", id)
 		}
-		ids = append(ids, id)
+		pluginIDs = append(pluginIDs, id)
 	}
-	sort.Strings(ids)
-	if len(ids) == 0 {
+	sort.Strings(pluginIDs)
+	if len(pluginIDs) == 0 {
 		return nil, "", fmt.Errorf("release index contains no plugins")
 	}
-	return ids, ref.canonical + "@" + release.TagName, nil
+	return pluginIDs, ref.canonical + "@" + release.TagName, nil
 }
 
 func (i *Installer) fetchGitHubRelease(ctx context.Context, ref githubSource) (githubRelease, error) {
