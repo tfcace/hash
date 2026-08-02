@@ -208,6 +208,62 @@ func (h *AgentHandler) StreamRequest(ctx context.Context, parsed parser.ParseRes
 	return tracedTextCh, tracedErrCh
 }
 
+// StreamEvents processes a parsed request and exposes typed lifecycle events
+// when the underlying agent supports them. Text-only transports are adapted by
+// agent.Client, so callers do not need vendor-specific branches.
+//
+//nolint:gocritic // unnamedResult: can't name receive-only channel returns
+func (h *AgentHandler) StreamEvents(ctx context.Context, parsed parser.ParseResult) (<-chan agent.StreamEvent, <-chan error) {
+	if h.client == nil {
+		errCh := make(chan error, 1)
+		errCh <- fmt.Errorf("no agent configured")
+		close(errCh)
+		return nil, errCh
+	}
+
+	req, err := h.buildRequest(parsed)
+	if err != nil {
+		errCh := make(chan error, 1)
+		errCh <- err
+		close(errCh)
+		return nil, errCh
+	}
+
+	events, errCh := h.client.StreamEvents(ctx, req)
+	traced := make(chan agent.StreamEvent, 16)
+	tracedErrs := make(chan error, 1)
+	go func() {
+		defer close(traced)
+		defer close(tracedErrs)
+		for events != nil || errCh != nil {
+			select {
+			case event, ok := <-events:
+				if !ok {
+					events = nil
+					continue
+				}
+				if event.Type == agent.StreamEventToolCall {
+					trace.Agent("tool_lifecycle", map[string]any{
+						"id":     event.ToolCall.ID,
+						"kind":   event.ToolCall.Kind,
+						"status": event.ToolCall.Status,
+					})
+				}
+				traced <- event
+			case err, ok := <-errCh:
+				if !ok {
+					errCh = nil
+					continue
+				}
+				if err != nil {
+					tracedErrs <- err
+				}
+			}
+		}
+	}()
+	return traced, tracedErrs
+}
+
 // StreamFollowUp sends a conversation follow-up turn to the agent.
 //
 //nolint:gocritic // unnamedResult: receive-only channels match Transport style
@@ -228,6 +284,24 @@ func (h *AgentHandler) StreamFollowUp(ctx context.Context, reply string, transcr
 	}
 
 	return h.client.StreamRequest(ctx, req)
+}
+
+//nolint:gocritic // unnamedResult: can't name receive-only channel returns
+func (h *AgentHandler) StreamFollowUpEvents(ctx context.Context, reply string, transcript []agentConversationMessage) (<-chan agent.StreamEvent, <-chan error) {
+	if h.client == nil {
+		errCh := make(chan error, 1)
+		errCh <- fmt.Errorf("no agent configured")
+		close(errCh)
+		return nil, errCh
+	}
+	req, err := h.buildFollowUpRequest(reply, transcript)
+	if err != nil {
+		errCh := make(chan error, 1)
+		errCh <- err
+		close(errCh)
+		return nil, errCh
+	}
+	return h.client.StreamEvents(ctx, req)
 }
 
 // buildRequest constructs an agent.Request from a parsed result.

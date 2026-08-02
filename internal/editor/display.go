@@ -422,14 +422,22 @@ func (d *Display) Render(buf *Buffer, cur *Cursor, hasSelection bool) {
 	d.out.Write([]byte(sb.String()))
 }
 
+// GhostRenderState groups the transient values that belong to one ghost frame.
+type GhostRenderState struct {
+	Streaming bool
+	FromAgent bool
+	ModelName string
+	Status    string
+}
+
 // RenderWithGhost draws the buffer with inline ghost text suggestion.
 // Ghost text appears after the cursor in dim gray, showing the suggested completion.
 // fromAgent indicates whether this is an agent suggestion (show hints) or prediction (fish-style).
 //
 //nolint:gocyclo // terminal rendering requires many conditional escape sequences
-func (d *Display) RenderWithGhost(buf *Buffer, cur *Cursor, hasSelection bool, ghostText string, streaming, fromAgent bool, modelName string) {
+func (d *Display) RenderWithGhost(buf *Buffer, cur *Cursor, hasSelection bool, ghostText string, state GhostRenderState) {
 	if d.frame != nil {
-		d.renderWithFrame(buf, cur, hasSelection, ghostText, streaming, fromAgent, modelName)
+		d.renderWithFrame(buf, cur, hasSelection, ghostText, state.Streaming, state.FromAgent, state.ModelName)
 		return
 	}
 	var sb strings.Builder
@@ -486,11 +494,15 @@ func (d *Display) RenderWithGhost(buf *Buffer, cur *Cursor, hasSelection bool, g
 		}
 
 		// Render ghost text on the cursor's line, after the cursor position
-		if i == cursorRow && (ghostText != "" || streaming) {
-			if ghostText == "" && streaming {
+		if i == cursorRow && (ghostText != "" || state.Streaming) {
+			if ghostText == "" && state.Streaming {
 				// Show thinking indicator while waiting for first chunk (agent only)
 				// Use consistent text with response_ui states
-				sb.WriteString("\x1b[90;3m Agent thinking...\x1b[0m")
+				if state.Status != "" {
+					sb.WriteString("\x1b[90;3m " + state.Status + "\x1b[0m")
+				} else {
+					sb.WriteString("\x1b[90;3m Agent thinking...\x1b[0m")
+				}
 			} else if ghostText != "" {
 				// Get the first line of ghost text (for single-line display)
 				ghostFirstLine := ghostText
@@ -499,14 +511,14 @@ func (d *Display) RenderWithGhost(buf *Buffer, cur *Cursor, hasSelection bool, g
 					ghostFirstLine = ghostText[:newlineIdx]
 				}
 
-				if fromAgent {
+				if state.FromAgent {
 					// Agent suggestions: dim + italic with hints
 					sb.WriteString("\x1b[90;3m") // Dim + italic
 					sb.WriteString(ghostFirstLine)
 					sb.WriteString(ansiReset)
 
 					// Show streaming indicator if still receiving, otherwise show accept hint
-					if streaming {
+					if state.Streaming {
 						sb.WriteString("\x1b[90m▌\x1b[0m")
 					} else {
 						sb.WriteString("\x1b[90m   [enter]run  [tab]edit  [esc]\x1b[0m")
@@ -524,7 +536,7 @@ func (d *Display) RenderWithGhost(buf *Buffer, cur *Cursor, hasSelection bool, g
 	// Clear everything below the buffer
 	sb.WriteString(ansiClearToEnd)
 
-	ghostWidth := renderedGhostSuffixWidth(ghostText, streaming, fromAgent)
+	ghostWidth := renderedGhostSuffixWidth(ghostText, state.Streaming, state.FromAgent)
 	totalRows, cursorVisualRow, cursorVisualCol := d.layoutForStandardRender(buf, cur, ghostWidth)
 	linesBelowCursor := totalRows - 1 - cursorVisualRow
 	if linesBelowCursor > 0 {

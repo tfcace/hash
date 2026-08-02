@@ -9,6 +9,14 @@ type GhostText struct {
 	Active     bool   // Whether ghost text is currently displayed
 	Streaming  bool   // Whether more text is still arriving
 	FromAgent  bool   // True for agent suggestions (show hints), false for predictions (fish-style)
+	Status     string // Transient activity; never accepted as command text.
+}
+
+// GhostStreamUpdate keeps streamed ghost text and its transient agent state
+// together so the editor owns one coherent render state.
+type GhostStreamUpdate struct {
+	Text   string
+	Status string
 }
 
 // NewGhostText creates a new ghost text state.
@@ -36,6 +44,7 @@ func (g *GhostText) Clear() {
 	g.Active = false
 	g.Streaming = false
 	g.FromAgent = false
+	g.Status = ""
 }
 
 // Remaining returns the unaccepted portion of ghost text.

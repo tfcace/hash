@@ -16,15 +16,18 @@ go test -tags=e2e ./e2e/...
 
 ### Live Tests (`-tags=e2e_live`)
 
-Tests against the real `claude-agent-acp` agent. Non-deterministic but validates actual ACP protocol behavior.
+Tests against a real ACP v1 server. Non-deterministic, but validate actual
+protocol behavior and the terminal UI.
 
 ```bash
-go test -tags=e2e_live ./e2e/...
+HASH_LIVE_ACP_COMMAND="agent acp" go test -tags=e2e_live -run TestLiveACPTerminalUX -count=1 -v ./e2e/...
 ```
 
 **Use for:** Validating ACP reliability, debugging agent integration issues, testing protocol changes.
 
-**Requirements:** `claude-agent-acp` must be installed and accessible in PATH.
+**Requirements:** Set `HASH_LIVE_ACP_COMMAND` to an authenticated ACP command
+available on `PATH`. Cursor Agent uses `agent acp`; Claude, Gemini, Codex, or
+another ACP-compatible command can be substituted without changing Hash.
 
 **Note:** Live tests are slower (2-3 min total) and require API quota. Agent responses vary between runs.
 
@@ -62,7 +65,10 @@ e2e/
 # Run all mock e2e tests (fast, deterministic)
 go test -tags=e2e ./e2e/...
 
-# Run all live agent tests (slow, requires claude-agent-acp)
+# Run the opt-in ACP terminal UX test with Cursor Agent
+HASH_LIVE_ACP_COMMAND="agent acp" go test -tags=e2e_live -run TestLiveACPTerminalUX -count=1 -v ./e2e/...
+
+# Run the older live agent suite (slow, requires its configured agent)
 go test -tags=e2e_live ./e2e/...
 
 # Run specific scenario
@@ -115,6 +121,7 @@ Live tests validate the full ACP protocol stack against `claude-agent-acp`:
 | `TestLive_ContextPropagation` | Working directory context |
 | `TestLive_Timeout` | Graceful timeout handling |
 | `TestLive_MultipleRequests` | Session reuse across requests |
+| `TestLiveACPTerminalUX` | Parameterized PTY streaming and tool lifecycle UX |
 
 ## Test Coverage Map
 

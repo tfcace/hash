@@ -198,8 +198,21 @@ func (u *ResponseUI) showError(err string) {
 func (u *ResponseUI) ShowState(state AgentState) {
 	u.spinnerMu.Lock()
 	defer u.spinnerMu.Unlock()
+	u.showSpinnerLocked(agentStateLabel(state, u.agentModel))
+}
 
-	text := agentStateLabel(state, u.agentModel)
+// ShowActivity updates the existing response spinner with structured agent
+// activity. It shares the same animation and lifecycle as ShowState.
+func (u *ResponseUI) ShowActivity(label string) {
+	if strings.TrimSpace(label) == "" {
+		label = "agent · working"
+	}
+	u.spinnerMu.Lock()
+	defer u.spinnerMu.Unlock()
+	u.showSpinnerLocked(label)
+}
+
+func (u *ResponseUI) showSpinnerLocked(text string) {
 
 	if u.spinnerRunning {
 		// Update the spinner text

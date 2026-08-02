@@ -39,6 +39,7 @@ func TestGhostText_Clear(t *testing.T) {
 	g := NewGhostText()
 	g.Set("hello")
 	g.SetStreaming(true)
+	g.Status = "Agent running pwd..."
 
 	g.Clear()
 
@@ -50,6 +51,9 @@ func TestGhostText_Clear(t *testing.T) {
 	}
 	if g.Text != "" {
 		t.Errorf("expected Text to be empty, got %q", g.Text)
+	}
+	if g.Status != "" {
+		t.Errorf("expected Status to be empty, got %q", g.Status)
 	}
 }
 

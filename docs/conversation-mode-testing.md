@@ -8,6 +8,19 @@ This checklist covers marker-free follow-up conversations for full `??` agent re
 - Configure an agent in `~/.config/hash/config.toml`
 - Use a working agent such as Claude Agent ACP, Gemini CLI ACP, or a configured HTTP/local model
 
+## ACP Streaming and Tool Lifecycle PTY Check
+
+Hash consumes ACP v1 events generically. Cursor Agent is a useful live target,
+not a production dependency. Run the opt-in terminal acceptance test with:
+
+```bash
+HASH_LIVE_ACP_COMMAND="agent acp" go test -tags=e2e_live -run TestLiveACPTerminalUX -count=1 -v ./e2e/...
+```
+
+The test asks for two read-only inspections, approves each permission prompt,
+and verifies paced assistant text plus stable `agent · running · title` and
+single final tool rows. Replace `agent acp` with any authenticated ACP command.
+
 ## Test Cases
 
 ### 1. Basic Single-Turn Explanation
