@@ -19,16 +19,27 @@ type Command struct {
 
 // AgentInteraction represents an agent prompt/response pair.
 type AgentInteraction struct {
-	ID        int64
-	Prompt    string // What the user asked
-	Response  string // What the agent suggested
-	Accepted  bool   // Did the user accept the suggestion?
-	CommandID int64  // Link to executed command (if accepted)
-	Context   string // Context that was sent (JSON)
-	LatencyMs int64  // Agent response time
-	Agent     string // Which agent (claude, ollama, etc.)
-	Timestamp time.Time
+	ID           int64
+	Prompt       string            // What the user asked
+	Response     string            // What the agent suggested
+	ResponseKind AgentResponseKind // Whether the response is a command, explanation, or legacy/unknown
+	Accepted     bool              // Did the user accept the suggestion?
+	CommandID    int64             // Link to executed command (if accepted)
+	Context      string            // Context that was sent (JSON)
+	LatencyMs    int64             // Agent response time
+	Agent        string            // Which agent (claude, ollama, etc.)
+	Timestamp    time.Time
 }
+
+// AgentResponseKind describes how an agent response can be recalled safely.
+// Unknown is intentionally used for legacy rows rather than inferring a type.
+type AgentResponseKind string
+
+const (
+	AgentResponseKindCommand     AgentResponseKind = "command"
+	AgentResponseKindExplanation AgentResponseKind = "explanation"
+	AgentResponseKindUnknown     AgentResponseKind = "unknown"
+)
 
 // SearchOptions for querying history.
 type SearchOptions struct {

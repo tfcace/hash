@@ -493,7 +493,7 @@ func (s *Shell) builtinTips(args []string) error {
 	fmt.Println()
 
 	fmt.Println(headerStyle.Render("Navigation:"))
-	fmt.Printf("  %s  %s\n", keyStyle.Render("Ctrl+R"), dimStyle.Render("Search command history"))
+	fmt.Printf("  %s  %s\n", keyStyle.Render("Ctrl+R"), dimStyle.Render("Search commands or agent results (Tab switches tabs)"))
 	fmt.Printf("  %s  %s\n", keyStyle.Render("Ctrl+P"), dimStyle.Render("Context picker for AI requests"))
 	fmt.Printf("  %s %s\n", keyStyle.Render("Up/Down"), dimStyle.Render("Browse history"))
 	fmt.Println()

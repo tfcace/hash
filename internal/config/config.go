@@ -100,10 +100,11 @@ type AgentEndpoint struct {
 }
 
 type HistoryConfig struct {
-	Enabled    bool   `toml:"enabled"`
-	Path       string `toml:"path"`
-	MaxEntries string `toml:"max_entries"`
-	MaxAge     string `toml:"max_age"`
+	Enabled             bool   `toml:"enabled"`
+	Path                string `toml:"path"`
+	MaxEntries          string `toml:"max_entries"`
+	MaxAge              string `toml:"max_age"`
+	AgentResultsEnabled bool   `toml:"agent_results_enabled"`
 }
 
 type CompletionsConfig struct {

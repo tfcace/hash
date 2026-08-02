@@ -86,6 +86,7 @@ func (s *Store) migrate() error {
 		context     TEXT,
 		latency_ms  INTEGER DEFAULT 0,
 		agent       TEXT,
+		response_kind TEXT NOT NULL DEFAULT 'unknown',
 		timestamp   DATETIME DEFAULT CURRENT_TIMESTAMP
 	);
 
@@ -94,7 +95,41 @@ func (s *Store) migrate() error {
 	CREATE INDEX IF NOT EXISTS idx_commands_is_sudo ON commands(is_sudo);
 	`
 
-	_, err := s.db.Exec(schema)
+	if _, err := s.db.Exec(schema); err != nil {
+		return err
+	}
+
+	return s.migrateAgentInteractionResponseKind()
+}
+
+// migrateAgentInteractionResponseKind adds the column to databases created
+// before result recall. Existing results are deliberately unknown: inferring a
+// command from old free-form text could make an unsafe result insertable.
+func (s *Store) migrateAgentInteractionResponseKind() error {
+	rows, err := s.db.Query("PRAGMA table_info(agent_interactions)")
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var cid int
+		var name, columnType string
+		var notNull int
+		var defaultValue sql.NullString
+		var primaryKey int
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			return err
+		}
+		if name == "response_kind" {
+			return rows.Err()
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	_, err = s.db.Exec("ALTER TABLE agent_interactions ADD COLUMN response_kind TEXT NOT NULL DEFAULT 'unknown'")
 	return err
 }
 
@@ -227,16 +262,28 @@ func (s *Store) scanCommands(rows *sql.Rows) ([]Command, error) {
 
 // AddAgentInteraction records an agent interaction.
 func (s *Store) AddAgentInteraction(interaction AgentInteraction) (int64, error) {
+	if interaction.ResponseKind == "" {
+		interaction.ResponseKind = AgentResponseKindUnknown
+	}
 	result, err := s.db.Exec(`
-		INSERT INTO agent_interactions (prompt, response, accepted, command_id, context, latency_ms, agent, timestamp)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-	`, interaction.Prompt, interaction.Response, interaction.Accepted, interaction.CommandID, interaction.Context, interaction.LatencyMs, interaction.Agent, interaction.Timestamp)
+		INSERT INTO agent_interactions (prompt, response, response_kind, accepted, command_id, context, latency_ms, agent, timestamp)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, interaction.Prompt, interaction.Response, interaction.ResponseKind, interaction.Accepted, interaction.CommandID, interaction.Context, interaction.LatencyMs, interaction.Agent, interaction.Timestamp)
 
 	if err != nil {
 		return 0, err
 	}
 
 	return result.LastInsertId()
+}
+
+// MarkAgentInteractionAccepted records that a command result was run or edited.
+func (s *Store) MarkAgentInteractionAccepted(id int64) error {
+	if id <= 0 {
+		return nil
+	}
+	_, err := s.db.Exec("UPDATE agent_interactions SET accepted = TRUE WHERE id = ?", id)
+	return err
 }
 
 // GetAgentInteractions returns agent interactions, optionally filtered.
@@ -246,15 +293,15 @@ func (s *Store) GetAgentInteractions(prompt string, limit int) ([]AgentInteracti
 
 	if prompt != "" {
 		rows, err = s.db.Query(`
-			SELECT id, prompt, response, accepted, command_id, context, latency_ms, agent, timestamp
+			SELECT id, prompt, response, response_kind, accepted, command_id, context, latency_ms, agent, timestamp
 			FROM agent_interactions
-			WHERE prompt LIKE ?
+			WHERE prompt LIKE ? OR response LIKE ?
 			ORDER BY timestamp DESC
 			LIMIT ?
-		`, "%"+prompt+"%", limit)
+		`, "%"+prompt+"%", "%"+prompt+"%", limit)
 	} else {
 		rows, err = s.db.Query(`
-			SELECT id, prompt, response, accepted, command_id, context, latency_ms, agent, timestamp
+			SELECT id, prompt, response, response_kind, accepted, command_id, context, latency_ms, agent, timestamp
 			FROM agent_interactions
 			ORDER BY timestamp DESC
 			LIMIT ?
@@ -270,15 +317,22 @@ func (s *Store) GetAgentInteractions(prompt string, limit int) ([]AgentInteracti
 	for rows.Next() {
 		var i AgentInteraction
 		var commandID sql.NullInt64
-		var interactionContext sql.NullString
+		var context sql.NullString
+		var responseKind sql.NullString
+		var agentName sql.NullString
 
-		err := rows.Scan(&i.ID, &i.Prompt, &i.Response, &i.Accepted, &commandID, &interactionContext, &i.LatencyMs, &i.Agent, &i.Timestamp)
+		err := rows.Scan(&i.ID, &i.Prompt, &i.Response, &responseKind, &i.Accepted, &commandID, &context, &i.LatencyMs, &agentName, &i.Timestamp)
 		if err != nil {
 			return nil, err
 		}
 
 		i.CommandID = commandID.Int64
-		i.Context = interactionContext.String
+		i.Context = context.String
+		i.Agent = agentName.String
+		i.ResponseKind = AgentResponseKind(responseKind.String)
+		if i.ResponseKind == "" {
+			i.ResponseKind = AgentResponseKindUnknown
+		}
 		interactions = append(interactions, i)
 	}
 

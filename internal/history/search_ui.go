@@ -24,15 +24,17 @@ type SearchUI struct {
 	clipboardBuf *clipboard.Buffer
 	palette      prompt.Palette
 
-	query         string
-	results       []Command
-	totalResults  int
-	selected      int
-	scrollOffset  int
-	width         int
-	height        int
-	debounceID    int
-	statusMessage string
+	query            string
+	results          []Command
+	agentResults     []AgentInteraction
+	agentResultsMode bool
+	totalResults     int
+	selected         int
+	scrollOffset     int
+	width            int
+	height           int
+	debounceID       int
+	statusMessage    string
 }
 
 // NewSearchUI creates a new search UI with the given color palette.
@@ -60,11 +62,7 @@ func (ui *SearchUI) Run() (string, error) {
 	}
 
 	finalUI := model.(*SearchUI)
-	if finalUI.selected >= 0 && finalUI.selected < len(finalUI.results) {
-		return finalUI.results[finalUI.selected].Command, nil
-	}
-
-	return "", nil
+	return finalUI.selectedText(), nil
 }
 
 // Init implements tea.Model.
@@ -84,13 +82,17 @@ func (ui *SearchUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		ui.height = msg.Height
 
 	case searchResultMsg:
+		if msg.agentResultsMode != ui.agentResultsMode {
+			return ui, nil
+		}
 		ui.results = msg.results
+		ui.agentResults = msg.agentResults
 		ui.totalResults = msg.total
-		if len(ui.results) > 0 && ui.selected < 0 {
+		if ui.resultCount() > 0 && ui.selected < 0 {
 			ui.selected = 0
 		}
-		if ui.selected >= len(ui.results) {
-			ui.selected = len(ui.results) - 1
+		if ui.selected >= ui.resultCount() {
+			ui.selected = ui.resultCount() - 1
 		}
 
 	case debounceMsg:
@@ -116,23 +118,38 @@ func (ui *SearchUI) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return ui, tea.Quit
 
 	case "enter":
+		if ui.agentResultsMode && ui.selectedText() == "" {
+			ui.statusMessage = "Only command results can be inserted"
+			return ui, nil
+		}
 		return ui, tea.Quit
 
-	case "up", "ctrl+p", "shift+tab":
+	case "up", "ctrl+p":
 		if ui.selected > 0 {
 			ui.selected--
 			ui.adjustScroll()
 		}
 
-	case "down", "ctrl+n", "tab":
-		if ui.selected < len(ui.results)-1 {
+	case "down", "ctrl+n":
+		if ui.selected < ui.resultCount()-1 {
 			ui.selected++
 			ui.adjustScroll()
 		}
 
+	case "tab":
+		return ui, ui.selectAgentResults()
+
+	case "shift+tab":
+		return ui, ui.selectCommands()
+
 	case "ctrl+y":
 		cmd := ui.copyCommand()
 		return ui, cmd
+
+	case "ctrl+r":
+		// Ctrl+R opens the picker. Once it is open, the visible tabs own
+		// navigation so repeated Ctrl+R never changes the active result set.
+		return ui, nil
 
 	case "ctrl+o":
 		cmd := ui.copyOutput()
@@ -172,6 +189,22 @@ func (ui *SearchUI) resetAndSearch() tea.Cmd {
 	return ui.debounceSearch(ui.debounceID)
 }
 
+func (ui *SearchUI) selectAgentResults() tea.Cmd {
+	if ui.agentResultsMode {
+		return nil
+	}
+	ui.agentResultsMode = true
+	return ui.resetAndSearch()
+}
+
+func (ui *SearchUI) selectCommands() tea.Cmd {
+	if !ui.agentResultsMode {
+		return nil
+	}
+	ui.agentResultsMode = false
+	return ui.resetAndSearch()
+}
+
 func (ui *SearchUI) adjustScroll() {
 	// Keep selected item visible
 	if ui.selected < ui.scrollOffset {
@@ -185,8 +218,6 @@ func (ui *SearchUI) adjustScroll() {
 // View implements tea.Model.
 func (ui *SearchUI) View() tea.View {
 	var b strings.Builder
-
-	// Styles
 	borderColor := lipgloss.Color(ui.palette.Primary)
 	selectedStyle := lipgloss.NewStyle().
 		Foreground(lipgloss.Color(ui.palette.Success)).
@@ -195,17 +226,20 @@ func (ui *SearchUI) View() tea.View {
 	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(ui.palette.Dim))
 	errorStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(ui.palette.Error))
 
-	// Header box
 	headerBorder := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(borderColor).
 		Padding(0, 1).
 		Width(ui.width - 2)
 
+	headerText := "Search Commands"
+	if ui.agentResultsMode {
+		headerText = "Search Agent results"
+	}
 	headerLabel := lipgloss.NewStyle().
 		Foreground(borderColor).
 		Bold(true).
-		Render("Search")
+		Render(headerText)
 
 	queryDisplay := ui.query
 	if queryDisplay == "" {
@@ -216,56 +250,89 @@ func (ui *SearchUI) View() tea.View {
 	b.WriteString(headerBorder.Render(header))
 	b.WriteString("\n")
 
-	// Results
-	if len(ui.results) == 0 {
+	activeTabStyle := lipgloss.NewStyle().
+		Foreground(borderColor).
+		Bold(true)
+	tabStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(ui.palette.Dim))
+	commandsTab := tabStyle.Render("[Commands]")
+	agentResultsTab := tabStyle.Render("[Agent results]")
+	if ui.agentResultsMode {
+		agentResultsTab = activeTabStyle.Render("[Agent results]")
+	} else {
+		commandsTab = activeTabStyle.Render("[Commands]")
+	}
+	b.WriteString("  ")
+	b.WriteString(commandsTab)
+	b.WriteString(" ")
+	b.WriteString(agentResultsTab)
+	b.WriteString("\n")
+
+	if ui.resultCount() == 0 {
 		if ui.query != "" {
 			b.WriteString(dimStyle.Render("  No matches"))
+		} else if ui.agentResultsMode {
+			b.WriteString(dimStyle.Render("  No saved agent results"))
 		} else {
 			b.WriteString(dimStyle.Render("  No history"))
 		}
 		b.WriteString("\n")
 	} else {
 		visibleEnd := ui.scrollOffset + maxVisibleResults
-		if visibleEnd > len(ui.results) {
-			visibleEnd = len(ui.results)
+		if visibleEnd > ui.resultCount() {
+			visibleEnd = ui.resultCount()
 		}
 
 		for i := ui.scrollOffset; i < visibleEnd; i++ {
-			cmd := ui.results[i]
-			line := ui.formatResultLine(cmd, i, selectedStyle, normalStyle, dimStyle, errorStyle)
+			line := ""
+			if ui.agentResultsMode {
+				line = ui.formatAgentResultLine(ui.agentResults[i], i, selectedStyle, normalStyle, dimStyle)
+			} else {
+				line = ui.formatResultLine(ui.results[i], i, selectedStyle, normalStyle, dimStyle, errorStyle)
+			}
 			b.WriteString(line)
 			b.WriteString("\n")
 		}
 	}
 
-	// Preview pane for selected command
-	if ui.selected >= 0 && ui.selected < len(ui.results) {
-		cmd := ui.results[ui.selected]
-
+	if ui.selected >= 0 && ui.selected < ui.resultCount() {
 		b.WriteString("\n")
 		b.WriteString(dimStyle.Render("─── Preview ───"))
 		b.WriteString("\n")
-
-		// Full command (not truncated)
-		b.WriteString(normalStyle.Render(cmd.Command))
-		b.WriteString("\n")
-
-		// Metadata line
-		meta := fmt.Sprintf("%s │ %s", cmd.Timestamp.Format("2006-01-02 15:04"), cmd.Cwd)
-		if cmd.GitBranch != "" {
-			meta += fmt.Sprintf(" │ %s", cmd.GitBranch)
-		}
-		if cmd.ExitCode != 0 {
-			meta += fmt.Sprintf(" │ ✗%d", cmd.ExitCode)
+		if ui.agentResultsMode {
+			result := ui.agentResults[ui.selected]
+			b.WriteString(dimStyle.Render("Prompt: "))
+			b.WriteString(normalStyle.Render(result.Prompt))
+			b.WriteString("\n")
+			b.WriteString(normalStyle.Render(result.Response))
+			b.WriteString("\n")
+			accepted := "not accepted"
+			if result.Accepted {
+				accepted = "accepted"
+			}
+			meta := fmt.Sprintf("%s │ %s │ %s", result.ResponseKind, accepted, result.Timestamp.Format("2006-01-02 15:04"))
+			if result.Agent != "" {
+				meta += fmt.Sprintf(" │ %s", result.Agent)
+			}
+			b.WriteString(dimStyle.Render(meta))
 		} else {
-			meta += " │ ✓"
+			cmd := ui.results[ui.selected]
+			b.WriteString(normalStyle.Render(cmd.Command))
+			b.WriteString("\n")
+			meta := fmt.Sprintf("%s │ %s", cmd.Timestamp.Format("2006-01-02 15:04"), cmd.Cwd)
+			if cmd.GitBranch != "" {
+				meta += fmt.Sprintf(" │ %s", cmd.GitBranch)
+			}
+			if cmd.ExitCode != 0 {
+				meta += fmt.Sprintf(" │ ✗%d", cmd.ExitCode)
+			} else {
+				meta += " │ ✓"
+			}
+			b.WriteString(dimStyle.Render(meta))
 		}
-		b.WriteString(dimStyle.Render(meta))
 		b.WriteString("\n")
 	}
 
-	// Result count (bottom right)
-	if len(ui.results) > 0 {
+	if ui.resultCount() > 0 {
 		countStr := fmt.Sprintf("result %d of %d", ui.selected+1, ui.totalResults)
 		padding := ui.width - len(countStr) - 2
 		if padding > 0 {
@@ -275,14 +342,15 @@ func (ui *SearchUI) View() tea.View {
 		b.WriteString("\n")
 	}
 
-	// Status message (if any)
 	if ui.statusMessage != "" {
 		b.WriteString(selectedStyle.Render(ui.statusMessage))
 		b.WriteString("\n")
 	}
 
-	// Help footer
-	help := "  ↑/↓ navigate  enter select  ctrl+y copy cmd  ctrl+o copy output  esc cancel"
+	help := "  tab agent results  shift+tab commands  ↑/↓ navigate  enter select  ctrl+y copy cmd  ctrl+o copy output  esc cancel"
+	if ui.agentResultsMode {
+		help = "  tab agent results  shift+tab commands  ↑/↓ navigate  enter insert command  ctrl+y copy response  esc cancel"
+	}
 	b.WriteString(dimStyle.Render(help))
 
 	v := tea.NewView(b.String())
@@ -292,6 +360,29 @@ func (ui *SearchUI) View() tea.View {
 	// characters like [?2027;1$y into the next editor session.
 	v.DisableBracketedPasteMode = true
 	return v
+}
+
+func (ui *SearchUI) resultCount() int {
+	if ui.agentResultsMode {
+		return len(ui.agentResults)
+	}
+	return len(ui.results)
+}
+
+// selectedText returns only content safe to insert into the command editor.
+// Explanations and legacy unknown results remain preview/copy-only.
+func (ui *SearchUI) selectedText() string {
+	if ui.selected < 0 || ui.selected >= ui.resultCount() {
+		return ""
+	}
+	if ui.agentResultsMode {
+		result := ui.agentResults[ui.selected]
+		if result.ResponseKind != AgentResponseKindCommand {
+			return ""
+		}
+		return result.Response
+	}
+	return ui.results[ui.selected].Command
 }
 
 func (ui *SearchUI) formatResultLine(cmd Command, idx int, selected, normal, dim, errStyle lipgloss.Style) string {
@@ -342,6 +433,45 @@ func (ui *SearchUI) formatResultLine(cmd Command, idx int, selected, normal, dim
 	return b.String()
 }
 
+func (ui *SearchUI) formatAgentResultLine(result AgentInteraction, idx int, selected, normal, dim lipgloss.Style) string {
+	indicator := "  "
+	if idx == ui.selected {
+		indicator = selected.Render("> ")
+	}
+	text := result.Prompt
+	if text == "" {
+		text = result.Response
+	}
+	agentName := result.Agent
+	if agentName == "" {
+		agentName = "unknown agent"
+	}
+	acceptance := "not accepted"
+	if result.Accepted {
+		acceptance = "accepted"
+	}
+	meta := fmt.Sprintf("%s · %s · %s · %s", result.ResponseKind, agentName, acceptance, ui.formatTimestamp(result.Timestamp))
+
+	// Reserve room for the complete metadata so no field silently drops off
+	// narrow terminals. The prompt gives way first and keeps the row readable.
+	maxWidth := ui.width - len(meta) - 6
+	if maxWidth < 3 {
+		maxWidth = 3
+	}
+	if len(text) > maxWidth && maxWidth > 3 {
+		text = text[:maxWidth-3] + "..."
+	}
+	style := normal
+	if idx == ui.selected {
+		style = selected
+	}
+	padding := ui.width - 2 - len(text) - len(meta) - 2
+	if padding < 1 {
+		padding = 1
+	}
+	return indicator + style.Render(text) + strings.Repeat(" ", padding) + dim.Render(meta)
+}
+
 func (ui *SearchUI) formatTimestamp(t time.Time) string {
 	now := time.Now()
 	diff := now.Sub(t)
@@ -370,8 +500,10 @@ func (ui *SearchUI) formatTimestamp(t time.Time) string {
 
 // Messages
 type searchResultMsg struct {
-	results []Command
-	total   int
+	results          []Command
+	agentResults     []AgentInteraction
+	agentResultsMode bool
+	total            int
 }
 
 type debounceMsg struct {
@@ -382,15 +514,30 @@ type clearStatusMsg struct{}
 
 func (ui *SearchUI) search() tea.Cmd {
 	return func() tea.Msg {
+		if ui.agentResultsMode {
+			results, _ := ui.store.GetAgentInteractions(ui.query, 100)
+			return searchResultMsg{agentResults: results, agentResultsMode: true, total: len(results)}
+		}
 		results, _ := ui.store.Search(SearchOptions{
 			Query: ui.query,
 			Limit: 100, // Get more for scrolling
 		})
-		return searchResultMsg{results: results, total: len(results)}
+		return searchResultMsg{results: results, agentResultsMode: false, total: len(results)}
 	}
 }
 
 func (ui *SearchUI) searchNow() {
+	if ui.agentResultsMode {
+		results, _ := ui.store.GetAgentInteractions(ui.query, 100)
+		ui.agentResults = results
+		ui.totalResults = len(results)
+		if len(results) > 0 {
+			ui.selected = 0
+		} else {
+			ui.selected = -1
+		}
+		return
+	}
 	results, _ := ui.store.Search(SearchOptions{
 		Query: ui.query,
 		Limit: 100,
@@ -419,12 +566,15 @@ func (ui *SearchUI) copyToClipboard(text string) error {
 }
 
 func (ui *SearchUI) copyCommand() tea.Cmd {
-	if ui.selected < 0 || ui.selected >= len(ui.results) {
+	if ui.selected < 0 || ui.selected >= ui.resultCount() {
 		ui.statusMessage = "No selection"
 		return nil
 	}
 
-	cmd := ui.results[ui.selected].Command
+	cmd := ui.selectedText()
+	if ui.agentResultsMode && cmd == "" {
+		cmd = ui.agentResults[ui.selected].Response
+	}
 	if err := ui.copyToClipboard(cmd); err != nil {
 		ui.statusMessage = "Clipboard error"
 	} else {
@@ -434,6 +584,9 @@ func (ui *SearchUI) copyCommand() tea.Cmd {
 }
 
 func (ui *SearchUI) copyOutput() tea.Cmd {
+	if ui.agentResultsMode {
+		return ui.copyCommand()
+	}
 	if ui.selected < 0 || ui.selected >= len(ui.results) {
 		ui.statusMessage = "No selection"
 		return nil

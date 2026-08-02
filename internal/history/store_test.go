@@ -1,11 +1,105 @@
 package history
 
 import (
+	"database/sql"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 )
+
+func TestStore_AgentInteractionsSearchPromptAndResponse(t *testing.T) {
+	store := newTestStore(t)
+	now := time.Now()
+	for _, interaction := range []AgentInteraction{
+		{Prompt: "find logs", Response: "rg --files | rg log", ResponseKind: AgentResponseKindCommand, Timestamp: now},
+		{Prompt: "explain deploy", Response: "The deployment is blocked by a pending migration.", ResponseKind: AgentResponseKindExplanation, Timestamp: now.Add(time.Second)},
+	} {
+		if _, err := store.AddAgentInteraction(interaction); err != nil {
+			t.Fatalf("AddAgentInteraction() error = %v", err)
+		}
+	}
+
+	byPrompt, err := store.GetAgentInteractions("logs", 20)
+	if err != nil {
+		t.Fatalf("GetAgentInteractions(prompt) error = %v", err)
+	}
+	if len(byPrompt) != 1 || byPrompt[0].ResponseKind != AgentResponseKindCommand {
+		t.Fatalf("prompt search = %#v, want command result", byPrompt)
+	}
+
+	byResponse, err := store.GetAgentInteractions("pending migration", 20)
+	if err != nil {
+		t.Fatalf("GetAgentInteractions(response) error = %v", err)
+	}
+	if len(byResponse) != 1 || byResponse[0].ResponseKind != AgentResponseKindExplanation {
+		t.Fatalf("response search = %#v, want explanation result", byResponse)
+	}
+}
+
+func TestStore_AgentInteractionsOrderByRecencyAndHonorLimit(t *testing.T) {
+	store := newTestStore(t)
+	base := time.Now().Add(-time.Hour)
+	for i, interaction := range []AgentInteraction{
+		{Prompt: "old", Response: "old response", Timestamp: base},
+		{Prompt: "middle", Response: "middle response", Timestamp: base.Add(time.Minute)},
+		{Prompt: "new", Response: "new response", Timestamp: base.Add(2 * time.Minute)},
+	} {
+		if _, err := store.AddAgentInteraction(interaction); err != nil {
+			t.Fatalf("AddAgentInteraction(%d) error = %v", i, err)
+		}
+	}
+
+	interactions, err := store.GetAgentInteractions("", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(interactions) != 2 {
+		t.Fatalf("GetAgentInteractions limit = %d, want 2", len(interactions))
+	}
+	if interactions[0].Prompt != "new" || interactions[1].Prompt != "middle" {
+		t.Fatalf("recency order = [%q, %q], want [new, middle]", interactions[0].Prompt, interactions[1].Prompt)
+	}
+}
+
+func TestStore_LegacyAgentInteractionsMigrateAsUnknown(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "history.db")
+	db, err := sql.Open("sqlite3", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`CREATE TABLE agent_interactions (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		prompt TEXT NOT NULL,
+		response TEXT NOT NULL,
+		accepted BOOLEAN DEFAULT FALSE,
+		command_id INTEGER,
+		context TEXT,
+		latency_ms INTEGER DEFAULT 0,
+		agent TEXT,
+		timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+	); INSERT INTO agent_interactions (prompt, response) VALUES ('legacy prompt', 'legacy response');`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("NewStore() migration error = %v", err)
+	}
+	defer store.Close()
+
+	interactions, err := store.GetAgentInteractions("legacy", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(interactions) != 1 || interactions[0].ResponseKind != AgentResponseKindUnknown {
+		t.Fatalf("legacy interaction = %#v, want unknown response kind", interactions)
+	}
+}
 
 func TestStore_CreateAndAdd(t *testing.T) {
 	tmpDir := t.TempDir()

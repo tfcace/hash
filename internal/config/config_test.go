@@ -27,6 +27,26 @@ func TestLoadConfig_DefaultValues(t *testing.T) {
 	if cfg.Prompt.Mode != "starship" {
 		t.Errorf("Prompt.Mode = %q, want %q", cfg.Prompt.Mode, "starship")
 	}
+	if cfg.History.AgentResultsEnabled {
+		t.Error("History.AgentResultsEnabled = true, want false by default")
+	}
+}
+
+func TestLoadConfig_AgentResultsHistoryOptIn(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.toml")
+
+	if err := os.WriteFile(configPath, []byte("[history]\nagent_results_enabled = true\n"), 0o644); err != nil { //nolint:gosec // G306: test file
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(tmpDir)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if !cfg.History.AgentResultsEnabled {
+		t.Fatal("History.AgentResultsEnabled = false, want config opt-in true")
+	}
 }
 
 func TestLoadConfig_FromFile(t *testing.T) {

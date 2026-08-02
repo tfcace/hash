@@ -1,6 +1,6 @@
 # Interactive History Search (Ctrl+R)
 
-Hash includes a powerful interactive history search feature, inspired by the `reverse-i-search` functionality found in Bash and other Unix shells. Press **Ctrl+R** at any time to launch the search interface and quickly find and re-execute previous commands.
+Hash includes a powerful interactive history search feature, inspired by the `reverse-i-search` functionality found in Bash and other Unix shells. Press **Ctrl+R** at any time to open the search interface on its **Commands** tab. Press **Tab** to select saved Agent results or **Shift+Tab** to return to commands when `[history].agent_results_enabled = true`.
 
 ## Quick Start
 
@@ -9,7 +9,7 @@ Hash includes a powerful interactive history search feature, inspired by the `re
 1. Press **Ctrl+R** to open the search interface
 2. Type keywords to search through your command history in real-time
 3. Navigate results using arrow keys or Ctrl+N/Ctrl+P
-4. Press **Enter** to select a command and execute it
+4. Press **Enter** to insert a command at the prompt, then review or edit it before execution
 5. Press **Esc** or **Ctrl+C** to cancel
 
 ### Example Session
@@ -56,7 +56,8 @@ Example:
 ### Navigation
 - **Up Arrow / Ctrl+P**: Select previous result
 - **Down Arrow / Ctrl+N**: Select next result
-- **Enter**: Execute the selected command
+- **Tab / Shift+Tab**: Select the Agent results or Commands tab
+- **Enter**: Insert the selected command at the prompt; it is never executed by the history picker
 - **Esc / Ctrl+C**: Cancel and return to normal prompt
 
 ### Real-Time Filtering
@@ -64,6 +65,15 @@ As you type, the search results update in real-time:
 - Type more characters to narrow results
 - Use backspace to broaden results
 - The selected result automatically resets when search query changes
+
+### Agent Results
+
+When `agent_results_enabled = true`, use the visible **Agent results** tab with
+**Tab** to search saved full, pipe, and conversation agent turns without losing the current query.
+Use **Shift+Tab** to return to Commands. Agent rows show the prompt,
+response kind, timestamp, and acceptance status. Only command-kind responses can be
+inserted with **Enter**; explanations and legacy unknown responses remain preview and
+copy-only. Use **Ctrl+Y** to copy any selected agent response.
 
 ## Advanced Usage
 
@@ -88,7 +98,7 @@ Shows commands containing "get pods" (useful for kubectl)
 Ctrl+R
 (reverse-i-search): grep
 ```
-Find previous grep commands and re-execute with different arguments
+Find previous grep commands, insert one, and adjust its arguments before running it
 
 ### Combining with Other Features
 

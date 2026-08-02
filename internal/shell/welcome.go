@@ -45,7 +45,7 @@ func (w *Welcome) Message() string {
 	b.WriteString("Quick start:\n")
 	b.WriteString("  \033[36m??\033[0m          Ask the AI for help (e.g., ?? find large files)\n")
 	b.WriteString("  \033[36mcmd | ??\033[0m    Pipe output to AI (e.g., git diff | ?? summarize)\n")
-	b.WriteString("  \033[36mCtrl+R\033[0m      Search history\n")
+	b.WriteString("  \033[36mCtrl+R\033[0m      Search commands or agent results (Tab switches tabs)\n")
 	b.WriteString("  \033[36mCtrl+P\033[0m      Pick context for AI\n")
 	b.WriteString("  \033[36mCtrl+Y\033[0m      Copy last command\n")
 	b.WriteString("  \033[36mCtrl+O\033[0m      Copy last output\n")

@@ -487,3 +487,98 @@ func TestSearchUI_PreviewPane(t *testing.T) {
 		t.Error("Preview should show full command")
 	}
 }
+
+func TestSearchUI_TabsSelectAgentResultsAndPreserveQuery(t *testing.T) {
+	store := newTestStore(t)
+	_, err := store.Add(Command{Command: "kubectl get deploy/api", Timestamp: time.Now()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = store.AddAgentInteraction(AgentInteraction{
+		Prompt:       "find deploy logs",
+		Response:     "kubectl logs deploy/api",
+		ResponseKind: AgentResponseKindCommand,
+		Agent:        "mock-agent",
+		Accepted:     true,
+		Timestamp:    time.Now(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ui := NewSearchUI(store, prompt.DefaultPalette())
+	ui.query = "deploy"
+	ui.searchNow()
+	if ui.agentResultsMode {
+		t.Fatal("picker should open on the Commands tab")
+	}
+	view := ui.View().Content
+	if !strings.Contains(view, "[Commands]") || !strings.Contains(view, "[Agent results]") {
+		t.Fatalf("view should render visible tabs:\n%s", ui.View().Content)
+	}
+
+	ui.handleKey(tea.KeyPressMsg{Code: tea.KeyTab})
+	ui.searchNow()
+	if !ui.agentResultsMode {
+		t.Fatal("Tab should select Agent results")
+	}
+	if ui.query != "deploy" {
+		t.Fatalf("query = %q, want preserved query", ui.query)
+	}
+	if len(ui.agentResults) != 1 {
+		t.Fatalf("agent result count = %d, want 1", len(ui.agentResults))
+	}
+
+	view = ui.View().Content
+	for _, want := range []string{"Agent results", "find deploy logs", "kubectl logs deploy/api", "command", "mock-agent", "accepted"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("agent results view missing %q:\n%s", want, view)
+		}
+	}
+	if got := ui.selectedText(); got != "kubectl logs deploy/api" {
+		t.Fatalf("selectedText() = %q, want command response", got)
+	}
+
+	ui.handleKey(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
+	ui.searchNow()
+	if ui.agentResultsMode {
+		t.Fatal("Shift+Tab should select Commands")
+	}
+	if ui.query != "deploy" {
+		t.Fatalf("query = %q after returning to Commands, want preserved query", ui.query)
+	}
+
+	ui.handleKey(tea.KeyPressMsg{Code: 'r', Mod: tea.ModCtrl})
+	if ui.agentResultsMode {
+		t.Fatal("Ctrl+R while the picker is open must not switch tabs")
+	}
+}
+
+func TestSearchUI_AgentExplanationDoesNotInsert(t *testing.T) {
+	store := newTestStore(t)
+	_, err := store.AddAgentInteraction(AgentInteraction{
+		Prompt:       "why did deploy fail",
+		Response:     "The migration has not completed.",
+		ResponseKind: AgentResponseKindExplanation,
+		Timestamp:    time.Now(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ui := NewSearchUI(store, prompt.DefaultPalette())
+	ui.handleKey(tea.KeyPressMsg{Code: tea.KeyTab})
+	ui.searchNow()
+	if got := ui.selectedText(); got != "" {
+		t.Fatalf("selectedText() = %q, want explanation to remain preview-only", got)
+	}
+	model, _ := ui.handleKey(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if model != ui || ui.statusMessage != "Only command results can be inserted" {
+		t.Fatal("Enter should keep an explanation result in preview instead of selecting it")
+	}
+	for _, want := range []string{"tab agent results", "shift+tab commands", "ctrl+y copy response"} {
+		if !strings.Contains(ui.View().Content, want) {
+			t.Fatalf("agent result help should contain %q:\n%s", want, ui.View().Content)
+		}
+	}
+}
