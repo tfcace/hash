@@ -33,6 +33,8 @@ const (
 
 var installVersionPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+-]*$`)
 var githubNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*$`)
+var githubReleaseTagPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/-]*$`)
+var releasePlatformPattern = regexp.MustCompile(`^[a-z0-9]+/[a-z0-9]+$`)
 
 // Installer manages downloaded plugin bundles separately from developer links.
 type Installer struct {
@@ -69,6 +71,11 @@ type UpgradeAllResult struct {
 type UpgradeFailure struct {
 	ID  string
 	Err error
+}
+
+type upgradeSnapshot struct {
+	id     string
+	target string
 }
 
 type installMetadata struct {
@@ -188,15 +195,147 @@ func (i *Installer) UpgradeAll(ctx context.Context, source string) (UpgradeAllRe
 		return UpgradeAllResult{}, err
 	}
 	result := UpgradeAllResult{Skipped: skipped}
+	sources := make(map[string]string, len(ids))
+	snapshots := make(map[string]upgradeSnapshot, len(ids))
 	for _, id := range ids {
-		upgraded, err := i.Upgrade(ctx, id, source)
+		manifest, metadata, metadataErr := i.installedMetadata(id)
+		if metadataErr != nil {
+			result.Failures = append(result.Failures, UpgradeFailure{ID: id, Err: metadataErr})
+			continue
+		}
+		snapshots[id] = upgradeSnapshot{id: id, target: manifest.Directory}
+		upgradeSource := source
+		if upgradeSource == "" {
+			upgradeSource = metadata.Source
+		}
+		sources[id] = upgradeSource
+	}
+	pinnedSources := make(map[string]string, len(sources))
+	pinErrors := make(map[string]error, len(sources))
+	uniqueSources := make([]string, 0, len(sources))
+	for _, upgradeSource := range sources {
+		if _, seen := pinnedSources[upgradeSource]; !seen {
+			pinnedSources[upgradeSource] = ""
+			uniqueSources = append(uniqueSources, upgradeSource)
+		}
+	}
+	sort.Strings(uniqueSources)
+	for _, upgradeSource := range uniqueSources {
+		pinnedSource, pinErr := i.pinCatalogSource(ctx, upgradeSource)
+		if pinErr != nil {
+			pinErrors[upgradeSource] = pinErr
+			continue
+		}
+		pinnedSources[upgradeSource] = pinnedSource
+	}
+	for _, id := range ids {
+		upgradeSource, ok := sources[id]
+		if !ok {
+			continue
+		}
+		if pinErr := pinErrors[upgradeSource]; pinErr != nil {
+			result.Failures = append(result.Failures, UpgradeFailure{ID: id, Err: fmt.Errorf("resolve plugin catalog: %w", pinErr)})
+			continue
+		}
+		upgraded, err := i.Upgrade(ctx, id, pinnedSources[upgradeSource])
 		if err != nil {
 			result.Failures = append(result.Failures, UpgradeFailure{ID: id, Err: err})
 			continue
 		}
 		result.Results = append(result.Results, upgraded)
 	}
+	if len(result.Failures) > 0 && len(result.Results) > 0 {
+		if rollbackErrors := i.rollbackUpgrades(result.Results, snapshots); len(rollbackErrors) > 0 {
+			result.Failures = append(result.Failures, rollbackErrors...)
+		}
+		// Do not report successful upgrades that were reverted.
+		result.Results = nil
+	}
 	return result, nil
+}
+
+func (i *Installer) rollbackUpgrades(results []InstallResult, snapshots map[string]upgradeSnapshot) []UpgradeFailure {
+	var failures []UpgradeFailure
+	for n := len(results) - 1; n >= 0; n-- {
+		result := results[n]
+		if !result.Changed {
+			continue
+		}
+		snapshot, ok := snapshots[result.ID]
+		if !ok {
+			failures = append(failures, UpgradeFailure{ID: result.ID, Err: fmt.Errorf("rollback snapshot is missing")})
+			continue
+		}
+		if err := i.restoreActiveTarget(snapshot.id, snapshot.target); err != nil {
+			failures = append(failures, UpgradeFailure{ID: result.ID, Err: fmt.Errorf("rollback active plugin: %w", err)})
+			// Keep the new bundle available if restoring its active link failed;
+			// deleting it here could leave the active plugin unusable.
+			continue
+		}
+		newTarget := result.Manifest.Directory
+		managedRoot := filepath.Join(i.bundleRoot, result.ID)
+		if !pathWithin(managedRoot, newTarget) || filepath.Clean(newTarget) == filepath.Clean(snapshot.target) {
+			failures = append(failures, UpgradeFailure{ID: result.ID, Err: fmt.Errorf("rollback bundle target is not managed")})
+			continue
+		}
+		if err := os.RemoveAll(newTarget); err != nil {
+			failures = append(failures, UpgradeFailure{ID: result.ID, Err: fmt.Errorf("remove rolled-back bundle: %w", err)})
+		}
+	}
+	return failures
+}
+
+func (i *Installer) restoreActiveTarget(id, target string) error {
+	managedRoot := filepath.Join(i.bundleRoot, id)
+	if !pathWithin(managedRoot, target) || filepath.Clean(target) == filepath.Clean(managedRoot) {
+		return fmt.Errorf("previous bundle target is not managed")
+	}
+	if _, err := os.Stat(filepath.Join(target, installMetadataFilename)); err != nil {
+		return fmt.Errorf("previous bundle is unavailable: %w", err)
+	}
+	if err := os.MkdirAll(i.pluginRoot, 0o755); err != nil { //nolint:gosec // XDG data directory
+		return err
+	}
+	placeholder, err := os.CreateTemp(i.pluginRoot, ".rollback-")
+	if err != nil {
+		return err
+	}
+	temporary := placeholder.Name()
+	if closeErr := placeholder.Close(); closeErr != nil {
+		_ = os.Remove(temporary)
+		return closeErr
+	}
+	if removeErr := os.Remove(temporary); removeErr != nil {
+		return removeErr
+	}
+	absTarget, err := filepath.Abs(target)
+	if err != nil {
+		return err
+	}
+	if err := os.Symlink(absTarget, temporary); err != nil {
+		return err
+	}
+	active := filepath.Join(i.pluginRoot, id)
+	if err := os.Rename(temporary, active); err != nil {
+		_ = os.Remove(temporary)
+		return fmt.Errorf("restore active plugin: %w", err)
+	}
+	return nil
+}
+
+func (i *Installer) pinCatalogSource(ctx context.Context, source string) (string, error) {
+	ref, ok, err := parseGitHubSource(source)
+	if err != nil || !ok {
+		return source, err
+	}
+	_, pinnedSource, err := i.indexedGitHubPluginIDs(ctx, source)
+	if err != nil {
+		return "", err
+	}
+	if ref.tag != "" {
+		return source, nil
+	}
+	return pinnedSource, nil
 }
 
 // Uninstall removes only a plugin managed by Installer. Developer links are
@@ -533,12 +672,14 @@ type githubAssetSelection struct {
 }
 
 type githubReleaseIndex struct {
-	Default string                         `json:"default"`
-	Plugins map[string]githubPluginRelease `json:"plugins"`
+	SchemaVersion int                            `json:"schema_version"`
+	Plugins       map[string]githubPluginRelease `json:"plugins"`
 }
 
 type githubPluginRelease struct {
-	Artifacts map[string]githubReleaseArtifact `json:"artifacts"`
+	Version    string                           `json:"version"`
+	ReleaseTag string                           `json:"release_tag"`
+	Artifacts  map[string]githubReleaseArtifact `json:"artifacts"`
 }
 
 type githubReleaseArtifact struct {
@@ -592,34 +733,73 @@ func parseGitHubSource(source string) (githubSource, bool, error) {
 }
 
 func (i *Installer) resolveGitHub(ctx context.Context, ref githubSource, expectedID string) (resolvedArtifact, error) {
-	release, err := i.fetchGitHubRelease(ctx, ref)
+	catalogRelease, err := i.fetchGitHubRelease(ctx, ref)
 	if err != nil {
-		return resolvedArtifact{}, fmt.Errorf("resolve GitHub release: %w", err)
+		return resolvedArtifact{}, fmt.Errorf("resolve plugin catalog: %w", err)
 	}
-	selection, err := selectGitHubAssets(release, i.goos, i.goarch)
+	selection, err := selectGitHubAssets(catalogRelease, i.goos, i.goarch)
 	if err != nil {
 		return resolvedArtifact{}, err
+	}
+	if selection.indexURL == "" {
+		return resolvedArtifact{}, fmt.Errorf("catalog release has no HASH_PLUGINS.json")
 	}
 	checksums, err := i.download(ctx, selection.checksumURL, maxAPIResponseBytes)
 	if err != nil {
 		return resolvedArtifact{}, fmt.Errorf("download release checksums: %w", err)
 	}
-	artifactName, artifactURL := selection.artifactName, selection.artifactURL
-	if selection.indexURL != "" {
-		artifactName, artifactURL, err = i.resolveIndexedGitHubArtifact(ctx, release, selection, checksums, expectedID)
-		if err != nil {
-			return resolvedArtifact{}, err
-		}
+	catalog, err := i.downloadGitHubReleaseIndex(ctx, selection.indexURL, checksums)
+	if err != nil {
+		return resolvedArtifact{}, err
 	}
+	id, err := selectIndexedGitHubPlugin(catalog, expectedID)
+	if err != nil {
+		return resolvedArtifact{}, err
+	}
+	entry := catalog.Plugins[id]
+	return i.resolveCatalogPlugin(ctx, ref, id, entry)
+}
+
+func (i *Installer) resolveCatalogPlugin(ctx context.Context, catalogRef githubSource, id string, catalogEntry githubPluginRelease) (resolvedArtifact, error) {
+	pluginRef := catalogRef
+	pluginRef.tag = catalogEntry.ReleaseTag
+	pluginRelease, err := i.fetchGitHubRelease(ctx, pluginRef)
+	if err != nil {
+		return resolvedArtifact{}, fmt.Errorf("resolve plugin release %q: %w", catalogEntry.ReleaseTag, err)
+	}
+	selection, err := selectGitHubAssets(pluginRelease, i.goos, i.goarch)
+	if err != nil {
+		return resolvedArtifact{}, err
+	}
+	if selection.indexURL == "" {
+		return resolvedArtifact{}, fmt.Errorf("plugin release %q has no HASH_PLUGINS.json", catalogEntry.ReleaseTag)
+	}
+	checksums, err := i.download(ctx, selection.checksumURL, maxAPIResponseBytes)
+	if err != nil {
+		return resolvedArtifact{}, fmt.Errorf("download plugin release checksums: %w", err)
+	}
+	pluginIndex, err := i.downloadGitHubReleaseIndex(ctx, selection.indexURL, checksums)
+	if err != nil {
+		return resolvedArtifact{}, err
+	}
+	pluginEntry, ok := pluginIndex.Plugins[id]
+	if !ok || !sameGitHubPluginRelease(pluginEntry, catalogEntry) {
+		return resolvedArtifact{}, fmt.Errorf("plugin release %q does not match catalog entry for %q", catalogEntry.ReleaseTag, id)
+	}
+	artifact, ok := catalogEntry.Artifacts[releasePlatformKey(i.goos, i.goarch)]
+	if !ok {
+		return resolvedArtifact{}, fmt.Errorf("catalog has no artifact for %s/%s", i.goos, i.goarch)
+	}
+	artifactName := expandGitHubArtifactName(artifact.Name, catalogEntry.Version)
+	artifactURL := selection.assetURLs[artifactName]
 	if artifactURL == "" {
-		return resolvedArtifact{}, fmt.Errorf("release has no artifact for %s/%s", i.goos, i.goarch)
+		return resolvedArtifact{}, fmt.Errorf("plugin release %q has no catalog artifact %s", catalogEntry.ReleaseTag, artifactName)
 	}
 	checksum := checksumForAsset(checksums, artifactName)
 	if checksum == "" {
 		return resolvedArtifact{}, fmt.Errorf("SHA256SUMS does not contain %s", artifactName)
 	}
-	version := strings.TrimPrefix(release.TagName, "v")
-	return resolvedArtifact{url: artifactURL, checksum: checksum, source: ref.canonical, expectedVersion: version}, nil
+	return resolvedArtifact{url: artifactURL, checksum: checksum, source: catalogRef.canonical, expectedVersion: catalogEntry.Version}, nil
 }
 
 func (i *Installer) indexedGitHubPluginIDs(ctx context.Context, source string) ([]string, string, error) {
@@ -679,6 +859,9 @@ func (i *Installer) fetchGitHubRelease(ctx context.Context, ref githubSource) (g
 	if err := json.Unmarshal(data, &release); err != nil {
 		return githubRelease{}, fmt.Errorf("decode GitHub release: %w", err)
 	}
+	if ref.tag != "" && release.TagName != ref.tag {
+		return githubRelease{}, fmt.Errorf("GitHub release tag %q does not match requested tag %q", release.TagName, ref.tag)
+	}
 	return release, nil
 }
 
@@ -704,37 +887,6 @@ func selectGitHubAssets(release githubRelease, goos, goarch string) (githubAsset
 		return githubAssetSelection{}, fmt.Errorf("release has no SHA256SUMS asset")
 	}
 	return selection, nil
-}
-
-func (i *Installer) resolveIndexedGitHubArtifact(ctx context.Context, release githubRelease, selection githubAssetSelection, checksums []byte, expectedID string) (artifactName, artifactURL string, err error) {
-	index, err := i.downloadGitHubReleaseIndex(ctx, selection.indexURL, checksums)
-	if err != nil {
-		return "", "", err
-	}
-	id, err := selectIndexedGitHubPlugin(index, expectedID)
-	if err != nil {
-		return "", "", err
-	}
-	entry, ok := index.Plugins[id]
-	if !ok {
-		return "", "", fmt.Errorf("release index has no plugin %q", id)
-	}
-	artifact, ok := entry.Artifacts[releasePlatformKey(i.goos, i.goarch)]
-	if !ok {
-		artifact, ok = entry.Artifacts[i.goos+"_"+i.goarch]
-	}
-	if !ok {
-		return "", "", fmt.Errorf("release index has no safe artifact for %s/%s", i.goos, i.goarch)
-	}
-	artifactName = expandGitHubArtifactName(artifact.Name, release.TagName)
-	if !safeGitHubArtifactName(artifactName) {
-		return "", "", fmt.Errorf("release index has no safe artifact for %s/%s", i.goos, i.goarch)
-	}
-	artifactURL = selection.assetURLs[artifactName]
-	if artifactURL == "" {
-		return "", "", fmt.Errorf("release index artifact is incomplete")
-	}
-	return artifactName, artifactURL, nil
 }
 
 func (i *Installer) downloadGitHubReleaseIndex(ctx context.Context, indexURL string, checksums []byte) (githubReleaseIndex, error) {
@@ -780,6 +932,31 @@ func decodeGitHubReleaseIndex(data []byte) (githubReleaseIndex, error) {
 	if err := json.Unmarshal(data, &index); err != nil {
 		return githubReleaseIndex{}, fmt.Errorf("decode release index")
 	}
+	if index.SchemaVersion != 2 {
+		return githubReleaseIndex{}, fmt.Errorf("unsupported release index schema_version %d", index.SchemaVersion)
+	}
+	if len(index.Plugins) == 0 {
+		return githubReleaseIndex{}, fmt.Errorf("release index contains no plugins")
+	}
+	for id, entry := range index.Plugins {
+		if !pluginIDPattern.MatchString(id) {
+			return githubReleaseIndex{}, fmt.Errorf("release index contains invalid plugin ID %q", id)
+		}
+		if !installVersionPattern.MatchString(entry.Version) {
+			return githubReleaseIndex{}, fmt.Errorf("release index has invalid version for %q", id)
+		}
+		if !safeGitHubReleaseTag(entry.ReleaseTag) {
+			return githubReleaseIndex{}, fmt.Errorf("release index has invalid release_tag for %q", id)
+		}
+		if len(entry.Artifacts) == 0 {
+			return githubReleaseIndex{}, fmt.Errorf("release index has no artifacts for %q", id)
+		}
+		for platform, artifact := range entry.Artifacts {
+			if !releasePlatformPattern.MatchString(platform) || !safeGitHubArtifactName(artifact.Name) {
+				return githubReleaseIndex{}, fmt.Errorf("release index has unsafe artifact for %q", id)
+			}
+		}
+	}
 	return index, nil
 }
 
@@ -787,14 +964,30 @@ func releasePlatformKey(goos, goarch string) string {
 	return goos + "/" + goarch
 }
 
-func expandGitHubArtifactName(name, tag string) string {
-	version := strings.TrimPrefix(tag, "v")
+func expandGitHubArtifactName(name, version string) string {
 	name = strings.ReplaceAll(name, "{{version}}", version)
 	return strings.ReplaceAll(name, "{{ .Version }}", version)
 }
 
 func safeGitHubArtifactName(name string) bool {
 	return name != "" && path.Base(name) == name && strings.HasSuffix(name, ".tar.gz")
+}
+
+func safeGitHubReleaseTag(tag string) bool {
+	return githubReleaseTagPattern.MatchString(tag) && !strings.Contains(tag, "..") && !strings.HasSuffix(tag, "/")
+}
+
+func sameGitHubPluginRelease(left, right githubPluginRelease) bool {
+	if left.Version != right.Version || left.ReleaseTag != right.ReleaseTag || len(left.Artifacts) != len(right.Artifacts) {
+		return false
+	}
+	for platform, leftArtifact := range left.Artifacts {
+		rightArtifact, ok := right.Artifacts[platform]
+		if !ok || rightArtifact != leftArtifact {
+			return false
+		}
+	}
+	return true
 }
 
 func checksumForAsset(data []byte, name string) string {

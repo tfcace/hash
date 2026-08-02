@@ -13,13 +13,14 @@ import (
 )
 
 type fakePluginLifecycle struct {
-	installedSource string
-	installedAll    bool
-	upgradedID      string
-	upgradedSource  string
-	upgradedAll     bool
-	uninstalledID   string
-	uninstalledIDs  []string
+	installedSource  string
+	installedAll     bool
+	upgradedID       string
+	upgradedSource   string
+	upgradedAll      bool
+	uninstalledID    string
+	uninstalledIDs   []string
+	upgradeAllResult plugin.UpgradeAllResult
 }
 
 func (f *fakePluginLifecycle) Install(_ context.Context, source string) (plugin.InstallResult, error) {
@@ -50,10 +51,40 @@ func (f *fakePluginLifecycle) InstallAll(_ context.Context, source string) ([]pl
 func (f *fakePluginLifecycle) UpgradeAll(_ context.Context, source string) (plugin.UpgradeAllResult, error) {
 	f.upgradedAll = true
 	f.upgradedSource = source
+	if f.upgradeAllResult.Failures != nil || f.upgradeAllResult.Results != nil || f.upgradeAllResult.Skipped != nil {
+		return f.upgradeAllResult, nil
+	}
 	return plugin.UpgradeAllResult{
 		Results: []plugin.InstallResult{{ID: "io.runhash.alpha", PreviousVersion: "0.1.0", Version: "0.1.1", Changed: true}},
 		Skipped: []string{"io.runhash.developer"},
 	}, nil
+}
+
+func TestRunPluginLifecycleUpgradeAllReportsFailuresAndPreservesEnabledState(t *testing.T) {
+	configDir := t.TempDir()
+	t.Setenv("HASH_CONFIG_DIR", configDir)
+	for _, id := range []string{"io.runhash.alpha", "io.runhash.beta"} {
+		if err := config.SetPluginEnabled(configDir, id, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	lifecycle := &fakePluginLifecycle{upgradeAllResult: plugin.UpgradeAllResult{
+		Failures: []plugin.UpgradeFailure{{ID: "io.runhash.beta", Err: errors.New("checksum mismatch")}},
+	}}
+	var stdout, stderr bytes.Buffer
+	if code := runPluginLifecycle([]string{"upgrade", "--all"}, lifecycle, &stdout, &stderr); code != 1 {
+		t.Fatalf("upgrade --all exit=%d, want 1; stderr=%s", code, stderr.String())
+	}
+	if !bytes.Contains(stderr.Bytes(), []byte("hash: upgrade io.runhash.beta: checksum mismatch")) {
+		t.Fatalf("upgrade --all failure output = %s", stderr.String())
+	}
+	cfg, err := config.Load(configDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Plugins.Enabled) != 2 || cfg.Plugins.Enabled[0] != "io.runhash.alpha" || cfg.Plugins.Enabled[1] != "io.runhash.beta" {
+		t.Fatalf("upgrade --all changed enabled state: %v", cfg.Plugins.Enabled)
+	}
 }
 
 func TestRunPluginLifecycleInstallUpgradeAndUninstall(t *testing.T) {

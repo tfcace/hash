@@ -105,6 +105,10 @@ For a multi-plugin release, use `install --id <plugin-id> <source>` or
 `upgrade --all [source]` to upgrade every Hash-managed bundle while preserving
 enabled state. Developer links are left unchanged.
 
+Multi-plugin repositories resolve through a signed catalog that pins every
+plugin's independent release tag and version; Hash verifies that catalog entry
+again from the selected plugin release.
+
 ## `[shell]`
 
 Core shell behavior.

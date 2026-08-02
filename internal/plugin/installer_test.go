@@ -25,6 +25,12 @@ type releaseFixture struct {
 	checksum string
 }
 
+type catalogPluginFixture struct {
+	id, version, releaseTag, artifactName string
+	archive                               []byte
+	checksum                              string
+}
+
 type releaseServer struct {
 	t      *testing.T
 	server *httptest.Server
@@ -66,7 +72,13 @@ func (r *releaseServer) serveHTTP(w http.ResponseWriter, req *http.Request) {
 			return
 		}
 		if parts[1] == "SHA256SUMS" {
-			fmt.Fprintf(w, "%s  hash-autocorrection_%s_darwin_arm64.tar.gz\n", fixture.checksum, fixture.version)
+			index := testReleaseIndex(r.t, fixture.version)
+			digest := sha256.Sum256(index)
+			fmt.Fprintf(w, "%s  hash-autocorrection_%s_darwin_arm64.tar.gz\n%s  HASH_PLUGINS.json\n", fixture.checksum, fixture.version, hex.EncodeToString(digest[:]))
+			return
+		}
+		if parts[1] == "HASH_PLUGINS.json" {
+			_, _ = w.Write(testReleaseIndex(r.t, fixture.version))
 			return
 		}
 		_, _ = w.Write(fixture.archive)
@@ -85,9 +97,96 @@ func (r *releaseServer) serveHTTP(w http.ResponseWriter, req *http.Request) {
 		"tag_name": tag,
 		"assets": []map[string]string{
 			{"name": assetName, "browser_download_url": r.server.URL + "/assets/" + tag + "/archive"},
+			{"name": "HASH_PLUGINS.json", "browser_download_url": r.server.URL + "/assets/" + tag + "/HASH_PLUGINS.json"},
 			{"name": "SHA256SUMS", "browser_download_url": r.server.URL + "/assets/" + tag + "/SHA256SUMS"},
 		},
 	})
+}
+
+func testReleaseIndex(t *testing.T, version string) []byte {
+	t.Helper()
+	data, err := json.Marshal(githubReleaseIndex{
+		SchemaVersion: 2,
+		Plugins: map[string]githubPluginRelease{
+			"io.runhash.autocorrection": {
+				Version:    version,
+				ReleaseTag: "v" + version,
+				Artifacts: map[string]githubReleaseArtifact{
+					"darwin/arm64": {Name: "hash-autocorrection_{{version}}_darwin_arm64.tar.gz"},
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
+}
+
+func newCatalogOnlyReleaseServer(t *testing.T, fixtures ...catalogPluginFixture) *httptest.Server {
+	t.Helper()
+	plugins := make(map[string]githubPluginRelease, len(fixtures))
+	byTag := make(map[string]catalogPluginFixture, len(fixtures))
+	for _, fixture := range fixtures {
+		plugins[fixture.id] = githubPluginRelease{Version: fixture.version, ReleaseTag: fixture.releaseTag, Artifacts: map[string]githubReleaseArtifact{
+			"darwin/arm64": {Name: fixture.artifactName},
+		}}
+		byTag[fixture.releaseTag] = fixture
+	}
+	indexData, err := json.Marshal(githubReleaseIndex{SchemaVersion: 2, Plugins: plugins})
+	if err != nil {
+		t.Fatal(err)
+	}
+	indexDigest := sha256.Sum256(indexData)
+	catalogChecksums := []byte(hex.EncodeToString(indexDigest[:]) + "  HASH_PLUGINS.json\n")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		tag := ""
+		switch {
+		case req.URL.Path == "/repos/owner/repo/releases/latest":
+			tag = "catalog-v1"
+		case strings.HasPrefix(req.URL.Path, "/repos/owner/repo/releases/tags/"):
+			tag = strings.TrimPrefix(req.URL.Path, "/repos/owner/repo/releases/tags/")
+		}
+		if tag != "" {
+			assets := []map[string]string{
+				{"name": "HASH_PLUGINS.json", "browser_download_url": "http://" + req.Host + "/assets/" + tag + "/HASH_PLUGINS.json"},
+				{"name": "SHA256SUMS", "browser_download_url": "http://" + req.Host + "/assets/" + tag + "/SHA256SUMS"},
+			}
+			if fixture, ok := byTag[tag]; ok {
+				assets = append([]map[string]string{{"name": fixture.artifactName, "browser_download_url": "http://" + req.Host + "/assets/" + tag + "/" + fixture.artifactName}}, assets...)
+			} else if tag != "catalog-v1" {
+				http.NotFound(w, req)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"tag_name": tag, "assets": assets})
+			return
+		}
+		parts := strings.Split(strings.TrimPrefix(req.URL.Path, "/assets/"), "/")
+		if len(parts) != 2 {
+			http.NotFound(w, req)
+			return
+		}
+		if parts[1] == "HASH_PLUGINS.json" {
+			_, _ = w.Write(indexData)
+			return
+		}
+		if parts[1] == "SHA256SUMS" {
+			if fixture, ok := byTag[parts[0]]; ok {
+				fmt.Fprintf(w, "%s  %s\n%s", fixture.checksum, fixture.artifactName, catalogChecksums)
+				return
+			}
+			_, _ = w.Write(catalogChecksums)
+			return
+		}
+		fixture, ok := byTag[parts[0]]
+		if !ok || parts[1] != fixture.artifactName {
+			http.NotFound(w, req)
+			return
+		}
+		_, _ = w.Write(fixture.archive)
+	}))
+	t.Cleanup(server.Close)
+	return server
 }
 
 func (r *releaseServer) setLatest(tag string) {
@@ -145,12 +244,12 @@ func newIndexedReleaseServer(t *testing.T, fixtures map[string]releaseFixture) *
 	version := "0.1.0"
 	assets := make([]map[string]string, 0, len(fixtures)+2)
 	checksums := make([]string, 0, len(fixtures)+1)
-	index := githubReleaseIndex{Default: "io.runhash.autocorrection", Plugins: make(map[string]githubPluginRelease, len(fixtures))}
+	index := githubReleaseIndex{SchemaVersion: 2, Plugins: make(map[string]githubPluginRelease, len(fixtures))}
 	for id, fixture := range fixtures {
 		name := strings.ReplaceAll(id, ".", "-") + "_" + fixture.version + "_darwin_arm64.tar.gz"
 		assets = append(assets, map[string]string{"name": name})
 		checksums = append(checksums, fixture.checksum+"  "+name)
-		index.Plugins[id] = githubPluginRelease{Artifacts: map[string]githubReleaseArtifact{
+		index.Plugins[id] = githubPluginRelease{Version: fixture.version, ReleaseTag: "v" + fixture.version, Artifacts: map[string]githubReleaseArtifact{
 			"darwin/arm64": {Name: strings.Replace(name, fixture.version, "{{version}}", 1)},
 		}}
 		version = fixture.version
@@ -261,6 +360,8 @@ func newLatestSwitchingIndexedReleaseServer(t *testing.T, first, second map[stri
 			_, _ = w.Write(archive)
 			if parts[0] == "v"+firstRelease.version {
 				latest = "v" + secondRelease.version
+			} else if parts[0] == "v"+secondRelease.version {
+				latest = "v" + firstRelease.version
 			}
 		}
 	}))
@@ -279,7 +380,7 @@ func newIndexedReleaseData(t *testing.T, fixtures map[string]releaseFixture) ind
 		t.Fatal("indexed release requires at least one plugin")
 	}
 	release := indexedReleaseData{version: fixtures[ids[0]].version, archives: make(map[string][]byte, len(fixtures))}
-	index := githubReleaseIndex{Plugins: make(map[string]githubPluginRelease, len(fixtures))}
+	index := githubReleaseIndex{SchemaVersion: 2, Plugins: make(map[string]githubPluginRelease, len(fixtures))}
 	checksums := make([]string, 0, len(fixtures)+1)
 	for _, id := range ids {
 		fixture := fixtures[id]
@@ -289,7 +390,7 @@ func newIndexedReleaseData(t *testing.T, fixtures map[string]releaseFixture) ind
 		name := strings.ReplaceAll(id, ".", "-") + "_" + fixture.version + "_darwin_arm64.tar.gz"
 		release.archives[name] = fixture.archive
 		checksums = append(checksums, fixture.checksum+"  "+name)
-		index.Plugins[id] = githubPluginRelease{Artifacts: map[string]githubReleaseArtifact{
+		index.Plugins[id] = githubPluginRelease{Version: fixture.version, ReleaseTag: "v" + fixture.version, Artifacts: map[string]githubReleaseArtifact{
 			"darwin/arm64": {Name: strings.Replace(name, fixture.version, "{{version}}", 1)},
 		}}
 	}
@@ -443,6 +544,102 @@ func TestInstallerInstallAllPinsOneReleaseSnapshot(t *testing.T) {
 	}
 }
 
+func TestInstallerCatalogReleaseWithoutArtifactsResolvesIndependentPluginTags(t *testing.T) {
+	alpha := bundleArchiveFor(t, "io.runhash.alpha", "Alpha", "hash-alpha", "1.0.0", nil)
+	beta := bundleArchiveFor(t, "io.runhash.beta", "Beta", "hash-beta", "2.3.0", nil)
+	server := newCatalogOnlyReleaseServer(t,
+		catalogPluginFixture{id: "io.runhash.alpha", version: "1.0.0", releaseTag: "alpha-v1.0.0", artifactName: "hash-alpha_1.0.0_darwin_arm64.tar.gz", archive: alpha.archive, checksum: alpha.checksum},
+		catalogPluginFixture{id: "io.runhash.beta", version: "2.3.0", releaseTag: "beta-v2.3.0", artifactName: "hash-beta_2.3.0_darwin_arm64.tar.gz", archive: beta.archive, checksum: beta.checksum},
+	)
+	data := t.TempDir()
+	installer := NewInstaller(filepath.Join(data, "plugins"), filepath.Join(data, "plugin-bundles"))
+	installer.githubAPIBase, installer.allowHTTP = server.URL, true
+	installer.goos, installer.goarch = "darwin", "arm64"
+
+	if _, err := installer.Install(t.Context(), "github:owner/repo"); err == nil || !strings.Contains(err.Error(), "--id") {
+		t.Fatalf("bare multi-plugin Install() error = %v", err)
+	}
+	results, err := installer.InstallAll(t.Context(), "github:owner/repo")
+	if err != nil {
+		t.Fatalf("InstallAll() error = %v", err)
+	}
+	if len(results) != 2 || results[0].ID != "io.runhash.alpha" || results[0].Version != "1.0.0" || results[1].ID != "io.runhash.beta" || results[1].Version != "2.3.0" {
+		t.Fatalf("InstallAll() independent releases = %+v", results)
+	}
+}
+
+func TestInstallerUpgradeAllPinsOneCatalogSnapshot(t *testing.T) {
+	versionOne := map[string]releaseFixture{
+		"io.runhash.alpha": bundleArchiveFor(t, "io.runhash.alpha", "Alpha", "hash-alpha", "0.1.0", nil),
+		"io.runhash.beta":  bundleArchiveFor(t, "io.runhash.beta", "Beta", "hash-beta", "0.1.0", nil),
+	}
+	versionTwo := map[string]releaseFixture{
+		"io.runhash.alpha": bundleArchiveFor(t, "io.runhash.alpha", "Alpha", "hash-alpha", "0.2.0", nil),
+		"io.runhash.beta":  bundleArchiveFor(t, "io.runhash.beta", "Beta", "hash-beta", "0.2.0", nil),
+	}
+	server := newLatestSwitchingIndexedReleaseServer(t, versionOne, versionTwo)
+	data := t.TempDir()
+	installer := NewInstaller(filepath.Join(data, "plugins"), filepath.Join(data, "plugin-bundles"))
+	installer.githubAPIBase, installer.allowHTTP = server.URL, true
+	installer.goos, installer.goarch = "darwin", "arm64"
+	if _, err := installer.InstallAll(t.Context(), "github:owner/repo"); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := installer.UpgradeAll(t.Context(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Results) != 2 || result.Results[0].Version != "0.2.0" || result.Results[1].Version != "0.2.0" {
+		t.Fatalf("UpgradeAll() mixed catalog snapshots: %+v", result)
+	}
+}
+
+func TestInstallerUpgradeAllRollsBackEarlierChangesWhenLaterPluginFails(t *testing.T) {
+	first := map[string]releaseFixture{
+		"io.runhash.alpha": bundleArchiveFor(t, "io.runhash.alpha", "Alpha", "hash-alpha", "0.1.0", nil),
+		"io.runhash.beta":  bundleArchiveFor(t, "io.runhash.beta", "Beta", "hash-beta", "0.1.0", nil),
+	}
+	alphaUpgrade := bundleArchiveFor(t, "io.runhash.alpha", "Alpha", "hash-alpha", "0.2.0", nil)
+	betaUpgrade := bundleArchiveFor(t, "io.runhash.beta", "Beta", "hash-beta", "0.2.0", nil)
+	// Keep the published checksum while serving a different archive so the
+	// second upgrade fails after the first plugin has already switched.
+	betaUpgrade.archive = append([]byte(nil), betaUpgrade.archive[:len(betaUpgrade.archive)-1]...)
+	second := map[string]releaseFixture{
+		"io.runhash.alpha": alphaUpgrade,
+		"io.runhash.beta":  betaUpgrade,
+	}
+	server := newLatestSwitchingIndexedReleaseServer(t, first, second)
+	data := t.TempDir()
+	installer := NewInstaller(filepath.Join(data, "plugins"), filepath.Join(data, "plugin-bundles"))
+	installer.githubAPIBase, installer.allowHTTP = server.URL, true
+	installer.goos, installer.goarch = "darwin", "arm64"
+	if _, err := installer.InstallAll(t.Context(), "github:owner/repo"); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := installer.UpgradeAll(t.Context(), "github:owner/repo@v0.2.0")
+	if err != nil {
+		t.Fatalf("UpgradeAll() error = %v", err)
+	}
+	if len(result.Failures) != 1 || result.Failures[0].ID != "io.runhash.beta" {
+		t.Fatalf("UpgradeAll() failures = %+v", result.Failures)
+	}
+
+	for _, id := range []string{"io.runhash.alpha", "io.runhash.beta"} {
+		manifest, err := LoadManifest(filepath.Join(installer.pluginRoot, id))
+		if err != nil {
+			t.Fatalf("LoadManifest(%s) error = %v", id, err)
+		}
+		if manifest.Version != "0.1.0" {
+			t.Fatalf("active %s version = %s, want rollback to 0.1.0", id, manifest.Version)
+		}
+		if _, err := os.Stat(filepath.Join(installer.bundleRoot, id, "0.2.0")); !os.IsNotExist(err) {
+			t.Fatalf("new %s bundle remains after rollback: %v", id, err)
+		}
+	}
+}
+
 func TestInstallerUpgradeAllSkipsDeveloperLinks(t *testing.T) {
 	server := newReleaseServer(t, bundleArchive(t, "0.1.0", nil), bundleArchive(t, "0.1.1", nil))
 	server.setLatest("v0.1.0")
@@ -567,6 +764,29 @@ func TestParseGitHubSource(t *testing.T) {
 	}
 }
 
+func TestFetchGitHubReleaseRejectsMismatchedRequestedTag(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.URL.Path != "/repos/owner/repo/releases/tags/v1.2.3" {
+			http.NotFound(w, req)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"tag_name": "v1.2.4",
+			"assets":   []map[string]string{},
+		})
+	}))
+	t.Cleanup(server.Close)
+	data := t.TempDir()
+	installer := NewInstaller(filepath.Join(data, "plugins"), filepath.Join(data, "plugin-bundles"))
+	installer.githubAPIBase = server.URL
+	installer.allowHTTP = true
+
+	_, err := installer.fetchGitHubRelease(t.Context(), githubSource{owner: "owner", repo: "repo", tag: "v1.2.3"})
+	if err == nil || !strings.Contains(err.Error(), "does not match requested tag") {
+		t.Fatalf("fetchGitHubRelease() error = %v, want requested-tag mismatch", err)
+	}
+}
+
 func TestSelectGitHubAssetsRequiresAnIndexForMultiplePlatformArtifacts(t *testing.T) {
 	release := githubRelease{
 		Assets: []githubAsset{
@@ -601,5 +821,16 @@ func TestSelectIndexedGitHubPluginAllowsTheOnlyPluginWithoutDefault(t *testing.T
 	id, err := selectIndexedGitHubPlugin(index, "")
 	if err != nil || id != "io.runhash.autocorrection" {
 		t.Fatalf("selectIndexedGitHubPlugin() = %q, %v", id, err)
+	}
+}
+
+func TestDecodeGitHubReleaseIndexRejectsLegacySchemaAndUnsafeReleaseTag(t *testing.T) {
+	for _, data := range [][]byte{
+		[]byte(`{"plugins":{"io.runhash.demo":{"version":"1.0.0","release_tag":"demo-v1","artifacts":{"darwin/arm64":{"name":"demo_1.0.0_darwin_arm64.tar.gz"}}}}}`),
+		[]byte(`{"schema_version":2,"plugins":{"io.runhash.demo":{"version":"1.0.0","release_tag":"../demo-v1","artifacts":{"darwin/arm64":{"name":"demo_1.0.0_darwin_arm64.tar.gz"}}}}}`),
+	} {
+		if _, err := decodeGitHubReleaseIndex(data); err == nil {
+			t.Fatalf("decodeGitHubReleaseIndex(%s) succeeded", data)
+		}
 	}
 }

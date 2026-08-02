@@ -38,6 +38,11 @@ source records the unpinned origin so `upgrade` can resolve the latest release.
 The archive contains the executable and `hash-plugin.toml`; users do not need
 the source repository or a compiler.
 
+Multi-plugin repositories publish a signed catalog release. The catalog pins
+each plugin's own release tag and version, so one plugin can be released or
+upgraded without changing the others. Hash verifies the catalog entry again
+from that plugin release before activating its archive.
+
 Direct release artifacts are also supported when they use HTTPS and carry an
 explicit digest:
 
