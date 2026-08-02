@@ -100,6 +100,11 @@ automatically. Plugin executables are trusted local programs with your user
 privileges; capability declarations are not a sandbox. See the complete
 [plugin developer guide](plugins/README.md).
 
+For a multi-plugin release, use `install --id <plugin-id> <source>` or
+`install --all <source>`; a bare install asks you to choose. Use
+`upgrade --all [source]` to upgrade every Hash-managed bundle while preserving
+enabled state. Developer links are left unchanged.
+
 ## `[shell]`
 
 Core shell behavior.

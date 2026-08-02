@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -13,9 +14,12 @@ import (
 
 type fakePluginLifecycle struct {
 	installedSource string
+	installedAll    bool
 	upgradedID      string
 	upgradedSource  string
+	upgradedAll     bool
 	uninstalledID   string
+	uninstalledIDs  []string
 }
 
 func (f *fakePluginLifecycle) Install(_ context.Context, source string) (plugin.InstallResult, error) {
@@ -30,7 +34,26 @@ func (f *fakePluginLifecycle) Upgrade(_ context.Context, id, source string) (plu
 
 func (f *fakePluginLifecycle) Uninstall(id string) error {
 	f.uninstalledID = id
+	f.uninstalledIDs = append(f.uninstalledIDs, id)
 	return nil
+}
+
+func (f *fakePluginLifecycle) InstallAll(_ context.Context, source string) ([]plugin.InstallResult, error) {
+	f.installedAll = true
+	f.installedSource = source
+	return []plugin.InstallResult{
+		{ID: "io.runhash.alpha", Version: "0.1.0", Source: "github:owner/repo", Changed: true},
+		{ID: "io.runhash.beta", Version: "0.1.0", Source: "github:owner/repo", Changed: true},
+	}, nil
+}
+
+func (f *fakePluginLifecycle) UpgradeAll(_ context.Context, source string) (plugin.UpgradeAllResult, error) {
+	f.upgradedAll = true
+	f.upgradedSource = source
+	return plugin.UpgradeAllResult{
+		Results: []plugin.InstallResult{{ID: "io.runhash.alpha", PreviousVersion: "0.1.0", Version: "0.1.1", Changed: true}},
+		Skipped: []string{"io.runhash.developer"},
+	}, nil
 }
 
 func TestRunPluginLifecycleInstallUpgradeAndUninstall(t *testing.T) {
@@ -79,19 +102,93 @@ func TestParseInstallArgsSupportsIDBeforeOrAfterSource(t *testing.T) {
 	for _, tc := range []struct {
 		args       []string
 		source, id string
+		installAll bool
 	}{
-		{[]string{"install", "github:owner/repo", "--id", "io.runhash.adaptive-prediction"}, "github:owner/repo", "io.runhash.adaptive-prediction"},
-		{[]string{"install", "--id=io.runhash.adaptive-prediction", "github:owner/repo"}, "github:owner/repo", "io.runhash.adaptive-prediction"},
-		{[]string{"install", "github:owner/repo"}, "github:owner/repo", ""},
+		{[]string{"install", "github:owner/repo", "--id", "io.runhash.adaptive-prediction"}, "github:owner/repo", "io.runhash.adaptive-prediction", false},
+		{[]string{"install", "--id=io.runhash.adaptive-prediction", "github:owner/repo"}, "github:owner/repo", "io.runhash.adaptive-prediction", false},
+		{[]string{"install", "github:owner/repo"}, "github:owner/repo", "", false},
+		{[]string{"install", "--all", "github:owner/repo"}, "github:owner/repo", "", true},
+		{[]string{"install", "github:owner/repo", "--all"}, "github:owner/repo", "", true},
 	} {
-		source, id, ok := parseInstallArgs(tc.args)
-		if !ok || source != tc.source || id != tc.id {
-			t.Fatalf("parseInstallArgs(%v) = %q, %q, %v", tc.args, source, id, ok)
+		source, id, installAll, ok := parseInstallArgs(tc.args)
+		if !ok || source != tc.source || id != tc.id || installAll != tc.installAll {
+			t.Fatalf("parseInstallArgs(%v) = %q, %q, %v, %v", tc.args, source, id, installAll, ok)
 		}
 	}
-	for _, args := range [][]string{{"install", "--id"}, {"install", "--nope", "x"}, {"install", "x", "--id", "bad"}} {
-		if _, _, ok := parseInstallArgs(args); ok {
+	for _, args := range [][]string{{"install", "--id"}, {"install", "--nope", "x"}, {"install", "x", "--id", "bad"}, {"install", "--all", "--id", "io.runhash.demo", "x"}, {"install", "--all", "--all", "x"}} {
+		if _, _, _, ok := parseInstallArgs(args); ok {
 			t.Fatalf("parseInstallArgs(%v) accepted invalid input", args)
+		}
+	}
+}
+
+func TestRunPluginLifecycleInstallAllLeavesEveryPluginDisabled(t *testing.T) {
+	configDir := t.TempDir()
+	t.Setenv("HASH_CONFIG_DIR", configDir)
+	if err := config.SetPluginEnabled(configDir, "io.runhash.alpha", true); err != nil {
+		t.Fatal(err)
+	}
+	lifecycle := &fakePluginLifecycle{}
+	var stdout, stderr bytes.Buffer
+	if code := runPluginLifecycle([]string{"install", "--all", "github:owner/repo"}, lifecycle, &stdout, &stderr); code != 0 {
+		t.Fatalf("install --all exit=%d stderr=%s", code, stderr.String())
+	}
+	if !lifecycle.installedAll || lifecycle.installedSource != "github:owner/repo" {
+		t.Fatalf("InstallAll() call = all:%v source:%q", lifecycle.installedAll, lifecycle.installedSource)
+	}
+	cfg, err := config.Load(configDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Plugins.Enabled) != 0 {
+		t.Fatalf("install --all left plugins enabled: %v", cfg.Plugins.Enabled)
+	}
+	if !bytes.Contains(stdout.Bytes(), []byte("Installed io.runhash.alpha 0.1.0")) || !bytes.Contains(stdout.Bytes(), []byte("Installed io.runhash.beta 0.1.0")) {
+		t.Fatalf("install --all output = %s", stdout.String())
+	}
+}
+
+func TestRunPluginLifecycleUpgradeAllReportsDeveloperLinksWithoutChangingThem(t *testing.T) {
+	configDir := t.TempDir()
+	t.Setenv("HASH_CONFIG_DIR", configDir)
+	if err := config.SetPluginEnabled(configDir, "io.runhash.alpha", true); err != nil {
+		t.Fatal(err)
+	}
+	lifecycle := &fakePluginLifecycle{}
+	var stdout, stderr bytes.Buffer
+	if code := runPluginLifecycle([]string{"upgrade", "--all", "github:owner/repo"}, lifecycle, &stdout, &stderr); code != 0 {
+		t.Fatalf("upgrade --all exit=%d stderr=%s", code, stderr.String())
+	}
+	if !lifecycle.upgradedAll || lifecycle.upgradedSource != "github:owner/repo" {
+		t.Fatalf("UpgradeAll() call = all:%v source:%q", lifecycle.upgradedAll, lifecycle.upgradedSource)
+	}
+	if !bytes.Contains(stdout.Bytes(), []byte("Skipped io.runhash.developer: not managed by Hash (left unchanged)")) {
+		t.Fatalf("upgrade --all output = %s", stdout.String())
+	}
+	cfg, err := config.Load(configDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Plugins.Enabled) != 1 || cfg.Plugins.Enabled[0] != "io.runhash.alpha" {
+		t.Fatalf("upgrade --all changed enabled state: %v", cfg.Plugins.Enabled)
+	}
+}
+
+func TestParseUpgradeArgsSupportsAllWithOptionalSource(t *testing.T) {
+	for _, tc := range []struct {
+		args                []string
+		id, source          string
+		upgradeAll, isValid bool
+	}{
+		{[]string{"upgrade", "io.runhash.demo"}, "io.runhash.demo", "", false, true},
+		{[]string{"upgrade", "io.runhash.demo", "github:owner/repo"}, "io.runhash.demo", "github:owner/repo", false, true},
+		{[]string{"upgrade", "--all"}, "", "", true, true},
+		{[]string{"upgrade", "--all", "github:owner/repo"}, "", "github:owner/repo", true, true},
+		{[]string{"upgrade", "--all", "--id"}, "", "", false, false},
+	} {
+		id, source, upgradeAll, ok := parseUpgradeArgs(tc.args)
+		if id != tc.id || source != tc.source || upgradeAll != tc.upgradeAll || ok != tc.isValid {
+			t.Fatalf("parseUpgradeArgs(%v) = %q, %q, %v, %v", tc.args, id, source, upgradeAll, ok)
 		}
 	}
 }
@@ -110,6 +207,40 @@ func TestRunPluginLifecycleRollsBackInstallWhenConfigurationCannotBeDisabled(t *
 	}
 	if lifecycle.uninstalledID != "io.runhash.demo" {
 		t.Fatalf("failed configuration left installed plugin; rollback ID=%q", lifecycle.uninstalledID)
+	}
+}
+
+func TestDisableInstalledPluginsRestoresPriorEnabledStateWhenLaterDisableFails(t *testing.T) {
+	configDir := t.TempDir()
+	t.Setenv("HASH_CONFIG_DIR", configDir)
+	if err := config.SetPluginEnabled(configDir, "io.runhash.alpha", true); err != nil {
+		t.Fatal(err)
+	}
+	originalSetPluginEnabled := setPluginEnabled
+	t.Cleanup(func() { setPluginEnabled = originalSetPluginEnabled })
+	setPluginEnabled = func(dir, id string, enabled bool) error {
+		if id == "io.runhash.beta" && !enabled {
+			return errors.New("simulated config failure")
+		}
+		return config.SetPluginEnabled(dir, id, enabled)
+	}
+	lifecycle := &fakePluginLifecycle{}
+	err := disableInstalledPlugins(lifecycle, []plugin.InstallResult{
+		{ID: "io.runhash.alpha"},
+		{ID: "io.runhash.beta"},
+	})
+	if err == nil || !bytes.Contains([]byte(err.Error()), []byte("installation rolled back")) {
+		t.Fatalf("disableInstalledPlugins() error = %v", err)
+	}
+	cfg, err := config.Load(configDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Plugins.Enabled) != 1 || cfg.Plugins.Enabled[0] != "io.runhash.alpha" {
+		t.Fatalf("enabled state after rollback = %v", cfg.Plugins.Enabled)
+	}
+	if len(lifecycle.uninstalledIDs) != 2 || lifecycle.uninstalledIDs[0] != "io.runhash.beta" || lifecycle.uninstalledIDs[1] != "io.runhash.alpha" {
+		t.Fatalf("rollback uninstall order = %v", lifecycle.uninstalledIDs)
 	}
 }
 

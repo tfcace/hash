@@ -24,7 +24,20 @@ type pluginIDInstaller interface {
 	InstallForID(context.Context, string, string) (plugin.InstallResult, error)
 }
 
+type pluginAllInstaller interface {
+	InstallAll(context.Context, string) ([]plugin.InstallResult, error)
+}
+
+type pluginAllUpgrader interface {
+	UpgradeAll(context.Context, string) (plugin.UpgradeAllResult, error)
+}
+
 var installPluginIDPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*(\.[a-z0-9][a-z0-9-]*)+$`)
+
+var (
+	loadPluginConfig = config.Load
+	setPluginEnabled = config.SetPluginEnabled
+)
 
 func runPlugin(args []string, stdout, stderr io.Writer) int { //nolint:gocyclo // CLI subcommand dispatch is intentionally explicit
 	if len(args) == 0 {
@@ -143,10 +156,31 @@ func runPluginLifecycle(args []string, lifecycle pluginLifecycle, stdout, stderr
 }
 
 func runPluginInstall(ctx context.Context, args []string, lifecycle pluginLifecycle, stdout, stderr io.Writer) int {
-	source, id, ok := parseInstallArgs(args)
+	source, id, installAll, ok := parseInstallArgs(args)
 	if !ok {
-		fmt.Fprintln(stderr, "Usage: hash plugin install [--id <plugin-id>] <github-repository-or-artifact-url>")
+		fmt.Fprintln(stderr, "Usage: hash plugin install (--id <plugin-id> | --all)? <github-repository-or-artifact-url>")
 		return 2
+	}
+	if installAll {
+		installer, supportsAll := lifecycle.(pluginAllInstaller)
+		if !supportsAll {
+			fmt.Fprintln(stderr, "hash: this installer does not support installing all plugins")
+			return 1
+		}
+		results, err := installer.InstallAll(ctx, source)
+		if err != nil {
+			fmt.Fprintf(stderr, "hash: install all plugins: %v\n", err)
+			return 1
+		}
+		if err := disableInstalledPlugins(lifecycle, results); err != nil {
+			fmt.Fprintf(stderr, "hash: disable installed plugins: %v\n", err)
+			return 1
+		}
+		for _, result := range results {
+			fmt.Fprintf(stdout, "Installed %s %s\nSource: %s\n", result.ID, result.Version, result.Source)
+		}
+		fmt.Fprintln(stdout, "Security: these trusted executables receive your OS user privileges. The plugins remain disabled until explicitly enabled.")
+		return 0
 	}
 	var result plugin.InstallResult
 	var err error
@@ -164,12 +198,8 @@ func runPluginInstall(ctx context.Context, args []string, lifecycle pluginLifecy
 		fmt.Fprintf(stderr, "hash: install plugin: %v\n", err)
 		return 1
 	}
-	if err := config.SetPluginEnabled(getConfigDir(), result.ID, false); err != nil {
-		if rollbackErr := lifecycle.Uninstall(result.ID); rollbackErr != nil {
-			fmt.Fprintf(stderr, "hash: disable installed plugin: %v (rollback also failed: %v)\n", err, rollbackErr)
-		} else {
-			fmt.Fprintf(stderr, "hash: disable installed plugin: %v (installation rolled back)\n", err)
-		}
+	if err := disableInstalledPlugins(lifecycle, []plugin.InstallResult{result}); err != nil {
+		fmt.Fprintf(stderr, "hash: disable installed plugin: %v\n", err)
 		return 1
 	}
 	fmt.Fprintf(stdout, "Installed %s %s\nSource: %s\n", result.ID, result.Version, result.Source)
@@ -177,15 +207,54 @@ func runPluginInstall(ctx context.Context, args []string, lifecycle pluginLifecy
 	return 0
 }
 
-func parseInstallArgs(args []string) (source, id string, ok bool) {
+func disableInstalledPlugins(lifecycle pluginLifecycle, results []plugin.InstallResult) error {
+	previous, loadErr := loadPluginConfig(getConfigDir())
+	if loadErr != nil {
+		return rollbackInstalledPlugins(lifecycle, results, loadErr)
+	}
+	previouslyEnabled := make(map[string]bool, len(previous.Plugins.Enabled))
+	for _, id := range previous.Plugins.Enabled {
+		previouslyEnabled[id] = true
+	}
+	disabled := make([]string, 0, len(results))
+	for _, result := range results {
+		if err := setPluginEnabled(getConfigDir(), result.ID, false); err != nil {
+			var restoreErrors []string
+			for n := len(disabled) - 1; n >= 0; n-- {
+				id := disabled[n]
+				if restoreErr := setPluginEnabled(getConfigDir(), id, previouslyEnabled[id]); restoreErr != nil {
+					restoreErrors = append(restoreErrors, fmt.Sprintf("%s: %v", id, restoreErr))
+				}
+			}
+			return rollbackInstalledPlugins(lifecycle, results, err, restoreErrors...)
+		}
+		disabled = append(disabled, result.ID)
+	}
+	return nil
+}
+
+func rollbackInstalledPlugins(lifecycle pluginLifecycle, results []plugin.InstallResult, cause error, restoreErrors ...string) error {
+	rollbackErrors := append([]string(nil), restoreErrors...)
+	for n := len(results) - 1; n >= 0; n-- {
+		if rollbackErr := lifecycle.Uninstall(results[n].ID); rollbackErr != nil {
+			rollbackErrors = append(rollbackErrors, fmt.Sprintf("%s: %v", results[n].ID, rollbackErr))
+		}
+	}
+	if len(rollbackErrors) > 0 {
+		return fmt.Errorf("%w (rollback also failed: %s)", cause, strings.Join(rollbackErrors, "; "))
+	}
+	return fmt.Errorf("%w (installation rolled back)", cause)
+}
+
+func parseInstallArgs(args []string) (source, id string, installAll, ok bool) {
 	if len(args) < 2 || len(args) > 4 || args[0] != "install" {
-		return "", "", false
+		return "", "", false, false
 	}
 	for n := 1; n < len(args); n++ {
 		arg := args[n]
 		if arg == "--id" {
 			if id != "" || n+1 >= len(args) {
-				return "", "", false
+				return "", "", false, false
 			}
 			id = args[n+1]
 			n++
@@ -193,32 +262,70 @@ func parseInstallArgs(args []string) (source, id string, ok bool) {
 		}
 		if strings.HasPrefix(arg, "--id=") {
 			if id != "" {
-				return "", "", false
+				return "", "", false, false
 			}
 			id = strings.TrimPrefix(arg, "--id=")
 			continue
 		}
+		if arg == "--all" {
+			if installAll {
+				return "", "", false, false
+			}
+			installAll = true
+			continue
+		}
 		if strings.HasPrefix(arg, "-") || source != "" {
-			return "", "", false
+			return "", "", false, false
 		}
 		source = arg
 	}
-	if source == "" || (id != "" && !installPluginIDPattern.MatchString(id)) {
-		return "", "", false
+	if source == "" || (id != "" && !installPluginIDPattern.MatchString(id)) || (id != "" && installAll) {
+		return "", "", false, false
 	}
-	return source, id, true
+	return source, id, installAll, true
 }
 
 func runPluginUpgrade(ctx context.Context, args []string, lifecycle pluginLifecycle, stdout, stderr io.Writer) int {
-	if len(args) < 2 || len(args) > 3 {
-		fmt.Fprintln(stderr, "Usage: hash plugin upgrade <id> [github-repository-or-artifact-url]")
+	id, source, upgradeAll, ok := parseUpgradeArgs(args)
+	if !ok {
+		fmt.Fprintln(stderr, "Usage: hash plugin upgrade <id> [github-repository-or-artifact-url]\n       hash plugin upgrade --all [github-repository-or-artifact-url]")
 		return 2
 	}
-	source := ""
-	if len(args) == 3 {
-		source = args[2]
+	if upgradeAll {
+		upgrader, supportsAll := lifecycle.(pluginAllUpgrader)
+		if !supportsAll {
+			fmt.Fprintln(stderr, "hash: this installer does not support upgrading all plugins")
+			return 1
+		}
+		allResults, err := upgrader.UpgradeAll(ctx, source)
+		if err != nil {
+			fmt.Fprintf(stderr, "hash: upgrade all plugins: %v\n", err)
+			return 1
+		}
+		for _, result := range allResults.Results {
+			if result.Changed {
+				fmt.Fprintf(stdout, "Upgraded %s %s -> %s\n", result.ID, result.PreviousVersion, result.Version)
+			} else {
+				fmt.Fprintf(stdout, "%s is already at %s\n", result.ID, result.Version)
+			}
+		}
+		for _, skipped := range allResults.Skipped {
+			fmt.Fprintf(stdout, "Skipped %s: not managed by Hash (left unchanged)\n", skipped)
+		}
+		for _, failure := range allResults.Failures {
+			fmt.Fprintf(stderr, "hash: upgrade %s: %v\n", failure.ID, failure.Err)
+		}
+		if len(allResults.Results) > 0 {
+			fmt.Fprintln(stdout, "Restart Hash to load upgraded plugin processes.")
+		} else if len(allResults.Skipped) == 0 {
+			fmt.Fprintln(stdout, "No Hash-managed plugins installed.")
+		}
+		if len(allResults.Failures) > 0 {
+			return 1
+		}
+		return 0
 	}
-	result, err := lifecycle.Upgrade(ctx, args[1], source)
+	result, err := lifecycle.Upgrade(ctx, id, source)
 	if err != nil {
 		fmt.Fprintf(stderr, "hash: upgrade plugin: %v\n", err)
 		return 1
@@ -229,6 +336,28 @@ func runPluginUpgrade(ctx context.Context, args []string, lifecycle pluginLifecy
 	}
 	fmt.Fprintf(stdout, "Upgraded %s %s -> %s\nRestart Hash to load the new plugin process.\n", result.ID, result.PreviousVersion, result.Version)
 	return 0
+}
+
+func parseUpgradeArgs(args []string) (id, source string, upgradeAll, ok bool) {
+	if len(args) < 2 || len(args) > 3 || args[0] != "upgrade" {
+		return "", "", false, false
+	}
+	if args[1] == "--all" {
+		if len(args) == 3 && strings.HasPrefix(args[2], "-") {
+			return "", "", false, false
+		}
+		if len(args) == 3 {
+			source = args[2]
+		}
+		return "", source, true, true
+	}
+	if strings.HasPrefix(args[1], "-") {
+		return "", "", false, false
+	}
+	if len(args) == 3 {
+		source = args[2]
+	}
+	return args[1], source, false, true
 }
 
 func runPluginUninstall(args []string, lifecycle pluginLifecycle, stdout, stderr io.Writer) int {
@@ -353,4 +482,6 @@ func listOrNone(values []string) string {
 
 func printPluginHelp(w io.Writer) {
 	fmt.Fprintln(w, "Usage: hash plugin <list|inspect|install|upgrade|uninstall|enable|disable|link|doctor> [arguments]")
+	fmt.Fprintln(w, "Install: hash plugin install --id <plugin-id> <source> | hash plugin install --all <source>")
+	fmt.Fprintln(w, "Upgrade: hash plugin upgrade <plugin-id> [source] | hash plugin upgrade --all [source]")
 }

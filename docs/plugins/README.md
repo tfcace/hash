@@ -8,7 +8,7 @@ manifests are ignored, and a fresh installation enables no plugin.
 ## Quickstart
 
 ```sh
-hash plugin install github:roeyazroel/hash-plugins
+hash plugin install github:roeyazroel/hash-plugins --id io.runhash.autocorrection
 hash plugin inspect io.runhash.autocorrection
 hash plugin enable io.runhash.autocorrection
 hash plugin doctor io.runhash.autocorrection
@@ -17,6 +17,19 @@ hash plugin upgrade io.runhash.autocorrection
 hash plugin disable io.runhash.autocorrection
 hash plugin uninstall io.runhash.autocorrection
 ```
+
+For a release containing multiple plugins, select one explicitly with `--id`,
+or install every published bundle in deterministic ID order with `--all`:
+
+```sh
+hash plugin install --all github:roeyazroel/hash-plugins
+hash plugin upgrade --all
+```
+
+`--all` leaves every newly installed plugin disabled. `upgrade --all` upgrades
+only bundles managed by Hash, preserves each plugin's enabled state, and leaves
+developer links unchanged. A bare install remains available for releases with
+exactly one plugin; it asks you to choose when a release contains several.
 
 The GitHub form resolves a release, selects the current OS/architecture archive,
 and verifies it using the release's `SHA256SUMS`. Pin an install with
