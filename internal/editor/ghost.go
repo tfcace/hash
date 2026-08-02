@@ -22,13 +22,14 @@ type GhostText struct {
 	Streaming  bool   // Whether more text is still arriving
 	FromAgent  bool   // True for agent suggestions (show hints), false for predictions (fish-style)
 	Status     string // Transient activity; never accepted as command text.
+	Source     GhostSource
+}
 
 // GhostStreamUpdate keeps streamed ghost text and its transient agent state
 // together so the editor owns one coherent render state.
 type GhostStreamUpdate struct {
 	Text   string
 	Status string
-	Source     GhostSource
 }
 
 // NewGhostText creates a new ghost text state.
