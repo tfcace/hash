@@ -262,13 +262,14 @@ func (s *Shell) showAgentHistory(query string) error {
 		return err
 	}
 
-	for _, i := range interactions {
+	for i := range interactions {
+		interaction := &interactions[i]
 		status := "\033[32m+\033[0m"
-		if !i.Accepted {
+		if !interaction.Accepted {
 			status = "\033[31m-\033[0m"
 		}
-		fmt.Printf("  %s \033[36m??\033[0m %s\n", status, i.Prompt)
-		fmt.Printf("    -> %s\n", i.Response)
+		fmt.Printf("  %s \033[36m??\033[0m %s\n", status, interaction.Prompt)
+		fmt.Printf("    -> %s\n", interaction.Response)
 	}
 	return nil
 }

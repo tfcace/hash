@@ -2,6 +2,7 @@ package history
 
 import (
 	"fmt"
+	"image/color"
 	"strings"
 	"time"
 
@@ -137,10 +138,12 @@ func (ui *SearchUI) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 
 	case "tab":
-		return ui, ui.selectAgentResults()
+		cmd := ui.selectAgentResults()
+		return ui, cmd
 
 	case "shift+tab":
-		return ui, ui.selectCommands()
+		cmd := ui.selectCommands()
+		return ui, cmd
 
 	case "ctrl+y":
 		cmd := ui.copyCommand()
@@ -218,13 +221,30 @@ func (ui *SearchUI) adjustScroll() {
 // View implements tea.Model.
 func (ui *SearchUI) View() tea.View {
 	var b strings.Builder
-	borderColor := lipgloss.Color(ui.palette.Primary)
 	selectedStyle := lipgloss.NewStyle().
 		Foreground(lipgloss.Color(ui.palette.Success)).
 		Bold(true)
 	normalStyle := lipgloss.NewStyle()
 	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(ui.palette.Dim))
 	errorStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(ui.palette.Error))
+	borderColor := lipgloss.Color(ui.palette.Primary)
+
+	ui.renderHeader(&b, borderColor, dimStyle)
+	ui.renderTabs(&b, borderColor)
+	ui.renderResults(&b, selectedStyle, normalStyle, dimStyle, errorStyle)
+	ui.renderPreview(&b, normalStyle, dimStyle)
+	ui.renderStatus(&b, selectedStyle, dimStyle)
+
+	v := tea.NewView(b.String())
+	// Disable bracketed paste to prevent DECRQM queries on shutdown.
+	// Bubbletea queries modes 2026/2027 at exit; the terminal responses
+	// arrive on stdin after bubbletea's input reader closes, leaking
+	// characters like [?2027;1$y into the next editor session.
+	v.DisableBracketedPasteMode = true
+	return v
+}
+
+func (ui *SearchUI) renderHeader(b *strings.Builder, borderColor color.Color, dimStyle lipgloss.Style) {
 
 	headerBorder := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
@@ -249,7 +269,9 @@ func (ui *SearchUI) View() tea.View {
 	header := fmt.Sprintf("%s %s", headerLabel, queryDisplay)
 	b.WriteString(headerBorder.Render(header))
 	b.WriteString("\n")
+}
 
+func (ui *SearchUI) renderTabs(b *strings.Builder, borderColor color.Color) {
 	activeTabStyle := lipgloss.NewStyle().
 		Foreground(borderColor).
 		Bold(true)
@@ -266,15 +288,11 @@ func (ui *SearchUI) View() tea.View {
 	b.WriteString(" ")
 	b.WriteString(agentResultsTab)
 	b.WriteString("\n")
+}
 
+func (ui *SearchUI) renderResults(b *strings.Builder, selectedStyle, normalStyle, dimStyle, errorStyle lipgloss.Style) {
 	if ui.resultCount() == 0 {
-		if ui.query != "" {
-			b.WriteString(dimStyle.Render("  No matches"))
-		} else if ui.agentResultsMode {
-			b.WriteString(dimStyle.Render("  No saved agent results"))
-		} else {
-			b.WriteString(dimStyle.Render("  No history"))
-		}
+		b.WriteString(dimStyle.Render(ui.emptyResultsMessage()))
 		b.WriteString("\n")
 	} else {
 		visibleEnd := ui.scrollOffset + maxVisibleResults
@@ -293,7 +311,20 @@ func (ui *SearchUI) View() tea.View {
 			b.WriteString("\n")
 		}
 	}
+}
 
+func (ui *SearchUI) emptyResultsMessage() string {
+	switch {
+	case ui.query != "":
+		return "  No matches"
+	case ui.agentResultsMode:
+		return "  No saved agent results"
+	default:
+		return "  No history"
+	}
+}
+
+func (ui *SearchUI) renderPreview(b *strings.Builder, normalStyle, dimStyle lipgloss.Style) {
 	if ui.selected >= 0 && ui.selected < ui.resultCount() {
 		b.WriteString("\n")
 		b.WriteString(dimStyle.Render("─── Preview ───"))
@@ -331,7 +362,9 @@ func (ui *SearchUI) View() tea.View {
 		}
 		b.WriteString("\n")
 	}
+}
 
+func (ui *SearchUI) renderStatus(b *strings.Builder, selectedStyle, dimStyle lipgloss.Style) {
 	if ui.resultCount() > 0 {
 		countStr := fmt.Sprintf("result %d of %d", ui.selected+1, ui.totalResults)
 		padding := ui.width - len(countStr) - 2
@@ -352,14 +385,6 @@ func (ui *SearchUI) View() tea.View {
 		help = "  tab agent results  shift+tab commands  ↑/↓ navigate  enter insert command  ctrl+y copy response  esc cancel"
 	}
 	b.WriteString(dimStyle.Render(help))
-
-	v := tea.NewView(b.String())
-	// Disable bracketed paste to prevent DECRQM queries on shutdown.
-	// Bubbletea queries modes 2026/2027 at exit; the terminal responses
-	// arrive on stdin after bubbletea's input reader closes, leaking
-	// characters like [?2027;1$y into the next editor session.
-	v.DisableBracketedPasteMode = true
-	return v
 }
 
 func (ui *SearchUI) resultCount() int {

@@ -118,14 +118,16 @@ func (s *Store) migrateAgentInteractionResponseKind() error {
 		var notNull int
 		var defaultValue sql.NullString
 		var primaryKey int
-		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+		err = rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey)
+		if err != nil {
 			return err
 		}
 		if name == "response_kind" {
 			return rows.Err()
 		}
 	}
-	if err := rows.Err(); err != nil {
+	err = rows.Err()
+	if err != nil {
 		return err
 	}
 
@@ -317,17 +319,17 @@ func (s *Store) GetAgentInteractions(prompt string, limit int) ([]AgentInteracti
 	for rows.Next() {
 		var i AgentInteraction
 		var commandID sql.NullInt64
-		var context sql.NullString
+		var contextValue sql.NullString
 		var responseKind sql.NullString
 		var agentName sql.NullString
 
-		err := rows.Scan(&i.ID, &i.Prompt, &i.Response, &responseKind, &i.Accepted, &commandID, &context, &i.LatencyMs, &agentName, &i.Timestamp)
+		err := rows.Scan(&i.ID, &i.Prompt, &i.Response, &responseKind, &i.Accepted, &commandID, &contextValue, &i.LatencyMs, &agentName, &i.Timestamp)
 		if err != nil {
 			return nil, err
 		}
 
 		i.CommandID = commandID.Int64
-		i.Context = context.String
+		i.Context = contextValue.String
 		i.Agent = agentName.String
 		i.ResponseKind = AgentResponseKind(responseKind.String)
 		if i.ResponseKind == "" {

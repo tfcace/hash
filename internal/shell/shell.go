@@ -1838,26 +1838,15 @@ func (s *Shell) recordAgentResult(parsed parser.ParseResult, resp agent.Response
 		return
 	}
 
-	kind := history.AgentResponseKindUnknown
-	switch resp.Type {
-	case agent.ResponseTypeCommand:
-		kind = history.AgentResponseKindCommand
-	case agent.ResponseTypeExplanation:
-		kind = history.AgentResponseKindExplanation
-	}
+	kind := agentResponseKind(resp.Type)
 
 	agentName := ""
 	if s.agentHandler != nil && s.agentHandler.client != nil {
 		agentName = s.agentHandler.client.Name()
 	}
-	prompt := strings.TrimSpace(parsed.AgentPrompt)
-	if s.agentHandler != nil {
-		if request, err := s.agentHandler.buildRequest(parsed); err == nil {
-			prompt = strings.TrimSpace(request.Prompt)
-		}
-	}
+	agentPrompt := s.agentResultPrompt(parsed)
 	id, err := s.history.AddAgentInteraction(history.AgentInteraction{
-		Prompt:       prompt,
+		Prompt:       agentPrompt,
 		Response:     responseText,
 		ResponseKind: kind,
 		Agent:        agentName,
@@ -1867,6 +1856,29 @@ func (s *Shell) recordAgentResult(parsed parser.ParseResult, resp agent.Response
 	if err == nil {
 		s.lastAgentResultID = id
 	}
+}
+
+func agentResponseKind(responseType agent.ResponseType) history.AgentResponseKind {
+	switch responseType {
+	case agent.ResponseTypeCommand:
+		return history.AgentResponseKindCommand
+	case agent.ResponseTypeExplanation:
+		return history.AgentResponseKindExplanation
+	default:
+		return history.AgentResponseKindUnknown
+	}
+}
+
+func (s *Shell) agentResultPrompt(parsed parser.ParseResult) string {
+	result := strings.TrimSpace(parsed.AgentPrompt)
+	if s.agentHandler == nil {
+		return result
+	}
+	request, err := s.agentHandler.buildRequest(parsed)
+	if err != nil {
+		return result
+	}
+	return strings.TrimSpace(request.Prompt)
 }
 
 func (s *Shell) markLatestAgentResultAccepted() {
