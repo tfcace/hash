@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.8.0](https://github.com/tfcace/hash/compare/v0.7.2...v0.8.0) (2026-08-06)
+
+
+### Features
+
+* **completion:** add declarative completion plugin system with built-in docker support ([#83](https://github.com/tfcace/hash/issues/83)) ([2b992af](https://github.com/tfcace/hash/commit/2b992afb55fb53c44d80a3c72ae000362f5e9b21))
+
+
+### Bug Fixes
+
+* cobra completion protocol detection ([#97](https://github.com/tfcace/hash/issues/97)) ([a5b0bc3](https://github.com/tfcace/hash/commit/a5b0bc3bf03fb1291eb46ef62f3689ba66670b3e))
+* **startup:** improve shell startup compatibility ([#91](https://github.com/tfcace/hash/issues/91)) ([d8b1399](https://github.com/tfcace/hash/commit/d8b1399ac4cc74153e07de574469822d44aa5ace))
+
+
+### Performance
+
+* take general-purpose parsing and query costs off the interactive hot paths ([#93](https://github.com/tfcace/hash/issues/93)) ([bd64b96](https://github.com/tfcace/hash/commit/bd64b961a5f7267406a4a3b071c3c38d6077917f))
+
 ## [0.7.2](https://github.com/tfcace/hash/compare/v0.7.1...v0.7.2) (2026-07-25)
 
 
