@@ -4,8 +4,91 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tfcace/hash/internal/agent"
+	"github.com/tfcace/hash/internal/config"
 	"github.com/tfcace/hash/internal/history"
+	"github.com/tfcace/hash/internal/parser"
 )
+
+func TestRecordAgentResult_DefaultAndOptOut(t *testing.T) {
+	store, err := history.NewStore(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	sh := &Shell{history: store, config: config.Default()}
+
+	sh.recordAgentResult(parser.ParseResult{Type: parser.CommandTypeAgent, AgentPrompt: "find logs"}, agent.Response{
+		Type: agent.ResponseTypeCommand, Command: "rg --files | rg log",
+	}, "rg --files | rg log", 25*time.Millisecond)
+	interactions, err := store.GetAgentInteractions("find logs", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(interactions) != 1 {
+		t.Fatalf("default interaction count = %d, want 1", len(interactions))
+	}
+
+	sh.config.History.AgentResultsEnabled = false
+	sh.recordAgentResult(parser.ParseResult{Type: parser.CommandTypeAgentPipe, AgentPrompt: "skip logs"}, agent.Response{
+		Type: agent.ResponseTypeCommand, Command: "rg --files | rg log",
+	}, "rg --files | rg log", 25*time.Millisecond)
+	interactions, err = store.GetAgentInteractions("find logs", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(interactions) != 1 || interactions[0].ResponseKind != history.AgentResponseKindCommand || interactions[0].Context != "" || interactions[0].LatencyMs != 25 {
+		t.Fatalf("stored interaction = %#v, want default command result without selected context", interactions)
+	}
+	skipped, err := store.GetAgentInteractions("skip logs", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(skipped) != 0 {
+		t.Fatalf("explicit opt-out interaction count = %d, want 0", len(skipped))
+	}
+
+	sh.markLatestAgentResultAccepted()
+	interactions, err = store.GetAgentInteractions("find logs", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !interactions[0].Accepted {
+		t.Fatal("Run/Edit acceptance should be tracked for the stored result")
+	}
+}
+
+func TestRecordAgentResult_SkipsInlineErrorsAndEmptyResponses(t *testing.T) {
+	store, err := history.NewStore(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	sh := &Shell{history: store, config: config.Default()}
+
+	for _, tc := range []struct {
+		name   string
+		parsed parser.ParseResult
+		resp   agent.Response
+		text   string
+	}{
+		{"inline", parser.ParseResult{Type: parser.CommandTypeAgentInline, AgentPrompt: "complete"}, agent.Response{Type: agent.ResponseTypeCommand, Command: "value"}, "value"},
+		{"error", parser.ParseResult{Type: parser.CommandTypeAgent, AgentPrompt: "fix"}, agent.Response{Type: agent.ResponseTypeError, Error: "failed"}, "partial"},
+		{"empty", parser.ParseResult{Type: parser.CommandTypeAgent, AgentPrompt: "fix"}, agent.Response{Type: agent.ResponseTypeCommand}, "  \n\t"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sh.recordAgentResult(tc.parsed, tc.resp, tc.text, time.Millisecond)
+		})
+	}
+
+	interactions, err := store.GetAgentInteractions("", 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(interactions) != 0 {
+		t.Fatalf("non-recallable turns stored = %#v, want none", interactions)
+	}
+}
 
 func TestRecordCommand_Builtin(t *testing.T) {
 	store, err := history.NewStore(":memory:")

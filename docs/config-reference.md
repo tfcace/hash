@@ -47,6 +47,8 @@ model = "codellama:13b"
 [history]
 enabled = true
 path = "~/.local/share/hash/history.db"
+# Saved agent results appear in Ctrl+R by default; set false to opt out.
+agent_results_enabled = true
 
 [completions]
 fuzzy = true
@@ -225,6 +227,7 @@ Command history storage.
 |-----|------|---------|-------------|
 | `enabled` | boolean | `true` | Enable SQLite-backed command history. |
 | `path` | string | `"~/.local/share/hash/history.db"` | History database path. |
+| `agent_results_enabled` | boolean | `true` | Save completed agent results for Ctrl+R recall. Set to `false` to opt out. Saved rows contain only the prompt, response, kind, and acceptance metadata; selected request context is never saved. |
 
 Retention limits are not implemented in 0.6.x.
 

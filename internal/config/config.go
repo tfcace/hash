@@ -100,10 +100,11 @@ type AgentEndpoint struct {
 }
 
 type HistoryConfig struct {
-	Enabled    bool   `toml:"enabled"`
-	Path       string `toml:"path"`
-	MaxEntries string `toml:"max_entries"`
-	MaxAge     string `toml:"max_age"`
+	Enabled             bool   `toml:"enabled"`
+	Path                string `toml:"path"`
+	MaxEntries          string `toml:"max_entries"`
+	MaxAge              string `toml:"max_age"`
+	AgentResultsEnabled bool   `toml:"agent_results_enabled"`
 }
 
 type CompletionsConfig struct {
@@ -167,9 +168,10 @@ func Default() *Config {
 			AllowedCommandsScope: "project",
 		},
 		History: HistoryConfig{
-			Enabled:    true,
-			MaxEntries: "unlimited",
-			MaxAge:     "forever",
+			Enabled:             true,
+			MaxEntries:          "unlimited",
+			MaxAge:              "forever",
+			AgentResultsEnabled: true,
 		},
 		Completions: CompletionsConfig{
 			Fuzzy:            true,

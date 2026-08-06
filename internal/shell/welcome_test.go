@@ -25,6 +25,9 @@ func TestWelcome_FirstRun(t *testing.T) {
 	if !strings.Contains(msg, "Ctrl+R") {
 		t.Error("Should mention Ctrl+R")
 	}
+	if !strings.Contains(msg, "Tab switches tabs") {
+		t.Error("Should explain how to switch Ctrl+R result tabs")
+	}
 
 	// Mark as shown
 	w.MarkShown()

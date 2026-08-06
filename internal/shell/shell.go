@@ -47,34 +47,36 @@ type Mode struct {
 
 // Shell is the main Hash shell instance.
 type Shell struct {
-	mode                Mode // Startup mode
-	config              *config.Config
-	executor            *executor.Executor
-	prompt              *prompt.Prompt
-	readline            *readline.Readline
-	inputHandler        *readline.InputHandler // For Ctrl+R search
-	editorCfg           editor.Config          // Editor configuration
-	agentHandler        *AgentHandler
-	responseUI          *ResponseUI
-	history             *history.Store
-	historyPath         string
-	learning            *learning.FixStore
-	fixes               *fixTracker     // Learning loop: observes outcomes, suggests fixes
-	errors              *ErrorHandler   // Renders error/fix banners (stderr by default)
-	branchLister        func() []string // Local git branches for did-you-mean; nil = gitBranches
-	clipboard           *clipboard.Buffer
-	predictor           *prediction.Predictor
-	suggestor           *CommandSuggestor
-	colorPalette        prompt.Palette
-	allowlist           *allowlist.Manager
-	agentOutput         *AgentOutputCoordinator
-	readKey             func(ctx context.Context) byte
-	agentReplyInputHook func(context.Context) (string, error)
-	lastExitCode        int
-	lastDuration        time.Duration
-	lastCommand         string // Last executed command
-	lastStderr          string // Stderr from last command (truncated)
-	lastCwd             string // Working directory of last command
+	mode                   Mode // Startup mode
+	config                 *config.Config
+	executor               *executor.Executor
+	prompt                 *prompt.Prompt
+	readline               *readline.Readline
+	inputHandler           *readline.InputHandler // For Ctrl+R search
+	editorCfg              editor.Config          // Editor configuration
+	agentHandler           *AgentHandler
+	responseUI             *ResponseUI
+	history                *history.Store
+	historyPath            string
+	learning               *learning.FixStore
+	fixes                  *fixTracker     // Learning loop: observes outcomes, suggests fixes
+	errors                 *ErrorHandler   // Renders error/fix banners (stderr by default)
+	branchLister           func() []string // Local git branches for did-you-mean; nil = gitBranches
+	clipboard              *clipboard.Buffer
+	predictor              *prediction.Predictor
+	suggestor              *CommandSuggestor
+	colorPalette           prompt.Palette
+	allowlist              *allowlist.Manager
+	agentOutput            *AgentOutputCoordinator
+	readKey                func(ctx context.Context) byte
+	agentReplyInputHook    func(context.Context) (string, error)
+	lastExitCode           int
+	lastDuration           time.Duration
+	lastCommand            string // Last executed command
+	lastStderr             string // Stderr from last command (truncated)
+	lastCwd                string // Working directory of last command
+	lastAgentResultID      int64  // Most recent recallable result in the current agent flow
+	lastAgentResultLatency time.Duration
 
 	osc *integration.Emitter // OSC shell integration emitter
 
@@ -1211,6 +1213,7 @@ func (s *Shell) handleAgentFullStreaming(ctx context.Context, parsed parser.Pars
 	s.responseUI.SetAgentModel(s.agentHandler.CurrentModel())
 	s.responseUI.ShowState(AgentStateThinking)
 
+	requestStarted := time.Now()
 	events, errCh := s.agentHandler.StreamEvents(requestCtx, parsed)
 	events, errCh = paceAgentEvents(requestCtx, events, errCh, agentStreamPacerOptions{})
 	s.agentOutput.BeginToolTurn()
@@ -1271,6 +1274,7 @@ func (s *Shell) handleAgentFullStreaming(ctx context.Context, parsed parser.Pars
 	collector.Append(responseText)
 	resp := collector.Response()
 	resp = agentTurnResponseForConfirmation(parsed.Type, resp, responseText)
+	s.recordAgentResult(parsed, resp, responseText, time.Since(requestStarted))
 
 	allowReply := agentTurnAllowsReply(parsed.Type, resp)
 	transcript := s.initialAgentConversationTranscript(parsed, responseText)
@@ -1365,6 +1369,7 @@ func (s *Shell) runAgentConversationLoop(ctx context.Context, modelName string, 
 		if !ok {
 			return
 		}
+		s.recordAgentResult(parser.ParseResult{Type: parser.CommandTypeAgent, AgentPrompt: reply}, resp, responseText, s.lastAgentResultLatency)
 		transcript = append(transcript, agentConversationMessage{Role: "assistant", Text: responseText})
 
 		if agentTurnShouldPromptForReply(parser.CommandTypeAgent, resp, responseText) {
@@ -1424,6 +1429,7 @@ func (s *Shell) streamAgentFollowUpTurn(
 ) (response agent.Response, responseText string, lineCount int, ok bool) {
 	requestCtx, timeoutCancel := context.WithTimeout(ctx, s.agentRequestTimeout())
 	defer timeoutCancel()
+	requestStarted := time.Now()
 
 	s.wireSpinnerGate()
 	s.responseUI.SetAgentModel(s.agentHandler.CurrentModel())
@@ -1480,6 +1486,7 @@ func (s *Shell) streamAgentFollowUpTurn(
 
 	collector := agent.NewStreamCollector()
 	collector.Append(responseText)
+	s.lastAgentResultLatency = time.Since(requestStarted)
 	return collector.Response(), responseText, streamResult.lineCount + 1, true
 }
 
@@ -1505,11 +1512,13 @@ func (s *Shell) handleAgentConfirmAction(ctx context.Context, action ConfirmActi
 	switch action {
 	case ConfirmRun:
 		if confirmType == ConfirmTypeCommand {
+			s.markLatestAgentResultAccepted()
 			s.executeAgentCommand(ctx, resp.Command)
 		}
 		// For explanations, ConfirmRun just dismisses
 	case ConfirmEdit:
 		if confirmType == ConfirmTypeCommand {
+			s.markLatestAgentResultAccepted()
 			s.handleEditCommand(ctx, resp.Command)
 			return true
 		}
@@ -1812,6 +1821,71 @@ func (s *Shell) recordCommand(line string, exitCode int, duration time.Duration)
 	}
 
 	_, _ = s.history.Add(cmd)
+}
+
+// recordAgentResult persists completed, recallable full and pipe agent turns.
+// It intentionally stores no request context, which may contain user-selected
+// history, environment values, or command output.
+func (s *Shell) recordAgentResult(parsed parser.ParseResult, resp agent.Response, responseText string, latency time.Duration) {
+	if s == nil || s.history == nil || s.config == nil || !s.config.History.AgentResultsEnabled {
+		return
+	}
+	if parsed.Type != parser.CommandTypeAgent && parsed.Type != parser.CommandTypeAgentPipe {
+		return
+	}
+	responseText = strings.TrimSpace(responseText)
+	if responseText == "" || resp.Type == agent.ResponseTypeError {
+		return
+	}
+
+	kind := agentResponseKind(resp.Type)
+
+	agentName := ""
+	if s.agentHandler != nil && s.agentHandler.client != nil {
+		agentName = s.agentHandler.client.Name()
+	}
+	agentPrompt := s.agentResultPrompt(parsed)
+	id, err := s.history.AddAgentInteraction(history.AgentInteraction{
+		Prompt:       agentPrompt,
+		Response:     responseText,
+		ResponseKind: kind,
+		Agent:        agentName,
+		LatencyMs:    latency.Milliseconds(),
+		Timestamp:    time.Now(),
+	})
+	if err == nil {
+		s.lastAgentResultID = id
+	}
+}
+
+func agentResponseKind(responseType agent.ResponseType) history.AgentResponseKind {
+	switch responseType {
+	case agent.ResponseTypeCommand:
+		return history.AgentResponseKindCommand
+	case agent.ResponseTypeExplanation:
+		return history.AgentResponseKindExplanation
+	default:
+		return history.AgentResponseKindUnknown
+	}
+}
+
+func (s *Shell) agentResultPrompt(parsed parser.ParseResult) string {
+	result := strings.TrimSpace(parsed.AgentPrompt)
+	if s.agentHandler == nil {
+		return result
+	}
+	request, err := s.agentHandler.buildRequest(parsed)
+	if err != nil {
+		return result
+	}
+	return strings.TrimSpace(request.Prompt)
+}
+
+func (s *Shell) markLatestAgentResultAccepted() {
+	if s == nil || s.history == nil || s.lastAgentResultID <= 0 {
+		return
+	}
+	_ = s.history.MarkAgentInteractionAccepted(s.lastAgentResultID)
 }
 
 // detectGitBranch returns the current git branch, or empty string if not in a git repo.
