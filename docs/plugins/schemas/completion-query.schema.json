@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "host.completion.query request",
+  "type": "object",
+  "required": ["jsonrpc", "id", "method", "params"],
+  "properties": {
+    "jsonrpc": {"const": "2.0"}, "id": {"type": "integer", "minimum": 1}, "method": {"const": "host.completion.query"},
+    "params": {"type": "object", "required": ["parent_request_id", "line", "cursor"], "properties": {"parent_request_id": {"type": "integer", "minimum": 1}, "line": {"type": "string"}, "cursor": {"type": "integer", "minimum": 0}}, "additionalProperties": false}
+  },
+  "additionalProperties": false
+}

@@ -29,6 +29,8 @@ func main() {
 		case "version":
 			printVersion()
 			os.Exit(0)
+		case "plugin":
+			os.Exit(runPlugin(args[1:], os.Stdout, os.Stderr))
 		}
 	}
 
@@ -101,6 +103,7 @@ Options:
 Subcommands:
   version         Show version
   migrate         Import compatible bash/zsh settings
+  plugin          Install and manage external plugins
 
 Interactive builtins:
   tips            Show common Hash shortcuts and AI syntax

@@ -2,6 +2,7 @@ package shell
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
 	"os/exec"
@@ -16,6 +17,33 @@ import (
 	"github.com/tfcace/hash/internal/prompt"
 )
 
+func TestCommandFailureKind(t *testing.T) {
+	tests := []struct {
+		name         string
+		result       *executor.Result
+		err          error
+		exitCode     int
+		wantKind     string
+		wantCanceled bool
+	}{
+		{name: "success"},
+		{name: "context cancellation", err: context.Canceled, exitCode: 1, wantKind: "canceled", wantCanceled: true},
+		{name: "result cancellation", result: &executor.Result{Canceled: true}, exitCode: 1, wantKind: "canceled", wantCanceled: true},
+		{name: "interrupt", result: &executor.Result{Interrupted: true}, exitCode: 130, wantKind: "interrupted"},
+		{name: "signal", result: &executor.Result{Signal: "terminated"}, exitCode: 143, wantKind: "signal"},
+		{name: "executor error", err: errors.New("execute failed"), exitCode: 1, wantKind: "executor_error"},
+		{name: "exit status", exitCode: 2, wantKind: "exit_status"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			kind, canceled := commandFailureKind(tt.result, tt.err, tt.exitCode)
+			if kind != tt.wantKind || canceled != tt.wantCanceled {
+				t.Fatalf("commandFailureKind() = (%q, %v), want (%q, %v)", kind, canceled, tt.wantKind, tt.wantCanceled)
+			}
+		})
+	}
+}
+
 func TestNewShell(t *testing.T) {
 	cfg := config.Default()
 
@@ -26,6 +54,67 @@ func TestNewShell(t *testing.T) {
 
 	if sh == nil {
 		t.Error("New() returned nil")
+	}
+}
+
+func TestIsStrictSuggestion(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		input     string
+		candidate string
+		want      bool
+	}{
+		{name: "strict extension", input: "git", candidate: "git status", want: true},
+		{name: "unchanged", input: "git", candidate: "git", want: false},
+		{name: "replacement", input: "git", candidate: "go test", want: false},
+		{name: "invalid utf8", input: "git", candidate: "git\xff", want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isStrictSuggestion(tc.input, tc.candidate); got != tc.want {
+				t.Fatalf("isStrictSuggestion(%q, %q) = %v, want %v", tc.input, tc.candidate, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestEditorSuggestParamsCarriesPreviousOutcome(t *testing.T) {
+	cfg := config.Default()
+	cfg.Shell.Dialect = "bash"
+	s := &Shell{config: cfg, commandGeneration: 42, lastCommand: "git status", lastExitCode: 0}
+
+	got := s.editorSuggestParams("", "prompt")
+	if got.Generation != 42 || got.Trigger != "prompt" || got.Line != "" || got.Cursor != 0 || got.Dialect != "bash" {
+		t.Fatalf("editorSuggestParams() = %+v", got)
+	}
+	if got.Previous == nil || got.Previous.Line != "git status" || got.Previous.ExitCode != 0 || got.Previous.Canceled {
+		t.Fatalf("previous outcome = %+v", got.Previous)
+	}
+
+	if empty := (&Shell{config: cfg}).editorSuggestParams("ec", "edit"); empty.Previous != nil {
+		t.Fatalf("first prompt should omit previous outcome: %+v", empty.Previous)
+	}
+}
+
+func TestEditorSuggestParamsUsesPluginProtocolType(t *testing.T) {
+	got := (&Shell{config: config.Default()}).editorSuggestParams("git", "edit")
+	if got.Line != "git" || got.Trigger != "edit" {
+		t.Fatalf("editorSuggestParams() = %+v", got)
+	}
+}
+
+func TestIsSingleTokenCorrection(t *testing.T) {
+	for _, tc := range []struct {
+		original, candidate string
+		want                bool
+	}{
+		{"git sttaus", "git status", true},
+		{"gti sttaus", "git status", false},
+		{"git status", "git status --short", false},
+		{"", "git status", false},
+	} {
+		if got := isSingleTokenCorrection(tc.original, tc.candidate); got != tc.want {
+			t.Errorf("isSingleTokenCorrection(%q, %q) = %v", tc.original, tc.candidate, got)
+		}
 	}
 }
 

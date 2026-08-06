@@ -2,7 +2,9 @@ package shell
 
 import (
 	"os"
+	"path/filepath"
 
+	"github.com/tfcace/hash/internal/editor"
 	"github.com/tfcace/hash/internal/learning"
 )
 
@@ -25,6 +27,14 @@ type fixTracker struct {
 // newFixTracker creates a tracker backed by the given fix store.
 func newFixTracker(store *learning.FixStore) *fixTracker {
 	return &fixTracker{store: store}
+}
+
+// openLearningStore returns no store when adaptive learning is disabled.
+func openLearningStore(enabled bool) (*learning.FixStore, error) {
+	if !enabled {
+		return nil, nil
+	}
+	return learning.NewFixStore(filepath.Join(getDataDir(), "learning.db"))
 }
 
 // Observe processes a finished command. For failures it returns the learned
@@ -115,12 +125,19 @@ func (s *Shell) observeCommandOutcome(line string) {
 // Either way the ghost renders bare (fish-style); the keys are taught by the
 // banner above the prompt, not on the input line.
 func (s *Shell) promptGhost() string {
+	text, _ := s.promptGhostOwned()
+	return text
+}
+
+func (s *Shell) promptGhostOwned() (string, editor.GhostSource) {
 	if fix := s.fixes.SuggestedFix(); fix != "" {
-		return fix
+		return fix, editor.GhostSourceLearnedFix
 	}
 	if s.predictor != nil && s.lastCommand != "" {
 		cwd, _ := os.Getwd()
-		return s.predictor.PredictCommand(s.lastCommand, cwd)
+		if predicted := s.predictor.PredictCommand(s.lastCommand, cwd); predicted != "" {
+			return predicted, editor.GhostSourcePrediction
+		}
 	}
-	return ""
+	return "", editor.GhostSourceNone
 }

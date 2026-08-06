@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -26,6 +27,30 @@ func TestLoadConfig_DefaultValues(t *testing.T) {
 	}
 	if cfg.Prompt.Mode != "starship" {
 		t.Errorf("Prompt.Mode = %q, want %q", cfg.Prompt.Mode, "starship")
+	}
+	if !cfg.Learning.Enabled {
+		t.Error("Learning.Enabled = false, want true by default")
+	}
+}
+
+func TestLoadConfig_LearningCanBeDisabled(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.toml")
+
+	content := []byte(`
+[learning]
+enabled = false
+`)
+	if err := os.WriteFile(configPath, content, 0o644); err != nil { //nolint:gosec // test config
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(tmpDir)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Learning.Enabled {
+		t.Error("Learning.Enabled = true, want false")
 	}
 }
 
@@ -62,6 +87,65 @@ mode = "built-in"
 	}
 	if cfg.Prompt.Mode != "built-in" {
 		t.Errorf("Prompt.Mode = %q, want %q", cfg.Prompt.Mode, "built-in")
+	}
+}
+
+func TestLoadConfig_PluginsPreservesOrderAndSettings(t *testing.T) {
+	tmpDir := t.TempDir()
+	content := []byte(`
+[plugins]
+enabled = ["io.runhash.autosuggestions", "io.runhash.autocorrection"]
+
+[plugins.settings."io.runhash.autosuggestions"]
+strategies = ["history", "completion"]
+min_input_length = 3
+`)
+	if err := os.WriteFile(filepath.Join(tmpDir, "config.toml"), content, 0o644); err != nil { //nolint:gosec // test config
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(tmpDir)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if !reflect.DeepEqual(cfg.Plugins.Enabled, []string{"io.runhash.autosuggestions", "io.runhash.autocorrection"}) {
+		t.Fatalf("Plugins.Enabled = %v", cfg.Plugins.Enabled)
+	}
+	settings := cfg.Plugins.Settings["io.runhash.autosuggestions"]
+	if settings["min_input_length"] != int64(3) {
+		t.Fatalf("min_input_length = %#v", settings["min_input_length"])
+	}
+}
+
+func TestSetPluginEnabledPreservesSettingsAndChangesOnlyEnabledList(t *testing.T) {
+	dir := t.TempDir()
+	content := []byte(`[shell]
+dialect = "zsh"
+
+[plugins]
+enabled = ["io.runhash.first"]
+
+[plugins.settings."io.runhash.first"]
+strategy = "history"
+`)
+	if err := os.WriteFile(filepath.Join(dir, "config.toml"), content, 0o644); err != nil { //nolint:gosec // test config
+		t.Fatal(err)
+	}
+	if err := SetPluginEnabled(dir, "io.runhash.second", true); err != nil {
+		t.Fatalf("SetPluginEnabled() error = %v", err)
+	}
+	if err := SetPluginEnabled(dir, "io.runhash.first", false); err != nil {
+		t.Fatalf("SetPluginEnabled() error = %v", err)
+	}
+	cfg, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if !reflect.DeepEqual(cfg.Plugins.Enabled, []string{"io.runhash.second"}) {
+		t.Fatalf("Plugins.Enabled = %v", cfg.Plugins.Enabled)
+	}
+	if cfg.Plugins.Settings["io.runhash.first"]["strategy"] != "history" {
+		t.Fatalf("settings were not preserved: %#v", cfg.Plugins.Settings)
 	}
 }
 

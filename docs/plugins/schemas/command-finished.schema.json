@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "command.finished request",
+  "type": "object",
+  "required": ["jsonrpc", "id", "method", "params"],
+  "properties": {
+    "jsonrpc": {"const": "2.0"},
+    "id": {"type": "integer", "minimum": 1},
+    "method": {"const": "command.finished"},
+    "params": {
+      "type": "object",
+      "required": ["generation", "original_line", "executed_line", "exit_code", "duration_ms", "failure_kind", "error_message", "stdout_tail", "stderr_tail", "output_streams_merged", "cwd", "dialect", "canceled"],
+      "properties": {
+        "generation": {"type": "integer", "minimum": 0}, "original_line": {"type": "string"}, "executed_line": {"type": "string"},
+        "exit_code": {"type": "integer"}, "duration_ms": {"type": "integer", "minimum": 0}, "failure_kind": {"enum": ["", "exit_status", "command_not_found", "parse_error", "executor_error", "canceled", "interrupted", "signal"]},
+        "error_message": {"type": "string"}, "stdout_tail": {"type": "string", "maxLength": 10240}, "stderr_tail": {"type": "string", "maxLength": 10240},
+        "output_streams_merged": {"type": "boolean"}, "cwd": {"type": "string"}, "dialect": {"enum": ["bash", "zsh"]}, "canceled": {"type": "boolean"}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

@@ -3,9 +3,11 @@ package executor
 import (
 	"bytes"
 	"context"
+	"io"
 	"os"
 	osexec "os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -186,6 +188,22 @@ func TestExecute_HashVersionReachesBinary(t *testing.T) {
 	}
 }
 
+func TestHandleHashCallRoutesPluginCommandsToHashBinary(t *testing.T) {
+	exec := New()
+	got, err := exec.handleHashCall(context.Background(), []string{"hash", "plugin", "list"})
+	if err != nil {
+		t.Fatalf("handleHashCall() error = %v", err)
+	}
+	wantExecutable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{wantExecutable, "plugin", "list"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("handleHashCall() = %q, want %q", got, want)
+	}
+}
+
 // Genuine POSIX hash usage must keep falling through to the no-op builtin:
 // it should produce no output and succeed, exactly as before.
 func TestExecute_HashPosixUsagePreserved(t *testing.T) {
@@ -323,6 +341,31 @@ func TestExecute_CapturedOutput_SimplePath(t *testing.T) {
 	captured := strings.TrimSpace(result.CapturedOutput)
 	if captured != "simple" {
 		t.Errorf("CapturedOutput = %q, want %q", captured, "simple")
+	}
+}
+
+func TestExecuteRetainsRollingOutputTails(t *testing.T) {
+	e := New()
+	result, err := e.Execute(context.Background(), `printf 'old'; i=0; while [ $i -lt 12000 ]; do printf x; i=$((i+1)); done; printf latest; printf 'err-old' >&2; i=0; while [ $i -lt 12000 ]; do printf y >&2; i=$((i+1)); done; printf err-latest >&2`, io.Discard, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.StdoutTail) > 10*1024 || !strings.HasSuffix(result.StdoutTail, "latest") || strings.Contains(result.StdoutTail, "old") {
+		t.Fatalf("bad stdout tail len=%d suffix=%q", len(result.StdoutTail), result.StdoutTail[len(result.StdoutTail)-min(20, len(result.StdoutTail)):])
+	}
+	if len(result.StderrTail) > 10*1024 || !strings.HasSuffix(result.StderrTail, "err-latest") || strings.Contains(result.StderrTail, "err-old") {
+		t.Fatalf("bad stderr tail len=%d", len(result.StderrTail))
+	}
+}
+
+func TestExecutePreservesSignalTerminationMetadata(t *testing.T) {
+	e := New()
+	result, err := e.Execute(context.Background(), `/bin/sh -c 'kill -TERM $$'`, io.Discard, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Signal == "" || result.ExitCode == 0 {
+		t.Fatalf("missing signal outcome: %+v", result)
 	}
 }
 

@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "editor.suggest request",
+  "type": "object",
+  "required": ["jsonrpc", "id", "method", "params"],
+  "properties": {
+    "jsonrpc": {"const": "2.0"},
+    "id": {"type": "integer", "minimum": 1},
+    "method": {"const": "editor.suggest"},
+    "params": {
+      "type": "object",
+      "required": ["generation", "trigger", "line", "cursor", "cwd", "dialect"],
+      "properties": {
+        "generation": {"type": "integer", "minimum": 0},
+        "trigger": {"enum": ["prompt", "edit"]},
+        "line": {"type": "string", "maxLength": 16384},
+        "cursor": {"type": "integer", "minimum": 0},
+        "cwd": {"type": "string"},
+        "dialect": {"enum": ["bash", "zsh"]},
+        "previous": {
+          "type": "object",
+          "required": ["line", "exit_code", "canceled"],
+          "properties": {
+            "line": {"type": "string", "maxLength": 16384},
+            "cwd": {"type": "string"},
+            "exit_code": {"type": "integer"},
+            "canceled": {"type": "boolean"}
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

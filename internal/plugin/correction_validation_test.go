@@ -1,0 +1,58 @@
+package plugin
+
+import "testing"
+
+func TestValidateCommandCorrectionAllowsOneStaticTokenAndPreservesLayout(t *testing.T) {
+	for _, tc := range []struct{ original, candidate string }{
+		{"git sttaus", "git status"},
+		{"git pukk", "git pull"},
+		{"git pukk", "git push"},
+		{"FOO=bar  git sttaus >out", "FOO=bar  git status >out"},
+		{"gti status", "git status"},
+		{"tool --vrsion x", "tool --version x"},
+		{"git 'sttaus'", "git 'status'"},
+	} {
+		if err := ValidateCommandCorrection(tc.original, tc.candidate, "bash"); err != nil {
+			t.Errorf("%q -> %q: %v", tc.original, tc.candidate, err)
+		}
+	}
+}
+
+func TestValidateCommandCorrectionRejectsUnsafeStructure(t *testing.T) {
+	for _, tc := range []struct{ original, candidate string }{
+		{"git sttaus", "git status; rm -rf x"},
+		{"git sttaus | cat", "git status | cat"},
+		{"echo $(gti)", "echo $(git)"},
+		{"git sttaus", "git status now"},
+		{"git sttaus >out", "git status >other"},
+		{"sudo gti status", "sudo git status"},
+		{"eval gti status", "eval git status"},
+		{"tool -hlep", "tool -help"},
+		{"git foo foo", "git bar foo"},
+	} {
+		if err := ValidateCommandCorrection(tc.original, tc.candidate, "bash"); err == nil {
+			t.Errorf("accepted unsafe correction %q -> %q", tc.original, tc.candidate)
+		}
+	}
+}
+
+func TestValidateCommandSuggestionAcceptsValidDialectSyntax(t *testing.T) {
+	for _, tc := range []struct {
+		candidate string
+		dialect   string
+	}{
+		{candidate: "git status", dialect: "bash"},
+		{candidate: "echo ok && echo done", dialect: "bash"},
+		{candidate: "print -r -- ok", dialect: "zsh"},
+	} {
+		if err := ValidateCommandSuggestion(tc.candidate, tc.dialect); err != nil {
+			t.Errorf("ValidateCommandSuggestion(%q, %q) = %v", tc.candidate, tc.dialect, err)
+		}
+	}
+}
+
+func TestValidateCommandSuggestionRejectsInvalidSyntax(t *testing.T) {
+	if err := ValidateCommandSuggestion("echo 'unterminated", "bash"); err == nil {
+		t.Fatal("expected invalid syntax to be rejected")
+	}
+}

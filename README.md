@@ -115,6 +115,7 @@ On first launch, Hash detects your previous shell and asks before loading compat
 
 - **[runhash.dev](https://runhash.dev/)** — guides for syntax, agents, context, completion, learning, keybindings, integrations, migration, and advanced debugging (tracing, PTY logs, debug env vars).
 - **[docs/config-reference.md](docs/config-reference.md)** — the complete configuration reference.
+- **[docs/plugins/](docs/plugins/README.md)** — external plugin architecture, protocol v1, hooks, host services, packaging, and examples.
 
 ## Development
 

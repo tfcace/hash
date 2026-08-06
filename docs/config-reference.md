@@ -10,6 +10,7 @@ Hash reads TOML configuration from `~/.config/hash/config.toml`.
 | `~/.hashrc` | Interactive shell setup |
 | `~/.hash_profile` | Login shell setup |
 | `~/.local/share/hash/history.db` | Default command history database |
+| `~/.local/share/hash/learning.db` | Adaptive learned-fix database |
 
 Set `HASH_CONFIG_DIR` to use a different config directory. Set `XDG_CONFIG_HOME`
 or `XDG_DATA_HOME` to change the default config/data roots.
@@ -60,13 +61,53 @@ max_output_size = "1MB"
 buffer_size = 100
 preserve_colors = false
 
+[learning]
+enabled = true
+
 [prediction]
 enabled = true
 accept_keys = ["right", "tab"]
 confidence_threshold = 0.6
 path_min_count = 2
 path_recency_boost_hours = 24
+
+[plugins]
+enabled = ["io.example.my-plugin"]
+
+[plugins.settings."io.example.my-plugin"]
+strategy = "history"
 ```
+
+## `[plugins]`
+
+External plugins are discovered only from XDG user/system data locations and
+are disabled by default. `enabled` is an ordered array: its order sets
+single-winner priority and aggregate contribution order. Per-plugin settings
+are forwarded unchanged to the plugin's initialization request.
+
+```toml
+[plugins]
+enabled = ["io.example.my-plugin"]
+
+[plugins.settings."io.example.my-plugin"]
+minimum_length = 2
+```
+
+Use `hash plugin install`, `upgrade`, `uninstall`, `list`, `inspect`, `link`,
+`enable`, `disable`, and `doctor` to manage bundles. Install accepts a GitHub
+release repository or a checksummed HTTPS artifact and never enables the plugin
+automatically. Plugin executables are trusted local programs with your user
+privileges; capability declarations are not a sandbox. See the complete
+[plugin developer guide](plugins/README.md).
+
+For a multi-plugin release, use `install --id <plugin-id> <source>` or
+`install --all <source>`; a bare install asks you to choose. Use
+`upgrade --all [source]` to upgrade every Hash-managed bundle while preserving
+enabled state. Developer links are left unchanged.
+
+Multi-plugin repositories resolve through a signed catalog that pins every
+plugin's independent release tag and version; Hash verifies that catalog entry
+again from the selected plugin release.
 
 ## `[shell]`
 
@@ -256,6 +297,18 @@ In-memory command/output capture for copy shortcuts and context.
 
 `HASH_CLIPBOARD_MAX_OUTPUT_SIZE` overrides `clipboard.max_output_size`.
 
+## `[learning]`
+
+Adaptive post-failure fix learning.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `enabled` | boolean | `true` | Record successful commands following failures and offer matching learned fixes. |
+
+Set `enabled = false` to stop opening, updating, and consulting
+`learning.db`. Existing learned data is preserved in case learning is enabled
+again. Restart Hash after changing this setting.
+
 ## `[prediction]`
 
 Local command and path prediction.
@@ -267,6 +320,10 @@ Local command and path prediction.
 | `confidence_threshold` | float | `0.6` | Minimum confidence score for command predictions. |
 | `path_min_count` | integer | `2` | Minimum uses before a path becomes eligible for suggestions. |
 | `path_recency_boost_hours` | integer | `24` | Recency window for prediction scoring. |
+
+To use `io.runhash.adaptive-prediction`, set the built-in `enabled = false`
+while retaining its database for rollback, then enable the external plugin
+through `[plugins]`. The external plugin has independent settings and data.
 
 ## Builtins
 
