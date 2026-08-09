@@ -6,12 +6,14 @@ import (
 	"os"
 	osexec "os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/creack/pty"
 	"github.com/tfcace/hash/internal/version"
+	"mvdan.cc/sh/v3/pattern"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -1326,6 +1328,23 @@ fi
 	}
 	if !strings.Contains(stdout.String(), "__zoxide_hook") {
 		t.Fatalf("PROMPT_COMMAND should include __zoxide_hook, got %q", stdout.String())
+	}
+}
+
+func TestShellPattern_NegatedPOSIXClassCompiles(t *testing.T) {
+	expr, err := pattern.Regexp(`*[![:space:]]*`, pattern.EntireString)
+	if err != nil {
+		t.Fatalf("NVM shell pattern failed: %v", err)
+	}
+	rx, err := regexp.Compile(expr)
+	if err != nil {
+		t.Fatalf("NVM shell pattern produced invalid regexp %q: %v", expr, err)
+	}
+	if !rx.MatchString("lts/krypton") {
+		t.Fatal("NVM shell pattern should match a non-space alias")
+	}
+	if rx.MatchString(" \t") {
+		t.Fatal("NVM shell pattern should not match an all-space alias")
 	}
 }
 

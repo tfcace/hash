@@ -36,3 +36,5 @@ require (
 	golang.org/x/mobile v0.0.0-20250606033058-a2a15c67f36f // indirect
 	golang.org/x/sync v0.21.0 // indirect
 )
+
+replace mvdan.cc/sh/v3 => github.com/roeyazroel/sh/v3 v3.13.2-0.20260809125237-e2f38fbcc51c
