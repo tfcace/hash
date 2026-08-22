@@ -3,7 +3,7 @@ module github.com/tfcace/hash
 go 1.25.0
 
 require (
-	charm.land/bubbletea/v2 v2.0.8
+	charm.land/bubbletea/v2 v2.0.9
 	charm.land/lipgloss/v2 v2.0.5
 	github.com/chzyer/readline v1.5.1
 	github.com/creack/pty v1.1.24
