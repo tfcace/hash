@@ -39,7 +39,8 @@ type EditorState struct {
 	Buffer    *Buffer
 	Cursor    *Cursor
 	UndoStack *UndoStack
-	// LineContinuation controls shell-style "\" continuation on newline/paste.
+	// LineContinuation controls shell-style "\" continuation on a typed
+	// newline. Pasted text is inserted literally.
 	LineContinuation bool
 	// AllowHistorySearch controls Ctrl+R history search.
 	AllowHistorySearch bool

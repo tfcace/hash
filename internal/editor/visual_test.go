@@ -208,3 +208,32 @@ func TestVisual_NilLayoutFallsBackToLogicalRows(t *testing.T) {
 		t.Fatal("logical fallback at row 0 should signal history")
 	}
 }
+
+func TestVisualUp_AtWrapBoundarySignalsHistory(t *testing.T) {
+	// width 10, prompt 2: "abcdefgh" fills row 0 exactly (abs 10). The
+	// display draws a cursor at the end of that line on row 0, column 10
+	// (pending wrap), so there is no row above it: Up must signal history,
+	// not jump to the line start.
+	state := newVisualState(fixedLayout{10, 2, 3}, "abcdefgh")
+	state.Cursor.MoveTo(0, 8)
+
+	if visualUp(state) {
+		t.Fatalf("visualUp at a wrap boundary on the only visual row must signal history; cursor moved to (%d,%d)",
+			state.Cursor.Pos.Row, state.Cursor.Pos.Col)
+	}
+}
+
+func TestVisualDown_AtWrapBoundaryMovesToNextRow(t *testing.T) {
+	// width 10, no prefix: "abcdefghijkl" is two visual rows. A cursor at
+	// col 10 (abs 10) is drawn on row 0 column 10, so Down must move onto
+	// row 1 and land as close to column 10 as the row allows (its end).
+	state := newVisualState(fixedLayout{10, 0, 0}, "abcdefghijkl")
+	state.Cursor.MoveTo(0, 10)
+
+	if !visualDown(state) {
+		t.Fatal("visualDown from a wrap boundary with a row below must move, not signal history")
+	}
+	if state.Cursor.Pos.Row != 0 || state.Cursor.Pos.Col != 12 {
+		t.Errorf("cursor = (%d,%d), want (0,12)", state.Cursor.Pos.Row, state.Cursor.Pos.Col)
+	}
+}

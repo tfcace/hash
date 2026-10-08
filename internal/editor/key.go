@@ -174,8 +174,18 @@ func parseTildeKey(inner []byte) Key {
 		return Key{}
 	}
 
-	if i < len(inner) && inner[i] == ';' && i+1 < len(inner) {
-		key = applyModifier(key, inner[i+1]-'0')
+	if i < len(inner) && inner[i] == ';' {
+		mod, digits := 0, 0
+		for j := i + 1; j < len(inner) && inner[j] >= '0' && inner[j] <= '9'; j++ {
+			mod = mod*10 + int(inner[j]-'0')
+			digits++
+		}
+		if digits == 0 {
+			// Malformed modifier parameter: discard like any other
+			// unrecognized tilde sequence rather than guess at modifiers.
+			return Key{}
+		}
+		key = applyModifier(key, mod)
 	}
 	return key
 }
@@ -202,7 +212,7 @@ func parseSimpleCSI(code byte) (Key, bool) {
 // parseModifiedKey parses modified key sequences (ESC [ 1 ; <mod> <dir>).
 // mod: 2=Shift, 3=Alt, 4=Shift+Alt, 5=Ctrl, 6=Ctrl+Shift, 7=Ctrl+Alt, 8=Ctrl+Alt+Shift
 func parseModifiedKey(modByte, dirByte byte) Key {
-	key := applyModifier(Key{}, modByte-'0')
+	key := applyModifier(Key{}, int(modByte-'0'))
 
 	switch dirByte {
 	case 'A':
@@ -226,7 +236,7 @@ func parseCsiUKey(special KeyCode, modBytes []byte) Key {
 	key := Key{Special: special}
 	for i := 0; i < len(modBytes); i++ {
 		if modBytes[i] == ';' && i+1 < len(modBytes) {
-			key = applyModifier(key, modBytes[i+1]-'0')
+			key = applyModifier(key, int(modBytes[i+1]-'0'))
 			break
 		}
 	}
@@ -236,7 +246,7 @@ func parseCsiUKey(special KeyCode, modBytes []byte) Key {
 // applyModifier applies modifier bits to a key.
 // Terminal modifier encoding: value = 1 + (shift?1:0) + (alt?2:0) + (ctrl?4:0)
 // So: 2=Shift, 3=Alt, 4=Shift+Alt, 5=Ctrl, 6=Ctrl+Shift, 7=Ctrl+Alt, 8=Ctrl+Alt+Shift
-func applyModifier(key Key, mod byte) Key {
+func applyModifier(key Key, mod int) Key {
 	// Subtract 1 to get the bitmask: Shift=bit0, Alt=bit1, Ctrl=bit2
 	if mod >= 2 {
 		bits := mod - 1

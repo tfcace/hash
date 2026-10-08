@@ -29,8 +29,8 @@ func visualUp(state *EditorState) bool {
 	line := state.Buffer.Line(row)
 	width := layout.WrapWidth()
 	abs := layout.PrefixWidth(row) + visibleWidthAtByteIndex(line, col)
-	vr := abs / width
-	goal := state.currentGoal(abs % width)
+	vr, vcol := visualPos(abs, width)
+	goal := state.currentGoal(vcol)
 
 	if vr > 0 {
 		newCol := byteColForAbs(layout, line, row, (vr-1)*width+goal)
@@ -65,8 +65,8 @@ func visualDown(state *EditorState) bool {
 	line := state.Buffer.Line(row)
 	width := layout.WrapWidth()
 	abs := layout.PrefixWidth(row) + visibleWidthAtByteIndex(line, col)
-	vr := abs / width
-	goal := state.currentGoal(abs % width)
+	vr, vcol := visualPos(abs, width)
+	goal := state.currentGoal(vcol)
 
 	switch {
 	case vr < lastVisualRow(layout, line, row):
@@ -94,6 +94,18 @@ func (s *EditorState) currentGoal(fallback int) int {
 func (s *EditorState) rememberGoal(goal int) {
 	s.goalCol = goal
 	s.goalAt = s.Cursor.Pos
+}
+
+// visualPos maps an absolute screen column to the visual row and column the
+// renderer draws it at. A cursor sitting exactly on a wrap boundary belongs
+// to the end of the previous row (pending wrap), matching
+// Display.wrappedCursorForChars, so vcol ranges over 0..width inclusive.
+func visualPos(abs, width int) (vr, vcol int) {
+	if abs <= 0 {
+		return 0, 0
+	}
+	vr = (abs - 1) / width
+	return vr, abs - vr*width
 }
 
 // lastVisualRow returns the last visual row offset of the logical line.

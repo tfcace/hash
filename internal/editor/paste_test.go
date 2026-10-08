@@ -70,3 +70,46 @@ func TestNormalMode_PasteInsertsLiterally(t *testing.T) {
 		t.Errorf("normal-mode paste content = %q, want %q (paste must not be ignored)", got, "one\ntwo")
 	}
 }
+
+func TestInsertMode_PasteInvalidUTF8LeavesCursorAfterPaste(t *testing.T) {
+	// A range loop yields U+FFFD (3 bytes wide as a string) for each invalid
+	// byte, so counting len(string(r)) overshoots. The cursor must sit right
+	// after the pasted bytes, before the existing text.
+	state := NewEditorState()
+	state.Buffer = NewBufferFromString("XYZ")
+	state.Cursor.MoveTo(0, 0)
+
+	pasteInto(t, NewInsertMode(), state, "ab\xffcd")
+
+	if got := state.Buffer.Content(); got != "ab\xffcdXYZ" {
+		t.Fatalf("content = %q, want %q", got, "ab\xffcdXYZ")
+	}
+	if state.Cursor.Pos.Row != 0 || state.Cursor.Pos.Col != 5 {
+		t.Errorf("cursor = (%d,%d), want (0,5), just after the pasted bytes",
+			state.Cursor.Pos.Row, state.Cursor.Pos.Col)
+	}
+}
+
+func TestCursorAfterInsert(t *testing.T) {
+	tests := []struct {
+		name         string
+		row, col     int
+		text         string
+		wantR, wantC int
+	}{
+		{"single line", 0, 3, "abc", 0, 6},
+		{"invalid utf8 counts bytes", 0, 0, "ab\xffcd", 0, 5},
+		{"multibyte rune counts bytes", 0, 1, "é", 0, 3},
+		{"newline resets column", 2, 4, "ab\ncd", 3, 2},
+		{"trailing newline", 0, 4, "ab\n", 1, 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r, c := cursorAfterInsert(tt.row, tt.col, tt.text)
+			if r != tt.wantR || c != tt.wantC {
+				t.Errorf("cursorAfterInsert(%d,%d,%q) = (%d,%d), want (%d,%d)",
+					tt.row, tt.col, tt.text, r, c, tt.wantR, tt.wantC)
+			}
+		})
+	}
+}

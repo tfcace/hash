@@ -379,18 +379,7 @@ func insertPasteContent(state *EditorState, text string) {
 
 	row, col := state.Cursor.Pos.Row, state.Cursor.Pos.Col
 	state.Buffer.Insert(row, col, processed)
-
-	// Move cursor to end of inserted text
-	for _, r := range processed {
-		if r == '\n' {
-			row++
-			col = 0
-		} else {
-			col += len(string(r))
-		}
-	}
-	state.Cursor.Pos.Row = row
-	state.Cursor.Pos.Col = col
+	state.Cursor.Pos.Row, state.Cursor.Pos.Col = cursorAfterInsert(row, col, processed)
 }
 
 // normalizePastedText canonicalizes pasted line endings to \n.
@@ -415,4 +404,15 @@ func endsWithBackslash(s string) bool {
 		trimmed = trimmed[:len(trimmed)-1]
 	}
 	return trimmed != "" && trimmed[len(trimmed)-1] == '\\'
+}
+
+// cursorAfterInsert returns the cursor position after inserting text at
+// (row, col). Columns are byte offsets, so it counts bytes: a range loop
+// would yield U+FFFD (three bytes as a string) for every invalid UTF-8 byte
+// and overshoot.
+func cursorAfterInsert(row, col int, text string) (newRow, newCol int) {
+	if i := strings.LastIndexByte(text, '\n'); i >= 0 {
+		return row + strings.Count(text, "\n"), len(text) - i - 1
+	}
+	return row, col + len(text)
 }

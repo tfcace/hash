@@ -76,3 +76,22 @@ func TestEditor_FunctionKeyIsIgnoredWithoutModeSwitch(t *testing.T) {
 		t.Errorf("cursor col = %d, want unchanged 3", ed.state.Cursor.Pos.Col)
 	}
 }
+
+func TestParseKey_Vt220TildeModifierParameter(t *testing.T) {
+	tests := []struct {
+		seq  string
+		want Key
+	}{
+		// two-digit modifier: 13 = 1 + Ctrl(4) + Meta(8); Ctrl must survive
+		{"\x1b[3;13~", Key{Special: KeyDelete, Ctrl: true}},
+		// a malformed parameter is discarded, never turned into random modifiers
+		{"\x1b[3;x~", Key{}},
+		{"\x1b[3;~", Key{}},
+	}
+	for _, tt := range tests {
+		got := ParseKey([]byte(tt.seq))
+		if got != tt.want {
+			t.Errorf("ParseKey(%q) = %+v, want %+v", tt.seq, got, tt.want)
+		}
+	}
+}
