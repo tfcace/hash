@@ -59,7 +59,7 @@ brew install hash
 
 ### From source
 
-Requires Go 1.25+ and a C compiler (for SQLite).
+Requires Go 1.26+ and a C compiler (for SQLite).
 
 ```bash
 git clone https://github.com/tfcace/hash.git
