@@ -171,66 +171,18 @@ func TestEndsWithBackslash(t *testing.T) {
 	}
 }
 
-func TestSplitLines(t *testing.T) {
-	tests := []struct {
-		input string
-		want  []string
-	}{
-		{"hello", []string{"hello"}},
-		{"hello\nworld", []string{"hello", "world"}},
-		{"a\nb\nc", []string{"a", "b", "c"}},
-		{"", []string{""}},
-		{"\n", []string{"", ""}},
-		{"hello\r\nworld", []string{"hello", "world"}}, // Windows line endings
-		{"hello\rworld", []string{"hello", "world"}},   // Old Mac line endings
-	}
-	for _, tt := range tests {
-		got := splitLines(tt.input)
-		if len(got) != len(tt.want) {
-			t.Errorf("splitLines(%q) returned %d lines, want %d", tt.input, len(got), len(tt.want))
-			continue
-		}
-		for i := range got {
-			if got[i] != tt.want[i] {
-				t.Errorf("splitLines(%q)[%d] = %q, want %q", tt.input, i, got[i], tt.want[i])
-			}
-		}
-	}
-}
-
-func TestAddLineContinuations(t *testing.T) {
-	tests := []struct {
-		input string
-		want  string
-	}{
-		{"hello", "hello"},                     // Single line unchanged
-		{"hello\nworld", "hello \\\nworld"},    // Two lines
-		{"a\nb\nc", "a \\\nb \\\nc"},           // Three lines
-		{"hello \\\nworld", "hello \\\nworld"}, // Already has continuation
-		{"hello\\\nworld", "hello\\\nworld"},   // Continuation without space
-		{"", ""},                               // Empty string
-		{"hello\n", "hello \\\n"},              // Trailing newline
-	}
-	for _, tt := range tests {
-		got := addLineContinuations(tt.input)
-		if got != tt.want {
-			t.Errorf("addLineContinuations(%q) = %q, want %q", tt.input, got, tt.want)
-		}
-	}
-}
-
 func TestInsertMode_Paste(t *testing.T) {
 	state := NewEditorState()
 	mode := NewInsertMode()
 
-	// Paste multiline content
+	// Paste multiline content: inserted literally
 	result := mode.HandleKey(Key{Special: KeyPaste, PasteText: "echo hello\necho world"}, state)
 
 	if result.Action != ActionPaste {
 		t.Errorf("Action = %v, want ActionPaste", result.Action)
 	}
 
-	expected := "echo hello \\\necho world"
+	expected := "echo hello\necho world"
 	if state.Buffer.Content() != expected {
 		t.Errorf("Content = %q, want %q", state.Buffer.Content(), expected)
 	}
@@ -394,7 +346,7 @@ func TestInsertMode_ShiftAltLeft_SelectsWordBack(t *testing.T) {
 	}
 }
 
-func TestInsertMode_AltLeft_PathSkipsSlash(t *testing.T) {
+func TestInsertMode_AltLeft_PathStopsAtLastSegment(t *testing.T) {
 	state := NewEditorState()
 	state.Buffer = NewBufferFromString("cd /tmp/my/file")
 	state.Cursor.MoveTo(0, len("cd /tmp/my/file"))
@@ -402,8 +354,10 @@ func TestInsertMode_AltLeft_PathSkipsSlash(t *testing.T) {
 	mode := NewInsertMode()
 	mode.HandleKey(Key{Special: KeyLeft, Alt: true}, state)
 
-	if state.Cursor.Pos.Col != len("cd ") {
-		t.Fatalf("Cursor col = %d, want %d", state.Cursor.Pos.Col, len("cd "))
+	// Punctuation-aware motion: one hop lands on the last path segment,
+	// not the whole path (Alt+Backspace still eats the whole token)
+	if state.Cursor.Pos.Col != len("cd /tmp/my/") {
+		t.Fatalf("Cursor col = %d, want %d", state.Cursor.Pos.Col, len("cd /tmp/my/"))
 	}
 }
 
@@ -420,7 +374,7 @@ func TestInsertMode_AltRight_PathSkipsSlash(t *testing.T) {
 	}
 }
 
-func TestInsertMode_ShiftAltLeft_SelectsPathAsSingleWord(t *testing.T) {
+func TestInsertMode_ShiftAltLeft_SelectsLastPathSegment(t *testing.T) {
 	state := NewEditorState()
 	state.Buffer = NewBufferFromString("cd /tmp/my/file")
 	state.Cursor.MoveTo(0, len("cd /tmp/my/file"))
@@ -432,8 +386,8 @@ func TestInsertMode_ShiftAltLeft_SelectsPathAsSingleWord(t *testing.T) {
 		t.Fatal("Shift+Alt+Left should start selection")
 	}
 	start, end := state.Cursor.SelectionRange()
-	if start.Col != len("cd ") || end.Col != len("cd /tmp/my/file") {
-		t.Fatalf("SelectionRange = (%d,%d), want (%d,%d)", start.Col, end.Col, len("cd "), len("cd /tmp/my/file"))
+	if start.Col != len("cd /tmp/my/") || end.Col != len("cd /tmp/my/file") {
+		t.Fatalf("SelectionRange = (%d,%d), want (%d,%d)", start.Col, end.Col, len("cd /tmp/my/"), len("cd /tmp/my/file"))
 	}
 }
 
@@ -445,8 +399,9 @@ func TestInsertMode_AltLeft_ServiceSegment(t *testing.T) {
 	mode := NewInsertMode()
 	mode.HandleKey(Key{Special: KeyLeft, Alt: true}, state)
 
-	if state.Cursor.Pos.Col != len("kubectl -n crr port-forward ") {
-		t.Fatalf("Cursor col = %d, want %d", state.Cursor.Pos.Col, len("kubectl -n crr port-forward "))
+	// Stops at the segment after the slash: svc/|x
+	if state.Cursor.Pos.Col != len("kubectl -n crr port-forward svc/") {
+		t.Fatalf("Cursor col = %d, want %d", state.Cursor.Pos.Col, len("kubectl -n crr port-forward svc/"))
 	}
 }
 
@@ -458,8 +413,9 @@ func TestInsertMode_AltLeft_PortMappingSegment(t *testing.T) {
 	mode := NewInsertMode()
 	mode.HandleKey(Key{Special: KeyLeft, Alt: true}, state)
 
-	if state.Cursor.Pos.Col != len("kubectl -n crr port-forward svc/x ") {
-		t.Fatalf("Cursor col = %d, want %d", state.Cursor.Pos.Col, len("kubectl -n crr port-forward svc/x "))
+	// Stops at the segment after the colon: 80:|80
+	if state.Cursor.Pos.Col != len("kubectl -n crr port-forward svc/x 80:") {
+		t.Fatalf("Cursor col = %d, want %d", state.Cursor.Pos.Col, len("kubectl -n crr port-forward svc/x 80:"))
 	}
 }
 

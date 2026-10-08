@@ -16,6 +16,15 @@ func (m *NormalMode) Name() string {
 
 // HandleKey processes a key in normal mode.
 func (m *NormalMode) HandleKey(key Key, state *EditorState) ModeResult {
+	// Handle bracketed paste: insert literally, same as insert mode
+	if key.Special == KeyPaste {
+		if state.Cursor.HasSelection() {
+			m.deleteSelection(state)
+		}
+		insertPasteContent(state, key.PasteText)
+		return ModeResult{Action: ActionPaste}
+	}
+
 	// Universal bindings (Ctrl+A, Ctrl+E, etc.)
 	if key.Ctrl {
 		return m.handleCtrl(key, state)
@@ -58,16 +67,14 @@ func (m *NormalMode) handleSpecialKey(key Key, state *EditorState) (ModeResult, 
 		state.Cursor.ClearSelection()
 		return ModeResult{}, true
 	case KeyUp:
-		if state.Cursor.Pos.Row == 0 {
+		if !visualUp(state) {
 			return ModeResult{HistoryPrev: true}, true
 		}
-		m.moveUp(state)
 		return ModeResult{}, true
 	case KeyDown:
-		if state.Cursor.Pos.Row == state.Buffer.LineCount()-1 {
+		if !visualDown(state) {
 			return ModeResult{HistoryNext: true}, true
 		}
-		m.moveDown(state)
 		return ModeResult{}, true
 	case KeyLeft:
 		m.moveLeft(state)
@@ -89,16 +96,14 @@ func (m *NormalMode) handleMovement(key Key, state *EditorState) (ModeResult, bo
 		m.moveRight(state)
 		return ModeResult{}, true
 	case 'j':
-		if state.Cursor.Pos.Row == state.Buffer.LineCount()-1 {
+		if !visualDown(state) {
 			return ModeResult{HistoryNext: true}, true
 		}
-		m.moveDown(state)
 		return ModeResult{}, true
 	case 'k':
-		if state.Cursor.Pos.Row == 0 {
+		if !visualUp(state) {
 			return ModeResult{HistoryPrev: true}, true
 		}
-		m.moveUp(state)
 		return ModeResult{}, true
 	case 'w':
 		m.moveWordForward(state)
@@ -263,40 +268,9 @@ func (m *NormalMode) moveRight(state *EditorState) {
 	state.Cursor.ClearSelection()
 }
 
-func (m *NormalMode) moveUp(state *EditorState) {
-	if state.Cursor.Pos.Row > 0 {
-		state.Cursor.Pos.Row--
-		lineLen := len(state.Buffer.Line(state.Cursor.Pos.Row))
-		if state.Cursor.Pos.Col > lineLen {
-			state.Cursor.Pos.Col = lineLen
-		}
-		state.Cursor.Pos.Col = clampByteIndexToRuneBoundary(state.Buffer.Line(state.Cursor.Pos.Row), state.Cursor.Pos.Col)
-	}
-}
-
-func (m *NormalMode) moveDown(state *EditorState) {
-	if state.Cursor.Pos.Row < state.Buffer.LineCount()-1 {
-		state.Cursor.Pos.Row++
-		lineLen := len(state.Buffer.Line(state.Cursor.Pos.Row))
-		if state.Cursor.Pos.Col > lineLen {
-			state.Cursor.Pos.Col = lineLen
-		}
-		state.Cursor.Pos.Col = clampByteIndexToRuneBoundary(state.Buffer.Line(state.Cursor.Pos.Row), state.Cursor.Pos.Col)
-	}
-}
-
 func (m *NormalMode) moveWordForward(state *EditorState) {
 	line := state.Buffer.Line(state.Cursor.Pos.Row)
-	col := state.Cursor.Pos.Col
-
-	// Skip current word
-	for col < len(line) && line[col] != ' ' {
-		col++
-	}
-	// Skip spaces
-	for col < len(line) && line[col] == ' ' {
-		col++
-	}
+	col := nextWordStart(line, state.Cursor.Pos.Col)
 
 	// If at end of line, try next line
 	if col >= len(line) && state.Cursor.Pos.Row < state.Buffer.LineCount()-1 {
@@ -310,40 +284,12 @@ func (m *NormalMode) moveWordForward(state *EditorState) {
 
 func (m *NormalMode) moveWordBack(state *EditorState) {
 	line := state.Buffer.Line(state.Cursor.Pos.Row)
-	col := state.Cursor.Pos.Col
-
-	// Skip spaces
-	for col > 0 && (col > len(line) || line[col-1] == ' ') {
-		col--
-	}
-	// Skip word
-	for col > 0 && col <= len(line) && line[col-1] != ' ' {
-		col--
-	}
-	state.Cursor.Pos.Col = col
+	state.Cursor.Pos.Col = prevWordStart(line, state.Cursor.Pos.Col)
 }
 
 func (m *NormalMode) moveWordEnd(state *EditorState) {
 	line := state.Buffer.Line(state.Cursor.Pos.Row)
-	col := state.Cursor.Pos.Col
-
-	// Move forward one first
-	if col < len(line) {
-		col++
-	}
-	// Skip spaces
-	for col < len(line) && line[col] == ' ' {
-		col++
-	}
-	// Move to end of word
-	for col < len(line) && line[col] != ' ' {
-		col++
-	}
-	// Back one to be at last char
-	if col > 0 {
-		col = previousRuneBoundary(line, col)
-	}
-	state.Cursor.Pos.Col = col
+	state.Cursor.Pos.Col = wordEnd(line, state.Cursor.Pos.Col)
 }
 
 func (m *NormalMode) selectLine(state *EditorState) {

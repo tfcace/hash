@@ -35,66 +35,6 @@ func TestEndsWithBackslash_Comprehensive(t *testing.T) {
 	}
 }
 
-// TestSplitLines_AllLineEndings tests all line ending types.
-func TestSplitLines_AllLineEndings(t *testing.T) {
-	tests := []struct {
-		name  string
-		input string
-		want  []string
-	}{
-		{"empty", "", []string{""}},
-		{"single line", "hello", []string{"hello"}},
-		{"two lines LF", "hello\nworld", []string{"hello", "world"}},
-		{"two lines CRLF", "hello\r\nworld", []string{"hello", "world"}},
-		{"two lines CR", "hello\rworld", []string{"hello", "world"}},
-		{"empty lines", "a\n\nb", []string{"a", "", "b"}},
-		{"trailing newline", "hello\n", []string{"hello", ""}},
-		{"multiple trailing", "a\n\n", []string{"a", "", ""}},
-		{"mixed line endings", "a\nb\r\nc\rd", []string{"a", "b", "c", "d"}},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := splitLines(tt.input)
-			if len(got) != len(tt.want) {
-				t.Errorf("splitLines(%q) = %v (len %d), want %v (len %d)",
-					tt.input, got, len(got), tt.want, len(tt.want))
-				return
-			}
-			for i, line := range got {
-				if line != tt.want[i] {
-					t.Errorf("splitLines(%q)[%d] = %q, want %q", tt.input, i, line, tt.want[i])
-				}
-			}
-		})
-	}
-}
-
-// TestAddLineContinuations_AllCases tests all line continuation cases.
-func TestAddLineContinuations_AllCases(t *testing.T) {
-	tests := []struct {
-		name  string
-		input string
-		want  string
-	}{
-		{"single line", "hello", "hello"},
-		{"two lines no backslash", "hello\nworld", "hello \\\nworld"},
-		{"already has backslash", "hello\\\nworld", "hello\\\nworld"},
-		{"backslash with space", "hello\\ \nworld", "hello\\ \nworld"},
-		{"multiple lines", "a\nb\nc", "a \\\nb \\\nc"},
-		{"empty lines", "a\n\nb", "a \\\n \\\nb"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := addLineContinuations(tt.input)
-			if got != tt.want {
-				t.Errorf("addLineContinuations(%q) = %q, want %q", tt.input, got, tt.want)
-			}
-		})
-	}
-}
-
 // TestBuffer_Line_OutOfBounds tests buffer line access with invalid indices.
 func TestBuffer_Line_OutOfBounds(t *testing.T) {
 	buf := NewBufferFromString("hello\nworld")

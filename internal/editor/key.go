@@ -115,6 +115,13 @@ func parseEscapeSequence(b []byte) Key {
 		return Key{} // No-op: discard terminal response
 	}
 
+	// vt220/xterm "tilde" keys: ESC [ <num> (; <mod>)? ~
+	// Home/End/Delete/PageUp/PageDown act; Insert and F-keys are discarded.
+	// Checked before other CSI forms so ESC[1;2~ is not misread as ESC[1;<mod><dir>.
+	if len(b) >= 4 && b[len(b)-1] == '~' {
+		return parseTildeKey(b[2 : len(b)-1])
+	}
+
 	// Simple arrow keys: ESC [ A/B/C/D
 	if len(b) == 3 {
 		if key, ok := parseSimpleCSI(b[2]); ok {
@@ -125,11 +132,6 @@ func parseEscapeSequence(b []byte) Key {
 	// Modified keys: ESC [ 1 ; <mod> <dir>
 	if len(b) >= 6 && b[2] == '1' && b[3] == ';' {
 		return parseModifiedKey(b[4], b[5])
-	}
-
-	// Delete key: ESC [ 3 ~
-	if len(b) >= 4 && b[2] == '3' && b[3] == '~' {
-		return Key{Special: KeyDelete}
 	}
 
 	// CSI u encoding for Enter: ESC [ 13 u or ESC [ 13 ; <mod> u
@@ -143,6 +145,49 @@ func parseEscapeSequence(b []byte) Key {
 	}
 
 	return Key{Special: KeyEscape}
+}
+
+// parseTildeKey parses vt220-style sequences: the bytes between "ESC[" and
+// the final "~", i.e. <num> optionally followed by ";<mod>". Unknown numbers
+// (Insert, function keys) return a zero Key so they are ignored instead of
+// being mistaken for Escape, which would silently switch editor modes.
+func parseTildeKey(inner []byte) Key {
+	num := 0
+	i := 0
+	for ; i < len(inner) && inner[i] >= '0' && inner[i] <= '9'; i++ {
+		num = num*10 + int(inner[i]-'0')
+	}
+
+	var key Key
+	switch num {
+	case 1, 7:
+		key = Key{Special: KeyHome}
+	case 4, 8:
+		key = Key{Special: KeyEnd}
+	case 3:
+		key = Key{Special: KeyDelete}
+	case 5:
+		key = Key{Special: KeyPageUp}
+	case 6:
+		key = Key{Special: KeyPageDown}
+	default:
+		return Key{}
+	}
+
+	if i < len(inner) && inner[i] == ';' {
+		mod, digits := 0, 0
+		for j := i + 1; j < len(inner) && inner[j] >= '0' && inner[j] <= '9'; j++ {
+			mod = mod*10 + int(inner[j]-'0')
+			digits++
+		}
+		if digits == 0 {
+			// Malformed modifier parameter: discard like any other
+			// unrecognized tilde sequence rather than guess at modifiers.
+			return Key{}
+		}
+		key = applyModifier(key, mod)
+	}
+	return key
 }
 
 // parseSimpleCSI parses simple CSI sequences (ESC [ X) for arrow/navigation keys.
@@ -167,7 +212,7 @@ func parseSimpleCSI(code byte) (Key, bool) {
 // parseModifiedKey parses modified key sequences (ESC [ 1 ; <mod> <dir>).
 // mod: 2=Shift, 3=Alt, 4=Shift+Alt, 5=Ctrl, 6=Ctrl+Shift, 7=Ctrl+Alt, 8=Ctrl+Alt+Shift
 func parseModifiedKey(modByte, dirByte byte) Key {
-	key := applyModifier(Key{}, modByte-'0')
+	key := applyModifier(Key{}, int(modByte-'0'))
 
 	switch dirByte {
 	case 'A':
@@ -191,7 +236,7 @@ func parseCsiUKey(special KeyCode, modBytes []byte) Key {
 	key := Key{Special: special}
 	for i := 0; i < len(modBytes); i++ {
 		if modBytes[i] == ';' && i+1 < len(modBytes) {
-			key = applyModifier(key, modBytes[i+1]-'0')
+			key = applyModifier(key, int(modBytes[i+1]-'0'))
 			break
 		}
 	}
@@ -201,7 +246,7 @@ func parseCsiUKey(special KeyCode, modBytes []byte) Key {
 // applyModifier applies modifier bits to a key.
 // Terminal modifier encoding: value = 1 + (shift?1:0) + (alt?2:0) + (ctrl?4:0)
 // So: 2=Shift, 3=Alt, 4=Shift+Alt, 5=Ctrl, 6=Ctrl+Shift, 7=Ctrl+Alt, 8=Ctrl+Alt+Shift
-func applyModifier(key Key, mod byte) Key {
+func applyModifier(key Key, mod int) Key {
 	// Subtract 1 to get the bitmask: Shift=bit0, Alt=bit1, Ctrl=bit2
 	if mod >= 2 {
 		bits := mod - 1

@@ -39,12 +39,22 @@ type EditorState struct {
 	Buffer    *Buffer
 	Cursor    *Cursor
 	UndoStack *UndoStack
-	// LineContinuation controls shell-style "\" continuation on newline/paste.
+	// LineContinuation controls shell-style "\" continuation on a typed
+	// newline. Pasted text is inserted literally.
 	LineContinuation bool
 	// AllowHistorySearch controls Ctrl+R history search.
 	AllowHistorySearch bool
 	// AllowContextPicker controls Ctrl+P context picker.
 	AllowContextPicker bool
+	// Layout provides wrap geometry for visual-row vertical movement.
+	// Nil falls back to logical-line movement.
+	Layout LineLayout
+
+	// goalCol remembers the screen column vertical movement aims for;
+	// goalAt is the cursor position it was last applied to, so any other
+	// movement makes it stale automatically.
+	goalCol int
+	goalAt  Position
 }
 
 // NewEditorState creates a new editor state.
@@ -56,5 +66,6 @@ func NewEditorState() *EditorState {
 		LineContinuation:   true,
 		AllowHistorySearch: true,
 		AllowContextPicker: true,
+		goalCol:            -1,
 	}
 }

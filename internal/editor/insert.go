@@ -1,7 +1,10 @@
 // internal/editor/insert.go
 package editor
 
-import "unicode"
+import (
+	"strings"
+	"unicode"
+)
 
 // InsertMode is the default text entry mode.
 type InsertMode struct{}
@@ -21,7 +24,7 @@ func (m *InsertMode) HandleKey(key Key, state *EditorState) ModeResult {
 	// Handle bracketed paste
 	if key.Special == KeyPaste {
 		m.deleteSelection(state)
-		m.insertPasteContent(state, key.PasteText)
+		insertPasteContent(state, key.PasteText)
 		return ModeResult{Action: ActionPaste}
 	}
 
@@ -93,18 +96,27 @@ func (m *InsertMode) handleSpecialKey(key Key, state *EditorState) (ModeResult, 
 
 // handleArrowKey processes arrow and navigation keys with Shift selection support.
 func (m *InsertMode) handleArrowKey(key Key, state *EditorState) (ModeResult, bool) {
-	// Up/Down at buffer boundary trigger history navigation
-	if key.Special == KeyUp && state.Cursor.Pos.Row == 0 {
-		state.Cursor.ClearSelection()
-		return ModeResult{HistoryPrev: true}, true
-	}
-	if key.Special == KeyDown && state.Cursor.Pos.Row == state.Buffer.LineCount()-1 {
-		state.Cursor.ClearSelection()
-		return ModeResult{HistoryNext: true}, true
-	}
-
 	// Update selection state
 	m.updateSelectionForShift(key.Shift, state)
+
+	// Up/Down move by visual (soft-wrapped) row; at the buffer's visual
+	// boundaries they navigate history instead
+	if key.Special == KeyUp || key.Special == KeyDown {
+		moved := false
+		if key.Special == KeyUp {
+			moved = visualUp(state)
+		} else {
+			moved = visualDown(state)
+		}
+		if !moved {
+			state.Cursor.ClearSelection()
+			if key.Special == KeyUp {
+				return ModeResult{HistoryPrev: true}, true
+			}
+			return ModeResult{HistoryNext: true}, true
+		}
+		return ModeResult{}, true
+	}
 
 	// Perform the movement
 	switch key.Special {
@@ -112,10 +124,6 @@ func (m *InsertMode) handleArrowKey(key Key, state *EditorState) (ModeResult, bo
 		m.moveLeft(state)
 	case KeyRight:
 		m.moveRight(state)
-	case KeyUp:
-		m.moveUp(state)
-	case KeyDown:
-		m.moveDown(state)
 	case KeyHome:
 		state.Cursor.Pos.Col = 0
 	case KeyEnd:
@@ -151,11 +159,11 @@ func (m *InsertMode) handleCtrl(key Key, state *EditorState) ModeResult {
 		if state.AllowContextPicker {
 			return ModeResult{ContextPicker: true}
 		}
-	case 'w': // Ctrl+W: delete word back
+	case 'w': // Ctrl+W: delete whitespace-delimited word back (bash werase)
 		if state.Cursor.HasSelection() {
 			m.deleteSelection(state)
 		} else {
-			m.deleteWordBack(state)
+			m.deleteTokenBack(state)
 		}
 		return ModeResult{Action: ActionDelete}
 	case 'u': // Ctrl+U: delete to line start
@@ -290,41 +298,9 @@ func (m *InsertMode) moveRight(state *EditorState) {
 	}
 }
 
-func (m *InsertMode) moveUp(state *EditorState) {
-	if state.Cursor.Pos.Row > 0 {
-		state.Cursor.Pos.Row--
-		lineLen := len(state.Buffer.Line(state.Cursor.Pos.Row))
-		if state.Cursor.Pos.Col > lineLen {
-			state.Cursor.Pos.Col = lineLen
-		}
-		state.Cursor.Pos.Col = clampByteIndexToRuneBoundary(state.Buffer.Line(state.Cursor.Pos.Row), state.Cursor.Pos.Col)
-	}
-}
-
-func (m *InsertMode) moveDown(state *EditorState) {
-	if state.Cursor.Pos.Row < state.Buffer.LineCount()-1 {
-		state.Cursor.Pos.Row++
-		lineLen := len(state.Buffer.Line(state.Cursor.Pos.Row))
-		if state.Cursor.Pos.Col > lineLen {
-			state.Cursor.Pos.Col = lineLen
-		}
-		state.Cursor.Pos.Col = clampByteIndexToRuneBoundary(state.Buffer.Line(state.Cursor.Pos.Row), state.Cursor.Pos.Col)
-	}
-}
-
 func (m *InsertMode) moveWordBack(state *EditorState) {
 	line := state.Buffer.Line(state.Cursor.Pos.Row)
-	col := state.Cursor.Pos.Col
-
-	// Skip gaps between segments/tokens.
-	for col > 0 && (col > len(line) || isWordGap(line[col-1])) {
-		col--
-	}
-	// Skip the previous segment.
-	for col > 0 && col <= len(line) && !isWordGap(line[col-1]) {
-		col--
-	}
-	state.Cursor.Pos.Col = col
+	state.Cursor.Pos.Col = prevWordStart(line, state.Cursor.Pos.Col)
 }
 
 func (m *InsertMode) moveTokenBack(state *EditorState) {
@@ -348,31 +324,9 @@ func (m *InsertMode) deleteTokenBack(state *EditorState) {
 	state.Buffer.Delete(Position{row, endCol}, Position{row, startCol})
 }
 
-func (m *InsertMode) deleteWordBack(state *EditorState) {
-	startCol := state.Cursor.Pos.Col
-	m.moveWordBack(state)
-	endCol := state.Cursor.Pos.Col
-	row := state.Cursor.Pos.Row
-	state.Buffer.Delete(Position{row, endCol}, Position{row, startCol})
-}
-
 func (m *InsertMode) moveWordForward(state *EditorState) {
 	line := state.Buffer.Line(state.Cursor.Pos.Row)
-	col := state.Cursor.Pos.Col
-
-	// Skip the current segment if we're inside one.
-	for col < len(line) && !isWordGap(line[col]) {
-		col++
-	}
-	// Skip separators/spaces so we land on the next segment start.
-	for col < len(line) && isWordGap(line[col]) {
-		col++
-	}
-	state.Cursor.Pos.Col = col
-}
-
-func isWordGap(ch byte) bool {
-	return ch == ' '
+	state.Cursor.Pos.Col = nextWordStart(line, state.Cursor.Pos.Col)
 }
 
 func (m *InsertMode) deleteToLineStart(state *EditorState) {
@@ -413,34 +367,25 @@ func (m *InsertMode) insertNewlineWithContinuation(state *EditorState) {
 	}
 }
 
-// insertPasteContent inserts pasted text with shell line continuations.
-// Adds " \" before each newline if the line doesn't already end with "\".
-func (m *InsertMode) insertPasteContent(state *EditorState, text string) {
+// insertPasteContent inserts pasted text literally. Only line endings are
+// normalized; rewriting the content (e.g. adding shell continuations) would
+// corrupt quoted strings and merge pasted commands into one.
+func insertPasteContent(state *EditorState, text string) {
 	if text == "" {
 		return
 	}
 
-	processed := text
-	// Process the pasted text to add continuations where needed
-	if state.LineContinuation {
-		processed = addLineContinuations(text)
-	}
+	processed := normalizePastedText(text)
 
-	// Insert the processed text
 	row, col := state.Cursor.Pos.Row, state.Cursor.Pos.Col
 	state.Buffer.Insert(row, col, processed)
+	state.Cursor.Pos.Row, state.Cursor.Pos.Col = cursorAfterInsert(row, col, processed)
+}
 
-	// Move cursor to end of inserted text
-	for _, r := range processed {
-		if r == '\n' {
-			row++
-			col = 0
-		} else {
-			col += len(string(r))
-		}
-	}
-	state.Cursor.Pos.Row = row
-	state.Cursor.Pos.Col = col
+// normalizePastedText canonicalizes pasted line endings to \n.
+func normalizePastedText(text string) string {
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	return strings.ReplaceAll(text, "\r", "\n")
 }
 
 // insertNewline inserts a plain newline without continuation.
@@ -461,50 +406,13 @@ func endsWithBackslash(s string) bool {
 	return trimmed != "" && trimmed[len(trimmed)-1] == '\\'
 }
 
-// addLineContinuations processes pasted text to add " \" before newlines
-// where the line doesn't already end with a backslash.
-func addLineContinuations(text string) string {
-	lines := splitLines(text)
-	if len(lines) <= 1 {
-		return text
+// cursorAfterInsert returns the cursor position after inserting text at
+// (row, col). Columns are byte offsets, so it counts bytes: a range loop
+// would yield U+FFFD (three bytes as a string) for every invalid UTF-8 byte
+// and overshoot.
+func cursorAfterInsert(row, col int, text string) (newRow, newCol int) {
+	if i := strings.LastIndexByte(text, '\n'); i >= 0 {
+		return row + strings.Count(text, "\n"), len(text) - i - 1
 	}
-
-	var result []byte
-	for i, line := range lines {
-		if i > 0 {
-			result = append(result, '\n')
-		}
-		result = append(result, line...)
-
-		// Add continuation if this is not the last line and doesn't already have one
-		if i < len(lines)-1 && !endsWithBackslash(line) {
-			result = append(result, ' ', '\\')
-		}
-	}
-	return string(result)
-}
-
-// splitLines splits text into lines, preserving empty lines.
-func splitLines(text string) []string {
-	var lines []string
-	var current []byte
-	for i := 0; i < len(text); i++ {
-		switch text[i] {
-		case '\n':
-			lines = append(lines, string(current))
-			current = current[:0]
-		case '\r':
-			// Handle \r\n (skip \r, \n will be handled next)
-			if i+1 < len(text) && text[i+1] == '\n' {
-				continue
-			}
-			// Standalone \r treated as newline
-			lines = append(lines, string(current))
-			current = current[:0]
-		default:
-			current = append(current, text[i])
-		}
-	}
-	lines = append(lines, string(current))
-	return lines
+	return row, col + len(text)
 }

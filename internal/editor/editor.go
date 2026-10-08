@@ -47,7 +47,7 @@ type Config struct {
 	InputBgColor            string                                       // Background color for submitted input (hex)
 	ScrollbarColor          string                                       // Foreground color for scrollbars (hex)
 	MaxPasteSize            uint                                         // Maximum paste size in bytes (default 10MB)
-	DisableLineContinuation bool                                         // Disable shell-style line continuations on newline/paste
+	DisableLineContinuation bool                                         // Disable shell-style line continuations on a typed newline
 	InputFrame              *InputFrame                                  // Optional frame for custom input rendering
 	PreventEmptySubmit      bool                                         // Keep editor open when submitting an empty buffer
 	DisableHistorySearch    bool                                         // Disable Ctrl+R history search
@@ -146,6 +146,7 @@ func New(cfg Config, in io.Reader, out io.Writer) *Editor {
 	state.LineContinuation = !cfg.DisableLineContinuation
 	state.AllowHistorySearch = !cfg.DisableHistorySearch
 	state.AllowContextPicker = !cfg.DisableContextPicker
+	state.Layout = display // visual-row vertical movement follows the render wrap
 
 	return &Editor{
 		config:  cfg,
@@ -841,18 +842,7 @@ func (e *Editor) handleGhostTextKey(key Key) bool {
 func (e *Editor) insertText(text string) {
 	row, col := e.state.Cursor.Pos.Row, e.state.Cursor.Pos.Col
 	e.state.Buffer.Insert(row, col, text)
-
-	// Move cursor to end of inserted text
-	for _, r := range text {
-		if r == '\n' {
-			row++
-			col = 0
-		} else {
-			col += len(string(r))
-		}
-	}
-	e.state.Cursor.Pos.Row = row
-	e.state.Cursor.Pos.Col = col
+	e.state.Cursor.Pos.Row, e.state.Cursor.Pos.Col = cursorAfterInsert(row, col, text)
 }
 
 func (e *Editor) handleResize() {
