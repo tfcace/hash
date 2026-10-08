@@ -13,7 +13,7 @@ require (
 	golang.design/x/clipboard v0.8.0
 	golang.org/x/sys v0.47.0
 	golang.org/x/term v0.45.0
-	mvdan.cc/sh/v3 v3.13.1
+	mvdan.cc/sh/v3 v3.14.1
 )
 
 require (
