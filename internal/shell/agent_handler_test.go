@@ -275,3 +275,34 @@ func TestBuildFollowUpRequest_StatelessTransportIncludesTranscript(t *testing.T)
 		}
 	}
 }
+
+func TestBuildRequest_InlineIsMarkedInline(t *testing.T) {
+	handler := &AgentHandler{}
+	parsed := parser.ParseResult{
+		Type:        parser.CommandTypeAgentInline,
+		Command:     "git log --format=",
+		AgentPrompt: "oneline with hash",
+	}
+
+	req, err := handler.buildRequest(parsed)
+	if err != nil {
+		t.Fatalf("buildRequest() error = %v", err)
+	}
+	if !req.Inline {
+		t.Error("inline completion request should be marked Inline")
+	}
+}
+
+func TestBuildRequest_FullAndPipeAreNotInline(t *testing.T) {
+	handler := &AgentHandler{}
+	for _, typ := range []parser.CommandType{parser.CommandTypeAgent, parser.CommandTypeAgentPipe} {
+		parsed := parser.ParseResult{Type: typ, Command: "cat go.mod", AgentPrompt: "list deps"}
+		req, err := handler.buildRequest(parsed)
+		if err != nil {
+			t.Fatalf("buildRequest(%v) error = %v", typ, err)
+		}
+		if req.Inline {
+			t.Errorf("%v request should not be marked Inline", typ)
+		}
+	}
+}

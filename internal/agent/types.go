@@ -30,6 +30,7 @@ type Request struct {
 	Prompt      string  // The user's prompt
 	CommandLine string  // Partial command line (for inline completion)
 	Context     Context // Context for the request
+	Inline      bool    // Inline completion: the reply is appended to CommandLine as ghost text
 }
 
 // Response represents a response from the agent.

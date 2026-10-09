@@ -1159,9 +1159,20 @@ func (t *ACPTransport) sendResponse(id int64, result interface{}, err *jsonRPCEr
 }
 
 // buildPromptWithContext builds a prompt that includes context information.
+// acpReplyContract tells the agent how Hash presents its reply, so the choice
+// between answering with a command and answering with output is an informed
+// one. Inline completions carry their own instructions and skip it.
+const acpReplyContract = "You are answering inside the Hash shell. " +
+	"If your reply is a single bare shell command on one line, the shell offers to run it; " +
+	"anything else is shown as output. " +
+	"If a tool call is denied, reply with the command you would have run instead.\n\n"
+
 func buildPromptWithContext(req Request) string {
 	var b strings.Builder
 
+	if !req.Inline {
+		b.WriteString(acpReplyContract)
+	}
 	b.WriteString("Be concise. Don't repeat information. No preamble.\n\n")
 
 	ctx := req.Context

@@ -343,6 +343,7 @@ Respond with ONLY the completion to append (single line).
 		Prompt:      prompt,
 		CommandLine: parsed.Command,
 		Context:     agentCtx,
+		Inline:      parsed.Type == parser.CommandTypeAgentInline,
 	}, nil
 }
 
