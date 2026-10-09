@@ -92,6 +92,8 @@ func TestInsertMode_ShiftEnter_InsertsNewline(t *testing.T) {
 
 func TestInsertMode_Escape_ToNormalMode(t *testing.T) {
 	state := NewEditorState()
+	state.Buffer = NewBufferFromString("hello")
+	state.Cursor.MoveTo(0, 5)
 	mode := NewInsertMode()
 
 	result := mode.HandleKey(Key{Special: KeyEscape}, state)
@@ -101,6 +103,19 @@ func TestInsertMode_Escape_ToNormalMode(t *testing.T) {
 	}
 	if _, ok := result.NewMode.(*NormalMode); !ok {
 		t.Error("NewMode should be NormalMode")
+	}
+}
+
+// With nothing typed there is nothing for normal mode to act on, and a
+// reflexive Esc must not turn the next word typed into motions.
+func TestInsertMode_Escape_OnEmptyLine_StaysInInsert(t *testing.T) {
+	state := NewEditorState()
+	mode := NewInsertMode()
+
+	result := mode.HandleKey(Key{Special: KeyEscape}, state)
+
+	if result.NewMode != nil {
+		t.Errorf("Esc on an empty line switched mode to %s, want to stay in insert", result.NewMode.Name())
 	}
 }
 

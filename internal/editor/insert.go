@@ -69,6 +69,11 @@ func (m *InsertMode) handleSpecialKey(key Key, state *EditorState) (ModeResult, 
 	switch key.Special {
 	case KeyEscape:
 		state.Cursor.ClearSelection()
+		// An empty line gives normal mode nothing to act on; staying in
+		// insert keeps a reflexive Esc from turning the next word into motions.
+		if state.Buffer.Content() == "" {
+			return ModeResult{}, true
+		}
 		return ModeResult{NewMode: NewNormalMode(), Action: ActionModeChange}, true
 	case KeyEnter:
 		return ModeResult{Submit: true}, true
