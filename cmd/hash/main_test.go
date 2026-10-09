@@ -293,3 +293,25 @@ func TestMain_CFlag_RefusedCommandExitCodes(t *testing.T) {
 		})
 	}
 }
+
+func TestMain_CFlag_RefusalKeepsLineRunning(t *testing.T) {
+	tmpDir := t.TempDir()
+	binPath := filepath.Join(tmpDir, "hash_test")
+	if err := exec.Command("go", "build", "-o", binPath, ".").Run(); err != nil {
+		t.Fatalf("failed to build: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	cmd := exec.Command(binPath, "-c", "nosuchcmd-hash-test || echo fallback")
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("expected exit 0 after the fallback, got %v (stderr: %s)", err, stderr.String())
+	}
+	if got := strings.TrimSpace(stdout.String()); got != "fallback" {
+		t.Errorf("stdout = %q, want fallback", got)
+	}
+	if !strings.Contains(stderr.String(), "command not found") {
+		t.Errorf("stderr = %q, want the refusal message", stderr.String())
+	}
+}

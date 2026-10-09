@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -22,16 +23,22 @@ func TestExecute_NonExecutableFileIsPermissionDenied126(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 
 	result, err := exec.Execute(ctx, script, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("Execute() error = %v, a refusal is a status, not an error", err)
+	}
 
 	var ne *CommandNotExecutableError
-	if !errors.As(err, &ne) {
-		t.Fatalf("err = %v, want *CommandNotExecutableError", err)
+	if len(result.Refusals) != 1 || !errors.As(result.Refusals[0], &ne) {
+		t.Fatalf("Refusals = %v, want one *CommandNotExecutableError", result.Refusals)
 	}
 	if ne.Reason != "Permission denied" {
 		t.Errorf("Reason = %q, want %q", ne.Reason, "Permission denied")
 	}
-	if result == nil || result.ExitCode != 126 {
-		t.Errorf("result = %+v, want ExitCode 126", result)
+	if result.ExitCode != 126 {
+		t.Errorf("ExitCode = %d, want 126", result.ExitCode)
+	}
+	if !strings.Contains(stderr.String(), "Permission denied") {
+		t.Errorf("stderr = %q, want the refusal message", stderr.String())
 	}
 }
 
@@ -43,16 +50,19 @@ func TestExecute_DirectoryIsNotExecutable126(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 
 	result, err := exec.Execute(ctx, dir, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("Execute() error = %v, a refusal is a status, not an error", err)
+	}
 
 	var ne *CommandNotExecutableError
-	if !errors.As(err, &ne) {
-		t.Fatalf("err = %v, want *CommandNotExecutableError", err)
+	if len(result.Refusals) != 1 || !errors.As(result.Refusals[0], &ne) {
+		t.Fatalf("Refusals = %v, want one *CommandNotExecutableError", result.Refusals)
 	}
 	if ne.Reason != "Is a directory" {
 		t.Errorf("Reason = %q, want %q", ne.Reason, "Is a directory")
 	}
-	if result == nil || result.ExitCode != 126 {
-		t.Errorf("result = %+v, want ExitCode 126", result)
+	if result.ExitCode != 126 {
+		t.Errorf("ExitCode = %d, want 126", result.ExitCode)
 	}
 }
 
@@ -63,12 +73,15 @@ func TestExecute_MissingPathStaysCommandNotFound127(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 
 	result, err := exec.Execute(ctx, filepath.Join(t.TempDir(), "nope.sh"), &stdout, &stderr)
-
-	if !IsCommandNotFound(err) {
-		t.Fatalf("err = %v, want CommandNotFoundError", err)
+	if err != nil {
+		t.Fatalf("Execute() error = %v, a refusal is a status, not an error", err)
 	}
-	if result == nil || result.ExitCode != 127 {
-		t.Errorf("result = %+v, want ExitCode 127", result)
+
+	if len(result.Refusals) != 1 || !IsCommandNotFound(result.Refusals[0]) {
+		t.Fatalf("Refusals = %v, want one command-not-found refusal", result.Refusals)
+	}
+	if result.ExitCode != 127 {
+		t.Errorf("ExitCode = %d, want 127", result.ExitCode)
 	}
 }
 

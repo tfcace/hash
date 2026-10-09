@@ -573,6 +573,10 @@ type Result struct {
 	Command        string
 	CapturedOutput string
 	UsedPTY        bool // True if command ran with PTY (TUI apps, interactive programs)
+	// Refusals lists the commands the shell declined to run on this line, in
+	// order: *CommandNotFoundError or *CommandNotExecutableError. Each one set
+	// its exit status (127 or 126) and the line carried on, as in bash.
+	Refusals []error
 }
 
 // Executor runs shell commands using mvdan/sh interpreter.
@@ -597,6 +601,50 @@ type Executor struct {
 	// Function tracking for completion
 	functions   map[string]struct{}
 	functionsMu sync.RWMutex
+
+	// Refusals (not found, not executable) are reported at the point of
+	// failure: through refusalHandler when the shell installs one, else as a
+	// plain message on the command's stderr. They are also collected per run.
+	refusalHandler func(err error)
+	refusals       []error
+	refusalsMu     sync.Mutex
+}
+
+// SetRefusalHandler installs the function that reports a refused command at
+// the moment it fails, in place of the executor's plain stderr message.
+func (e *Executor) SetRefusalHandler(fn func(err error)) {
+	e.refusalHandler = fn
+}
+
+// noteRefusal records a refusal for the current run and reports it.
+func (e *Executor) noteRefusal(stderr io.Writer, err error) {
+	e.refusalsMu.Lock()
+	e.refusals = append(e.refusals, err)
+	e.refusalsMu.Unlock()
+	if e.refusalHandler != nil {
+		e.refusalHandler(err)
+		return
+	}
+	fmt.Fprintf(stderr, "hash: %v\n", err)
+}
+
+// takeRefusals returns the refusals recorded since the last call.
+func (e *Executor) takeRefusals() []error {
+	e.refusalsMu.Lock()
+	defer e.refusalsMu.Unlock()
+	out := e.refusals
+	e.refusals = nil
+	return out
+}
+
+// refusalExitStatus is the status a refused command sets: 126 for a path
+// that exists but cannot run, 127 for a command that was not found.
+func refusalExitStatus(err error) uint8 {
+	var nex *CommandNotExecutableError
+	if errors.As(err, &nex) {
+		return 126
+	}
+	return 127
 }
 
 // New creates a new Executor.
@@ -1302,6 +1350,7 @@ func (e *Executor) Execute(ctx context.Context, command string, stdout, stderr i
 	}
 
 	// Run with persistent runner - functions persist across executions
+	e.takeRefusals() // start the run with a clean slate
 	err = e.safeRunNode(ctx, prog)
 	e.updateEnvFromRunner(e.runner)
 	e.ensureShellEnv()
@@ -1318,36 +1367,13 @@ func (e *Executor) Execute(ctx context.Context, command string, stdout, stderr i
 	// Capture PTY usage before returning
 	usedPTY := e.ptyActive.Load()
 
-	// Return CommandNotFoundError to caller for special handling
-	var cnf *CommandNotFoundError
-	if errors.As(err, &cnf) {
-		return &Result{
-			ExitCode:       127,
-			Duration:       time.Since(start),
-			Command:        command,
-			CapturedOutput: captureBuf.String(),
-			UsedPTY:        usedPTY,
-		}, cnf
-	}
-
-	// A path that exists but cannot run exits 126, as in bash
-	var nex *CommandNotExecutableError
-	if errors.As(err, &nex) {
-		return &Result{
-			ExitCode:       126,
-			Duration:       time.Since(start),
-			Command:        command,
-			CapturedOutput: captureBuf.String(),
-			UsedPTY:        usedPTY,
-		}, nex
-	}
-
 	return &Result{
 		ExitCode:       exitCodeFromError(err),
 		Duration:       time.Since(start),
 		Command:        command,
 		CapturedOutput: captureBuf.String(),
 		UsedPTY:        usedPTY,
+		Refusals:       e.takeRefusals(),
 	}, nil
 }
 
@@ -1394,7 +1420,10 @@ func (e *Executor) execHandler(next interp.ExecHandlerFunc) interp.ExecHandlerFu
 
 		path, err := interp.LookPathDir(hc.Dir, hc.Env, args[0])
 		if err != nil {
-			return lookupFailure(hc.Dir, args[0])
+			// Report it and set the status; the rest of the line keeps running
+			refusal := lookupFailure(hc.Dir, args[0])
+			e.noteRefusal(hc.Stderr, refusal)
+			return interp.ExitStatus(refusalExitStatus(refusal))
 		}
 
 		cmd := exec.CommandContext(ctx, path, args[1:]...)

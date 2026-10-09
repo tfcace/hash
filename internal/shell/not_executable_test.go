@@ -2,10 +2,14 @@ package shell
 
 import (
 	"bytes"
+	"context"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/tfcace/hash/internal/config"
 	"github.com/tfcace/hash/internal/executor"
 )
 
@@ -42,11 +46,44 @@ func TestHandleExecutionResult_UsesErrorTextWhenStderrIsEmpty(t *testing.T) {
 	var out bytes.Buffer
 	sh := &Shell{errors: &ErrorHandler{out: &out}}
 	capture := newStderrCapture(io.Discard)
-	err := &executor.CommandNotExecutableError{Command: "./deploy.sh", Reason: "Permission denied"}
+	refusal := &executor.CommandNotExecutableError{Command: "./deploy.sh", Reason: "Permission denied"}
 
-	sh.handleExecutionResult("./deploy.sh", &executor.Result{ExitCode: 126}, err, capture)
+	sh.handleExecutionResult("./deploy.sh", &executor.Result{ExitCode: 126, Refusals: []error{refusal}}, nil, capture)
 
 	if sh.lastStderr != "./deploy.sh: Permission denied" {
-		t.Errorf("lastStderr = %q, want the error text", sh.lastStderr)
+		t.Errorf("lastStderr = %q, want the refusal text", sh.lastStderr)
+	}
+	if sh.lastExitCode != 126 {
+		t.Errorf("lastExitCode = %d, want 126", sh.lastExitCode)
+	}
+}
+
+// The shell renders its banner at the point of refusal and the line keeps
+// running, so a fallback after || decides the line's status.
+func TestNew_RefusalShowsBannerAndKeepsLineRunning(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	cfg := config.Default()
+	cfg.History.Path = filepath.Join(t.TempDir(), "history.db")
+	sh, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer sh.Close()
+	var banner bytes.Buffer
+	sh.errors = &ErrorHandler{out: &banner}
+	script := filepath.Join(t.TempDir(), "deploy.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := sh.executeRegularCommand(context.Background(), script+" || true"); err != nil {
+		t.Fatalf("executeRegularCommand() error = %v", err)
+	}
+
+	if sh.lastExitCode != 0 {
+		t.Errorf("lastExitCode = %d, want 0: the fallback ran", sh.lastExitCode)
+	}
+	if !strings.Contains(banner.String(), "Permission denied") {
+		t.Errorf("banner should be rendered at the point of refusal, got %q", banner.String())
 	}
 }

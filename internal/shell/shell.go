@@ -424,6 +424,10 @@ func New(cfg *config.Config) (*Shell, error) {
 		return shell.colorPalette.Primary
 	})
 
+	// A refused command (not found, not executable) gets its banner at the
+	// point of failure while the line keeps running with the right status.
+	e.SetRefusalHandler(shell.handleExecutionError)
+
 	return shell, nil
 }
 
@@ -725,10 +729,19 @@ func (s *Shell) handleExecutionResult(line string, result *executor.Result, err 
 		// and issue reports see what actually went wrong.
 		s.lastStderr = ptyStderrFallback(result)
 	}
-	if s.lastStderr == "" && err != nil {
-		// The shell itself refused the command (not found, not executable):
-		// its own words are the only error text for learning and a bare ??.
-		s.lastStderr = err.Error()
+	if s.lastStderr == "" {
+		// The shell itself refused a command (not found, not executable): its
+		// own words are the only error text for learning and a bare ??.
+		switch {
+		case err != nil:
+			s.lastStderr = err.Error()
+		case result != nil && len(result.Refusals) > 0:
+			msgs := make([]string, 0, len(result.Refusals))
+			for _, r := range result.Refusals {
+				msgs = append(msgs, r.Error())
+			}
+			s.lastStderr = strings.Join(msgs, "\n")
+		}
 	}
 	s.lastCwd, _ = os.Getwd()
 
