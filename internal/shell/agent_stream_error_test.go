@@ -23,7 +23,7 @@ func TestHandleAgentStreamError_NoResponseStartupShowsTroubleshooting(t *testing
 	sh.config.Agent.Transport = "stdio"
 	sh.config.Agent.Command = "claude-agent-acp"
 
-	handled := sh.handleAgentStreamError(
+	err := sh.handleAgentStreamError(
 		context.Background(),
 		parser.ParseResult{},
 		"claude-agent-acp",
@@ -32,8 +32,8 @@ func TestHandleAgentStreamError_NoResponseStartupShowsTroubleshooting(t *testing
 		0,
 	)
 
-	if !handled {
-		t.Fatal("expected error to be handled")
+	if err != nil {
+		t.Fatalf("handleAgentStreamError() error = %v, want nil once handled", err)
 	}
 
 	output := out.String()
@@ -53,7 +53,7 @@ func TestHandleAgentStreamError_NoResponseTimeoutDoesNotShowTroubleshooting(t *t
 		agentOutput: NewAgentOutputCoordinator(&out),
 	}
 
-	handled := sh.handleAgentStreamError(
+	err := sh.handleAgentStreamError(
 		context.Background(),
 		parser.ParseResult{},
 		"claude-agent-acp",
@@ -62,8 +62,8 @@ func TestHandleAgentStreamError_NoResponseTimeoutDoesNotShowTroubleshooting(t *t
 		0,
 	)
 
-	if !handled {
-		t.Fatal("expected error to be handled")
+	if err != nil {
+		t.Fatalf("handleAgentStreamError() error = %v, want nil once handled", err)
 	}
 
 	output := out.String()
@@ -83,7 +83,7 @@ func TestHandleAgentStreamError_NoOutputUsesUserFacingRetry(t *testing.T) {
 		agentOutput: NewAgentOutputCoordinator(&out),
 	}
 
-	handled := sh.handleAgentStreamError(
+	err := sh.handleAgentStreamError(
 		context.Background(),
 		parser.ParseResult{},
 		"claude-agent-acp",
@@ -92,8 +92,8 @@ func TestHandleAgentStreamError_NoOutputUsesUserFacingRetry(t *testing.T) {
 		0,
 	)
 
-	if !handled {
-		t.Fatal("expected error to be handled")
+	if err != nil {
+		t.Fatalf("handleAgentStreamError() error = %v, want nil once handled", err)
 	}
 
 	output := out.String()
@@ -116,7 +116,7 @@ func TestHandleAgentStreamError_ModelErrorPointsAtModelBuiltin(t *testing.T) {
 		agentOutput: NewAgentOutputCoordinator(&out),
 	}
 
-	handled := sh.handleAgentStreamError(
+	err := sh.handleAgentStreamError(
 		context.Background(),
 		parser.ParseResult{},
 		"claude-agent-acp",
@@ -125,8 +125,8 @@ func TestHandleAgentStreamError_ModelErrorPointsAtModelBuiltin(t *testing.T) {
 		0,
 	)
 
-	if !handled {
-		t.Fatal("expected error to be handled")
+	if err != nil {
+		t.Fatalf("handleAgentStreamError() error = %v, want nil once handled", err)
 	}
 	output := out.String()
 	if !strings.Contains(output, "model --list") {
