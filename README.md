@@ -50,7 +50,7 @@ No mode switching. No special commands. Just `??` where you need help. The agent
 - **Editor-style input** — multiline editing, visual selection, Helix/Vim/Emacs keybindings.
 - **Smart completion** — tool-native (Cobra), aliases and functions, env vars, files, agent fallback.
 - **Rich history** — SQLite with full-text search, sudo tracking, and agent-interaction recall.
-- **Plays nice** — Starship prompts, shell-integration escapes (OSC 133), zoxide/direnv/fzf setup, configurable builtins.
+- **Plays nice** — Starship prompts, shell-integration escapes (OSC 133), program status for tab headers and session pickers (OSC 7501), zoxide/direnv/fzf setup, configurable builtins.
 - **Experimental zsh dialect** *(new in 0.6)* — parse commands and startup files as zsh via `shell.dialect`.
 
 Full guides, tutorials, and troubleshooting live at **[runhash.dev](https://runhash.dev/)**.
