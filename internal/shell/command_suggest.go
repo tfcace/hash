@@ -146,6 +146,9 @@ func (s *CommandSuggestor) getHistoryCommands() []string {
 	seen := make(map[string]bool)
 	var result []string
 	for i := range cmds {
+		if cmds[i].ExitCode != 0 {
+			continue // a command that failed is not a correction
+		}
 		parts := strings.Fields(cmds[i].Command)
 		if len(parts) == 0 {
 			continue
