@@ -264,3 +264,33 @@ func TestSearchByPrefix_NoMatch(t *testing.T) {
 		t.Errorf("got %d results, want 0", len(results))
 	}
 }
+
+func TestAgentPromptForCommand_FindsTheTurnThatProducedIt(t *testing.T) {
+	store, err := NewStore(":memory:")
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	defer store.Close()
+
+	id, err := store.Add(Command{Command: "find . -name '*.go' | xargs wc -l", Timestamp: time.Now()})
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if _, err := store.AddAgentInteraction(AgentInteraction{
+		Prompt:    "count lines in go files",
+		Response:  "find . -name '*.go' | xargs wc -l",
+		Accepted:  true,
+		CommandID: id,
+		Timestamp: time.Now(),
+	}); err != nil {
+		t.Fatalf("AddAgentInteraction: %v", err)
+	}
+
+	prompt, ok := store.AgentPromptForCommand(id)
+	if !ok || prompt != "count lines in go files" {
+		t.Errorf("AgentPromptForCommand(%d) = %q, %v; want the question that produced it", id, prompt, ok)
+	}
+	if _, ok := store.AgentPromptForCommand(id + 1); ok {
+		t.Error("a command no turn produced should have no prompt")
+	}
+}
