@@ -259,6 +259,15 @@ func (e *Editor) SetInitialText(text string) {
 	e.state.Cursor.MoveTo(0, len(e.state.Buffer.Line(0)))
 }
 
+// PrintSubmitted leaves text on screen the way Run leaves a submitted line,
+// without reading any input. The shell uses it to show a command it runs on
+// the user's behalf, so scrollback reads as if the user had typed it.
+func (e *Editor) PrintSubmitted(text string) {
+	e.display.SetGutter(e.config.Gutter)
+	e.display.SetPrompt(e.config.Prompt)
+	e.display.Finalize(NewBufferFromString(text))
+}
+
 // Run starts the editor and blocks until submit or cancel.
 func (e *Editor) Run(ctx context.Context) (Result, error) {
 	// Enable raw mode if we have a terminal

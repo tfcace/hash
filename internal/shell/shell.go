@@ -1572,11 +1572,13 @@ func (s *Shell) handleAgentConfirmAction(ctx context.Context, action ConfirmActi
 	switch action {
 	case ConfirmRun:
 		if confirmType == ConfirmTypeCommand {
+			s.showAgentCommandAsTyped(resp.Command)
 			commandID, err = s.runAgentCommand(ctx, resp.Command)
 		}
 		// For explanations, ConfirmRun just dismisses
 	case ConfirmEdit:
 		if confirmType == ConfirmTypeCommand {
+			s.clearConfirmationHint() // the editor takes the hint's place
 			commandID, err = s.handleEditCommand(ctx, resp.Command)
 			break
 		}
@@ -1599,6 +1601,21 @@ func (s *Shell) handleAgentConfirmAction(ctx context.Context, action ConfirmActi
 	}
 	s.recordAgentTurn(turn, accepted, commandID)
 	return err
+}
+
+// clearConfirmationHint removes the hint line and the blank line printed
+// after the user's keypress, so what follows takes their place.
+func (s *Shell) clearConfirmationHint() {
+	s.responseUI.ClearLines(2)
+}
+
+// showAgentCommandAsTyped replaces the confirmation hint with the command on
+// its own input line, so scrollback reads as if the user had typed it.
+func (s *Shell) showAgentCommandAsTyped(command string) {
+	s.clearConfirmationHint()
+	cfg := s.editorCfg
+	cfg.Prompt = s.currentPromptLine()
+	editor.New(cfg, strings.NewReader(""), s.responseUI.out).PrintSubmitted(command)
 }
 
 // runAgentCommand runs a command the agent handed back exactly as if the
