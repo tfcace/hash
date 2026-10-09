@@ -1,6 +1,7 @@
 package history
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
@@ -414,8 +415,8 @@ func (ui *SearchUI) copyToClipboard(text string) error {
 	if err := sysClipboard.Init(); err != nil {
 		return err
 	}
-	sysClipboard.Write(sysClipboard.FmtText, []byte(text))
-	return nil
+	_, err := sysClipboard.Write(context.Background(), sysClipboard.FmtText, []byte(text))
+	return err
 }
 
 func (ui *SearchUI) copyCommand() tea.Cmd {
