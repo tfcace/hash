@@ -353,8 +353,8 @@ func copyToSystemClipboard(text string) error {
 	if err := sysClipboard.Init(); err != nil {
 		return err
 	}
-	sysClipboard.Write(sysClipboard.FmtText, []byte(text))
-	return nil
+	_, err := sysClipboard.Write(context.Background(), sysClipboard.FmtText, []byte(text))
+	return err
 }
 
 // ClipboardBuffer is a type alias for easier external access.

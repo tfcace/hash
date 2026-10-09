@@ -896,7 +896,9 @@ func (e *Editor) yank() {
 
 	start, end := e.state.Cursor.SelectionRange()
 	text := e.extractText(start, end)
-	clipboard.Write(clipboard.FmtText, []byte(text))
+	// A clipboard that cannot be written leaves nothing to report from the
+	// editor; the selection is still cleared below, matching the old behavior.
+	_, _ = clipboard.Write(context.Background(), clipboard.FmtText, []byte(text))
 
 	// Clear selection after yank (Helix behavior)
 	e.state.Cursor.ClearSelection()
@@ -906,8 +908,9 @@ func (e *Editor) yank() {
 func (e *Editor) paste(before bool) {
 	e.initClipboard()
 
-	data := clipboard.Read(clipboard.FmtText)
-	if len(data) == 0 {
+	data, err := clipboard.Read(context.Background(), clipboard.FmtText)
+	if err != nil || len(data) == 0 {
+		// ErrNoData, or no usable clipboard: nothing to paste.
 		return
 	}
 
