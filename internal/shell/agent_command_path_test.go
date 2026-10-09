@@ -1,6 +1,7 @@
 package shell
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"path/filepath"
@@ -174,5 +175,24 @@ func TestHandleAgentConfirmAction_CancelRecordsTheTurnAsDeclined(t *testing.T) {
 	}
 	if turns[0].Accepted || turns[0].CommandID != 0 {
 		t.Errorf("declined turn recorded as %+v, want not accepted and no command", turns[0])
+	}
+}
+
+// Running the agent's command replaces the confirmation hint with the command
+// on its own input line, so scrollback reads as if the user had typed it.
+func TestHandleAgentConfirmAction_RunShowsTheCommandAsTyped(t *testing.T) {
+	sh := newShellForAgentCommand(t)
+	var out bytes.Buffer
+	sh.responseUI = NewResponseUI(&out)
+
+	sh.handleAgentConfirmAction(context.Background(), ConfirmRun, ConfirmTypeCommand,
+		agent.Response{Type: agent.ResponseTypeCommand, Command: "true"}, agentTurn{response: "true"}, 1)
+
+	got := out.String()
+	if !strings.HasPrefix(got, "\x1b[A\x1b[K\x1b[A\x1b[K") {
+		t.Errorf("want the hint line and the blank line after it cleared first, got %q", got)
+	}
+	if !strings.Contains(got, "\x1b[1mtrue\x1b[0m") {
+		t.Errorf("want the command shown as a submitted input line, got %q", got)
 	}
 }
