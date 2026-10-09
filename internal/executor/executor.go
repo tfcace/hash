@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/creack/pty"
+	"github.com/tfcace/hash/internal/programstatus"
 	"github.com/tfcace/hash/internal/progress"
 	"github.com/tfcace/hash/internal/trace"
 	"github.com/tfcace/hash/internal/version"
@@ -586,6 +587,9 @@ type Executor struct {
 	lang              syntax.LangVariant
 	progressOSC       *progress.OSC
 	progressThreshold time.Duration
+	status            *programstatus.Reporter   // OSC 7501 reports, to the terminal
+	cmd               atomic.Pointer[cmdStatus] // the running line's cmd record
+	program           atomic.Value              // basename of the external command the running line started last
 	env               *envStore
 	positionalArgs    []string    // $0, $1, $2, etc. for -c execution
 	ptyActive         atomic.Bool // set when PTY is in use, disables progress
@@ -669,6 +673,12 @@ func New() *Executor {
 		functions:         make(map[string]struct{}),
 		// runner is created lazily on first Execute()
 	}
+	// Terminal escapes only make sense on a terminal: hash -c 'make' | tee
+	// must not write them into the pipe.
+	onTerminal := term.IsTerminal(int(os.Stdout.Fd()))
+	e.progressOSC.SetEnabled(onTerminal)
+	e.status = programstatus.NewReporter(os.Stdout)
+	e.status.SetEnabled(onTerminal)
 	e.ensureShellEnv()
 	e.syncProcessEnv()
 	return e
@@ -1280,7 +1290,15 @@ func (e *Executor) Execute(ctx context.Context, command string, stdout, stderr i
 	e.ptyActive.Store(false)
 
 	// Progress timer - only for non-PTY commands (wget, curl, etc.)
-	// PTY commands (vim, helix) handle their own display
+	// PTY commands (vim, helix) handle their own display.
+	//
+	// Past the same threshold the terminal also gets the line's program
+	// status (OSC 7501), PTY or not: a plain make runs in a PTY too. A child
+	// that owns its status withdraws it (see cmdStatus).
+	e.program.Store("")
+	cs := newCmdStatus(e.status, command)
+	e.cmd.Store(cs)
+	exitCode := 1
 	var progressShown atomic.Bool
 	progressDone := make(chan struct{})
 	go func() {
@@ -1291,6 +1309,8 @@ func (e *Executor) Execute(ctx context.Context, command string, stdout, stderr i
 				e.progressOSC.Start()
 				progressShown.Store(true)
 			}
+			app, _ := e.program.Load().(string)
+			cs.start(app)
 		case <-progressDone:
 		}
 	}()
@@ -1299,6 +1319,8 @@ func (e *Executor) Execute(ctx context.Context, command string, stdout, stderr i
 		if progressShown.Load() {
 			e.progressOSC.Done()
 		}
+		cs.finish(exitCode)
+		e.cmd.Store(nil)
 	}()
 
 	// Determine $0 value - first positional arg or shell name
@@ -1367,8 +1389,9 @@ func (e *Executor) Execute(ctx context.Context, command string, stdout, stderr i
 	// Capture PTY usage before returning
 	usedPTY := e.ptyActive.Load()
 
+	exitCode = exitCodeFromError(err)
 	return &Result{
-		ExitCode:       exitCodeFromError(err),
+		ExitCode:       exitCode,
 		Duration:       time.Since(start),
 		Command:        command,
 		CapturedOutput: captureBuf.String(),
@@ -1426,6 +1449,7 @@ func (e *Executor) execHandler(next interp.ExecHandlerFunc) interp.ExecHandlerFu
 			return interp.ExitStatus(refusalExitStatus(refusal))
 		}
 
+		e.program.Store(filepath.Base(args[0]))
 		cmd := exec.CommandContext(ctx, path, args[1:]...)
 		cmd.Dir = hc.Dir
 		cmd.Env = environToSlice(hc.Env)
@@ -1631,7 +1655,7 @@ func (e *Executor) runWithPTY(ctx context.Context, cmd *exec.Cmd, hc interp.Hand
 
 	stdoutDone := make(chan error, 1)
 	go func() {
-		err := copyWithRetry(hc.Stdout, ptmx,
+		err := copyWithRetry(e.watchOwner(hc.Stdout), ptmx,
 			func(n int) {
 				if ptyTr != nil {
 					ptyTr.markOutRead(n)
@@ -1799,7 +1823,7 @@ func (e *Executor) runWithPTYRaw(ctx context.Context, cmd *exec.Cmd, hc interp.H
 	// Copy PTY to stdout
 	stdoutDone := make(chan error, 1)
 	go func() {
-		err := copyWithRetry(hc.Stdout, ptmx, nil, nil)
+		err := copyWithRetry(e.watchOwner(hc.Stdout), ptmx, nil, nil)
 		stdoutDone <- err
 	}()
 

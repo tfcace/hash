@@ -40,6 +40,11 @@ func (o *OSC) SetEnabled(enabled bool) {
 	o.enabled = enabled
 }
 
+// Enabled reports whether sequences are written.
+func (o *OSC) Enabled() bool {
+	return o.enabled
+}
+
 // Start begins indeterminate progress (spinning indicator).
 func (o *OSC) Start() {
 	if !o.enabled {
