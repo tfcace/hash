@@ -407,3 +407,18 @@ func (s *Store) Close() error {
 	}
 	return s.db.Close()
 }
+
+// All returns every recorded command, oldest first.
+func (s *Store) All() ([]Command, error) {
+	rows, err := s.db.Query(`
+		SELECT id, command, cwd, exit_code, duration_ms, timestamp, git_branch, kube_context, is_sudo, sudo_user, raw_command
+		FROM commands
+		ORDER BY timestamp ASC, id ASC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	return s.scanCommands(rows)
+}

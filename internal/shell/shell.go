@@ -392,6 +392,7 @@ func New(cfg *config.Config) (*Shell, error) {
 
 		pluginCompleter: pluginCompleter,
 	}
+	shell.registerExecutorBuiltins()
 
 	if acpTransport != nil {
 		acpTransport.SetPermissionHandler(shell.handleToolPermission)

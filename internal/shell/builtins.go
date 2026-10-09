@@ -3,6 +3,7 @@ package shell
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -69,8 +70,17 @@ func isBuiltin(cmd string) bool {
 
 // executeBuiltin runs a builtin command. Returns (handled, error).
 func (s *Shell) executeBuiltin(ctx context.Context, line string) (bool, error) { //nolint:gocyclo // switch over builtin commands
-	parts := strings.Fields(line)
-	if len(parts) == 0 {
+	fields := strings.Fields(line)
+	if len(fields) == 0 || !isBuiltin(fields[0]) {
+		return false, nil
+	}
+
+	// Only handle a builtin here when the line is a single simple command of
+	// literal words. Pipelines, redirections, control operators, expansions
+	// and assignments belong to the interpreter, which sees the same builtins
+	// through registerExecutorBuiltins where they produce output.
+	parts, ok := s.simpleCommandWords(line)
+	if !ok {
 		return false, nil
 	}
 
@@ -95,8 +105,6 @@ func (s *Shell) executeBuiltin(ctx context.Context, line string) (bool, error) {
 		return true, err
 	case "exit", "quit":
 		return true, errExit
-	case "history":
-		return true, s.builtinHistory(args)
 	case "copy":
 		return true, s.builtinCopy(args)
 	case "issue":
@@ -157,14 +165,13 @@ func builtinCd(args []string) error {
 }
 
 // builtinHistory handles the history command.
-func (s *Shell) builtinHistory(args []string) error {
+func (s *Shell) builtinHistory(w io.Writer, args []string) error {
 	if s.history == nil {
 		return fmt.Errorf("history not available")
 	}
 
 	if len(args) == 0 {
-		// Show recent history
-		return s.showRecentHistory(20)
+		return s.listHistory(w)
 	}
 
 	subcommand := args[0]
@@ -175,43 +182,44 @@ func (s *Shell) builtinHistory(args []string) error {
 		if len(subargs) == 0 {
 			return fmt.Errorf("usage: history search <query>")
 		}
-		return s.searchHistory(strings.Join(subargs, " "))
+		return s.searchHistory(w, strings.Join(subargs, " "))
 
 	case "failed":
-		return s.showFailedHistory()
+		return s.showFailedHistory(w)
 
 	case "sudo":
-		return s.showSudoHistory()
+		return s.showSudoHistory(w)
 
 	case "asked":
 		if len(subargs) == 0 {
-			return s.showAgentHistory("")
+			return s.showAgentHistory(w, "")
 		}
-		return s.showAgentHistory(subargs[0])
+		return s.showAgentHistory(w, subargs[0])
 
 	case "clear":
 		return fmt.Errorf("history clear: not implemented (use sqlite3 directly)")
 
 	default:
 		// Treat as search
-		return s.searchHistory(strings.Join(args, " "))
+		return s.searchHistory(w, strings.Join(args, " "))
 	}
 }
 
-func (s *Shell) showRecentHistory(n int) error {
-	commands, err := s.history.GetRecent(n)
+// listHistory prints every recorded command, oldest first, numbered from 1
+// like bash's history builtin.
+func (s *Shell) listHistory(w io.Writer) error {
+	commands, err := s.history.All()
 	if err != nil {
 		return err
 	}
 
 	for i := range commands {
-		num := len(commands) - i
-		fmt.Printf("%5d  %s\n", num, commands[i].Command)
+		fmt.Fprintf(w, "%5d  %s\n", i+1, commands[i].Command)
 	}
 	return nil
 }
 
-func (s *Shell) searchHistory(query string) error {
+func (s *Shell) searchHistory(w io.Writer, query string) error {
 	results, err := s.history.Search(history.SearchOptions{
 		Query: query,
 		Limit: 20,
@@ -221,12 +229,12 @@ func (s *Shell) searchHistory(query string) error {
 	}
 
 	for i := range results {
-		fmt.Printf("  %s  \033[90m(%s)\033[0m\n", results[i].Command, results[i].Timestamp.Format("2006-01-02"))
+		fmt.Fprintf(w, "  %s  \033[90m(%s)\033[0m\n", results[i].Command, results[i].Timestamp.Format("2006-01-02"))
 	}
 	return nil
 }
 
-func (s *Shell) showFailedHistory() error {
+func (s *Shell) showFailedHistory(w io.Writer) error {
 	results, err := s.history.Search(history.SearchOptions{
 		OnlyFailed: true,
 		Limit:      20,
@@ -236,12 +244,12 @@ func (s *Shell) showFailedHistory() error {
 	}
 
 	for i := range results {
-		fmt.Printf("  \033[31mx%d\033[0m %s\n", results[i].ExitCode, results[i].Command)
+		fmt.Fprintf(w, "  \033[31mx%d\033[0m %s\n", results[i].ExitCode, results[i].Command)
 	}
 	return nil
 }
 
-func (s *Shell) showSudoHistory() error {
+func (s *Shell) showSudoHistory(w io.Writer) error {
 	results, err := s.history.Search(history.SearchOptions{
 		OnlySudo: true,
 		Limit:    20,
@@ -251,12 +259,12 @@ func (s *Shell) showSudoHistory() error {
 	}
 
 	for i := range results {
-		fmt.Printf("  \033[33m#\033[0m %s  \033[90m(as %s)\033[0m\n", results[i].Command, results[i].SudoUser)
+		fmt.Fprintf(w, "  \033[33m#\033[0m %s  \033[90m(as %s)\033[0m\n", results[i].Command, results[i].SudoUser)
 	}
 	return nil
 }
 
-func (s *Shell) showAgentHistory(query string) error {
+func (s *Shell) showAgentHistory(w io.Writer, query string) error {
 	interactions, err := s.history.GetAgentInteractions(query, 20)
 	if err != nil {
 		return err
@@ -267,8 +275,8 @@ func (s *Shell) showAgentHistory(query string) error {
 		if !i.Accepted {
 			status = "\033[31m-\033[0m"
 		}
-		fmt.Printf("  %s \033[36m??\033[0m %s\n", status, i.Prompt)
-		fmt.Printf("    -> %s\n", i.Response)
+		fmt.Fprintf(w, "  %s \033[36m??\033[0m %s\n", status, i.Prompt)
+		fmt.Fprintf(w, "    -> %s\n", i.Response)
 	}
 	return nil
 }
@@ -630,4 +638,28 @@ func (s *Shell) builtinSource(ctx context.Context, args []string) error {
 	}
 
 	return fmt.Errorf("source: executor not available")
+}
+
+// registerExecutorBuiltins exposes the builtins that produce output inside
+// the interpreter, so they compose with pipelines and redirections.
+func (s *Shell) registerExecutorBuiltins() {
+	if s.executor == nil {
+		return
+	}
+	if isBuiltinEnabled(s.config, "history") {
+		s.executor.RegisterBuiltin("history", func(_ context.Context, args []string, stdout, _ io.Writer) error {
+			return s.builtinHistory(stdout, args)
+		})
+	}
+}
+
+// simpleCommandWords splits line into words when it is a single simple
+// command the REPL can handle literally. Without an executor it falls back to
+// whitespace splitting.
+func (s *Shell) simpleCommandWords(line string) ([]string, bool) {
+	if s.executor == nil {
+		fields := strings.Fields(line)
+		return fields, len(fields) > 0
+	}
+	return s.executor.SimpleCommandWords(line)
 }
