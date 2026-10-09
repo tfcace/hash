@@ -1014,19 +1014,23 @@ func (s *Shell) navigateHistory(dir int, currentLine string) string {
 	return entries[s.historyIndex].Command
 }
 
+// agentRequestLabel names the ?? form that is about to run. A plain request
+// is an agent turn whose reply may be output or a command, so only the pipe
+// and inline forms carry a qualifier.
+func agentRequestLabel(typ parser.CommandType) string {
+	switch typ {
+	case parser.CommandTypeAgentPipe:
+		return "[agent: pipe]"
+	case parser.CommandTypeAgentInline:
+		return "[agent: inline]"
+	default:
+		return "[agent]"
+	}
+}
+
 func (s *Shell) handleAgentRequest(ctx context.Context, parsed parser.ParseResult) error {
 
-	// Show which mode was detected
-	var modeLabel string
-	switch parsed.Type {
-	case parser.CommandTypeAgent:
-		modeLabel = "command"
-	case parser.CommandTypeAgentPipe:
-		modeLabel = "pipe"
-	case parser.CommandTypeAgentInline:
-		modeLabel = "inline"
-	}
-	fmt.Fprintf(os.Stdout, "\033[90m[agent: %s]\033[0m ", modeLabel)
+	fmt.Fprintf(os.Stdout, "\033[90m%s\033[0m ", agentRequestLabel(parsed.Type))
 
 	if s.agentHandler == nil {
 		writeAgentNotConfiguredHint(os.Stderr)
