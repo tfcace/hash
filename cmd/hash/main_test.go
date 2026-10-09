@@ -255,3 +255,41 @@ func TestMain_CFlag_PositionalArgs(t *testing.T) {
 		t.Errorf("expected '%s', got '%s'", expected, output)
 	}
 }
+
+// A refused command exits the way bash does: 127 when the path is missing,
+// 126 when it exists but cannot be executed.
+func TestMain_CFlag_RefusedCommandExitCodes(t *testing.T) {
+	tmpDir := t.TempDir()
+	binPath := filepath.Join(tmpDir, "hash_test")
+	if err := exec.Command("go", "build", "-o", binPath, ".").Run(); err != nil {
+		t.Fatalf("failed to build: %v", err)
+	}
+	script := filepath.Join(tmpDir, "deploy.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name string
+		cmd  string
+		want int
+	}{
+		{"missing path", filepath.Join(tmpDir, "nope.sh"), 127},
+		{"not executable", script, 126},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var stderr bytes.Buffer
+			cmd := exec.Command(binPath, "-c", tt.cmd)
+			cmd.Stderr = &stderr
+			err := cmd.Run()
+			exitErr, ok := err.(*exec.ExitError)
+			if !ok {
+				t.Fatalf("expected a non-zero exit, got err=%v stderr=%s", err, stderr.String())
+			}
+			if exitErr.ExitCode() != tt.want {
+				t.Errorf("exit code = %d, want %d (stderr: %s)", exitErr.ExitCode(), tt.want, stderr.String())
+			}
+		})
+	}
+}

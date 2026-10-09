@@ -43,6 +43,17 @@ func (h *ErrorHandler) HandleCommandNotFound(cmd string, suggestions []string, i
 	fmt.Fprintf(out, "  \033[90m└─ ?? to explain\033[0m\n")
 }
 
+// HandleNotExecutable displays a path that exists but cannot be run.
+func (h *ErrorHandler) HandleNotExecutable(cmd, reason string) {
+	out := h.out
+	if out == nil {
+		out = os.Stderr
+	}
+
+	fmt.Fprintf(out, "\n\033[31m✗ %s: %s\033[0m\n", cmd, reason)
+	fmt.Fprintf(out, "  \033[90m└─ ?? to explain\033[0m\n")
+}
+
 // showDidYouMean displays a deterministic typo correction (e.g. a close
 // branch name), using the same key hints as the learned-fix banner.
 func (h *ErrorHandler) showDidYouMean(suggestion string) {

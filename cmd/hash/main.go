@@ -141,6 +141,9 @@ func runCommand(command string, positionalArgs []string, mode ShellMode) int {
 	result, err := exec.Execute(context.Background(), command, os.Stdout, os.Stderr)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "hash: %v\n", err)
+		if result != nil && result.ExitCode != 0 {
+			return result.ExitCode // 127 not found, 126 not executable, as bash
+		}
 		return 1
 	}
 	return result.ExitCode

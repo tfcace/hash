@@ -725,6 +725,11 @@ func (s *Shell) handleExecutionResult(line string, result *executor.Result, err 
 		// and issue reports see what actually went wrong.
 		s.lastStderr = ptyStderrFallback(result)
 	}
+	if s.lastStderr == "" && err != nil {
+		// The shell itself refused the command (not found, not executable):
+		// its own words are the only error text for learning and a bare ??.
+		s.lastStderr = err.Error()
+	}
 	s.lastCwd, _ = os.Getwd()
 
 	// Record command in history
@@ -743,6 +748,17 @@ func (s *Shell) handleExecutionResult(line string, result *executor.Result, err 
 
 // handleExecutionError handles errors from command execution.
 func (s *Shell) handleExecutionError(err error) {
+	var nex *executor.CommandNotExecutableError
+	if errors.As(err, &nex) {
+		handler := s.errors
+		if handler == nil {
+			handler = NewErrorHandler()
+		}
+		handler.HandleNotExecutable(nex.Command, nex.Reason)
+		s.lastExitCode = 126
+		return
+	}
+
 	var cnf *executor.CommandNotFoundError
 	if errors.As(err, &cnf) {
 		suggestions := s.suggestor.Suggest(cnf.Command)

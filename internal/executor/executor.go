@@ -39,6 +39,39 @@ func (e *CommandNotFoundError) Error() string {
 	return fmt.Sprintf("%s: command not found", e.Command)
 }
 
+// CommandNotExecutableError is returned when the command names a file that
+// exists but cannot be run: no execute bit, or a directory.
+type CommandNotExecutableError struct {
+	Command string
+	Reason  string // "Permission denied" or "Is a directory", worded as bash does
+}
+
+func (e *CommandNotExecutableError) Error() string {
+	return fmt.Sprintf("%s: %s", e.Command, e.Reason)
+}
+
+// lookupFailure explains why looking up a command failed. A name with a path
+// separator that resolves to an existing file or directory is reported as
+// not executable, with bash's wording and exit status; anything else is
+// command not found.
+func lookupFailure(dir, name string) error {
+	if strings.Contains(name, "/") {
+		path := name
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(dir, path)
+		}
+		if info, err := os.Stat(path); err == nil {
+			if info.IsDir() {
+				return &CommandNotExecutableError{Command: name, Reason: "Is a directory"}
+			}
+			if info.Mode()&0o111 == 0 {
+				return &CommandNotExecutableError{Command: name, Reason: "Permission denied"}
+			}
+		}
+	}
+	return &CommandNotFoundError{Command: name}
+}
+
 // IsCommandNotFound checks if an error is a CommandNotFoundError.
 func IsCommandNotFound(err error) bool {
 	var cnf *CommandNotFoundError
@@ -1297,6 +1330,18 @@ func (e *Executor) Execute(ctx context.Context, command string, stdout, stderr i
 		}, cnf
 	}
 
+	// A path that exists but cannot run exits 126, as in bash
+	var nex *CommandNotExecutableError
+	if errors.As(err, &nex) {
+		return &Result{
+			ExitCode:       126,
+			Duration:       time.Since(start),
+			Command:        command,
+			CapturedOutput: captureBuf.String(),
+			UsedPTY:        usedPTY,
+		}, nex
+	}
+
 	return &Result{
 		ExitCode:       exitCodeFromError(err),
 		Duration:       time.Since(start),
@@ -1349,7 +1394,7 @@ func (e *Executor) execHandler(next interp.ExecHandlerFunc) interp.ExecHandlerFu
 
 		path, err := interp.LookPathDir(hc.Dir, hc.Env, args[0])
 		if err != nil {
-			return &CommandNotFoundError{Command: args[0]}
+			return lookupFailure(hc.Dir, args[0])
 		}
 
 		cmd := exec.CommandContext(ctx, path, args[1:]...)
