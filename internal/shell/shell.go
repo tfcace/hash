@@ -30,6 +30,7 @@ import (
 	"github.com/tfcace/hash/internal/onboarding"
 	"github.com/tfcace/hash/internal/parser"
 	"github.com/tfcace/hash/internal/prediction"
+	"github.com/tfcace/hash/internal/programstatus"
 	"github.com/tfcace/hash/internal/prompt"
 	"github.com/tfcace/hash/internal/readline"
 	"github.com/tfcace/hash/internal/shell/integration"
@@ -68,6 +69,7 @@ type Shell struct {
 	colorPalette        prompt.Palette
 	allowlist           *allowlist.Manager
 	agentOutput         *AgentOutputCoordinator
+	agentStatus         *agentStatus // OSC 7501 reports for the ?? turn
 	readKey             func(ctx context.Context) byte
 	agentReplyInputHook func(context.Context) (string, error)
 	lastExitCode        int
@@ -305,6 +307,10 @@ func New(cfg *config.Config) (*Shell, error) {
 	// Initialize OSC shell integration emitter
 	osc := integration.New()
 
+	// Program status (OSC 7501) for the ?? turn, on a terminal only
+	statusReporter := programstatus.NewReporter(os.Stdout)
+	statusReporter.SetEnabled(term.IsTerminal(int(os.Stdout.Fd())))
+
 	// Initialize clipboard buffer (configurable size and output limit)
 	clipboardBuf := clipboard.NewBuffer(cfg.Clipboard.BufferSize)
 	maxOutputSizeStr := cfg.Clipboard.MaxOutputSize
@@ -377,6 +383,7 @@ func New(cfg *config.Config) (*Shell, error) {
 		editorCfg:    editorCfg,
 		agentHandler: agentHandler,
 		responseUI:   NewResponseUI(os.Stdout),
+		agentStatus:  newAgentStatus(statusReporter),
 		history:      historyStore,
 		historyPath:  historyPath,
 		learning:     learningStore,
@@ -1099,6 +1106,9 @@ func (s *Shell) handleAgentRequest(ctx context.Context, parsed parser.ParseResul
 		s.agentHandler.SetLastError(nil)
 	}
 
+	// Whatever path the turn takes, leave the terminal no stale record.
+	defer s.agentStatus.finish()
+
 	// Use unified streaming handler for all modes
 	return s.handleAgentRequestUnified(agentCtx, parsed)
 }
@@ -1129,6 +1139,7 @@ func (s *Shell) agentRequestTimeout() time.Duration {
 
 // handleAgentInlineStreaming uses ghost text for inline completions.
 func (s *Shell) handleAgentInlineStreaming(ctx context.Context, parsed parser.ParseResult, modelName string) error {
+	s.agentStatus.working(parsed.AgentPrompt)
 	requestCtx, timeoutCancel := context.WithTimeout(ctx, s.agentRequestTimeout())
 	defer timeoutCancel()
 
@@ -1245,6 +1256,7 @@ func (s *Shell) handleAgentRequestUnified(ctx context.Context, parsed parser.Par
 // handleAgentFullStreaming handles full ?? and pipe modes with streaming.
 func (s *Shell) handleAgentFullStreaming(ctx context.Context, parsed parser.ParseResult, modelName string) error {
 	started := time.Now()
+	s.agentStatus.working(parsed.AgentPrompt)
 	requestCtx, timeoutCancel := context.WithTimeout(ctx, s.agentRequestTimeout())
 	defer timeoutCancel()
 
@@ -1274,6 +1286,7 @@ func (s *Shell) handleAgentFullStreaming(ctx context.Context, parsed parser.Pars
 	})
 
 	if streamResult.canceled {
+		s.agentStatus.idle()
 		s.responseUI.ClearLine()
 		fmt.Fprintln(os.Stderr, "hash: request canceled")
 		s.lastExitCode = 1
@@ -1295,6 +1308,7 @@ func (s *Shell) handleAgentFullStreaming(ctx context.Context, parsed parser.Pars
 
 	responseText := strings.TrimSpace(streamResult.responseText)
 	if responseText == "" {
+		s.agentStatus.failed(emptyAgentResponseMessage)
 		s.responseUI.ClearLine()
 		s.responseUI.ShowError(emptyAgentResponseMessage)
 		s.lastExitCode = 1
@@ -1318,11 +1332,13 @@ func (s *Shell) handleAgentFullStreaming(ctx context.Context, parsed parser.Pars
 
 	confirmType, needsConfirmation := confirmationTypeForAgentResponse(resp, allowReply)
 	if !needsConfirmation {
+		s.agentStatus.done(firstNonEmptyLine(responseText))
 		s.responseUI.StopProgress()
 		s.recordAgentTurn(turn, true, 0)
 		return nil
 	}
 
+	s.reportConfirmationWait(confirmType, resp, responseText)
 	s.agentOutput.EnterConfirming()
 	s.agentOutput.ShowHints(confirmType)
 	action := s.responseUI.WaitForConfirmationByType(confirmType)
@@ -1390,6 +1406,7 @@ func (s *Shell) initialAgentConversationTranscript(parsed parser.ParseResult, re
 func (s *Shell) runAgentConversationLoop(ctx context.Context, modelName string, transcript []agentConversationMessage) error {
 	openRail := true
 	for {
+		s.agentStatus.blocked(programstatus.Question, lastNonEmptyLine(lastAssistantText(transcript)))
 		reply, ok := s.readAgentConversationReply(ctx, openRail)
 		if !ok {
 			return nil
@@ -1423,6 +1440,7 @@ func (s *Shell) runAgentConversationLoop(ctx context.Context, modelName string, 
 			return nil
 		}
 
+		s.reportConfirmationWait(confirmType, resp, responseText)
 		s.agentOutput.EnterConfirming()
 		s.agentOutput.ShowHints(confirmType)
 		action := s.responseUI.WaitForConfirmationByType(confirmType)
@@ -1466,6 +1484,7 @@ func (s *Shell) streamAgentFollowUpTurn(
 	reply string,
 	transcript []agentConversationMessage,
 ) (response agent.Response, responseText string, lineCount int, ok bool) {
+	s.agentStatus.working(reply)
 	requestCtx, timeoutCancel := context.WithTimeout(ctx, s.agentRequestTimeout())
 	defer timeoutCancel()
 
@@ -1497,6 +1516,7 @@ func (s *Shell) streamAgentFollowUpTurn(
 
 	if streamResult.canceled {
 		s.responseUI.ClearLine()
+		s.agentStatus.idle()
 		fmt.Fprintln(os.Stderr, "hash: request canceled")
 		s.lastExitCode = 1
 		return agent.Response{}, "", 0, false
@@ -1505,6 +1525,7 @@ func (s *Shell) streamAgentFollowUpTurn(
 	s.agentOutput.EndStreaming()
 
 	if streamResult.streamErr != nil {
+		s.agentStatus.failed(agentStreamErrorMessage(streamResult.streamErr))
 		s.responseUI.ClearLine()
 		s.responseUI.ShowError(agentStreamErrorMessage(streamResult.streamErr))
 		s.lastExitCode = 1
@@ -1513,6 +1534,7 @@ func (s *Shell) streamAgentFollowUpTurn(
 
 	responseText = strings.TrimSpace(streamResult.responseText)
 	if responseText == "" {
+		s.agentStatus.failed(emptyAgentResponseMessage)
 		s.responseUI.ClearLine()
 		s.responseUI.ShowError(emptyAgentResponseMessage)
 		s.lastExitCode = 1
@@ -1580,6 +1602,9 @@ func (s *Shell) recordAgentTurn(turn agentTurn, accepted bool, commandID int64) 
 // command the user runs or edits takes the same path as a typed line, so
 // the error it returns (such as exit) is the shell's to act on.
 func (s *Shell) handleAgentConfirmAction(ctx context.Context, action ConfirmAction, confirmType ConfirmationType, resp agent.Response, turn agentTurn, lineCount int) error {
+	// The user acted: hash is at rest, and a command that runs now reports
+	// for itself.
+	s.agentStatus.idle()
 	var commandID int64
 	var err error
 	switch action {
@@ -1654,6 +1679,7 @@ func (s *Shell) runAgentCommand(ctx context.Context, command string) (commandID 
 // returns its result: nil once the error is handled, or the outcome of a
 // retried turn.
 func (s *Shell) handleAgentStreamError(ctx context.Context, parsed parser.ParseResult, modelName string, streamErr error, responseLen, lineCount int) error {
+	s.agentStatus.failed(agentStreamErrorMessage(streamErr))
 	s.responseUI.ClearLine() // Stop spinner and clear the line
 	s.responseUI.ShowError(agentStreamErrorMessage(streamErr))
 
@@ -2024,6 +2050,12 @@ func (s *Shell) handleToolPermission(ctx context.Context, req agent.ToolPermissi
 		"tool":    req.ToolName,
 	})
 
+	waitingFor := req.Command
+	if waitingFor == "" {
+		waitingFor = req.ToolName
+	}
+	s.agentStatus.blocked(programstatus.Permission, waitingFor)
+
 	// Stop the spinner so it doesn't overwrite the permission prompt.
 	s.responseUI.StopSpinner()
 
@@ -2038,6 +2070,7 @@ func (s *Shell) handleToolPermission(ctx context.Context, req agent.ToolPermissi
 	}
 	key := readKey(ctx)
 	allow, always = permissionDecisionForKey(key)
+	s.agentStatus.resume()
 
 	if always && s.allowlist != nil {
 		s.refreshProjectAllowlist()
