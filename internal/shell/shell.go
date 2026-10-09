@@ -1869,11 +1869,7 @@ func expandUserPath(path string) string {
 
 // getConfigDir returns the config directory for hash.
 func getConfigDir() string {
-	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
-		return filepath.Join(xdg, "hash")
-	}
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".config", "hash")
+	return config.Dir()
 }
 
 // History returns the history store for use by builtins.

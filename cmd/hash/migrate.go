@@ -250,7 +250,7 @@ func runMigrateFrom(shell string, args []string) int {
 }
 
 func migrateShellDialect() string {
-	cfg, err := config.Load(getConfigDir())
+	cfg, err := config.Load(config.Dir())
 	if err != nil {
 		return "bash"
 	}

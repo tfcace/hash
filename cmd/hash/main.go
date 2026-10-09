@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"syscall"
 
 	"github.com/tfcace/hash/internal/config"
@@ -157,7 +156,7 @@ func run(mode ShellMode) error {
 	defer trace.Close()
 
 	// Load configuration (warns but continues on parse errors)
-	configDir := getConfigDir()
+	configDir := config.Dir()
 	cfg, err := config.Load(configDir)
 	if err != nil {
 		// Load errors keep whatever could be salvaged - warn loudly but continue
@@ -193,17 +192,4 @@ func run(mode ShellMode) error {
 
 	// Run the shell
 	return sh.Run(ctx)
-}
-
-func getConfigDir() string {
-	if dir := os.Getenv("HASH_CONFIG_DIR"); dir != "" {
-		return dir
-	}
-
-	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
-		return filepath.Join(xdg, "hash")
-	}
-
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".config", "hash")
 }
