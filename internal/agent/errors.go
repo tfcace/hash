@@ -32,6 +32,21 @@ func IsStartupError(err error) bool {
 		errors.Is(err, exec.ErrNotFound)
 }
 
+// IsModelSelectionError reports whether the agent rejected the session's
+// current model, as Claude Code does for a model the account cannot use. The
+// fix is a different model, which the shell's model builtin can select.
+func IsModelSelectionError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "selected model") {
+		return true
+	}
+	return strings.Contains(msg, "model") &&
+		(strings.Contains(msg, "not exist") || strings.Contains(msg, "not have access"))
+}
+
 // IsTimeoutError reports whether the error indicates a request timeout.
 func IsTimeoutError(err error) bool {
 	if err == nil {

@@ -446,6 +446,14 @@ func (u *ResponseUI) ShowAgentHint(transport, command, url string) {
 	fmt.Fprintln(u.out)
 }
 
+// ShowModelHint follows an agent error about the session's model with the
+// way out: the model builtin, which lists what this agent offers and switches.
+func (u *ResponseUI) ShowModelHint() {
+	fmt.Fprintln(u.out)
+	fmt.Fprintf(u.out, "\033[90m  Pick a model this agent can use: run `model --list` to see the choices, then `model <name>`.\033[0m\n")
+	fmt.Fprintln(u.out)
+}
+
 // ShowConfirmation displays the compact confirmation UI below the response.
 //
 // Deprecated: Use AgentOutputCoordinator.ShowHints instead for proper

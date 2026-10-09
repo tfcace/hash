@@ -78,3 +78,25 @@ func TestIsRetryableError(t *testing.T) {
 		})
 	}
 }
+
+func TestIsModelSelectionError(t *testing.T) {
+	claudeMessage := errors.New("rpc error -32603: Internal error: There's an issue with the selected model (fable[1m]). It may not exist or you may not have access to it. Run --model to pick a different model.")
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"claude code rejects the session model", claudeMessage, true},
+		{"model does not exist", errors.New("model claude-x does not exist"), true},
+		{"nil", nil, false},
+		{"startup failure", ErrACPStartFailed, false},
+		{"unrelated rpc error", errors.New("rpc error -32603: Internal error: boom"), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := IsModelSelectionError(tt.err); got != tt.want {
+				t.Errorf("IsModelSelectionError(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
+	}
+}

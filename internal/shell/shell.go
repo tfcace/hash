@@ -1544,6 +1544,12 @@ func (s *Shell) handleAgentStreamError(ctx context.Context, parsed parser.ParseR
 	// If no response was received, classify the failure before showing hints.
 	// Startup errors get install/PATH hints; transient errors get retry.
 	if responseLen == 0 {
+		if agent.IsModelSelectionError(streamErr) {
+			s.responseUI.ShowModelHint()
+			s.lastExitCode = 1
+			return true
+		}
+
 		if agent.IsStartupError(streamErr) {
 			s.responseUI.ShowAgentHint(
 				s.config.Agent.Transport,

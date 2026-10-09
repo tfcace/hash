@@ -107,3 +107,32 @@ func TestHandleAgentStreamError_NoOutputUsesUserFacingRetry(t *testing.T) {
 		t.Fatalf("expected retry hint for no-output error, got:\n%s", output)
 	}
 }
+
+func TestHandleAgentStreamError_ModelErrorPointsAtModelBuiltin(t *testing.T) {
+	var out bytes.Buffer
+	sh := &Shell{
+		config:      &config.Config{},
+		responseUI:  NewResponseUI(&out),
+		agentOutput: NewAgentOutputCoordinator(&out),
+	}
+
+	handled := sh.handleAgentStreamError(
+		context.Background(),
+		parser.ParseResult{},
+		"claude-agent-acp",
+		errors.New("rpc error -32603: Internal error: There's an issue with the selected model (fable[1m]). It may not exist or you may not have access to it. Run --model to pick a different model."),
+		0,
+		0,
+	)
+
+	if !handled {
+		t.Fatal("expected error to be handled")
+	}
+	output := out.String()
+	if !strings.Contains(output, "model --list") {
+		t.Fatalf("expected a pointer to the model builtin, got:\n%s", output)
+	}
+	if strings.Contains(output, "Troubleshooting") || strings.Contains(output, "[Enter: retry]") {
+		t.Fatalf("model errors should get neither install hints nor a retry prompt, got:\n%s", output)
+	}
+}
