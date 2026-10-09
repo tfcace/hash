@@ -10,6 +10,7 @@ func TestCommandFromResponse(t *testing.T) {
 		ok   bool
 	}{
 		{"bare command", "find . -name '*.go'", "find . -name '*.go'", true},
+		{"inline-code bare command", "`cat nope.txt`", "cat nope.txt", true},
 		{"lead-in then indented command", "The command is:\n  find . -name '*.go' -mtime 0", "find . -name '*.go' -mtime 0", true},
 		{"lead-in with sentences then command", "No context here. The request: find Go files. A single bare command:\nfind . -name '*.go' -mtime 0", "find . -name '*.go' -mtime 0", true},
 		{"lead-in then fenced command", "A single bare command:\n```bash\nfind . -name '*.go' -mtime 0\n```", "find . -name '*.go' -mtime 0", true},
