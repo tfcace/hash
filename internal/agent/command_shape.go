@@ -24,7 +24,7 @@ func commandFromResponse(text string) (string, bool) {
 		return "", false
 	}
 	if looksLikeCommand(text) {
-		return text, true
+		return bareCommandLine(text), true
 	}
 
 	lines := responseLines(text)
