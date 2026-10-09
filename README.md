@@ -17,21 +17,28 @@
 Hash is a shell that treats AI as a first-class citizen without locking you into any particular model or vendor. Drop `??` anywhere in a command to get help:
 
 ```bash
-# Generate a command from natural language
+# Ask in plain language; the agent does the work and streams the answer
 ?? find all Go files modified today
-→ find . -name "*.go" -mtime 0
+→ Found 31 Go files modified today, mostly under internal/shell and
+  internal/history. The largest change is in internal/shell/shell.go.
+  [Enter: done] [Tab: copy] [r: reply] [Esc: cancel]
+
+# When the reply is a single command, Hash offers to run it instead
+?? one-liner to count lines in every Go file
+→ find . -name "*.go" | xargs wc -l
   [Enter: run] [Tab: edit] [Esc: cancel]
 
 # Pipe output through the agent
 kubectl get pods -o json | ?? extract names and status
-→ jq -r '.items[] | "\(.metadata.name) \(.status.phase)"'
+→ api-7d9f5c    Running
+  worker-2      CrashLoopBackOff
 
 # Fill just one argument
 git log --format=?? oneline with hash
 → git log --format="%h %s"
 ```
 
-No mode switching. No special commands. Just `??` where you need help. And when the agent answers with a question, Hash opens a conversation prompt so you can reply turn by turn in the same session.
+No mode switching. No special commands. Just `??` where you need help. The agent decides the shape of its reply: it can run commands itself, each tool call asking your permission, and answer in prose, or hand back one command that never runs until you press Enter. And when the agent answers with a question, Hash opens a conversation prompt so you can reply turn by turn in the same session.
 
 ## Highlights
 

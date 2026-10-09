@@ -3,6 +3,7 @@
 #
 # This creates the main hero recording for the README and runhash.dev,
 # showing the three core ?? forms: full request, pipe, inline completion.
+# A full request is an agent turn: the reply is either output or a command.
 
 Output demos/hero.gif
 Output demos/hero.mp4
@@ -27,11 +28,11 @@ Enter
 Sleep 4s
 Show
 
-# Demo 1: natural language to command
+# Demo 1: a plain-language request; the agent answers, or hands back a command
 Type "?? find all Go files modified today"
 Sleep 800ms
 Enter
-Wait+Screen /Enter: run/
+Wait+Screen /Enter: (run|done)/
 Sleep 1.5s
 Enter
 Sleep 2.5s
@@ -45,11 +46,11 @@ Sleep 3s
 Enter
 Sleep 1.5s
 
-# Demo 3: inline completion fills one argument
+# Demo 3: inline completion fills one argument; the editor shows [enter]run
 Type "git log -3 --format=?? short hash and subject"
 Sleep 800ms
 Enter
-Wait+Screen /Enter: run/
+Wait+Screen /enter.run/
 Sleep 1.5s
 Enter
 Sleep 2.5s
