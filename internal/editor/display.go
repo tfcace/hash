@@ -248,10 +248,13 @@ func visibleWidthAtByteIndex(s string, col int) int {
 }
 
 // renderedGhostSuffixWidth returns the visible width added by ghost rendering.
-func renderedGhostSuffixWidth(ghostText string, streaming, fromAgent bool) int {
+func renderedGhostSuffixWidth(ghostText string, streaming, fromAgent bool, notice string) int {
 	if ghostText == "" {
 		if streaming {
 			return visibleWidth(" Agent thinking...")
+		}
+		if notice != "" {
+			return visibleWidth(" " + notice)
 		}
 		return 0
 	}
@@ -439,6 +442,7 @@ type GhostRenderState struct {
 	FromAgent bool
 	ModelName string
 	Status    string
+	Notice    string // shown after the cursor when an agent ghost ended with an error
 }
 
 // RenderWithGhost draws the buffer with inline ghost text suggestion.
@@ -505,8 +509,12 @@ func (d *Display) RenderWithGhost(buf *Buffer, cur *Cursor, hasSelection bool, g
 		}
 
 		// Render ghost text on the cursor's line, after the cursor position
-		if i == cursorRow && (ghostText != "" || state.Streaming) {
-			if ghostText == "" && state.Streaming {
+		if i == cursorRow && (ghostText != "" || state.Streaming || state.Notice != "") {
+			switch {
+			case ghostText == "" && !state.Streaming:
+				// The agent ghost ended with an error: say why, where the fill would have been
+				sb.WriteString("\x1b[90;3m " + state.Notice + "\x1b[0m")
+			case ghostText == "":
 				// Show thinking indicator while waiting for first chunk (agent only)
 				// Use consistent text with response_ui states
 				if state.Status != "" {
@@ -514,7 +522,7 @@ func (d *Display) RenderWithGhost(buf *Buffer, cur *Cursor, hasSelection bool, g
 				} else {
 					sb.WriteString("\x1b[90;3m Agent thinking...\x1b[0m")
 				}
-			} else if ghostText != "" {
+			default:
 				// Get the first line of ghost text (for single-line display)
 				ghostFirstLine := ghostText
 				newlineIdx := strings.Index(ghostText, "\n")
@@ -547,7 +555,7 @@ func (d *Display) RenderWithGhost(buf *Buffer, cur *Cursor, hasSelection bool, g
 	// Clear everything below the buffer
 	sb.WriteString(ansiClearToEnd)
 
-	ghostWidth := renderedGhostSuffixWidth(ghostText, state.Streaming, state.FromAgent)
+	ghostWidth := renderedGhostSuffixWidth(ghostText, state.Streaming, state.FromAgent, state.Notice)
 	totalRows, cursorVisualRow, cursorVisualCol := d.layoutForStandardRender(buf, cur, ghostWidth)
 	linesBelowCursor := totalRows - 1 - cursorVisualRow
 	if linesBelowCursor > 0 {

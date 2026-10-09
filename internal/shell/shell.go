@@ -1111,8 +1111,9 @@ func (s *Shell) handleAgentInlineStreaming(ctx context.Context, parsed parser.Pa
 	ed.SetGhostTextStreaming(updates, errCh)
 	ed.SetStreamingModel(modelName)
 
-	// Run editor
-	result, err := ed.Run(requestCtx)
+	// Run the editor on the shell's context, not the request's: the timeout
+	// bounds how long we wait for the agent, never how long the user may edit.
+	result, err := ed.Run(ctx)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "hash: editor error: %v\n", err)
 		s.lastExitCode = 1
@@ -1137,17 +1138,10 @@ func (s *Shell) handleAgentInlineStreaming(ctx context.Context, parsed parser.Pa
 	// Stop progress bar before executing (defer in caller will be a no-op)
 	s.responseUI.StopProgress()
 
-	// Execute the command
-	execResult, err := s.executor.Execute(ctx, command, os.Stdout, os.Stderr)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "hash: %v\n", err)
-		s.lastExitCode = 1
-	} else {
-		s.lastExitCode = execResult.ExitCode
-		s.lastDuration = execResult.Duration
-	}
-	s.recordCommand(command, s.lastExitCode, s.lastDuration)
-	return nil
+	// The user may have edited the line into anything, including a builtin
+	// such as exit or cd, so it takes the same path as a line typed at the
+	// prompt: builtins, history, learning and stderr capture included.
+	return s.dispatchCommand(ctx, command)
 }
 
 // executePipeCommand runs the pipe command and captures its output.

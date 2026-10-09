@@ -133,6 +133,14 @@ func textStreamFromEvents(ctx context.Context, events <-chan agent.StreamEvent, 
 		for events != nil || errs != nil {
 			select {
 			case <-ctx.Done():
+				// The request ended before the stream did (timeout or cancel):
+				// tell the editor instead of closing the channels silently.
+				if err := ctx.Err(); err != nil {
+					select {
+					case errCh <- err:
+					default:
+					}
+				}
 				return
 			case event, ok := <-events:
 				if !ok {

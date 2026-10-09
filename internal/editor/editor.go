@@ -3,6 +3,7 @@ package editor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -108,6 +109,7 @@ type Editor struct {
 	ghost           *GhostText
 	ghostStreamChan <-chan GhostStreamUpdate // Unified streamed text and status.
 	ghostErrChan    <-chan error             // Channel for ghost text errors
+	ghostNotice     string                   // Why the last agent ghost ended without a fill; cleared on the next key
 	streamingModel  string                   // Model name for "Thinking..." display
 }
 
@@ -440,7 +442,9 @@ func (e *Editor) handleGhostStreamUpdate(update GhostStreamUpdate, ok bool) {
 	e.render()
 }
 
-// handleGhostTextError processes ghost text errors.
+// handleGhostTextError processes ghost text errors. The failed fill is
+// replaced by a one-line notice after the cursor so the user knows why nothing
+// arrived; the typed line stays editable and the notice goes on the next key.
 func (e *Editor) handleGhostTextError(err error, ok bool) {
 	if !ok {
 		e.ghostErrChan = nil
@@ -450,8 +454,32 @@ func (e *Editor) handleGhostTextError(err error, ok bool) {
 		e.ghost.Clear()
 		e.ghostStreamChan = nil
 		e.ghostErrChan = nil
+		e.ghostNotice = ghostNoticeFor(err)
 		e.render()
 	}
+}
+
+// ghostNoticeMaxWidth bounds the notice so it stays on the input line.
+const ghostNoticeMaxWidth = 72
+
+// ghostNoticeFor turns a ghost stream error into the short notice shown after
+// the cursor. A canceled request shows nothing: the user asked for that.
+func ghostNoticeFor(err error) string {
+	switch {
+	case errors.Is(err, context.Canceled):
+		return ""
+	case errors.Is(err, context.DeadlineExceeded):
+		return "agent request timed out"
+	}
+	msg := err.Error()
+	if i := strings.IndexByte(msg, '\n'); i >= 0 {
+		msg = msg[:i]
+	}
+	msg = "agent: " + strings.TrimSpace(msg)
+	if runes := []rune(msg); len(runes) > ghostNoticeMaxWidth {
+		msg = string(runes[:ghostNoticeMaxWidth-1]) + "…"
+	}
+	return msg
 }
 
 // handleKeyEvent processes a key event. Returns (result, true) if the editor should exit.
@@ -464,8 +492,9 @@ func (e *Editor) handleKeyEvent(key Key) (Result, bool) {
 		"mode":              e.mode.Name(),
 	})
 
-	// Any keypress dismisses a lingering completion notice.
+	// Any keypress dismisses a lingering completion or ghost notice.
 	e.completionNotice = ""
+	e.ghostNotice = ""
 
 	if result, done, handled := e.handleControlKey(key); handled {
 		return result, done
@@ -691,6 +720,7 @@ func (e *Editor) render() {
 		FromAgent: e.ghost.FromAgent,
 		ModelName: e.streamingModel,
 		Status:    e.ghost.Status,
+		Notice:    e.ghostNotice,
 	})
 
 	// Render completion menu if active

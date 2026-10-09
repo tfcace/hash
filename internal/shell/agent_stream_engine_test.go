@@ -2,6 +2,7 @@ package shell
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -151,5 +152,25 @@ func TestCollectAgentStream_StripsSplitAwaitingInputMarker(t *testing.T) {
 	}
 	if result.responseText != "Which directory should I inspect?\n" {
 		t.Fatalf("response text = %q, want marker-free question", result.responseText)
+	}
+}
+
+// A request timeout with no fill yet must reach the editor as an error, not
+// as a silently closed stream.
+func TestTextStreamFromEvents_ReportsContextErrorOnErrChan(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	events := make(chan agent.StreamEvent)
+	errs := make(chan error)
+
+	_, errCh := textStreamFromEvents(ctx, events, errs)
+
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("errCh delivered %v, want the deadline error", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected the deadline to surface on errCh")
 	}
 }
