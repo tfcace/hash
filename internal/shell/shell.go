@@ -1225,12 +1225,11 @@ func (s *Shell) handleAgentRequestUnified(ctx context.Context, parsed parser.Par
 	}
 
 	// Full ?? and pipe modes: streaming with confirmation UI
-	s.handleAgentFullStreaming(ctx, parsed, modelName)
-	return nil
+	return s.handleAgentFullStreaming(ctx, parsed, modelName)
 }
 
 // handleAgentFullStreaming handles full ?? and pipe modes with streaming.
-func (s *Shell) handleAgentFullStreaming(ctx context.Context, parsed parser.ParseResult, modelName string) {
+func (s *Shell) handleAgentFullStreaming(ctx context.Context, parsed parser.ParseResult, modelName string) error {
 	requestCtx, timeoutCancel := context.WithTimeout(ctx, s.agentRequestTimeout())
 	defer timeoutCancel()
 
@@ -1263,22 +1262,20 @@ func (s *Shell) handleAgentFullStreaming(ctx context.Context, parsed parser.Pars
 		s.responseUI.ClearLine()
 		fmt.Fprintln(os.Stderr, "hash: request canceled")
 		s.lastExitCode = 1
-		return
+		return nil
 	}
 
 	s.agentOutput.EndStreaming()
 
 	if streamResult.streamErr != nil {
-		if s.handleAgentStreamError(
+		return s.handleAgentStreamError(
 			ctx,
 			parsed,
 			modelName,
 			streamResult.streamErr,
 			len(streamResult.responseText),
 			streamResult.lineCount,
-		) {
-			return
-		}
+		)
 	}
 
 	responseText := strings.TrimSpace(streamResult.responseText)
@@ -1286,7 +1283,7 @@ func (s *Shell) handleAgentFullStreaming(ctx context.Context, parsed parser.Pars
 		s.responseUI.ClearLine()
 		s.responseUI.ShowError(emptyAgentResponseMessage)
 		s.lastExitCode = 1
-		return
+		return nil
 	}
 
 	// Success path - add newline after response and clear spinner
@@ -1306,7 +1303,7 @@ func (s *Shell) handleAgentFullStreaming(ctx context.Context, parsed parser.Pars
 	confirmType, needsConfirmation := confirmationTypeForAgentResponse(resp, allowReply)
 	if !needsConfirmation {
 		s.responseUI.StopProgress()
-		return
+		return nil
 	}
 
 	s.agentOutput.EnterConfirming()
@@ -1319,13 +1316,10 @@ func (s *Shell) handleAgentFullStreaming(ctx context.Context, parsed parser.Pars
 	s.responseUI.StopProgress()
 
 	if action == ConfirmReply {
-		s.runAgentConversationLoop(ctx, modelName, transcript)
-		return
+		return s.runAgentConversationLoop(ctx, modelName, transcript)
 	}
 
-	if s.handleAgentConfirmAction(ctx, action, confirmType, resp, responseText, lineCount) {
-		return
-	}
+	return s.handleAgentConfirmAction(ctx, action, confirmType, resp, responseText, lineCount)
 }
 
 func (s *Shell) presentAgentToolUpdate(update agent.ToolCallUpdate, prefix string) {
@@ -1375,23 +1369,23 @@ func (s *Shell) initialAgentConversationTranscript(parsed parser.ParseResult, re
 	return transcript
 }
 
-func (s *Shell) runAgentConversationLoop(ctx context.Context, modelName string, transcript []agentConversationMessage) {
+func (s *Shell) runAgentConversationLoop(ctx context.Context, modelName string, transcript []agentConversationMessage) error {
 	openRail := true
 	for {
 		reply, ok := s.readAgentConversationReply(ctx, openRail)
 		if !ok {
-			return
+			return nil
 		}
 		openRail = false
 		if agentConversationReplyEndsConversation(reply) {
-			return
+			return nil
 		}
 
 		priorTranscript := append([]agentConversationMessage(nil), transcript...)
 		resp, responseText, lineCount, ok := s.streamAgentFollowUpTurn(ctx, reply, priorTranscript)
 		transcript = append(transcript, agentConversationMessage{Role: "user", Text: reply})
 		if !ok {
-			return
+			return nil
 		}
 		transcript = append(transcript, agentConversationMessage{Role: "assistant", Text: responseText})
 
@@ -1404,7 +1398,7 @@ func (s *Shell) runAgentConversationLoop(ctx context.Context, modelName string, 
 			agentTurnAllowsReply(parser.CommandTypeAgent, resp),
 		)
 		if !needsConfirmation {
-			return
+			return nil
 		}
 
 		s.agentOutput.EnterConfirming()
@@ -1418,8 +1412,7 @@ func (s *Shell) runAgentConversationLoop(ctx context.Context, modelName string, 
 		if action == ConfirmReply {
 			continue
 		}
-		s.handleAgentConfirmAction(ctx, action, confirmType, resp, responseText, lineCount)
-		return
+		return s.handleAgentConfirmAction(ctx, action, confirmType, resp, responseText, lineCount)
 	}
 }
 
@@ -1527,19 +1520,19 @@ func confirmationTypeForAgentResponse(resp agent.Response, allowExplanationReply
 	return 0, false
 }
 
-// handleAgentConfirmAction processes the user's confirmation choice.
-// Returns true if the caller should return early (e.g., for edit mode).
-func (s *Shell) handleAgentConfirmAction(ctx context.Context, action ConfirmAction, confirmType ConfirmationType, resp agent.Response, responseText string, lineCount int) bool {
+// handleAgentConfirmAction processes the user's confirmation choice. A
+// command the user runs or edits takes the same path as a typed line, so
+// the error it returns (such as exit) is the shell's to act on.
+func (s *Shell) handleAgentConfirmAction(ctx context.Context, action ConfirmAction, confirmType ConfirmationType, resp agent.Response, responseText string, lineCount int) error {
 	switch action {
 	case ConfirmRun:
 		if confirmType == ConfirmTypeCommand {
-			s.executeAgentCommand(ctx, resp.Command)
+			return s.runAgentCommand(ctx, resp.Command)
 		}
 		// For explanations, ConfirmRun just dismisses
 	case ConfirmEdit:
 		if confirmType == ConfirmTypeCommand {
-			s.handleEditCommand(ctx, resp.Command)
-			return true
+			return s.handleEditCommand(ctx, resp.Command)
 		}
 		// Copy explanation to system clipboard
 		if err := copyToSystemClipboard(responseText); err != nil {
@@ -1552,25 +1545,26 @@ func (s *Shell) handleAgentConfirmAction(ctx context.Context, action ConfirmActi
 		// +1 for confirmation hint line, +1 for the blank line after fmt.Println()
 		s.responseUI.ClearLines(lineCount + 2)
 	}
-	return false
+	return nil
 }
 
-// executeAgentCommand executes a command generated by the agent.
-func (s *Shell) executeAgentCommand(ctx context.Context, command string) {
-	result, err := s.executor.Execute(ctx, command, os.Stdout, os.Stderr)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "hash: %v\n", err)
-		s.lastExitCode = 1
-	} else {
-		s.lastExitCode = result.ExitCode
-		s.lastDuration = result.Duration
+// runAgentCommand runs a command the agent handed back exactly as if the
+// user had typed it: builtins, history, learning, prediction and stderr
+// capture included, so a failure becomes the context a bare ?? explains.
+// The reply is a shell line, never a new request: a ?? inside it (a glob, a
+// grep pattern) is shell syntax, so it bypasses the ?? dispatch.
+func (s *Shell) runAgentCommand(ctx context.Context, command string) error {
+	command = strings.TrimSpace(command)
+	if command == "" {
+		return nil
 	}
-	s.recordCommand(command, s.lastExitCode, s.lastDuration)
+	return s.executeRegularCommand(ctx, command)
 }
 
-// handleAgentStreamError handles errors during agent streaming.
-// Returns true if the caller should return (error was fully handled).
-func (s *Shell) handleAgentStreamError(ctx context.Context, parsed parser.ParseResult, modelName string, streamErr error, responseLen, lineCount int) bool {
+// handleAgentStreamError handles errors during agent streaming. The caller
+// returns its result: nil once the error is handled, or the outcome of a
+// retried turn.
+func (s *Shell) handleAgentStreamError(ctx context.Context, parsed parser.ParseResult, modelName string, streamErr error, responseLen, lineCount int) error {
 	s.responseUI.ClearLine() // Stop spinner and clear the line
 	s.responseUI.ShowError(agentStreamErrorMessage(streamErr))
 
@@ -1580,7 +1574,7 @@ func (s *Shell) handleAgentStreamError(ctx context.Context, parsed parser.ParseR
 		if agent.IsModelSelectionError(streamErr) {
 			s.responseUI.ShowModelHint()
 			s.lastExitCode = 1
-			return true
+			return nil
 		}
 
 		if agent.IsStartupError(streamErr) {
@@ -1590,7 +1584,7 @@ func (s *Shell) handleAgentStreamError(ctx context.Context, parsed parser.ParseR
 				s.config.Agent.URL,
 			)
 			s.lastExitCode = 1
-			return true
+			return nil
 		}
 
 		if agent.IsRetryableError(streamErr) {
@@ -1600,14 +1594,14 @@ func (s *Shell) handleAgentStreamError(ctx context.Context, parsed parser.ParseR
 			s.agentOutput.ExitConfirming()
 			fmt.Println()
 			if action == ConfirmRun { // Retry
-				s.handleAgentFullStreaming(ctx, parsed, modelName)
+				return s.handleAgentFullStreaming(ctx, parsed, modelName)
 			}
 			s.lastExitCode = 1
-			return true
+			return nil
 		}
 
 		s.lastExitCode = 1
-		return true
+		return nil
 	}
 
 	// Mid-stream error with partial response - offer retry
@@ -1617,13 +1611,12 @@ func (s *Shell) handleAgentStreamError(ctx context.Context, parsed parser.ParseR
 	s.agentOutput.ExitConfirming()
 	fmt.Println()
 	if action == ConfirmRun { // Retry
-		s.handleAgentFullStreaming(ctx, parsed, modelName)
-		return true
+		return s.handleAgentFullStreaming(ctx, parsed, modelName)
 	}
 	// Cancel: clear error + any partial response
 	// lineCount + error line + confirmation line + blank line
 	s.responseUI.ClearLines(lineCount + 3)
-	return true
+	return nil
 }
 
 func agentStreamErrorMessage(err error) string {
@@ -1643,8 +1636,8 @@ func writeAgentNotConfiguredHint(w io.Writer) {
 	fmt.Fprintf(w, "  See docs/config-reference.md for options.\n")
 }
 
-// handleEditCommand opens editor with command for editing.
-func (s *Shell) handleEditCommand(ctx context.Context, command string) {
+// handleEditCommand opens the editor on the command and runs the edited line.
+func (s *Shell) handleEditCommand(ctx context.Context, command string) error {
 	s.historyIndex = -1
 	s.historySavedLine = ""
 
@@ -1658,26 +1651,14 @@ func (s *Shell) handleEditCommand(ctx context.Context, command string) {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "hash: editor error: %v\n", err)
 		s.lastExitCode = 1
-		return
+		return nil
 	}
 
 	if result.Canceled || result.EOF {
-		return
+		return nil
 	}
 
-	// Execute edited command
-	editedCmd := strings.TrimSpace(result.Text)
-	if editedCmd != "" {
-		execResult, err := s.executor.Execute(ctx, editedCmd, os.Stdout, os.Stderr)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "hash: %v\n", err)
-			s.lastExitCode = 1
-		} else {
-			s.lastExitCode = execResult.ExitCode
-			s.lastDuration = execResult.Duration
-		}
-		s.recordCommand(editedCmd, s.lastExitCode, s.lastDuration)
-	}
+	return s.runAgentCommand(ctx, result.Text)
 }
 
 func (s *Shell) updatePrompt() {
