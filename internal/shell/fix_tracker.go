@@ -58,6 +58,11 @@ func (t *fixTracker) Observe(command, stderr string, exitCode int) (learning.Fix
 	return fix, true
 }
 
+// active reports whether the tracker can offer suggestions at the prompt.
+func (t *fixTracker) active() bool {
+	return t != nil && t.store != nil
+}
+
 // SuggestedFix returns the fix suggested for the pending failure, or "".
 func (t *fixTracker) SuggestedFix() string {
 	if t == nil || t.pending == nil {
@@ -80,6 +85,8 @@ func (t *fixTracker) SetSuggested(fix string) {
 // shows the best suggestion for a failure: a deterministic did-you-mean
 // correction when one exists, else the learned fix from the store.
 func (s *Shell) observeCommandOutcome(line string) {
+	typoFix := s.pendingTypoFix
+	s.pendingTypoFix = ""
 	if s.fixes == nil {
 		return
 	}
@@ -100,6 +107,12 @@ func (s *Shell) observeCommandOutcome(line string) {
 		if suggestion := gitDidYouMean(line, s.lastStderr, lister); suggestion != "" {
 			s.fixes.SetSuggested(suggestion)
 			h.showDidYouMean(suggestion)
+			return
+		}
+		// The command-not-found banner already named the correction; the
+		// corrected line is what the prompt offers.
+		if typoFix != "" {
+			s.fixes.SetSuggested(typoFix)
 			return
 		}
 	}

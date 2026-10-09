@@ -11,7 +11,7 @@ func TestErrorHandler_HandleCommandNotFound(t *testing.T) {
 	h := NewErrorHandler()
 	h.out = &buf
 
-	h.HandleCommandNotFound("jq", []string{"jp", "jj"}, "brew install jq")
+	h.HandleCommandNotFound("jq", []string{"jp", "jj"}, "brew install jq", true)
 
 	output := buf.String()
 
@@ -48,7 +48,7 @@ func TestErrorHandler_HandleCommandNotFound_NoSuggestions(t *testing.T) {
 	h := NewErrorHandler()
 	h.out = &buf
 
-	h.HandleCommandNotFound("xyz123", nil, "")
+	h.HandleCommandNotFound("xyz123", nil, "", false)
 
 	output := buf.String()
 

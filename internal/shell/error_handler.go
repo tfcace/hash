@@ -9,6 +9,10 @@ import (
 	"github.com/tfcace/hash/internal/learning"
 )
 
+// acceptFooter closes a banner whose suggestion is waiting as ghost text at
+// the next prompt.
+const acceptFooter = "  \033[90m└─ → to accept at prompt · esc to dismiss · ?? to explain\033[0m\n"
+
 // ErrorHandler renders error and learned-fix banners.
 type ErrorHandler struct {
 	out io.Writer
@@ -20,7 +24,9 @@ func NewErrorHandler() *ErrorHandler {
 }
 
 // HandleCommandNotFound displays a command-not-found error with suggestions.
-func (h *ErrorHandler) HandleCommandNotFound(cmd string, suggestions []string, installHint string) {
+// offerAccept says the first suggestion will be waiting as ghost text at the
+// next prompt, so the footer may teach the accept key.
+func (h *ErrorHandler) HandleCommandNotFound(cmd string, suggestions []string, installHint string, offerAccept bool) {
 	out := h.out
 	if out == nil {
 		out = os.Stderr
@@ -40,6 +46,10 @@ func (h *ErrorHandler) HandleCommandNotFound(cmd string, suggestions []string, i
 	}
 
 	// Footer
+	if offerAccept {
+		fmt.Fprint(out, acceptFooter)
+		return
+	}
 	fmt.Fprintf(out, "  \033[90m└─ ?? to explain\033[0m\n")
 }
 
@@ -64,7 +74,7 @@ func (h *ErrorHandler) showDidYouMean(suggestion string) {
 
 	fmt.Fprintf(out, "\n\033[33m✗ Did you mean\033[0m\n")
 	fmt.Fprintf(out, "\n\033[32m→\033[0m %s\n", suggestion)
-	fmt.Fprintf(out, "  \033[90m└─ → to accept at prompt · esc to dismiss · ?? to explain\033[0m\n")
+	fmt.Fprint(out, acceptFooter)
 }
 
 func (h *ErrorHandler) showLearnedFix(fix learning.Fix, highConfidence bool) {
@@ -84,5 +94,5 @@ func (h *ErrorHandler) showLearnedFix(fix learning.Fix, highConfidence bool) {
 		fmt.Fprintf(out, "\n\033[33m?\033[0m %s    \033[90m(tried %d×, worked %d×)\033[0m\n",
 			fix.Fix, fix.SuccessCount+fix.FailureCount, fix.SuccessCount)
 	}
-	fmt.Fprintf(out, "  \033[90m└─ → to accept at prompt · esc to dismiss · ?? to explain\033[0m\n")
+	fmt.Fprint(out, acceptFooter)
 }
