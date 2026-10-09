@@ -251,6 +251,14 @@ func (ui *SearchUI) View() tea.View {
 		b.WriteString(normalStyle.Render(cmd.Command))
 		b.WriteString("\n")
 
+		// The question behind a command the agent produced
+		if ui.store != nil {
+			if question, ok := ui.store.AgentPromptForCommand(cmd.ID); ok {
+				b.WriteString(dimStyle.Render("?? " + question))
+				b.WriteString("\n")
+			}
+		}
+
 		// Metadata line
 		meta := fmt.Sprintf("%s │ %s", cmd.Timestamp.Format("2006-01-02 15:04"), cmd.Cwd)
 		if cmd.GitBranch != "" {

@@ -487,3 +487,26 @@ func TestSearchUI_PreviewPane(t *testing.T) {
 		t.Error("Preview should show full command")
 	}
 }
+
+// A command that came from a ?? turn shows the question under it in the
+// preview, so the picker recalls what was asked as well as what ran.
+func TestSearchUI_PreviewShowsTheQuestionBehindACommand(t *testing.T) {
+	store, _ := NewStore(":memory:")
+	defer store.Close()
+
+	id, err := store.Add(Command{Command: "find . -name '*.go' | xargs wc -l", Cwd: "/tmp", Timestamp: time.Now()})
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if _, err := store.AddAgentInteraction(AgentInteraction{Prompt: "count lines in go files", Accepted: true, CommandID: id, Timestamp: time.Now()}); err != nil {
+		t.Fatalf("AddAgentInteraction: %v", err)
+	}
+
+	ui := NewSearchUI(store, prompt.DefaultPalette())
+	ui.searchNow()
+
+	view := ui.View().Content
+	if !strings.Contains(view, "?? count lines in go files") {
+		t.Errorf("preview should show the question behind the command, got:\n%s", view)
+	}
+}

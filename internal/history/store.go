@@ -92,6 +92,7 @@ func (s *Store) migrate() error {
 	CREATE INDEX IF NOT EXISTS idx_commands_timestamp ON commands(timestamp DESC);
 	CREATE INDEX IF NOT EXISTS idx_commands_command ON commands(command);
 	CREATE INDEX IF NOT EXISTS idx_commands_is_sudo ON commands(is_sudo);
+	CREATE INDEX IF NOT EXISTS idx_agent_interactions_command ON agent_interactions(command_id);
 	`
 
 	_, err := s.db.Exec(schema)
@@ -283,6 +284,25 @@ func (s *Store) GetAgentInteractions(prompt string, limit int) ([]AgentInteracti
 	}
 
 	return interactions, rows.Err()
+}
+
+// AgentPromptForCommand returns what the user asked the agent when the given
+// command came from a ?? turn, so a recalled command carries its question.
+func (s *Store) AgentPromptForCommand(commandID int64) (string, bool) {
+	if commandID == 0 {
+		return "", false
+	}
+	var prompt string
+	err := s.db.QueryRow(`
+		SELECT prompt FROM agent_interactions
+		WHERE command_id = ?
+		ORDER BY timestamp DESC
+		LIMIT 1
+	`, commandID).Scan(&prompt)
+	if err != nil || prompt == "" {
+		return "", false
+	}
+	return prompt, true
 }
 
 // SearchByPrefix returns the most recent successful commands matching a prefix.
