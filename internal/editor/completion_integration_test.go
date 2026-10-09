@@ -233,8 +233,10 @@ func TestIntegration_DrillIntoDirectoryWithSpaces(t *testing.T) {
 	if err := os.Mkdir(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "Child File.txt"), []byte{}, 0o644); err != nil {
-		t.Fatal(err)
+	for _, name := range []string{"Child File.txt", "Other.txt"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte{}, 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	origDir, err := os.Getwd()
@@ -248,15 +250,18 @@ func TestIntegration_DrillIntoDirectoryWithSpaces(t *testing.T) {
 
 	e := newTestEditorWithRealCompletion(t, "ls My", 5)
 	e.triggerCompletion()
-	if !e.completionActive {
-		t.Fatal("expected directory completion menu to be active")
+
+	// The lone directory completes in place, escaped; the next Tab lists it.
+	if e.completionActive {
+		t.Fatal("a lone directory must complete inline, not open a menu")
+	}
+	if got := e.state.Buffer.Content(); got != `ls My\ Dir/` {
+		t.Fatalf("buffer after first Tab = %q, want %q", got, `ls My\ Dir/`)
 	}
 
-	dirItem, _ := findCompletionItem(t, e.completionItems, `My\ Dir/`)
-	e.drillIntoDirectory(dirItem)
-
-	if got := e.state.Buffer.Content(); got != `ls My\ Dir/` {
-		t.Fatalf("buffer after drill = %q, want %q", got, `ls My\ Dir/`)
+	e.triggerCompletion()
+	if !e.completionActive {
+		t.Fatal("expected the second Tab to list the directory's children")
 	}
 
 	childItem, _ := findCompletionItem(t, e.completionItems, `My\ Dir/Child\ File.txt`)

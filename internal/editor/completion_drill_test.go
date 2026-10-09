@@ -520,9 +520,9 @@ func TestDrillUpEmptyStack(t *testing.T) {
 	}
 }
 
-// TestSingleDirectoryShowsMenu verifies that a single directory match
-// shows the completion menu instead of auto-inserting.
-func TestSingleDirectoryShowsMenu(t *testing.T) {
+// TestSingleDirectoryCompletesInline verifies that a single directory match
+// is inserted in place like a single file: no one-row menu to dismiss.
+func TestSingleDirectoryCompletesInline(t *testing.T) {
 	e := &Editor{
 		display: newTestDisplay(),
 		state:   NewEditorState(),
@@ -539,14 +539,11 @@ func TestSingleDirectoryShowsMenu(t *testing.T) {
 
 	e.triggerCompletion()
 
-	if !e.completionActive {
-		t.Error("expected completion menu to be active for single directory match")
+	if e.completionActive {
+		t.Error("a single directory match must not open a menu")
 	}
-	if len(e.completionItems) != 1 {
-		t.Fatalf("expected 1 completion item, got %d", len(e.completionItems))
-	}
-	if e.completionItems[0].Text != "internal/" {
-		t.Errorf("completion item = %q, want %q", e.completionItems[0].Text, "internal/")
+	if got := e.state.Buffer.Content(); got != "ls internal/" {
+		t.Errorf("buffer = %q, want %q", got, "ls internal/")
 	}
 }
 

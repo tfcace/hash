@@ -1037,13 +1037,15 @@ func (e *Editor) completeWord(refine bool) {
 	e.completionCol = e.findWordStart()
 	e.completionPrefix = currentLine[e.completionCol:e.state.Cursor.Pos.Col]
 
-	if !refine && len(items) == 1 && !strings.HasSuffix(items[0].Text, "/") {
-		// Single non-directory match: insert inline immediately
+	if !refine && len(items) == 1 {
+		// A lone match, file or directory, goes in place. For a directory the
+		// next Tab lists its children, so there is no need for a one-row menu
+		// that costs an extra Enter before the line can run.
 		e.acceptCompletion(items[0])
 		return
 	}
 
-	// Multiple matches or single directory: show menu
+	// Multiple matches: show menu
 	e.completionItems = items
 	e.completionIndex = 0
 	e.completionFilter = ""
