@@ -37,6 +37,10 @@ jobs:
           sudo mv hash /usr/local/bin/
 
       - name: Install VHS
+        # vhs@latest may need a newer Go than go.mod pins; auto lets go install
+        # download the toolchain its go.mod asks for instead of failing.
+        env:
+          GOTOOLCHAIN: auto
         run: |
           go install github.com/charmbracelet/vhs@latest
 
