@@ -556,6 +556,7 @@ type Executor struct {
 
 	// Persistent interpreter state - keeps function definitions across executions
 	runner       *interp.Runner
+	builtins     map[string]BuiltinFunc // Hash builtins that run inside the interpreter
 	switchStdout *switchableWriter
 	switchStderr *switchableWriter
 	runnerMu     sync.Mutex // Protects runner access during execution
@@ -686,6 +687,18 @@ func (e *Executor) shellBuiltinHandler(ctx context.Context, args []string) ([]st
 	// Strip "--" from cd args (handles "cd", "builtin cd", "command cd").
 	if filtered, ok := e.handleCdDoubleDash(cmd, args); ok {
 		return filtered, nil
+	}
+
+	// Registered Hash builtins write to the interpreter's current stdout and
+	// stderr, so they compose with pipelines and redirections. The call is
+	// rewritten to ":" or "false" to carry the exit status.
+	if fn, ok := e.builtins[cmd]; ok {
+		hc := interp.HandlerCtx(ctx)
+		if err := fn(ctx, args[1:], hc.Stdout, hc.Stderr); err != nil {
+			fmt.Fprintf(hc.Stderr, "hash: %s: %v\n", cmd, err)
+			return []string{"false"}, nil
+		}
+		return []string{":"}, nil
 	}
 
 	switch cmd {
@@ -1918,4 +1931,76 @@ func formatBytes(b int64) string {
 		exp++
 	}
 	return fmt.Sprintf("%.1f %cB", float64(b)/float64(div), "KMGTPE"[exp])
+}
+
+// BuiltinFunc implements a Hash builtin that runs inside the interpreter.
+// Output goes to the writers the interpreter supplies, so the builtin
+// composes with pipelines and redirections like any other command.
+type BuiltinFunc func(ctx context.Context, args []string, stdout, stderr io.Writer) error
+
+// RegisterBuiltin makes fn available as the command name inside the
+// interpreter. Register builtins before executing commands.
+func (e *Executor) RegisterBuiltin(name string, fn BuiltinFunc) {
+	if e.builtins == nil {
+		e.builtins = make(map[string]BuiltinFunc)
+	}
+	e.builtins[name] = fn
+}
+
+// SimpleCommandWords reports whether line is a single simple command made of
+// literal words only, returning those words. Lines with pipes, redirections,
+// control operators, expansions, globs, escapes or assignments are not
+// simple: the shell would transform them, so a caller that treats words
+// literally must leave them to the interpreter.
+func (e *Executor) SimpleCommandWords(line string) ([]string, bool) {
+	file, err := e.newParser().Parse(strings.NewReader(line), "")
+	if err != nil || len(file.Stmts) != 1 {
+		return nil, false
+	}
+	stmt := file.Stmts[0]
+	if stmt.Background || stmt.Negated || stmt.Coprocess || len(stmt.Redirs) > 0 {
+		return nil, false
+	}
+	call, ok := stmt.Cmd.(*syntax.CallExpr)
+	if !ok || len(call.Assigns) > 0 || len(call.Args) == 0 {
+		return nil, false
+	}
+	words := make([]string, 0, len(call.Args))
+	for _, arg := range call.Args {
+		word, ok := literalWord(arg)
+		if !ok {
+			return nil, false
+		}
+		words = append(words, word)
+	}
+	return words, true
+}
+
+// literalWord returns the text of a word made only of literals and quoted
+// literals. Unquoted literals containing glob metacharacters or backslash
+// escapes are rejected, since the shell would still transform them.
+func literalWord(w *syntax.Word) (string, bool) {
+	var b strings.Builder
+	for _, part := range w.Parts {
+		switch p := part.(type) {
+		case *syntax.Lit:
+			if strings.ContainsAny(p.Value, "\\*?[") {
+				return "", false
+			}
+			b.WriteString(p.Value)
+		case *syntax.SglQuoted:
+			b.WriteString(p.Value)
+		case *syntax.DblQuoted:
+			for _, inner := range p.Parts {
+				lit, ok := inner.(*syntax.Lit)
+				if !ok {
+					return "", false
+				}
+				b.WriteString(lit.Value)
+			}
+		default:
+			return "", false
+		}
+	}
+	return b.String(), true
 }
