@@ -73,6 +73,8 @@ type Shell struct {
 	lastExitCode        int
 	lastDuration        time.Duration
 	lastCommandID       int64  // history id of the last recorded command, 0 if none
+	runningLine         string // line the executor is running, for refusals raised mid-line
+	pendingTypoFix      string // corrected line for a mistyped command name, until the learning loop offers it
 	lastCommand         string // Last executed command
 	lastStderr          string // Stderr from last command (truncated)
 	lastCwd             string // Working directory of last command
@@ -700,8 +702,11 @@ func (s *Shell) executeRegularCommand(ctx context.Context, line string) error {
 	// Capture stderr for issue reporting
 	stderrCap := newStderrCapture(os.Stderr)
 
-	// Execute external command
+	// Execute external command. The line is kept while it runs so a refusal
+	// raised mid-line (command not found) can correct the line as typed.
+	s.runningLine = line
 	result, err := s.executor.Execute(ctx, line, os.Stdout, stderrCap)
+	s.runningLine = ""
 	s.handleExecutionResult(line, result, err, stderrCap)
 	return nil
 }
@@ -760,7 +765,10 @@ func (s *Shell) handleExecutionResult(line string, result *executor.Result, err 
 	}
 }
 
-// handleExecutionError handles errors from command execution.
+// handleExecutionError handles errors from command execution. A mistyped
+// command name with a close match leaves the corrected line for the learning
+// loop to offer at the next prompt, and the banner promises the accept key
+// only when that offer will be made.
 func (s *Shell) handleExecutionError(err error) {
 	var nex *executor.CommandNotExecutableError
 	if errors.As(err, &nex) {
@@ -789,7 +797,12 @@ func (s *Shell) handleExecutionError(err error) {
 		if handler == nil {
 			handler = NewErrorHandler()
 		}
-		handler.HandleCommandNotFound(cnf.Command, suggestions, installHint)
+		fix := ""
+		if len(suggestions) > 0 && s.fixes.active() {
+			fix = typoFixLine(s.runningLine, cnf.Command, suggestions[0])
+		}
+		handler.HandleCommandNotFound(cnf.Command, suggestions, installHint, fix != "")
+		s.pendingTypoFix = fix
 		s.lastExitCode = 127
 	} else {
 		fmt.Fprintf(os.Stderr, "hash: %v\n", err)

@@ -48,6 +48,40 @@ func gitDidYouMean(command, stderr string, listBranches func() []string) string 
 	return strings.Join(fields, " ")
 }
 
+// isShellWordBoundary reports whether b can end a command name: whitespace,
+// an operator, a grouping character, or a quote.
+func isShellWordBoundary(b byte) bool {
+	switch b {
+	case ' ', '\t', '\n', ';', '|', '&', '(', ')', '<', '>', '`', '\'', '"':
+		return true
+	}
+	return false
+}
+
+// typoFixLine returns line with its first whole-word occurrence of typo
+// replaced by correction (e.g. "gti status" -> "git status"), or "" when the
+// typo does not appear as a word, so a correction never lands mid-token.
+func typoFixLine(line, typo, correction string) string {
+	if typo == "" {
+		return ""
+	}
+	for start := 0; start <= len(line)-len(typo); {
+		idx := strings.Index(line[start:], typo)
+		if idx < 0 {
+			return ""
+		}
+		idx += start
+		end := idx + len(typo)
+		before := idx == 0 || isShellWordBoundary(line[idx-1])
+		after := end == len(line) || isShellWordBoundary(line[end])
+		if before && after {
+			return line[:idx] + correction + line[end:]
+		}
+		start = idx + 1
+	}
+	return ""
+}
+
 // gitBranches lists local branch names in the current directory's repository.
 func gitBranches() []string {
 	out, err := exec.Command("git", "for-each-ref", "--format=%(refname:short)", "refs/heads").Output()

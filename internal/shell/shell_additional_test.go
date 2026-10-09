@@ -130,7 +130,7 @@ func TestErrorHandler_HandleCommandNotFound_AllCases(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			var buf bytes.Buffer
 			h := &ErrorHandler{out: &buf}
-			h.HandleCommandNotFound(tt.cmd, tt.suggestions, tt.installHint)
+			h.HandleCommandNotFound(tt.cmd, tt.suggestions, tt.installHint, false)
 
 			output := buf.String()
 			for _, want := range tt.wantContain {
