@@ -72,6 +72,7 @@ type Shell struct {
 	agentReplyInputHook func(context.Context) (string, error)
 	lastExitCode        int
 	lastDuration        time.Duration
+	lastCommandID       int64  // history id of the last recorded command, 0 if none
 	lastCommand         string // Last executed command
 	lastStderr          string // Stderr from last command (truncated)
 	lastCwd             string // Working directory of last command
@@ -1230,6 +1231,7 @@ func (s *Shell) handleAgentRequestUnified(ctx context.Context, parsed parser.Par
 
 // handleAgentFullStreaming handles full ?? and pipe modes with streaming.
 func (s *Shell) handleAgentFullStreaming(ctx context.Context, parsed parser.ParseResult, modelName string) error {
+	started := time.Now()
 	requestCtx, timeoutCancel := context.WithTimeout(ctx, s.agentRequestTimeout())
 	defer timeoutCancel()
 
@@ -1285,6 +1287,7 @@ func (s *Shell) handleAgentFullStreaming(ctx context.Context, parsed parser.Pars
 		s.lastExitCode = 1
 		return nil
 	}
+	turn := agentTurn{prompt: parsed.AgentPrompt, response: responseText, latency: time.Since(started)}
 
 	// Success path - add newline after response and clear spinner
 	fmt.Println()
@@ -1303,6 +1306,7 @@ func (s *Shell) handleAgentFullStreaming(ctx context.Context, parsed parser.Pars
 	confirmType, needsConfirmation := confirmationTypeForAgentResponse(resp, allowReply)
 	if !needsConfirmation {
 		s.responseUI.StopProgress()
+		s.recordAgentTurn(turn, true, 0)
 		return nil
 	}
 
@@ -1316,10 +1320,11 @@ func (s *Shell) handleAgentFullStreaming(ctx context.Context, parsed parser.Pars
 	s.responseUI.StopProgress()
 
 	if action == ConfirmReply {
+		s.recordAgentTurn(turn, true, 0)
 		return s.runAgentConversationLoop(ctx, modelName, transcript)
 	}
 
-	return s.handleAgentConfirmAction(ctx, action, confirmType, resp, responseText, lineCount)
+	return s.handleAgentConfirmAction(ctx, action, confirmType, resp, turn, lineCount)
 }
 
 func (s *Shell) presentAgentToolUpdate(update agent.ToolCallUpdate, prefix string) {
@@ -1382,14 +1387,17 @@ func (s *Shell) runAgentConversationLoop(ctx context.Context, modelName string, 
 		}
 
 		priorTranscript := append([]agentConversationMessage(nil), transcript...)
+		started := time.Now()
 		resp, responseText, lineCount, ok := s.streamAgentFollowUpTurn(ctx, reply, priorTranscript)
 		transcript = append(transcript, agentConversationMessage{Role: "user", Text: reply})
 		if !ok {
 			return nil
 		}
 		transcript = append(transcript, agentConversationMessage{Role: "assistant", Text: responseText})
+		turn := agentTurn{prompt: reply, response: responseText, latency: time.Since(started)}
 
 		if agentTurnShouldPromptForReply(parser.CommandTypeAgent, resp, responseText) {
+			s.recordAgentTurn(turn, true, 0)
 			continue
 		}
 
@@ -1398,6 +1406,7 @@ func (s *Shell) runAgentConversationLoop(ctx context.Context, modelName string, 
 			agentTurnAllowsReply(parser.CommandTypeAgent, resp),
 		)
 		if !needsConfirmation {
+			s.recordAgentTurn(turn, true, 0)
 			return nil
 		}
 
@@ -1410,9 +1419,10 @@ func (s *Shell) runAgentConversationLoop(ctx context.Context, modelName string, 
 		s.responseUI.StopProgress()
 
 		if action == ConfirmReply {
+			s.recordAgentTurn(turn, true, 0)
 			continue
 		}
-		return s.handleAgentConfirmAction(ctx, action, confirmType, resp, responseText, lineCount)
+		return s.handleAgentConfirmAction(ctx, action, confirmType, resp, turn, lineCount)
 	}
 }
 
@@ -1520,23 +1530,59 @@ func confirmationTypeForAgentResponse(resp agent.Response, allowExplanationReply
 	return 0, false
 }
 
+// agentTurn is what the shell remembers about one ?? exchange once the user
+// has acted on the reply.
+type agentTurn struct {
+	prompt   string        // what the user asked, as typed after ??
+	response string        // the agent's reply text
+	latency  time.Duration // request to end of reply
+}
+
+// recordAgentTurn stores a ?? exchange in history, linked to the command it
+// produced when one ran, so the question and its outcome can be recalled
+// together.
+func (s *Shell) recordAgentTurn(turn agentTurn, accepted bool, commandID int64) {
+	if s.history == nil {
+		return
+	}
+	agentName := ""
+	if s.agentHandler != nil {
+		agentName = s.agentHandler.CurrentModel()
+	}
+	if agentName == "" && s.config != nil {
+		agentName = s.config.EffectiveAgent().Command
+	}
+	_, _ = s.history.AddAgentInteraction(history.AgentInteraction{
+		Prompt:    turn.prompt,
+		Response:  turn.response,
+		Accepted:  accepted,
+		CommandID: commandID,
+		LatencyMs: turn.latency.Milliseconds(),
+		Agent:     agentName,
+		Timestamp: time.Now(),
+	})
+}
+
 // handleAgentConfirmAction processes the user's confirmation choice. A
 // command the user runs or edits takes the same path as a typed line, so
 // the error it returns (such as exit) is the shell's to act on.
-func (s *Shell) handleAgentConfirmAction(ctx context.Context, action ConfirmAction, confirmType ConfirmationType, resp agent.Response, responseText string, lineCount int) error {
+func (s *Shell) handleAgentConfirmAction(ctx context.Context, action ConfirmAction, confirmType ConfirmationType, resp agent.Response, turn agentTurn, lineCount int) error {
+	var commandID int64
+	var err error
 	switch action {
 	case ConfirmRun:
 		if confirmType == ConfirmTypeCommand {
-			return s.runAgentCommand(ctx, resp.Command)
+			commandID, err = s.runAgentCommand(ctx, resp.Command)
 		}
 		// For explanations, ConfirmRun just dismisses
 	case ConfirmEdit:
 		if confirmType == ConfirmTypeCommand {
-			return s.handleEditCommand(ctx, resp.Command)
+			commandID, err = s.handleEditCommand(ctx, resp.Command)
+			break
 		}
 		// Copy explanation to system clipboard
-		if err := copyToSystemClipboard(responseText); err != nil {
-			fmt.Fprintf(os.Stderr, "\033[90mCould not copy: %v\033[0m\n", err)
+		if copyErr := copyToSystemClipboard(turn.response); copyErr != nil {
+			fmt.Fprintf(os.Stderr, "\033[90mCould not copy: %v\033[0m\n", copyErr)
 		} else {
 			fmt.Fprintf(os.Stdout, "\033[90mCopied to clipboard\033[0m\n")
 		}
@@ -1545,7 +1591,14 @@ func (s *Shell) handleAgentConfirmAction(ctx context.Context, action ConfirmActi
 		// +1 for confirmation hint line, +1 for the blank line after fmt.Println()
 		s.responseUI.ClearLines(lineCount + 2)
 	}
-	return nil
+	accepted := action != ConfirmCancel
+	if confirmType == ConfirmTypeCommand {
+		// A command reply is accepted once a command ran (or ended the
+		// shell); an edit the user abandons is not acceptance.
+		accepted = commandID != 0 || err == errExit
+	}
+	s.recordAgentTurn(turn, accepted, commandID)
+	return err
 }
 
 // runAgentCommand runs a command the agent handed back exactly as if the
@@ -1553,12 +1606,18 @@ func (s *Shell) handleAgentConfirmAction(ctx context.Context, action ConfirmActi
 // capture included, so a failure becomes the context a bare ?? explains.
 // The reply is a shell line, never a new request: a ?? inside it (a glob, a
 // grep pattern) is shell syntax, so it bypasses the ?? dispatch.
-func (s *Shell) runAgentCommand(ctx context.Context, command string) error {
+// It reports the history id of the command that ran, 0 when none was recorded.
+func (s *Shell) runAgentCommand(ctx context.Context, command string) (commandID int64, err error) {
 	command = strings.TrimSpace(command)
 	if command == "" {
-		return nil
+		return 0, nil
 	}
-	return s.executeRegularCommand(ctx, command)
+	before := s.lastCommandID
+	err = s.executeRegularCommand(ctx, command)
+	if s.lastCommandID != before {
+		commandID = s.lastCommandID
+	}
+	return commandID, err
 }
 
 // handleAgentStreamError handles errors during agent streaming. The caller
@@ -1637,7 +1696,7 @@ func writeAgentNotConfiguredHint(w io.Writer) {
 }
 
 // handleEditCommand opens the editor on the command and runs the edited line.
-func (s *Shell) handleEditCommand(ctx context.Context, command string) error {
+func (s *Shell) handleEditCommand(ctx context.Context, command string) (int64, error) {
 	s.historyIndex = -1
 	s.historySavedLine = ""
 
@@ -1651,11 +1710,11 @@ func (s *Shell) handleEditCommand(ctx context.Context, command string) error {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "hash: editor error: %v\n", err)
 		s.lastExitCode = 1
-		return nil
+		return 0, nil
 	}
 
 	if result.Canceled || result.EOF {
-		return nil
+		return 0, nil
 	}
 
 	return s.runAgentCommand(ctx, result.Text)
@@ -1826,7 +1885,9 @@ func (s *Shell) recordCommand(line string, exitCode int, duration time.Duration)
 		RawCommand: sudoResult.RawCommand,
 	}
 
-	_, _ = s.history.Add(cmd)
+	if id, err := s.history.Add(cmd); err == nil {
+		s.lastCommandID = id
+	}
 }
 
 // detectGitBranch returns the current git branch, or empty string if not in a git repo.
