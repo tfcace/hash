@@ -101,8 +101,8 @@ func (c *StreamCollector) Response() Response {
 		return Response{Type: ResponseTypeError, Error: "empty response"}
 	}
 
-	if looksLikeCommand(text) {
-		return Response{Type: ResponseTypeCommand, Command: text}
+	if cmd, ok := commandFromResponse(text); ok {
+		return Response{Type: ResponseTypeCommand, Command: cmd}
 	}
 	return Response{Type: ResponseTypeExplanation, Explanation: text}
 }

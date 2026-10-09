@@ -871,11 +871,11 @@ func parseAgentResponse(text string) Response {
 		}
 	}
 
-	// Simple heuristic: if it looks like a command, return as command
-	if looksLikeCommand(text) {
+	// A bare command, or a one-line lead-in followed by one command line
+	if cmd, ok := commandFromResponse(text); ok {
 		return Response{
 			Type:    ResponseTypeCommand,
-			Command: text,
+			Command: cmd,
 		}
 	}
 	return Response{
