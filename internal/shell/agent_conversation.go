@@ -2,6 +2,7 @@ package shell
 
 import (
 	"strings"
+	"unicode/utf8"
 
 	"github.com/tfcace/hash/internal/agent"
 	"github.com/tfcace/hash/internal/editor"
@@ -121,6 +122,11 @@ func (s *legacyAgentMarkerSanitizer) Write(text string) string {
 	}
 
 	emitLen := len(s.pending) - legacyMarkerTailBytes
+	// Never cut inside a multibyte character: each piece is rendered on its
+	// own, and a partial character would show as replacement glyphs.
+	for emitLen > 0 && !utf8.RuneStart(s.pending[emitLen]) {
+		emitLen--
+	}
 	out := s.pending[:emitLen]
 	s.pending = s.pending[emitLen:]
 	return out
