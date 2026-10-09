@@ -171,8 +171,7 @@ func (s *Shell) builtinHistory(w io.Writer, args []string) error {
 	}
 
 	if len(args) == 0 {
-		// Show recent history
-		return s.showRecentHistory(w, 20)
+		return s.listHistory(w)
 	}
 
 	subcommand := args[0]
@@ -206,15 +205,16 @@ func (s *Shell) builtinHistory(w io.Writer, args []string) error {
 	}
 }
 
-func (s *Shell) showRecentHistory(w io.Writer, n int) error {
-	commands, err := s.history.GetRecent(n)
+// listHistory prints every recorded command, oldest first, numbered from 1
+// like bash's history builtin.
+func (s *Shell) listHistory(w io.Writer) error {
+	commands, err := s.history.All()
 	if err != nil {
 		return err
 	}
 
 	for i := range commands {
-		num := len(commands) - i
-		fmt.Fprintf(w, "%5d  %s\n", num, commands[i].Command)
+		fmt.Fprintf(w, "%5d  %s\n", i+1, commands[i].Command)
 	}
 	return nil
 }

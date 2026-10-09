@@ -3,6 +3,7 @@ package shell
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -22,8 +23,9 @@ func newHistoryShell(t *testing.T, commands ...string) *Shell {
 		t.Fatalf("NewStore: %v", err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	for _, c := range commands {
-		if _, err := store.Add(history.Command{Command: c, Timestamp: time.Now()}); err != nil {
+	base := time.Now().Add(-time.Hour)
+	for i, c := range commands {
+		if _, err := store.Add(history.Command{Command: c, Timestamp: base.Add(time.Duration(i) * time.Second)}); err != nil {
 			t.Fatalf("Add(%q): %v", c, err)
 		}
 	}
@@ -109,5 +111,28 @@ func TestExecuteRegularCommand_CdWithAndRunsBothCommands(t *testing.T) {
 	dirR, _ := filepath.EvalSymlinks(dir)
 	if cwdR != dirR {
 		t.Errorf("cwd = %q, want %q", cwd, dir)
+	}
+}
+
+func TestExecuteRegularCommand_HistoryListsEverythingOldestFirst(t *testing.T) {
+	var cmds []string
+	for i := 0; i < 25; i++ {
+		cmds = append(cmds, fmt.Sprintf("cmd%02d", i))
+	}
+	sh := newHistoryShell(t, cmds...)
+	out := captureStdout(t, func() {
+		if err := sh.executeRegularCommand(context.Background(), "history"); err != nil {
+			t.Fatalf("executeRegularCommand: %v", err)
+		}
+	})
+	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	if len(lines) != 25 {
+		t.Fatalf("got %d lines, want all 25:\n%s", len(lines), out)
+	}
+	if strings.TrimSpace(lines[0]) != "1  cmd00" {
+		t.Errorf("first line = %q, want the oldest command numbered 1", lines[0])
+	}
+	if strings.TrimSpace(lines[24]) != "25  cmd24" {
+		t.Errorf("last line = %q, want the newest command numbered 25", lines[24])
 	}
 }
