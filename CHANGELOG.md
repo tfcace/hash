@@ -1,5 +1,40 @@
 # Changelog
 
+## [0.9.0](https://github.com/tfcace/hash/compare/v0.8.0...v0.9.0) (2026-10-10)
+
+
+### Features
+
+* **agent:** accept a one-line lead-in before a command in agent replies ([fcf7378](https://github.com/tfcace/hash/commit/fcf73786a3e6f06123638bffc9bc4016a5b2f499))
+* **agent:** tell ACP agents how the shell treats their reply ([bc4f926](https://github.com/tfcace/hash/commit/bc4f926639d5e29a7f277bb44f3267bdc6e0f200))
+* **editor:** complete a lone directory inline on Tab ([ef8c102](https://github.com/tfcace/hash/commit/ef8c1021368a4b885f92d7b79704f3e6374ddd6b))
+* **executor:** report long commands to the terminal with OSC 7501 ([ab3cf69](https://github.com/tfcace/hash/commit/ab3cf69026fb12bee306c80f26d87cf4b37249e2))
+* **history:** record each ?? turn with the command it produced ([083b3d3](https://github.com/tfcace/hash/commit/083b3d3435af8261633a624ed0db0a1f978b3e78))
+* **history:** show the ?? question behind a command in the Ctrl+R preview ([cb0141a](https://github.com/tfcace/hash/commit/cb0141a83b375c154fe1494579011b0e1c7f0a0b))
+* **programstatus:** encode Program Status Protocol (OSC 7501) reports ([c09a558](https://github.com/tfcace/hash/commit/c09a5586e77478135d6789c2896456100aed65cc))
+* **shell:** find a newer Claude adapter and offer model update ([7cdd8d2](https://github.com/tfcace/hash/commit/7cdd8d2d5902a1a2a73d7a570e9a142415bd83f8))
+* **shell:** offer a did-you-mean command as ghost text at the next prompt ([b5b8a2d](https://github.com/tfcace/hash/commit/b5b8a2dcf4a8761e9ed9948a39b449f8e2ed570d))
+* **shell:** report the ?? turn to the terminal with OSC 7501 ([06a9858](https://github.com/tfcace/hash/commit/06a985860bf6c76146c56fabc77537b47ec62450))
+* **shell:** show an agent command on its own input line when it runs ([8b5d6ce](https://github.com/tfcace/hash/commit/8b5d6ce03f69399f50f33969fdd08207a2ceb733))
+
+
+### Bug Fixes
+
+* **agent:** run a backticked one-line reply as the bare command ([75b766f](https://github.com/tfcace/hash/commit/75b766fccfd204f784828d941b952f906b08fc2b))
+* **config:** honor HASH_CONFIG_DIR everywhere the shell resolves its config directory ([3dbadb4](https://github.com/tfcace/hash/commit/3dbadb4d4ff92e6ffa68e4532a069c0b6e751136))
+* **editor:** keep insert mode when Esc is pressed on an empty line ([59776f8](https://github.com/tfcace/hash/commit/59776f88c9916c29ad7fffd569a59d6909ccd855))
+* **editor:** keep the inline ?? editor alive past the agent timeout and show agent errors ([8a55b40](https://github.com/tfcace/hash/commit/8a55b40f39dcc3109cd4740b767112a3d31ba188))
+* **editor:** visual-row movement, word motions, literal paste, vt220 keys ([e46d7a5](https://github.com/tfcace/hash/commit/e46d7a5bb000a87b7a2b9503d77385635a25d943))
+* **executor:** a refused command sets its exit status instead of aborting the line ([2f3f04d](https://github.com/tfcace/hash/commit/2f3f04d098c3fb703db0f677b60dae46b9371c46))
+* **executor:** bump mvdan.cc/sh/v3 to 3.14.1 so NVM's alias pattern no longer panics ([#114](https://github.com/tfcace/hash/issues/114)) ([421d5dc](https://github.com/tfcace/hash/commit/421d5dcdb0ddcf168413cb857d7efcdd8fcb55ef))
+* **executor:** report a non-executable path as permission denied with exit 126 ([7338f86](https://github.com/tfcace/hash/commit/7338f867963a93095480a391451b7354f7290027))
+* **shell:** keep multibyte characters intact when streaming agent text ([d336829](https://github.com/tfcace/hash/commit/d3368299323e95cbf257617ad820f37581bbb75a))
+* **shell:** label a plain ?? request as [agent] instead of [agent: command] ([7756b90](https://github.com/tfcace/hash/commit/7756b903d134f17261832b24d636808117c6b8ef))
+* **shell:** point model errors at the model builtin ([ef80c79](https://github.com/tfcace/hash/commit/ef80c79da1cc7faa201d4dbedbc63589422afa47))
+* **shell:** run an agent-suggested command through the same path as a typed line ([68f107e](https://github.com/tfcace/hash/commit/68f107e8ceb72ebc303abb1e0ded4a9755ef825f))
+* **shell:** run builtins through the interpreter and list the whole history ([#115](https://github.com/tfcace/hash/issues/115)) ([bc3d87a](https://github.com/tfcace/hash/commit/bc3d87a5459fd4eca7eeef70e0fe955bda990252))
+* **shell:** stop did-you-mean from suggesting commands that failed ([2417adc](https://github.com/tfcace/hash/commit/2417adc28ba5cede0b4575d482147bd542144c4f))
+
 ## [0.8.0](https://github.com/tfcace/hash/compare/v0.7.2...v0.8.0) (2026-10-08)
 
 
