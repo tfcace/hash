@@ -80,6 +80,18 @@ func (h *AgentHandler) EnsureModelInfo(ctx context.Context) error {
 	return h.client.EnsureModelInfo(ctx)
 }
 
+// Restart drops the agent process and session and reconnects, so a freshly
+// installed adapter is the one answering. The model list is reloaded, and a
+// model the user pinned survives: the transport keeps the pin across Close
+// and re-applies it to the new session.
+func (h *AgentHandler) Restart(ctx context.Context) error {
+	if h == nil || h.client == nil {
+		return fmt.Errorf("no agent configured")
+	}
+	_ = h.client.Close()
+	return h.client.EnsureModelInfo(ctx)
+}
+
 // AskText sends a raw prompt to the agent and returns its reply as plain
 // text, regardless of whether the agent classified it as a command or an
 // explanation. Used by builtins that drive the agent directly (e.g.
