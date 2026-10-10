@@ -31,9 +31,11 @@ type SystemStatus struct {
 	PatternCount int64
 
 	// Agent
-	AgentName string
-	AgentOK   bool
-	AgentErr  string
+	AgentName    string
+	AgentOK      bool
+	AgentErr     string
+	AgentVersion string // installed adapter version when it is the npm Claude adapter
+	AgentLatest  string // newer version known from the daily check, "" when current or unknown
 
 	// PTY
 	PTYOK  bool
@@ -80,10 +82,17 @@ func (s *SystemStatus) Format() string {
 	}
 
 	// Agent
+	agentLabel := s.AgentName
+	if s.AgentVersion != "" {
+		agentLabel += " " + s.AgentVersion
+	}
 	if s.AgentOK {
-		fmt.Fprintf(&b, "Agent:     %s \033[32m✓\033[0m\n", s.AgentName)
+		fmt.Fprintf(&b, "Agent:     %s \033[32m✓\033[0m\n", agentLabel)
 	} else {
-		fmt.Fprintf(&b, "Agent:     %s (not connected)\n", s.AgentName)
+		fmt.Fprintf(&b, "Agent:     %s (not connected)\n", agentLabel)
+	}
+	if s.AgentLatest != "" {
+		fmt.Fprintf(&b, "           \033[33m%s available\033[0m · %s\n", s.AgentLatest, updateCommand)
 	}
 
 	// PTY

@@ -180,6 +180,7 @@ For Claude over ACP, install the current adapter with
 | `default` | string | `"claude-agent-acp"` | Name of the selected `[agent.<name>]`, or a label for flat config. |
 | `timeout` | duration string | `"120s"` | Agent request timeout. |
 | `allowed_commands_scope` | `"project"` \| `"global"` \| `"session"` | `"project"` | Where persistent tool approvals are stored. |
+| `auto_update` | `"check"` \| `"off"` | `"check"` | Check the npm registry daily for a newer `claude-agent-acp` and offer `model update` at the prompt. Only applies to the npm-installed Claude adapter; never installs on its own. |
 
 Hash supports both flat agent config and named agents.
 

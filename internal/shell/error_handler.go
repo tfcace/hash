@@ -5,7 +5,9 @@ import (
 	"io"
 	"os"
 	"strings"
+	"time"
 
+	"github.com/tfcace/hash/internal/agentupdate"
 	"github.com/tfcace/hash/internal/learning"
 )
 
@@ -75,6 +77,21 @@ func (h *ErrorHandler) showDidYouMean(suggestion string) {
 	fmt.Fprintf(out, "\n\033[33m✗ Did you mean\033[0m\n")
 	fmt.Fprintf(out, "\n\033[32m→\033[0m %s\n", suggestion)
 	fmt.Fprint(out, acceptFooter)
+}
+
+// showUpdateAvailable tells the user a newer adapter exists, in the shape of
+// the other prompt banners: a title, the offered command with the versions,
+// and the footer that teaches the accept key.
+func (h *ErrorHandler) showUpdateAvailable(n agentupdate.Notice, now time.Time) {
+	out := h.out
+	if out == nil {
+		out = os.Stderr
+	}
+
+	fmt.Fprintf(out, "\n\033[36m✦ %s update available\033[0m\n", agentupdate.DisplayName)
+	fmt.Fprintf(out, "\n\033[32m→\033[0m %s    \033[90m%s → %s · installed %s\033[0m\n",
+		updateCommand, n.Installed, n.Latest, formatAge(n.InstalledAt, now))
+	fmt.Fprint(out, "  \033[90m└─ → to accept at prompt · esc to dismiss\033[0m\n")
 }
 
 func (h *ErrorHandler) showLearnedFix(fix learning.Fix, highConfidence bool) {

@@ -317,3 +317,26 @@ func TestLoadConfig_HooksChpwd_Default(t *testing.T) {
 		t.Errorf("expected 0 default chpwd hooks, got %d", len(cfg.Shell.Hooks.Chpwd))
 	}
 }
+
+func TestConfig_AgentAutoUpdate(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg, err := Load(tmpDir)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if got := cfg.EffectiveAgent().AutoUpdate; got != "check" {
+		t.Errorf("default auto_update = %q, want %q", got, "check")
+	}
+
+	content := []byte("[agent]\ncommand = \"claude-agent-acp\"\nauto_update = \"off\"\n")
+	if err := os.WriteFile(filepath.Join(tmpDir, "config.toml"), content, 0o644); err != nil { //nolint:gosec // G306: test file
+		t.Fatal(err)
+	}
+	cfg, err = Load(tmpDir)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if got := cfg.EffectiveAgent().AutoUpdate; got != "off" {
+		t.Errorf("auto_update = %q, want %q", got, "off")
+	}
+}

@@ -5,12 +5,14 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 
 	"charm.land/lipgloss/v2"
 	"github.com/tfcace/hash/internal/agent"
+	"github.com/tfcace/hash/internal/agentupdate"
 	"github.com/tfcace/hash/internal/clipboard"
 	"github.com/tfcace/hash/internal/config"
 	"github.com/tfcace/hash/internal/history"
@@ -361,11 +363,17 @@ func copyToSystemClipboard(text string) error {
 type ClipboardBuffer = clipboard.Buffer
 
 // builtinModel lists/selects the agent model. With no args it opens a TUI
-// picker; `model <name>` selects directly; `model --list` prints the choices.
+// picker; `model <name>` selects directly; `model --list` prints the choices;
+// `model update` installs the latest Claude adapter so the list is current.
 // The selection persists for the duration of the shell session.
 func (s *Shell) builtinModel(ctx context.Context, args []string) error {
 	if s.agentHandler == nil {
 		return fmt.Errorf("no agent configured")
+	}
+
+	// `model update`: refresh the adapter so the list below is current.
+	if len(args) > 0 && args[0] == "update" {
+		return s.runModelUpdate(ctx, os.Stdout)
 	}
 
 	// Establish a session if needed so the agent reports its model options.
@@ -580,6 +588,7 @@ func (s *Shell) collectStatus() *SystemStatus {
 		status.AgentName = agentCfg.Command
 	}
 	status.AgentOK = s.agentHandler != nil
+	status.AgentVersion, status.AgentLatest = s.adapterVersions(agentCfg)
 
 	// PTY status - check if executor supports PTY
 	status.PTYOK = true // PTY is always available on unix systems
@@ -597,6 +606,23 @@ func (s *Shell) collectStatus() *SystemStatus {
 	}
 
 	return status
+}
+
+// adapterVersions reports the installed version of the npm Claude adapter
+// behind the agent command and, when the daily check has recorded a newer
+// one, that version too. Both are "" for any other agent.
+func (s *Shell) adapterVersions(agentCfg config.AgentConfig) (installed, latest string) {
+	if agentCfg.Transport == "http" {
+		return "", ""
+	}
+	inst, ok := agentupdate.Detect(agentCfg.Command, exec.LookPath)
+	if !ok {
+		return "", ""
+	}
+	if known := agentupdate.LoadState(s.updateStatePath()).Latest; agentupdate.Compare(known, inst.Version) > 0 {
+		latest = known
+	}
+	return inst.Version, latest
 }
 
 // builtinSource sources a shell script file using the executor parser dialect.

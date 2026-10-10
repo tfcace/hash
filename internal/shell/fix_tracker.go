@@ -124,12 +124,15 @@ func (s *Shell) observeCommandOutcome(line string) {
 }
 
 // promptGhost returns the ghost text for the next prompt: a learned fix for
-// the last failure if available, otherwise the command predictor's guess.
-// Either way the ghost renders bare (fish-style); the keys are taught by the
-// banner above the prompt, not on the input line.
+// the last failure if available, else an offered adapter update, else the
+// command predictor's guess. Either way the ghost renders bare (fish-style);
+// the keys are taught by the banner above the prompt, not on the input line.
 func (s *Shell) promptGhost() string {
 	if fix := s.fixes.SuggestedFix(); fix != "" {
 		return fix
+	}
+	if s.updateGhost != "" {
+		return s.updateGhost
 	}
 	if s.predictor != nil && s.lastCommand != "" {
 		cwd, _ := os.Getwd()

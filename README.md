@@ -90,6 +90,8 @@ transport = "stdio"
 command = "claude-agent-acp"
 ```
 
+Hash checks the npm registry once a day for a newer adapter. When one exists, the next prompt shows a short banner with `model update` ready as ghost text; accepting runs the install visibly, restarts the agent, and lists the models now available. Set `auto_update = "off"` under `[agent]` to turn the check off.
+
 Authenticate with `ANTHROPIC_API_KEY`, or with your Claude subscription: on macOS, the adapter reuses the OAuth credentials from your Claude Code CLI login automatically.
 
 Prefer a different agent? Gemini CLI and Cursor CLI speak ACP too:

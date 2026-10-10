@@ -86,6 +86,7 @@ type AgentConfig struct {
 	Model                string            `toml:"model"`                  // For http transport (e.g., "codellama")
 	Headers              map[string]string `toml:"headers"`                // For http transport
 	AllowedCommandsScope string            `toml:"allowed_commands_scope"` // "project", "global", "session"
+	AutoUpdate           string            `toml:"auto_update"`            // "check" (default) or "off": look for a newer claude-agent-acp daily
 }
 
 // AgentEndpoint is an individual named agent under [agent.<name>].
@@ -165,6 +166,7 @@ func Default() *Config {
 			Command:              "claude-agent-acp",
 			Timeout:              "120s",
 			AllowedCommandsScope: "project",
+			AutoUpdate:           "check",
 		},
 		History: HistoryConfig{
 			Enabled:    true,

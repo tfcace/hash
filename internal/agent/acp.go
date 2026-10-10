@@ -1282,7 +1282,8 @@ func (t *ACPTransport) Close() error {
 	t.modelConfigID = ""
 	t.currentModelVal = ""
 	t.availableModels = nil
-	t.preferredModel = ""
+	// preferredModel stays: it is the user's pin, and ensureSession re-applies
+	// it to the next session (or drops it if that session no longer offers it).
 	return nil
 }
 

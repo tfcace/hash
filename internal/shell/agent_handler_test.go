@@ -306,3 +306,56 @@ func TestBuildRequest_FullAndPipeAreNotInline(t *testing.T) {
 		}
 	}
 }
+
+// modelsTestTransport exposes a model list that changes when the transport
+// is closed and reopened, the way a freshly installed adapter would.
+type modelsTestTransport struct {
+	namedTestTransport
+	models    []agent.ModelOption
+	next      []agent.ModelOption
+	current   string
+	closes    int
+	ensures   int
+	ensureErr error
+}
+
+func (t *modelsTestTransport) Close() error {
+	t.closes++
+	if t.next != nil {
+		t.models, t.next = t.next, nil
+	}
+	return nil
+}
+
+func (t *modelsTestTransport) EnsureModelInfo(context.Context) error {
+	t.ensures++
+	return t.ensureErr
+}
+
+func (t *modelsTestTransport) AvailableModels() []agent.ModelOption { return t.models }
+func (t *modelsTestTransport) CurrentModel() string                 { return t.current }
+
+func TestAgentHandler_RestartReloadsModels(t *testing.T) {
+	tr := &modelsTestTransport{
+		models: []agent.ModelOption{{Value: "default", Name: "Default"}},
+		next:   []agent.ModelOption{{Value: "default", Name: "Default"}, {Value: "haiku", Name: "Haiku"}},
+	}
+	h := NewAgentHandler(agent.NewClient(tr))
+
+	if err := h.Restart(context.Background()); err != nil {
+		t.Fatalf("Restart() error = %v", err)
+	}
+	if tr.closes != 1 || tr.ensures != 1 {
+		t.Errorf("closes = %d, ensures = %d, want 1 and 1", tr.closes, tr.ensures)
+	}
+	if len(h.AvailableModels()) != 2 {
+		t.Errorf("AvailableModels() after restart = %v, want the new list", h.AvailableModels())
+	}
+}
+
+func TestAgentHandler_RestartWithoutAgent(t *testing.T) {
+	var h *AgentHandler
+	if err := h.Restart(context.Background()); err == nil {
+		t.Error("Restart() on nil handler = nil error, want an error")
+	}
+}

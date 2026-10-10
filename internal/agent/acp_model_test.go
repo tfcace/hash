@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -169,5 +170,47 @@ func TestACPTransport_ReapplyPreferredModelNoopWhenMatching(t *testing.T) {
 	stdin.mu.Unlock()
 	if written != 0 {
 		t.Fatalf("reapply sent %d bytes, want 0 (no-op)", written)
+	}
+}
+
+func TestACPTransport_ClosePreservesPreferredModel(t *testing.T) {
+	transport, _ := newModelTestTransport()
+	transport.modelConfigID = "model"
+	transport.currentModelVal = "sonnet"
+	transport.availableModels = []ModelOption{{Value: "default", Name: "Default"}, {Value: "sonnet", Name: "Sonnet"}}
+	transport.preferredModel = "sonnet"
+
+	if err := transport.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if transport.sessionID != "" || transport.modelConfigID != "" {
+		t.Fatal("Close should drop the session and its model state")
+	}
+	if transport.preferredModel != "sonnet" {
+		t.Fatalf("preferredModel after Close = %q, want sonnet kept for the next session", transport.preferredModel)
+	}
+
+	// The next session comes up on the agent default; the pin is re-sent.
+	stdin := newMockPipe()
+	transport.stdin = stdin // stands in for the reconnect
+	transport.messages <- []byte(`{"jsonrpc":"2.0","id":1,"result":{"sessionId":"sess-2","configOptions":[` +
+		`{"id":"model","category":"model","currentValue":"default","options":[` +
+		`{"value":"default","name":"Default"},{"value":"sonnet","name":"Sonnet"}]}]}}`)
+	transport.messages <- []byte(`{"jsonrpc":"2.0","id":2,"result":{"configOptions":[` +
+		`{"id":"model","category":"model","currentValue":"sonnet","options":[` +
+		`{"value":"default","name":"Default"},{"value":"sonnet","name":"Sonnet"}]}]}}`)
+
+	if _, err := transport.ensureSession(context.Background(), "/tmp/hash-test"); err != nil {
+		t.Fatalf("ensureSession: %v", err)
+	}
+
+	stdin.mu.Lock()
+	written := string(stdin.written)
+	stdin.mu.Unlock()
+	if !strings.Contains(written, `"session/set_config_option"`) || !strings.Contains(written, `"value":"sonnet"`) {
+		t.Fatalf("new session did not re-apply the pinned model:\n%s", written)
+	}
+	if got := transport.CurrentModel(); got != "Sonnet" {
+		t.Fatalf("CurrentModel() after reconnect = %q, want Sonnet", got)
 	}
 }
