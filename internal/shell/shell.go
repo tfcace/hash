@@ -75,6 +75,9 @@ type Shell struct {
 	updateGhost         string                                           // "model update" offered as ghost text at the next prompt only
 	updateChecker       func(context.Context) (agentupdate.Notice, bool) // nil = real detect + registry check
 	adapterVersion      func() string                                    // nil = re-detect the installed adapter; tests inject a version
+	installer           adapterInstaller                                 // nil = agentupdate.Installer for the configured command
+	updateStateFile     string                                           // override of agentUpdateStatePath() for tests
+	latestLookup        func(context.Context) string                     // nil = ask the npm registry; tests inject a version
 	readKey             func(ctx context.Context) byte
 	agentReplyInputHook func(context.Context) (string, error)
 	lastExitCode        int

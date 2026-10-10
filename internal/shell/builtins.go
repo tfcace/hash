@@ -361,11 +361,17 @@ func copyToSystemClipboard(text string) error {
 type ClipboardBuffer = clipboard.Buffer
 
 // builtinModel lists/selects the agent model. With no args it opens a TUI
-// picker; `model <name>` selects directly; `model --list` prints the choices.
+// picker; `model <name>` selects directly; `model --list` prints the choices;
+// `model update` installs the latest Claude adapter so the list is current.
 // The selection persists for the duration of the shell session.
 func (s *Shell) builtinModel(ctx context.Context, args []string) error {
 	if s.agentHandler == nil {
 		return fmt.Errorf("no agent configured")
+	}
+
+	// `model update`: refresh the adapter so the list below is current.
+	if len(args) > 0 && args[0] == "update" {
+		return s.runModelUpdate(ctx, os.Stdout)
 	}
 
 	// Establish a session if needed so the agent reports its model options.
