@@ -11,7 +11,7 @@ require (
 	github.com/mattn/go-sqlite3 v1.14.50
 	github.com/pelletier/go-toml/v2 v2.4.3
 	golang.design/x/clipboard v0.11.0
-	golang.org/x/sys v0.47.0
+	golang.org/x/sys v0.49.0
 	golang.org/x/term v0.45.0
 	mvdan.cc/sh/v3 v3.14.1
 )
