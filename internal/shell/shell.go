@@ -18,6 +18,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/tfcace/hash/internal/agent"
+	"github.com/tfcace/hash/internal/agentupdate"
 	"github.com/tfcace/hash/internal/allowlist"
 	"github.com/tfcace/hash/internal/clipboard"
 	"github.com/tfcace/hash/internal/completion"
@@ -69,7 +70,9 @@ type Shell struct {
 	colorPalette        prompt.Palette
 	allowlist           *allowlist.Manager
 	agentOutput         *AgentOutputCoordinator
-	agentStatus         *agentStatus // OSC 7501 reports for the ?? turn
+	agentStatus         *agentStatus            // OSC 7501 reports for the ?? turn
+	updateNotices       chan agentupdate.Notice // newer-adapter notices from the background check, drained before a prompt
+	updateGhost         string                  // "model update" offered as ghost text at the next prompt only
 	readKey             func(ctx context.Context) byte
 	agentReplyInputHook func(context.Context) (string, error)
 	lastExitCode        int
