@@ -2,12 +2,14 @@ package shell
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/tfcace/hash/internal/agentupdate"
+	"github.com/tfcace/hash/internal/config"
 	"github.com/tfcace/hash/internal/executor"
 	"github.com/tfcace/hash/internal/learning"
 )
@@ -66,6 +68,40 @@ func TestShell_UpdateBannerOffersModelUpdate(t *testing.T) {
 	}
 }
 
+// A notice computed before the adapter was updated (model update at the
+// first prompt, or npm run by hand in another terminal) must not be shown
+// once the installed version has caught up with it.
+func TestShell_UpdateNoticeDroppedWhenAlreadyInstalled(t *testing.T) {
+	var banner bytes.Buffer
+	s := &Shell{
+		fixes:          newFixTracker(nil),
+		errors:         &ErrorHandler{out: &banner},
+		updateNotices:  make(chan agentupdate.Notice, 1),
+		adapterVersion: func() string { return "0.89.0" }, // what is on disk now
+	}
+	s.updateNotices <- agentupdate.Notice{Installed: "0.42.0", Latest: "0.89.0"}
+
+	s.flushUpdateNotice(time.Now())
+
+	if banner.Len() != 0 {
+		t.Errorf("stale notice was shown:\n%s", banner.String())
+	}
+	if got := s.promptGhost(); got != "" {
+		t.Errorf("promptGhost() = %q, want no ghost for a stale notice", got)
+	}
+	if len(s.updateNotices) != 0 {
+		t.Error("stale notice should be consumed, not left for the next prompt")
+	}
+
+	// A notice that still applies is shown as before.
+	s.adapterVersion = func() string { return "0.42.0" }
+	s.updateNotices <- agentupdate.Notice{Installed: "0.42.0", Latest: "0.89.0"}
+	s.flushUpdateNotice(time.Now())
+	if !strings.Contains(banner.String(), "0.42.0 → 0.89.0") {
+		t.Errorf("live notice not shown:\n%s", banner.String())
+	}
+}
+
 func TestShell_UpdateNoticeWaitsBehindLearnedFix(t *testing.T) {
 	store := newTestFixStore(t)
 	pattern := learning.ExtractPattern("./deploy.sh", "permission denied", 126)
@@ -95,5 +131,58 @@ func TestShell_UpdateNoticeWaitsBehindLearnedFix(t *testing.T) {
 	}
 	if len(s.updateNotices) != 1 {
 		t.Error("notice should still be queued for the next prompt")
+	}
+}
+
+func TestShell_StartUpdateCheckDeliversNotice(t *testing.T) {
+	var banner bytes.Buffer
+	s := &Shell{
+		mode:   Mode{Interactive: true},
+		config: config.Default(),
+		fixes:  newFixTracker(nil),
+		errors: &ErrorHandler{out: &banner},
+		updateChecker: func(context.Context) (agentupdate.Notice, bool) {
+			return agentupdate.Notice{Installed: "0.42.0", Latest: "0.88.0"}, true
+		},
+		adapterVersion: func() string { return "0.42.0" }, // the notice must not be judged against this machine
+	}
+
+	s.startUpdateCheck(context.Background())
+
+	select {
+	case n := <-s.updateNotices:
+		s.updateNotices <- n // put it back for the flush
+	case <-time.After(2 * time.Second):
+		t.Fatal("no notice delivered")
+	}
+	s.flushUpdateNotice(time.Now())
+	if !strings.Contains(banner.String(), "0.42.0 → 0.88.0") {
+		t.Errorf("banner = %q", banner.String())
+	}
+}
+
+func TestShell_StartUpdateCheckHonorsOffAndNonInteractive(t *testing.T) {
+	off := config.Default()
+	off.Agent.AutoUpdate = "off"
+	httpTransport := config.Default()
+	httpTransport.Agent.Transport = "http"
+	noCommand := config.Default()
+	noCommand.Agent.Command = ""
+	cases := map[string]*Shell{
+		"auto_update off": {mode: Mode{Interactive: true}, config: off},
+		"non-interactive": {mode: Mode{Interactive: false}, config: config.Default()},
+		"http transport":  {mode: Mode{Interactive: true}, config: httpTransport},
+		"empty command":   {mode: Mode{Interactive: true}, config: noCommand},
+	}
+	for name, s := range cases {
+		t.Run(name, func(t *testing.T) {
+			// A nil channel below proves the goroutine never started, so the
+			// stub only needs to exist.
+			s.updateChecker = func(context.Context) (agentupdate.Notice, bool) { return agentupdate.Notice{}, false }
+			s.startUpdateCheck(context.Background())
+			if s.updateNotices != nil {
+				t.Error("notice channel created although checks are off")
+			}
+		})
 	}
 }

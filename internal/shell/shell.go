@@ -70,9 +70,11 @@ type Shell struct {
 	colorPalette        prompt.Palette
 	allowlist           *allowlist.Manager
 	agentOutput         *AgentOutputCoordinator
-	agentStatus         *agentStatus            // OSC 7501 reports for the ?? turn
-	updateNotices       chan agentupdate.Notice // newer-adapter notices from the background check, drained before a prompt
-	updateGhost         string                  // "model update" offered as ghost text at the next prompt only
+	agentStatus         *agentStatus                                     // OSC 7501 reports for the ?? turn
+	updateNotices       chan agentupdate.Notice                          // newer-adapter notices from the background check, drained before a prompt
+	updateGhost         string                                           // "model update" offered as ghost text at the next prompt only
+	updateChecker       func(context.Context) (agentupdate.Notice, bool) // nil = real detect + registry check
+	adapterVersion      func() string                                    // nil = re-detect the installed adapter; tests inject a version
 	readKey             func(ctx context.Context) byte
 	agentReplyInputHook func(context.Context) (string, error)
 	lastExitCode        int
@@ -476,6 +478,7 @@ func (s *Shell) Run(ctx context.Context) error {
 	// This replaces separate refreshColorPalette() + updatePrompt() calls,
 	// reducing starship subprocess spawns from 4 to 2 (~75ms savings).
 	s.initPromptAndPalette()
+	s.startUpdateCheck(ctx)
 	trace.ShellHigh("prompt_start", map[string]any{
 		"mode": "editor",
 	})
@@ -488,9 +491,11 @@ func (s *Shell) Run(ctx context.Context) error {
 		default:
 		}
 
+		s.flushUpdateNotice(time.Now())
 		s.emitShellIntegration(&firstPrompt)
 
 		line, err := s.readLineWithEditor(ctx)
+		s.updateGhost = ""
 		trace.ShellDetailed("input_ready", map[string]any{
 			"line":  line,
 			"error": errStr(err),
