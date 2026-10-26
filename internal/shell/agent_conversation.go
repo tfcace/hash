@@ -42,7 +42,9 @@ func agentConversationInputFrame(openRail bool) *editor.InputFrame {
 		PrefixWidth: agentConversationReplyPromptWidth,
 	}
 	if openRail {
-		frame.TopLine = agentConversationLiveRailStyle + "╭─ conversation\x1b[0m \x1b[90menter to send · esc to leave · /exit to end\x1b[0m"
+		const title = "╭─ conversation "
+		hints := fitHint("", "", []string{"enter to send", "esc to leave", "/exit to end"}, max(terminalColumns()-len([]rune(title)), 0))
+		frame.TopLine = agentConversationLiveRailStyle + strings.TrimSuffix(title, " ") + "\x1b[0m \x1b[90m" + hints + "\x1b[0m"
 	}
 	return frame
 }
@@ -59,6 +61,7 @@ func agentConversationEditorConfig(base editor.Config, openRail bool) editor.Con
 	cfg.DisableContextPicker = true
 	cfg.DisableLineContinuation = true
 	cfg.CancelOnEscape = true
+	cfg.ClearOnCancel = true // leaving takes the reply box with it
 	return cfg
 }
 

@@ -524,3 +524,21 @@ func TestShowTurnCanceled(t *testing.T) {
 var testSGRRe = regexp.MustCompile(`\x1b\[[0-9;]*m`)
 
 func stripANSI(s string) string { return testSGRRe.ReplaceAllString(s, "") }
+
+// Canceling mid-stream keeps the half-drawn row: it is reply text the user
+// was reading, not leftover output.
+func TestAgentOutputCoordinator_CancelKeepsStreamedRow(t *testing.T) {
+	var buf bytes.Buffer
+	aoc := NewAgentOutputCoordinator(&buf)
+	aoc.StartStreaming()
+	aoc.WriteStream("12. Use set -e so")
+	buf.Reset()
+
+	aoc.Cancel()
+	if strings.Contains(buf.String(), "\x1b[K") {
+		t.Errorf("cancel erased the streamed row: %q", buf.String())
+	}
+	if !aoc.EndsMidRow() {
+		t.Error("EndsMidRow() = false after a row without a newline")
+	}
+}

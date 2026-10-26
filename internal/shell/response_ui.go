@@ -3,6 +3,7 @@ package shell
 import (
 	"bufio"
 	"fmt"
+	"github.com/mattn/go-runewidth"
 	"io"
 	"math/rand"
 	"os"
@@ -170,7 +171,8 @@ func (u *ResponseUI) ShowResponse(resp agent.Response) {
 
 func (u *ResponseUI) showCommand(cmd string) {
 	// Green arrow, command, then help text - write together to avoid split output
-	output := fmt.Sprintf("\033[32m→\033[0m %s\n  \033[90menter to run · tab to edit · esc to cancel\033[0m\n", cmd)
+	_, hints := confirmationHints(ConfirmTypeCommand)
+	output := fmt.Sprintf("\033[32m→\033[0m %s\n\033[90m%s\033[0m\n", cmd, fitHint("  ", "", hints, terminalColumns()))
 	fmt.Fprint(u.out, output)
 	// Flush if output is buffered
 	switch w := u.out.(type) {
@@ -255,7 +257,7 @@ func (u *ResponseUI) runSpinner() {
 			}
 
 			motion := selectAgentStatusMotion(frame, u.spinnerRand)
-			fmt.Fprintf(u.out, "\r\033[K%s", formatAgentStatusMotion(text, motion))
+			fmt.Fprintf(u.out, "\r\033[K%s", spinnerFrame(text, motion))
 			frame++
 		}
 	}
@@ -269,6 +271,19 @@ func selectAgentStatusMotion(frame int, rng agentStatusRandom) string {
 		return agentStatusReplacementPool[rng.Intn(len(agentStatusReplacementPool))]
 	}
 	return agentStatusReplacementPool[frame%len(agentStatusReplacementPool)]
+}
+
+// spinnerFrame is one spinner frame fitted to the pane. The frame is
+// redrawn with \r every tick; one that wraps leaves a row behind each time.
+func spinnerFrame(text, motion string) string {
+	if budget := rowBudget(terminalColumns()); budget > 0 {
+		used := 1 // leading space
+		if motion != "" {
+			used += runewidth.StringWidth(motion) + 1
+		}
+		text = fitText(text, budget-used)
+	}
+	return formatAgentStatusMotion(text, motion)
 }
 
 func formatAgentStatusMotion(text, motion string) string {
@@ -473,16 +488,21 @@ func (u *ResponseUI) ShowModelHint() {
 // Deprecated: Use AgentOutputCoordinator.ShowHints instead for proper
 // coordination with streaming output and permission prompts.
 func (u *ResponseUI) ShowConfirmation(ct ConfirmationType) {
-	var hint string
+	_, hints := confirmationHints(ct)
+	fmt.Fprintf(u.out, "\033[90m%s\033[0m\n", fitHint("  ", "", hints, terminalColumns()))
+}
+
+// confirmationHints are the scope label and keys of a confirmation footer.
+func confirmationHints(ct ConfirmationType) (scope string, hints []string) {
 	switch ct {
 	case ConfirmTypeCommand:
-		hint = "enter to run · tab to edit · esc to cancel"
+		return "cmd", []string{"enter to run", "tab to edit", "esc to cancel"}
 	case ConfirmTypeExplanation:
-		hint = "enter to finish · tab to copy · r to reply"
+		return "agent", []string{"enter to finish", "tab to copy", "r to reply"}
 	case ConfirmTypeError:
-		hint = "enter to retry · esc to cancel"
+		return "error", []string{"enter to retry", "esc to cancel"}
 	}
-	fmt.Fprintf(u.out, "  \033[90m%s\033[0m\n", hint)
+	return "", nil
 }
 
 // WaitForConfirmationByType waits for confirmation based on response type.

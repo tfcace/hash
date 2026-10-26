@@ -12,8 +12,15 @@ import (
 )
 
 // acceptFooter closes a banner whose suggestion is waiting as ghost text at
-// the next prompt.
-const acceptFooter = "  \033[90m└─ → to accept at prompt · esc to dismiss · ?? to explain\033[0m\n"
+// the next prompt, fitted to the pane.
+func acceptFooter() string {
+	return bannerFooter("→ to accept at prompt", "esc to dismiss", "?? to explain")
+}
+
+// bannerFooter is a banner's "└─" key row, keeping whole hints that fit.
+func bannerFooter(hints ...string) string {
+	return "\033[90m" + fitHint("  └─ ", "", hints, terminalColumns()) + "\033[0m\n"
+}
 
 // ErrorHandler renders error and learned-fix banners.
 type ErrorHandler struct {
@@ -49,7 +56,7 @@ func (h *ErrorHandler) HandleCommandNotFound(cmd string, suggestions []string, i
 
 	// Footer
 	if offerAccept {
-		fmt.Fprint(out, acceptFooter)
+		fmt.Fprint(out, acceptFooter())
 		return
 	}
 	fmt.Fprintf(out, "  \033[90m└─ ?? to explain\033[0m\n")
@@ -76,7 +83,7 @@ func (h *ErrorHandler) showDidYouMean(suggestion string) {
 
 	fmt.Fprintf(out, "\n\033[33m✗ Did you mean\033[0m\n")
 	fmt.Fprintf(out, "\n\033[32m→\033[0m %s\n", suggestion)
-	fmt.Fprint(out, acceptFooter)
+	fmt.Fprint(out, acceptFooter())
 }
 
 // showUpdateAvailable tells the user a newer adapter exists, in the shape of
@@ -91,7 +98,7 @@ func (h *ErrorHandler) showUpdateAvailable(n agentupdate.Notice, now time.Time) 
 	fmt.Fprintf(out, "\n\033[36m✦ %s update available\033[0m\n", agentupdate.DisplayName)
 	fmt.Fprintf(out, "\n\033[32m→\033[0m %s    \033[90m%s → %s · installed %s\033[0m\n",
 		updateCommand, n.Installed, n.Latest, formatAge(n.InstalledAt, now))
-	fmt.Fprint(out, "  \033[90m└─ → to accept at prompt · esc to dismiss\033[0m\n")
+	fmt.Fprint(out, bannerFooter("→ to accept at prompt", "esc to dismiss"))
 }
 
 func (h *ErrorHandler) showLearnedFix(fix learning.Fix, highConfidence bool) {
@@ -114,5 +121,5 @@ func (h *ErrorHandler) showLearnedFix(fix learning.Fix, highConfidence bool) {
 		fmt.Fprintf(out, "  \033[90m└─ ?? to explain\033[0m\n")
 		return
 	}
-	fmt.Fprint(out, acceptFooter)
+	fmt.Fprint(out, acceptFooter())
 }
