@@ -2,7 +2,6 @@ package shell
 
 import (
 	"strings"
-	"unicode/utf8"
 
 	"github.com/tfcace/hash/internal/agent"
 	"github.com/tfcace/hash/internal/editor"
@@ -121,19 +120,26 @@ func (s *legacyAgentMarkerSanitizer) Write(text string) string {
 
 	s.pending += text
 	s.pending = stripLegacyAgentMarkers(s.pending)
-	if len(s.pending) <= legacyMarkerTailBytes {
-		return ""
-	}
 
-	emitLen := len(s.pending) - legacyMarkerTailBytes
-	// Never cut inside a multibyte character: each piece is rendered on its
-	// own, and a partial character would show as replacement glyphs.
-	for emitLen > 0 && !utf8.RuneStart(s.pending[emitLen]) {
-		emitLen--
-	}
+	// Hold back only a tail that could still grow into a marker; the rest
+	// shows now. Markers are ASCII and open with "[", so the cut never lands
+	// inside a multibyte character.
+	emitLen := len(s.pending) - possibleMarkerTail(s.pending)
 	out := s.pending[:emitLen]
 	s.pending = s.pending[emitLen:]
 	return out
+}
+
+// possibleMarkerTail is the length of the longest suffix of text that is the
+// start of a legacy marker, 0 when none could be.
+func possibleMarkerTail(text string) int {
+	for n := min(len(text), legacyMarkerTailBytes); n > 0; n-- {
+		tail := text[len(text)-n:]
+		if strings.HasPrefix(legacyAwaitingInputMarker, tail) || strings.HasPrefix(legacyConversationMarker, tail) {
+			return n
+		}
+	}
+	return 0
 }
 
 func (s *legacyAgentMarkerSanitizer) Flush() string {
