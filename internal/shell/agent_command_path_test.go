@@ -215,3 +215,38 @@ func TestHandleAgentConfirmAction_ExplanationKeepsText(t *testing.T) {
 		}
 	}
 }
+
+// A command the user denied during the turn is not offered back one Enter
+// away: the agent is told to reply with it, so it shows as text instead.
+func TestDemoteDeniedCommand(t *testing.T) {
+	sh := newShellForAgentCommand(t)
+	sh.noteDeniedCommand("mkdir -p /tmp/x")
+
+	got := sh.demoteDeniedCommand(agent.Response{Type: agent.ResponseTypeCommand, Command: " mkdir -p /tmp/x "})
+	if got.Type != agent.ResponseTypeExplanation {
+		t.Errorf("denied command offered as %v, want an explanation", got.Type)
+	}
+	other := sh.demoteDeniedCommand(agent.Response{Type: agent.ResponseTypeCommand, Command: "ls /tmp/x"})
+	if other.Type != agent.ResponseTypeCommand {
+		t.Errorf("a command that was not denied became %v", other.Type)
+	}
+}
+
+// A line the user edits runs the way a typed line would: a ?? they type is
+// a new request, not a two-character glob. A ?? the agent's command already
+// had keeps its shell meaning.
+func TestRunEditedCommand_TypedQuestionMarksAreARequest(t *testing.T) {
+	sh := newShellForAgentCommand(t)
+	edited := "?? explain this"
+	sh.runEditedCommand(context.Background(), "echo hi", edited)
+	if sh.lastCommand == edited {
+		t.Errorf("edited ?? line ran as shell code")
+	}
+
+	sh = newShellForAgentCommand(t)
+	glob := "echo a??b c"
+	sh.runEditedCommand(context.Background(), "echo a??b", glob)
+	if sh.lastCommand != glob || sh.lastExitCode != 0 {
+		t.Errorf("agent's ?? glob: lastCommand = %q exit %d, want it run as shell", sh.lastCommand, sh.lastExitCode)
+	}
+}

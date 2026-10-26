@@ -71,9 +71,11 @@ type Shell struct {
 	colorPalette        prompt.Palette
 	allowlist           *allowlist.Manager
 	agentOutput         *AgentOutputCoordinator
-	agentStatus         *agentStatus                                     // OSC 7501 reports for the ?? turn
-	turnCancel          context.CancelFunc                               // cancels the ?? turn in flight (Ctrl+C, Esc)
-	streamKeys          atomic.Pointer[streamKeyWatcher]                 // reads Esc while a reply streams
+	agentStatus         *agentStatus                     // OSC 7501 reports for the ?? turn
+	turnCancel          context.CancelFunc               // cancels the ?? turn in flight (Ctrl+C, Esc)
+	streamKeys          atomic.Pointer[streamKeyWatcher] // reads Esc while a reply streams
+	deniedMu            sync.Mutex
+	denied              map[string]bool                                  // commands denied at a permission prompt during the ?? request
 	updateNotices       chan agentupdate.Notice                          // newer-adapter notices from the background check, drained before a prompt
 	updateGhost         string                                           // "model update" offered as ghost text at the next prompt only
 	updateChecker       func(context.Context) (agentupdate.Notice, bool) // nil = real detect + registry check
@@ -1088,6 +1090,7 @@ func (s *Shell) handleAgentRequest(ctx context.Context, parsed parser.ParseResul
 	defer agentCancel()
 	s.turnCancel = agentCancel
 	defer func() { s.turnCancel = nil }()
+	s.resetDeniedCommands()
 
 	// Set up SIGINT handler for this agent request
 	sigCh := make(chan os.Signal, 1)
@@ -1345,6 +1348,7 @@ func (s *Shell) handleAgentFullStreaming(ctx context.Context, parsed parser.Pars
 	collector.Append(responseText)
 	resp := collector.Response()
 	resp = agentTurnResponseForConfirmation(parsed.Type, resp, responseText)
+	resp = s.demoteDeniedCommand(resp)
 
 	allowReply := agentTurnAllowsReply(parsed.Type, resp)
 	transcript := s.initialAgentConversationTranscript(parsed, responseText)
@@ -1451,6 +1455,7 @@ func (s *Shell) runAgentConversationLoop(ctx context.Context, modelName string, 
 			continue
 		}
 
+		resp = s.demoteDeniedCommand(resp)
 		confirmType, needsConfirmation := confirmationTypeForAgentResponse(
 			resp,
 			agentTurnAllowsReply(parser.CommandTypeAgent, resp),
@@ -1806,7 +1811,57 @@ func (s *Shell) handleEditCommand(ctx context.Context, command string) (int64, e
 		return 0, nil
 	}
 
-	return s.runAgentCommand(ctx, result.Text)
+	return s.runEditedCommand(ctx, command, result.Text)
+}
+
+// runEditedCommand runs the line the user made of the agent's command. The
+// edits are the user's typing, so a ?? they added is a request, as at the
+// prompt; a ?? the agent's command already had stays shell syntax.
+func (s *Shell) runEditedCommand(ctx context.Context, original, edited string) (int64, error) {
+	line := strings.TrimSpace(edited)
+	if !strings.Contains(original, "??") && parser.Parse(line).Type != parser.CommandTypeRegular {
+		return 0, s.dispatchCommand(ctx, line)
+	}
+	return s.runAgentCommand(ctx, edited)
+}
+
+func (s *Shell) resetDeniedCommands() {
+	s.deniedMu.Lock()
+	s.denied = nil
+	s.deniedMu.Unlock()
+}
+
+func (s *Shell) noteDeniedCommand(command string) {
+	command = strings.TrimSpace(command)
+	if command == "" {
+		return
+	}
+	s.deniedMu.Lock()
+	if s.denied == nil {
+		s.denied = map[string]bool{}
+	}
+	s.denied[command] = true
+	s.deniedMu.Unlock()
+}
+
+// demoteDeniedCommand keeps a command the user denied during this request
+// from coming back one Enter away. The agent is told to reply with a denied
+// command, so the reply stays readable, just not runnable.
+func (s *Shell) demoteDeniedCommand(resp agent.Response) agent.Response {
+	if resp.Type != agent.ResponseTypeCommand {
+		return resp
+	}
+	s.deniedMu.Lock()
+	denied := s.denied[strings.TrimSpace(resp.Command)]
+	s.deniedMu.Unlock()
+	if !denied {
+		return resp
+	}
+	resp.Type = agent.ResponseTypeExplanation
+	if resp.Explanation == "" {
+		resp.Explanation = resp.Command
+	}
+	return resp
 }
 
 func (s *Shell) updatePrompt() {
@@ -2114,6 +2169,9 @@ func (s *Shell) handleToolPermission(ctx context.Context, req agent.ToolPermissi
 	if always && s.allowlist != nil {
 		s.refreshProjectAllowlist()
 		_ = s.allowlist.Allow(req.Command)
+	}
+	if !allow {
+		s.noteDeniedCommand(req.Command)
 	}
 
 	trace.AgentHigh("tool_permission", map[string]any{
