@@ -564,6 +564,9 @@ func (e *Editor) cancelInput() Result {
 	e.ghost.Clear()
 	e.ghostStreamChan = nil
 	e.ghostErrChan = nil
+	if e.config.ClearOnCancel {
+		e.display.Clear()
+	}
 	return Result{Canceled: true}
 }
 

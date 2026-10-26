@@ -1309,7 +1309,7 @@ func (s *Shell) handleAgentFullStreaming(ctx context.Context, parsed parser.Pars
 
 	if streamResult.canceled {
 		s.agentStatus.idle()
-		s.responseUI.ClearLine()
+		s.endCanceledRow()
 		showTurnCanceled(os.Stdout)
 		s.lastExitCode = 1
 		return nil
@@ -1544,7 +1544,7 @@ func (s *Shell) streamAgentFollowUpTurn(
 	stopKeys()
 
 	if streamResult.canceled {
-		s.responseUI.ClearLine()
+		s.endCanceledRow()
 		s.agentStatus.idle()
 		showTurnCanceled(os.Stdout)
 		s.lastExitCode = 1
@@ -1812,6 +1812,14 @@ func (s *Shell) handleEditCommand(ctx context.Context, command string) (int64, e
 	}
 
 	return s.runEditedCommand(ctx, command, result.Text)
+}
+
+// endCanceledRow makes room for the canceled row without erasing what the
+// reply drew: the spinner's row is cleared, a half-drawn row is ended.
+func (s *Shell) endCanceledRow() {
+	if !s.responseUI.StopSpinnerAndClear() && s.agentOutput.EndsMidRow() {
+		fmt.Fprintln(os.Stdout)
+	}
 }
 
 // runEditedCommand runs the line the user made of the agent's command. The
