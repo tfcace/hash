@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 	"unicode"
@@ -163,12 +164,35 @@ func (aoc *AgentOutputCoordinator) RenderToolResult(update agent.ToolCallUpdate,
 	if update.PermissionDenied {
 		icon, label, color = "–", "denied", "\x1b[33m"
 	} else if update.Status != agent.ToolCallCompleted {
-		icon, label, color = "✗", "failed", "\x1b[31m"
+		// The red mark says it failed; the row still names the tool and,
+		// when the agent sent one, why.
+		icon, color = "✗", "\x1b[31m"
+		if reason := toolFailureReason(update.Content); reason != "" {
+			title += " · " + reason
+		}
 	}
 
 	aoc.mu.Lock()
 	defer aoc.mu.Unlock()
 	fmt.Fprintf(aoc.out, "%s  %s%s\x1b[0m \x1b[90m%s · %s\x1b[0m\n", prefix, color, icon, label, title)
+}
+
+var toolMarkupRe = regexp.MustCompile(`</?[a-z_]+>`)
+
+// toolFailureReason is the first line of a failed tool's output, without
+// the markup some agents wrap errors in, short enough for one row.
+func toolFailureReason(content string) string {
+	content = strings.TrimSpace(toolMarkupRe.ReplaceAllString(content, ""))
+	if i := strings.IndexByte(content, '\n'); i >= 0 {
+		content = strings.TrimSpace(content[:i])
+	}
+	return truncateTerminalText(sanitizeTerminalText(content), 80)
+}
+
+// showTurnCanceled closes a canceled ?? turn with a row in the style of the
+// tool rows above it.
+func showTurnCanceled(w io.Writer) {
+	fmt.Fprint(w, "  \x1b[33m–\x1b[0m \x1b[90mcanceled\x1b[0m\n")
 }
 
 func truncateTerminalText(text string, limit int) string {
@@ -348,7 +372,7 @@ func (aoc *AgentOutputCoordinator) RenderPermissionPromptOnRow(command, toolName
 		barStyle + "│" + ansiReset + " " + permissionPad + header,
 		barStyle + "│" + ansiReset + " " + permissionPad + accentCode + ansiBold + safeCommand + ansiReset,
 		barStyle + "│" + ansiReset + " " + permissionPad,
-		barStyle + "│" + ansiReset + " " + permissionPad + "[y]allow  [n]deny  [a]always allow",
+		barStyle + "│" + ansiReset + " " + permissionPad + "y to allow · n to deny · a to always allow",
 	}
 
 	var sb strings.Builder
@@ -491,13 +515,13 @@ func (aoc *AgentOutputCoordinator) ShowHints(ct ConfirmationType) {
 	switch ct {
 	case ConfirmTypeCommand:
 		scope = "cmd"
-		hint = "[Enter: run] [Tab: edit] [Esc: cancel]"
+		hint = "enter to run · tab to edit · esc to cancel"
 	case ConfirmTypeExplanation:
 		scope = "agent"
-		hint = "[Enter: done] [Tab: copy] [r: reply] [Esc: cancel]"
+		hint = "enter to finish · tab to copy · r to reply"
 	case ConfirmTypeError:
 		scope = "error"
-		hint = "[Enter: retry] [Esc: cancel]"
+		hint = "enter to retry · esc to cancel"
 	}
 
 	fmt.Fprintf(aoc.out, "  \x1b[90m%s · %s\x1b[0m\n", scope, hint)

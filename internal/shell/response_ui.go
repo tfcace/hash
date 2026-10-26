@@ -55,9 +55,9 @@ const (
 type ConfirmationType int
 
 const (
-	ConfirmTypeCommand     ConfirmationType = iota // [Enter: run] [Tab: edit] [Esc: cancel]
-	ConfirmTypeExplanation                         // [Enter: done] [Tab: copy] [r: reply] [Esc: cancel]
-	ConfirmTypeError                               // [Enter: retry] [Esc: cancel]
+	ConfirmTypeCommand     ConfirmationType = iota // enter to run · tab to edit · esc to cancel
+	ConfirmTypeExplanation                         // enter to finish · tab to copy · r to reply
+	ConfirmTypeError                               // enter to retry · esc to cancel
 )
 
 // AgentState represents the current state of an agent request.
@@ -170,7 +170,7 @@ func (u *ResponseUI) ShowResponse(resp agent.Response) {
 
 func (u *ResponseUI) showCommand(cmd string) {
 	// Green arrow, command, then help text - write together to avoid split output
-	output := fmt.Sprintf("\033[32m→\033[0m %s\n  \033[90m[Enter: run] [Tab: edit] [Esc: cancel]\033[0m\n", cmd)
+	output := fmt.Sprintf("\033[32m→\033[0m %s\n  \033[90menter to run · tab to edit · esc to cancel\033[0m\n", cmd)
 	fmt.Fprint(u.out, output)
 	// Flush if output is buffered
 	switch w := u.out.(type) {
@@ -476,11 +476,11 @@ func (u *ResponseUI) ShowConfirmation(ct ConfirmationType) {
 	var hint string
 	switch ct {
 	case ConfirmTypeCommand:
-		hint = "[Enter: run] [Tab: edit] [Esc: cancel]"
+		hint = "enter to run · tab to edit · esc to cancel"
 	case ConfirmTypeExplanation:
-		hint = "[Enter: done] [Tab: copy] [r: reply] [Esc: cancel]"
+		hint = "enter to finish · tab to copy · r to reply"
 	case ConfirmTypeError:
-		hint = "[Enter: retry] [Esc: cancel]"
+		hint = "enter to retry · esc to cancel"
 	}
 	fmt.Fprintf(u.out, "  \033[90m%s\033[0m\n", hint)
 }

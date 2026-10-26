@@ -175,7 +175,7 @@ func (ui *PickerUI) View() tea.View {
 	fmt.Fprintf(&b, "%s\n", statusStyle.Render(sizeInfo))
 
 	// Footer
-	fmt.Fprintf(&b, "\n%s", dimStyle.Render("[Space: toggle] [a: all] [n: none] [Enter: confirm] [Esc: skip]"))
+	fmt.Fprintf(&b, "\n%s", dimStyle.Render("space to toggle · a for all · n for none · enter to confirm · esc to skip"))
 
 	v := tea.NewView(b.String())
 	v.AltScreen = true

@@ -283,7 +283,7 @@ func TestErrorHandler_ShowLearnedFixAdvertisesRealKeys(t *testing.T) {
 	h.showLearnedFix(learning.Fix{Fix: "chmod +x deploy.sh", SuccessCount: 3}, true)
 	out := buf.String()
 
-	if strings.Contains(out, "[Enter: run]") || strings.Contains(out, "[Tab: edit]") {
+	if strings.Contains(out, "enter to run") || strings.Contains(out, "tab to edit") {
 		t.Errorf("banner advertises key bindings that do not exist: %q", out)
 	}
 	if !strings.Contains(out, "accept") || !strings.Contains(out, "esc") {

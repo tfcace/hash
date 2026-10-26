@@ -70,7 +70,7 @@ func TestHandleAgentStreamError_NoResponseTimeoutDoesNotShowTroubleshooting(t *t
 	if strings.Contains(output, "Troubleshooting") {
 		t.Fatalf("did not expect troubleshooting hints for timeout, got:\n%s", output)
 	}
-	if !strings.Contains(output, "[Enter: retry]") {
+	if !strings.Contains(output, "enter to retry") {
 		t.Fatalf("expected retry hint for timeout, got:\n%s", output)
 	}
 }
@@ -103,7 +103,7 @@ func TestHandleAgentStreamError_NoOutputUsesUserFacingRetry(t *testing.T) {
 	if strings.Contains(output, "acp prompt completed") || strings.Contains(output, "stopReason=end_turn") {
 		t.Fatalf("expected protocol details to stay out of the UI, got:\n%s", output)
 	}
-	if !strings.Contains(output, "[Enter: retry]") {
+	if !strings.Contains(output, "enter to retry") {
 		t.Fatalf("expected retry hint for no-output error, got:\n%s", output)
 	}
 }
@@ -132,7 +132,7 @@ func TestHandleAgentStreamError_ModelErrorPointsAtModelBuiltin(t *testing.T) {
 	if !strings.Contains(output, "model --list") {
 		t.Fatalf("expected a pointer to the model builtin, got:\n%s", output)
 	}
-	if strings.Contains(output, "Troubleshooting") || strings.Contains(output, "[Enter: retry]") {
+	if strings.Contains(output, "Troubleshooting") || strings.Contains(output, "enter to retry") {
 		t.Fatalf("model errors should get neither install hints nor a retry prompt, got:\n%s", output)
 	}
 }
