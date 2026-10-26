@@ -1292,6 +1292,7 @@ func (s *Shell) handleAgentFullStreaming(ctx context.Context, parsed parser.Pars
 		writeRendered: func(rendered string) {
 			s.agentOutput.WriteStream(rendered)
 		},
+		wrapWidth: replyWidth(0),
 	}, func(update agent.ToolCallUpdate) {
 		s.presentAgentToolUpdate(update, "")
 	})
@@ -1519,6 +1520,7 @@ func (s *Shell) streamAgentFollowUpTurn(
 		writeRendered: func(rendered string) {
 			railPrefixer.Write(rendered)
 		},
+		wrapWidth: replyWidth(agentConversationAgentPrefixWidth),
 	}, func(update agent.ToolCallUpdate) {
 		// Tool rows share the conversation rail without pretending they are
 		// assistant prose.
