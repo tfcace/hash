@@ -515,7 +515,7 @@ func TestAgentOutputCoordinator_FailedToolShowsKindAndReason(t *testing.T) {
 // "hash: request canceled".
 func TestShowTurnCanceled(t *testing.T) {
 	var buf bytes.Buffer
-	showTurnCanceled(&buf)
+	showTurnCanceled(&buf, "")
 	if got, want := stripANSI(buf.String()), "  – canceled\n"; got != want {
 		t.Errorf("canceled row = %q, want %q", got, want)
 	}
@@ -540,5 +540,20 @@ func TestAgentOutputCoordinator_CancelKeepsStreamedRow(t *testing.T) {
 	}
 	if !aoc.EndsMidRow() {
 		t.Error("EndsMidRow() = false after a row without a newline")
+	}
+}
+
+// Text held during a permission prompt and drawn after it counts toward the
+// row state, so the footer neither doubles a newline nor joins the row.
+func TestAgentOutputCoordinator_BufferedTextSetsRowState(t *testing.T) {
+	var buf bytes.Buffer
+	aoc := NewAgentOutputCoordinator(&buf)
+	aoc.StartStreaming()
+	aoc.WriteStream("line one\n")
+	aoc.RenderPermissionPrompt("ls", "", "")
+	aoc.WriteStream("half a row")
+	aoc.ClearPermissionPromptSilently(true)
+	if !aoc.EndsMidRow() {
+		t.Error("EndsMidRow() = false after buffered text without a newline")
 	}
 }

@@ -68,7 +68,7 @@ func TestHandleAgentConfirmAction_CommandTurnWithoutARunIsNotAccepted(t *testing
 	sh := newShellForAgentCommand(t)
 
 	sh.handleAgentConfirmAction(context.Background(), ConfirmRun, ConfirmTypeCommand,
-		agent.Response{Type: agent.ResponseTypeCommand, Command: "   "}, agentTurn{prompt: "noop", response: "   "}, 1)
+		agent.Response{Type: agent.ResponseTypeCommand, Command: "   "}, agentTurn{prompt: "noop", response: "   "})
 
 	turns, err := sh.history.GetAgentInteractions("", 10)
 	if err != nil || len(turns) != 1 {
@@ -88,7 +88,7 @@ func TestHandleAgentConfirmAction_FailedCommandBecomesLastError(t *testing.T) {
 	cmd := "cat " + missing
 
 	sh.handleAgentConfirmAction(context.Background(), ConfirmRun, ConfirmTypeCommand,
-		agent.Response{Type: agent.ResponseTypeCommand, Command: cmd}, agentTurn{response: cmd}, 1)
+		agent.Response{Type: agent.ResponseTypeCommand, Command: cmd}, agentTurn{response: cmd})
 
 	if sh.lastCommand != cmd {
 		t.Errorf("lastCommand = %q, want the agent command %q", sh.lastCommand, cmd)
@@ -109,7 +109,7 @@ func TestHandleAgentConfirmAction_CommandContainingDoubleQuestionMarkRunsAsShell
 	cmd := "echo a??b"
 
 	sh.handleAgentConfirmAction(context.Background(), ConfirmRun, ConfirmTypeCommand,
-		agent.Response{Type: agent.ResponseTypeCommand, Command: cmd}, agentTurn{response: cmd}, 1)
+		agent.Response{Type: agent.ResponseTypeCommand, Command: cmd}, agentTurn{response: cmd})
 
 	if sh.lastCommand != cmd {
 		t.Errorf("lastCommand = %q, want %q to have run as a shell line", sh.lastCommand, cmd)
@@ -124,7 +124,7 @@ func TestHandleAgentConfirmAction_ExitEndsTheShell(t *testing.T) {
 	sh := newShellForAgentCommand(t)
 
 	err := sh.handleAgentConfirmAction(context.Background(), ConfirmRun, ConfirmTypeCommand,
-		agent.Response{Type: agent.ResponseTypeCommand, Command: "exit"}, agentTurn{response: "exit"}, 1)
+		agent.Response{Type: agent.ResponseTypeCommand, Command: "exit"}, agentTurn{response: "exit"})
 
 	if err != errExit {
 		t.Fatalf("handleAgentConfirmAction() error = %v, want errExit", err)
@@ -138,7 +138,7 @@ func TestHandleAgentConfirmAction_RunLinksTheTurnToItsCommand(t *testing.T) {
 	turn := agentTurn{prompt: "print linked", response: "echo linked"}
 
 	sh.handleAgentConfirmAction(context.Background(), ConfirmRun, ConfirmTypeCommand,
-		agent.Response{Type: agent.ResponseTypeCommand, Command: "echo linked"}, turn, 1)
+		agent.Response{Type: agent.ResponseTypeCommand, Command: "echo linked"}, turn)
 
 	recent, err := sh.history.GetRecent(1)
 	if err != nil || len(recent) != 1 || recent[0].Command != "echo linked" {
@@ -167,7 +167,7 @@ func TestHandleAgentConfirmAction_CancelRecordsTheTurnAsDeclined(t *testing.T) {
 	turn := agentTurn{prompt: "delete everything", response: "rm -rf /"}
 
 	sh.handleAgentConfirmAction(context.Background(), ConfirmCancel, ConfirmTypeCommand,
-		agent.Response{Type: agent.ResponseTypeCommand, Command: "rm -rf /"}, turn, 1)
+		agent.Response{Type: agent.ResponseTypeCommand, Command: "rm -rf /"}, turn)
 
 	turns, err := sh.history.GetAgentInteractions("", 10)
 	if err != nil || len(turns) != 1 {
@@ -186,7 +186,7 @@ func TestHandleAgentConfirmAction_RunShowsTheCommandAsTyped(t *testing.T) {
 	sh.responseUI = NewResponseUI(&out)
 
 	sh.handleAgentConfirmAction(context.Background(), ConfirmRun, ConfirmTypeCommand,
-		agent.Response{Type: agent.ResponseTypeCommand, Command: "true"}, agentTurn{response: "true"}, 1)
+		agent.Response{Type: agent.ResponseTypeCommand, Command: "true"}, agentTurn{response: "true"})
 
 	got := out.String()
 	if !strings.HasPrefix(got, "\x1b[A\x1b[K\x1b[A\x1b[K") {
@@ -208,7 +208,7 @@ func TestHandleAgentConfirmAction_ExplanationKeepsText(t *testing.T) {
 
 		sh.handleAgentConfirmAction(context.Background(), action, ConfirmTypeExplanation,
 			agent.Response{Type: agent.ResponseTypeExplanation, Explanation: "answer"},
-			agentTurn{prompt: "q", response: "answer"}, 60)
+			agentTurn{prompt: "q", response: "answer"})
 
 		if ups := strings.Count(out.String(), "\033[A"); ups != 2 {
 			t.Errorf("action %v moved up %d rows, want 2 (the hint and its blank line)", action, ups)

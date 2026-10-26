@@ -198,9 +198,9 @@ func toolFailureReason(content string) string {
 }
 
 // showTurnCanceled closes a canceled ?? turn with a row in the style of the
-// tool rows above it.
-func showTurnCanceled(w io.Writer) {
-	fmt.Fprint(w, "  \x1b[33m–\x1b[0m \x1b[90mcanceled\x1b[0m\n")
+// tool rows above it, behind the same prefix (the conversation rail).
+func showTurnCanceled(w io.Writer, prefix string) {
+	fmt.Fprint(w, prefix+"  \x1b[33m–\x1b[0m \x1b[90mcanceled\x1b[0m\n")
 }
 
 func truncateTerminalText(text string, limit int) string {
@@ -244,10 +244,7 @@ func (aoc *AgentOutputCoordinator) WriteStream(text string) {
 
 	switch aoc.state {
 	case AgentOutputStateStreaming:
-		fmt.Fprint(aoc.out, text)
-		if text != "" {
-			aoc.midRow = !strings.HasSuffix(text, "\n")
-		}
+		aoc.drawStreamLocked(text)
 	case AgentOutputStatePermission:
 		// Buffer for later
 		aoc.streamBuffer.WriteString(text)
@@ -285,7 +282,7 @@ func (aoc *AgentOutputCoordinator) ExitPermission() {
 		aoc.state = AgentOutputStateStreaming
 		// Flush buffered content
 		if aoc.streamBuffer.Len() > 0 {
-			fmt.Fprint(aoc.out, aoc.streamBuffer.String())
+			aoc.drawStreamLocked(aoc.streamBuffer.String())
 			aoc.streamBuffer.Reset()
 		}
 	} else {
@@ -500,7 +497,7 @@ func (aoc *AgentOutputCoordinator) clearPermissionPrompt(allowed, showFeedback b
 	if aoc.wasStreaming {
 		aoc.state = AgentOutputStateStreaming
 		if aoc.streamBuffer.Len() > 0 {
-			fmt.Fprint(aoc.out, aoc.streamBuffer.String())
+			aoc.drawStreamLocked(aoc.streamBuffer.String())
 			aoc.streamBuffer.Reset()
 		}
 	} else {
@@ -580,6 +577,15 @@ func (aoc *AgentOutputCoordinator) Cancel() {
 	}
 
 	aoc.flushLocked()
+}
+
+// drawStreamLocked writes reply text and remembers whether it left the row
+// unfinished. Must be called with mu held.
+func (aoc *AgentOutputCoordinator) drawStreamLocked(text string) {
+	fmt.Fprint(aoc.out, text)
+	if text != "" {
+		aoc.midRow = !strings.HasSuffix(text, "\n")
+	}
 }
 
 // EndsMidRow reports whether the reply drawn so far stopped partway through

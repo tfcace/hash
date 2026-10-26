@@ -29,7 +29,6 @@ func TestHandleAgentStreamError_NoResponseStartupShowsTroubleshooting(t *testing
 		"claude-agent-acp",
 		errors.Join(agent.ErrACPStartFailed, exec.ErrNotFound),
 		0,
-		0,
 	)
 
 	if err != nil {
@@ -59,7 +58,6 @@ func TestHandleAgentStreamError_NoResponseTimeoutDoesNotShowTroubleshooting(t *t
 		"claude-agent-acp",
 		errors.Join(agent.ErrACPIdleTimeout, context.DeadlineExceeded),
 		0,
-		0,
 	)
 
 	if err != nil {
@@ -88,7 +86,6 @@ func TestHandleAgentStreamError_NoOutputUsesUserFacingRetry(t *testing.T) {
 		parser.ParseResult{},
 		"claude-agent-acp",
 		errors.Join(agent.ErrACPNoOutput, errors.New("prompt completed without displayable text (stopReason=end_turn)")),
-		0,
 		0,
 	)
 
@@ -121,7 +118,6 @@ func TestHandleAgentStreamError_ModelErrorPointsAtModelBuiltin(t *testing.T) {
 		parser.ParseResult{},
 		"claude-agent-acp",
 		errors.New("rpc error -32603: Internal error: There's an issue with the selected model (fable[1m]). It may not exist or you may not have access to it. Run --model to pick a different model."),
-		0,
 		0,
 	)
 

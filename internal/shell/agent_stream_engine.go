@@ -425,12 +425,13 @@ func (s *Shell) collectAgentEventStream(
 					})
 				}
 			case agent.StreamEventToolCall:
+				// The agent's view of the call; a denial is hash's own and is
+				// traced at the permission prompt (tool_permission).
 				trace.AgentHigh("turn_tool", map[string]any{
 					"id":     event.ToolCall.ID,
 					"kind":   event.ToolCall.Kind,
 					"title":  event.ToolCall.Title,
 					"status": string(event.ToolCall.Status),
-					"denied": event.ToolCall.PermissionDenied,
 				})
 				writeRendered(wrapper.Write(renderer.Flush()) + wrapper.Flush())
 				if response.Len() > 0 && !strings.HasSuffix(response.String(), "\n") {
@@ -447,6 +448,7 @@ func (s *Shell) collectAgentEventStream(
 	cleanTail := sanitizer.Flush()
 	appendResponse(cleanTail)
 	writeRendered(wrapper.Write(renderer.Write(cleanTail)+renderer.Finish()) + wrapper.Flush())
+	result.lineCount += wrapper.SoftRows()
 	result.responseText = response.String()
 	return result
 }

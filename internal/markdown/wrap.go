@@ -20,9 +20,10 @@ type wrapToken struct {
 }
 
 // Wrapper word-wraps rendered ANSI text to a column width as it streams in.
-// Hash breaks lines itself so it knows how many rows a reply takes and can
-// indent continuations; left to the terminal, a long line breaks mid-word at
-// column 0 and escapes any prefix drawn at the row start.
+// Hash breaks lines itself so it can indent continuations and keep a row
+// prefix (the conversation rail) on every row; left to the terminal, a long
+// line breaks mid-word at column 0. What must stay whole is left for the
+// terminal to wrap: a word longer than a row (a URL, a path) and code.
 type Wrapper struct {
 	width int
 
@@ -31,20 +32,32 @@ type Wrapper struct {
 	indent  int             // continuation indent of the logical line
 	measure bool            // indent not yet measured for this line
 
-	spaces    int // pending spaces before the next word
+	head     strings.Builder // start of a line, held until it is known whether it opens code
+	deciding bool            // at a line start, head still matches codeLinePrefix
+	code     bool            // the current line is code: drawn unwrapped
+
+	spaces    int  // pending spaces before the next word
+	rowUsed   bool // a word is already on the current row
 	word      []wrapToken
 	wordWidth int
 
 	esc   strings.Builder // escape sequence being read
 	inEsc bool
 
-	sgr string // styling active at the output position
+	sgr  string // styling active at the output position
+	soft int    // rows the terminal added by wrapping overlong rows
 }
 
 // NewWrapper creates a wrapper for the given width. A width below 1 passes
 // text through unchanged.
 func NewWrapper(width int) *Wrapper {
-	return &Wrapper{width: width, measure: true}
+	return &Wrapper{width: width, measure: true, deciding: true}
+}
+
+// SoftRows is how many rows the terminal added wrapping what hash left
+// whole, on top of the newlines in the output.
+func (w *Wrapper) SoftRows() int {
+	return w.soft
 }
 
 // Write consumes a fragment and returns the text that is ready to draw. The
@@ -56,40 +69,7 @@ func (w *Wrapper) Write(text string) string {
 	}
 	var out strings.Builder
 	for _, r := range text {
-		if w.inEsc {
-			w.esc.WriteRune(r)
-			if escapeDone(w.esc.String()) {
-				w.inEsc = false
-				w.word = append(w.word, wrapToken{text: w.esc.String()})
-				w.esc.Reset()
-			}
-			continue
-		}
-		switch r {
-		case '\x1b':
-			w.inEsc = true
-			w.esc.WriteRune(r)
-		case '\n':
-			w.flushWord(&out)
-			w.spaces = 0
-			w.emit(&out, "\n")
-			w.col = 0
-			w.line.Reset()
-			w.measure = true
-		case ' ', '\t':
-			w.flushWord(&out)
-			n := 1
-			if r == '\t' {
-				n = tabWidth - (w.col+w.spaces)%tabWidth
-			}
-			w.spaces += n
-			w.noteLine(strings.Repeat(" ", n))
-		default:
-			rw := runewidth.RuneWidth(r)
-			w.word = append(w.word, wrapToken{text: string(r), width: rw})
-			w.wordWidth += rw
-			w.noteLine(string(r))
-		}
+		w.rune(&out, r)
 	}
 	return out.String()
 }
@@ -101,9 +81,133 @@ func (w *Wrapper) Flush() string {
 		return ""
 	}
 	var out strings.Builder
+	w.decide(&out, false)
 	w.flushWord(&out)
 	w.spaces = 0
 	return out.String()
+}
+
+// rune routes one rune: through the line-start check, then as code or as
+// wrapped text.
+func (w *Wrapper) rune(out *strings.Builder, r rune) {
+	if w.deciding {
+		w.head.WriteRune(r)
+		head := w.head.String()
+		switch {
+		case head == codeLinePrefix:
+			w.decide(out, true)
+		case !strings.HasPrefix(codeLinePrefix, head):
+			w.decide(out, false)
+		}
+		return
+	}
+	if w.code {
+		w.codeRune(out, r)
+		return
+	}
+	w.textRune(out, r)
+}
+
+// decide ends the line-start check and replays what it held.
+func (w *Wrapper) decide(out *strings.Builder, code bool) {
+	if !w.deciding {
+		return
+	}
+	w.deciding = false
+	w.code = code
+	head := w.head.String()
+	w.head.Reset()
+	if code {
+		w.emit(out, head)
+		w.col = runewidth.StringWidth(strings.TrimPrefix(head, gray))
+		return
+	}
+	for _, r := range head {
+		w.textRune(out, r)
+	}
+}
+
+// codeRune draws a code line rune as is, tabs expanded from where the code
+// starts (after its two-column indent).
+func (w *Wrapper) codeRune(out *strings.Builder, r rune) {
+	if w.inEsc {
+		w.esc.WriteRune(r)
+		if escapeDone(w.esc.String()) {
+			w.inEsc = false
+			w.emit(out, w.esc.String())
+			w.esc.Reset()
+		}
+		return
+	}
+	switch r {
+	case '\x1b':
+		w.inEsc = true
+		w.esc.WriteRune(r)
+	case '\n':
+		w.endLine(out)
+	case '\t':
+		n := tabWidth - (w.col-2)%tabWidth
+		w.emit(out, strings.Repeat(" ", n))
+		w.col += n
+	default:
+		w.emit(out, string(r))
+		w.col += runewidth.RuneWidth(r)
+	}
+}
+
+// textRune feeds one rune of wrapped text.
+func (w *Wrapper) textRune(out *strings.Builder, r rune) {
+	if w.inEsc {
+		w.esc.WriteRune(r)
+		if escapeDone(w.esc.String()) {
+			w.inEsc = false
+			w.word = append(w.word, wrapToken{text: w.esc.String()})
+			w.esc.Reset()
+		}
+		return
+	}
+	switch r {
+	case '\x1b':
+		w.inEsc = true
+		w.esc.WriteRune(r)
+	case '\n':
+		w.flushWord(out)
+		w.endLine(out)
+	case ' ', '\t':
+		w.flushWord(out)
+		n := 1
+		if r == '\t' {
+			n = tabWidth - (w.col+w.spaces)%tabWidth
+		}
+		w.spaces += n
+		w.noteLine(strings.Repeat(" ", n))
+	default:
+		rw := runewidth.RuneWidth(r)
+		w.word = append(w.word, wrapToken{text: string(r), width: rw})
+		w.wordWidth += rw
+		w.noteLine(string(r))
+	}
+}
+
+// endLine finishes a logical line and readies the next.
+func (w *Wrapper) endLine(out *strings.Builder) {
+	w.spaces = 0
+	w.countSoftRows()
+	w.emit(out, "\n")
+	w.col = 0
+	w.rowUsed = false
+	w.line.Reset()
+	w.measure = true
+	w.code = false
+	w.deciding = true
+}
+
+// countSoftRows adds the rows the terminal takes for the current row when
+// it is wider than the pane.
+func (w *Wrapper) countSoftRows() {
+	if w.col > w.width {
+		w.soft += (w.col - 1) / w.width
+	}
 }
 
 // noteLine records the start of the logical line, enough to measure its
@@ -115,12 +219,13 @@ func (w *Wrapper) noteLine(s string) {
 }
 
 // flushWord draws the pending spaces and word, starting a new row first
-// when the word does not fit on this one.
+// when the word does not fit on this one. A word too long for any row is
+// drawn whole on its own row.
 func (w *Wrapper) flushWord(out *strings.Builder) {
 	if len(w.word) == 0 {
 		return
 	}
-	if w.col > 0 && w.col+w.spaces+w.wordWidth > w.width {
+	if w.rowUsed && w.col+w.spaces+w.wordWidth > w.width {
 		w.breakRow(out)
 	} else {
 		// Indentation alone must leave a column for the text.
@@ -131,12 +236,10 @@ func (w *Wrapper) flushWord(out *strings.Builder) {
 	w.spaces = 0
 
 	for _, tok := range w.word {
-		if tok.width > 0 && w.col+tok.width > w.width && w.col > w.rowStart() {
-			w.breakRow(out)
-		}
 		w.emit(out, tok.text)
 		w.col += tok.width
 	}
+	w.rowUsed = true
 	w.word = w.word[:0]
 	w.wordWidth = 0
 }
@@ -148,20 +251,14 @@ func (w *Wrapper) breakRow(out *strings.Builder) {
 		w.indent = lineIndent(w.line.String(), w.width)
 		w.measure = false
 	}
+	w.countSoftRows()
 	style := w.sgr
 	if style != "" {
 		w.emit(out, reset)
 	}
 	w.emit(out, "\n"+strings.Repeat(" ", w.indent)+style)
 	w.col = w.indent
-}
-
-// rowStart is the column a continuation row starts at.
-func (w *Wrapper) rowStart() int {
-	if w.measure {
-		return 0
-	}
-	return w.indent
+	w.rowUsed = false
 }
 
 // emit writes s and tracks the SGR state it leaves behind.

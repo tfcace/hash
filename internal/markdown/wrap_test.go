@@ -37,12 +37,36 @@ func TestWrapper_HangingIndentForBullets(t *testing.T) {
 	}
 }
 
-// A word longer than the line is broken where the line ends rather than
-// left for the terminal to break.
-func TestWrapper_HardBreaksLongWords(t *testing.T) {
-	got := wrapAll(5, "abcdefghijklm\n")
-	if want := "abcde\nfghij\nklm\n"; got != want {
+// A word longer than a row (a URL, a path) moves to a row of its own and is
+// left whole for the terminal to wrap: a newline inside it would break copy
+// and link detection.
+func TestWrapper_KeepsLongWordsWhole(t *testing.T) {
+	w := NewWrapper(5)
+	got := w.Write("ab abcdefghijklm cd\n") + w.Flush()
+	if want := "ab\nabcdefghijklm\ncd\n"; got != want {
 		t.Errorf("got %q, want %q", got, want)
+	}
+	// After a hanging indent too: one break, not an empty indented row.
+	if got := stripAnsi(wrapAll(10, "• see https://example.com/long\n")); got != "• see\n  https://example.com/long\n" {
+		t.Errorf("indented long word = %q", got)
+	}
+	// 13 columns on a 5-column row: the terminal adds two rows.
+	if w.SoftRows() != 2 {
+		t.Errorf("SoftRows() = %d, want 2", w.SoftRows())
+	}
+}
+
+// Code is not word-wrapped: a newline hash inserts would become part of
+// the code when copied. Tabs expand from where the code starts, not from
+// the code block's indent.
+func TestWrapper_LeavesCodeLinesWhole(t *testing.T) {
+	code := codeLinePrefix + "if x { return \"a long string literal\" }" + reset + "\n"
+	if got := wrapAll(12, code); got != code {
+		t.Errorf("code line was wrapped: %q", got)
+	}
+	got := stripAnsi(wrapAll(40, codeLinePrefix+"\tx"+reset+"\n"+codeLinePrefix+"\t\ty"+reset+"\n"))
+	if want := "      x\n          y\n"; got != want {
+		t.Errorf("tabs = %q, want %q", got, want)
 	}
 }
 
@@ -81,7 +105,9 @@ var wrapCorpus = []string{
 	"aaa bbb ccc ddd eee fff\n",
 	"  \x1b[36m•\x1b[0m one \x1b[1mtwo three\x1b[0m four five six\n",
 	"日本語テキスト 🚀👍🏽 https://example.com/a/very/long/path\n",
-	"\x1b[90m  \tcode with\ttabs and words\x1b[0m\n",
+	codeLinePrefix + "\tcode with\ttabs and words" + reset + "\n",
+	"\x1b[9", // a lone escape prefix
+	"  plain indented words that wrap\n",
 	"abcdefghijklmnopqrstuvwxyz abc\n",
 }
 
@@ -106,12 +132,16 @@ func TestWrapper_ChunkSplitInvariant(t *testing.T) {
 	}
 }
 
-// No row may be wider than the wrap width.
+// No row may be wider than the wrap width, except a lone word too long for
+// any row and code, which hash leaves for the terminal to wrap.
 func TestWrapper_RowsFitWidth(t *testing.T) {
 	for _, doc := range wrapCorpus {
+		if strings.Contains(doc, codeLinePrefix) {
+			continue
+		}
 		for _, width := range []int{5, 8, 13, 20} {
 			for _, row := range strings.Split(stripAnsi(wrapAll(width, doc)), "\n") {
-				if n := displayWidth(row); n > width {
+				if n := displayWidth(row); n > width && len(wrapWords(row)) > 1 {
 					t.Errorf("width %d: row %q is %d columns", width, row, n)
 				}
 			}
@@ -139,12 +169,17 @@ func FuzzWrapper(f *testing.F) {
 			t.Fatalf("split changes output\n got: %q\nwant: %q", got, want)
 		}
 		if strings.ContainsAny(doc, "\x1b\r\v\f\b\x00") {
-			return // control bytes have no defined width
+			return // control bytes have no defined width; code lines are not wrapped
 		}
 		for _, row := range strings.Split(stripAnsi(want), "\n") {
-			if n := displayWidth(row); n > w && utf8.RuneCountInString(row) > 1 {
+			if n := displayWidth(row); n > w && len(wrapWords(row)) > 1 {
 				t.Fatalf("width %d: row %q is %d columns", w, row, n)
 			}
 		}
 	})
+}
+
+// wrapWords splits a row where the wrapper may break it: at spaces and tabs.
+func wrapWords(row string) []string {
+	return strings.FieldsFunc(row, func(r rune) bool { return r == ' ' || r == '\t' })
 }

@@ -1310,7 +1310,7 @@ func (s *Shell) handleAgentFullStreaming(ctx context.Context, parsed parser.Pars
 	if streamResult.canceled {
 		s.agentStatus.idle()
 		s.endCanceledRow()
-		showTurnCanceled(os.Stdout)
+		showTurnCanceled(os.Stdout, "")
 		s.lastExitCode = 1
 		return nil
 	}
@@ -1324,7 +1324,6 @@ func (s *Shell) handleAgentFullStreaming(ctx context.Context, parsed parser.Pars
 			modelName,
 			streamResult.streamErr,
 			len(streamResult.responseText),
-			streamResult.lineCount,
 		)
 	}
 
@@ -1338,10 +1337,8 @@ func (s *Shell) handleAgentFullStreaming(ctx context.Context, parsed parser.Pars
 	}
 	turn := agentTurn{prompt: parsed.AgentPrompt, response: responseText, latency: time.Since(started)}
 
-	// Success path - add newline after response and clear spinner
-	fmt.Println()
-	s.responseUI.ClearLine()
-	lineCount := streamResult.lineCount + 1
+	// Success path - end the reply's last row and clear the spinner
+	s.endReplyRow()
 
 	// Determine response type (single-turn flow)
 	collector := agent.NewStreamCollector()
@@ -1377,7 +1374,7 @@ func (s *Shell) handleAgentFullStreaming(ctx context.Context, parsed parser.Pars
 		return s.runAgentConversationLoop(ctx, modelName, transcript)
 	}
 
-	return s.handleAgentConfirmAction(ctx, action, confirmType, resp, turn, lineCount)
+	return s.handleAgentConfirmAction(ctx, action, confirmType, resp, turn)
 }
 
 func (s *Shell) presentAgentToolUpdate(update agent.ToolCallUpdate, prefix string) {
@@ -1442,7 +1439,7 @@ func (s *Shell) runAgentConversationLoop(ctx context.Context, modelName string, 
 
 		priorTranscript := append([]agentConversationMessage(nil), transcript...)
 		started := time.Now()
-		resp, responseText, lineCount, ok := s.streamAgentFollowUpTurn(ctx, reply, priorTranscript)
+		resp, responseText, ok := s.streamAgentFollowUpTurn(ctx, reply, priorTranscript)
 		transcript = append(transcript, agentConversationMessage{Role: "user", Text: reply})
 		if !ok {
 			return nil
@@ -1479,7 +1476,7 @@ func (s *Shell) runAgentConversationLoop(ctx context.Context, modelName string, 
 			s.recordAgentTurn(turn, true, 0)
 			continue
 		}
-		return s.handleAgentConfirmAction(ctx, action, confirmType, resp, turn, lineCount)
+		return s.handleAgentConfirmAction(ctx, action, confirmType, resp, turn)
 	}
 }
 
@@ -1509,7 +1506,7 @@ func (s *Shell) streamAgentFollowUpTurn(
 	ctx context.Context,
 	reply string,
 	transcript []agentConversationMessage,
-) (response agent.Response, responseText string, lineCount int, ok bool) {
+) (response agent.Response, responseText string, ok bool) {
 	s.agentStatus.working(reply)
 	requestCtx, timeoutCancel := context.WithTimeout(ctx, s.agentRequestTimeout())
 	defer timeoutCancel()
@@ -1546,9 +1543,9 @@ func (s *Shell) streamAgentFollowUpTurn(
 	if streamResult.canceled {
 		s.endCanceledRow()
 		s.agentStatus.idle()
-		showTurnCanceled(os.Stdout)
+		showTurnCanceled(os.Stdout, agentConversationAgentContinuation)
 		s.lastExitCode = 1
-		return agent.Response{}, "", 0, false
+		return agent.Response{}, "", false
 	}
 
 	s.agentOutput.EndStreaming()
@@ -1558,7 +1555,7 @@ func (s *Shell) streamAgentFollowUpTurn(
 		s.responseUI.ClearLine()
 		s.responseUI.ShowError(agentStreamErrorMessage(streamResult.streamErr))
 		s.lastExitCode = 1
-		return agent.Response{}, "", 0, false
+		return agent.Response{}, "", false
 	}
 
 	responseText = strings.TrimSpace(streamResult.responseText)
@@ -1567,15 +1564,14 @@ func (s *Shell) streamAgentFollowUpTurn(
 		s.responseUI.ClearLine()
 		s.responseUI.ShowError(emptyAgentResponseMessage)
 		s.lastExitCode = 1
-		return agent.Response{}, "", 0, false
+		return agent.Response{}, "", false
 	}
 
-	fmt.Println()
-	s.responseUI.ClearLine()
+	s.endReplyRow()
 
 	collector := agent.NewStreamCollector()
 	collector.Append(responseText)
-	return collector.Response(), responseText, streamResult.lineCount + 1, true
+	return collector.Response(), responseText, true
 }
 
 func confirmationTypeForAgentResponse(resp agent.Response, allowExplanationReply bool) (ConfirmationType, bool) {
@@ -1630,7 +1626,7 @@ func (s *Shell) recordAgentTurn(turn agentTurn, accepted bool, commandID int64) 
 // handleAgentConfirmAction processes the user's confirmation choice. A
 // command the user runs or edits takes the same path as a typed line, so
 // the error it returns (such as exit) is the shell's to act on.
-func (s *Shell) handleAgentConfirmAction(ctx context.Context, action ConfirmAction, confirmType ConfirmationType, resp agent.Response, turn agentTurn, lineCount int) error {
+func (s *Shell) handleAgentConfirmAction(ctx context.Context, action ConfirmAction, confirmType ConfirmationType, resp agent.Response, turn agentTurn) error {
 	// The user acted: hash is at rest, and a command that runs now reports
 	// for itself.
 	s.agentStatus.idle()
@@ -1659,15 +1655,10 @@ func (s *Shell) handleAgentConfirmAction(ctx context.Context, action ConfirmActi
 			fmt.Fprintf(os.Stdout, "\033[90mCopied to clipboard\033[0m\n")
 		}
 	case ConfirmCancel:
-		if confirmType != ConfirmTypeCommand {
-			// The user has read the answer; declining it is not a reason to
-			// erase it, and rows already scrolled away could not be erased.
-			s.clearConfirmationHint()
-			break
-		}
-		// Take back the proposed command: its rows, the hint line, and the
-		// blank line after fmt.Println().
-		s.responseUI.ClearLines(lineCount + 2)
+		// Declining keeps what the agent said, a proposed command included:
+		// the user has read it, its lead-in explains it, and rows already
+		// scrolled away could not be erased anyway. Only the hint goes.
+		s.clearConfirmationHint()
 	}
 	accepted := action != ConfirmCancel
 	if confirmType == ConfirmTypeCommand {
@@ -1716,7 +1707,7 @@ func (s *Shell) runAgentCommand(ctx context.Context, command string) (commandID 
 // handleAgentStreamError handles errors during agent streaming. The caller
 // returns its result: nil once the error is handled, or the outcome of a
 // retried turn.
-func (s *Shell) handleAgentStreamError(ctx context.Context, parsed parser.ParseResult, modelName string, streamErr error, responseLen, lineCount int) error {
+func (s *Shell) handleAgentStreamError(ctx context.Context, parsed parser.ParseResult, modelName string, streamErr error, responseLen int) error {
 	s.agentStatus.failed(agentStreamErrorMessage(streamErr))
 	s.responseUI.ClearLine() // Stop spinner and clear the line
 	s.responseUI.ShowError(agentStreamErrorMessage(streamErr))
@@ -1766,9 +1757,8 @@ func (s *Shell) handleAgentStreamError(ctx context.Context, parsed parser.ParseR
 	if action == ConfirmRun { // Retry
 		return s.handleAgentFullStreaming(ctx, parsed, modelName)
 	}
-	// Cancel: clear error + any partial response
-	// lineCount + error line + confirmation line + blank line
-	s.responseUI.ClearLines(lineCount + 3)
+	// Cancel: the partial reply and the error stay; only the hint goes.
+	s.clearConfirmationHint()
 	return nil
 }
 
@@ -1812,6 +1802,16 @@ func (s *Shell) handleEditCommand(ctx context.Context, command string) (int64, e
 	}
 
 	return s.runEditedCommand(ctx, command, result.Text)
+}
+
+// endReplyRow ends the reply's last row, if it is unfinished, so the footer
+// starts on its own row: a reply ending in a code block already did, and a
+// second newline drew a blank row before the footer.
+func (s *Shell) endReplyRow() {
+	if s.agentOutput.EndsMidRow() {
+		fmt.Println()
+	}
+	s.responseUI.ClearLine()
 }
 
 // endCanceledRow makes room for the canceled row without erasing what the

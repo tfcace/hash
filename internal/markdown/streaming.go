@@ -5,6 +5,10 @@ import (
 	"strings"
 )
 
+// codeLinePrefix opens every rendered code block line. The wrapper knows a
+// code line by it and leaves the line unwrapped.
+const codeLinePrefix = gray + "  "
+
 // StreamingRenderer processes markdown text chunk-by-chunk and emits
 // ANSI-styled output as patterns complete.
 type StreamingRenderer struct {
@@ -145,7 +149,7 @@ func (r *StreamingRenderer) processLine(line string) string {
 		// Open the color and indent once per line; close at the real line end.
 		result = content
 		if !continuation {
-			result = gray + "  " + result
+			result = codeLinePrefix + result
 		}
 		if hasNewline {
 			result += reset
