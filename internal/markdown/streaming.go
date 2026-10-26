@@ -43,12 +43,18 @@ func (r *StreamingRenderer) Write(chunk string) string {
 
 // Flush returns any remaining buffered content with appropriate styling.
 // The line is incomplete: its continuation arrives in later Write calls,
-// so line-start decoration and inline state stay open for it.
+// so line-start decoration and inline state stay open for it. A line whose
+// start is still ambiguous (a fence, header or list marker not yet complete)
+// stays buffered until more of it arrives.
 func (r *StreamingRenderer) Flush() string {
-	if r.lineBuffer.Len() == 0 {
+	if r.lineBuffer.Len() == 0 || r.lineStartUndecided(r.lineBuffer.String()) {
 		return ""
 	}
+	return r.flushPartial()
+}
 
+// flushPartial renders the buffered fragment and marks the line as started.
+func (r *StreamingRenderer) flushPartial() string {
 	line := r.lineBuffer.String()
 	r.lineBuffer.Reset()
 
@@ -57,10 +63,40 @@ func (r *StreamingRenderer) Flush() string {
 	return out
 }
 
+// orderedPrefixRe matches the start of an ordered list marker before its
+// space has arrived ("1", "12.").
+var orderedPrefixRe = regexp.MustCompile(`^\d+\.?$`)
+
+// lineStartUndecided reports whether a line's opening fragment could still
+// turn out to be a fence, header or list item. processLine decides how a
+// line opens from its first fragment only, so such a fragment must wait.
+func (r *StreamingRenderer) lineStartUndecided(fragment string) bool {
+	if r.midLine {
+		return false
+	}
+	// A fence line renders nothing and its language follows the backticks:
+	// hold it whole, and hold the backticks that may still become one.
+	if strings.HasPrefix(fragment, "`") {
+		return strings.HasPrefix("```", fragment) || strings.HasPrefix(fragment, "```")
+	}
+	if r.inCodeBlock {
+		return false
+	}
+	// Headers are short: render them whole so the style spans the line.
+	if strings.HasPrefix(fragment, "#") {
+		return true
+	}
+	trimmed := strings.TrimLeft(fragment, " \t")
+	return trimmed == "" || trimmed == "-" || trimmed == "*" || orderedPrefixRe.MatchString(trimmed)
+}
+
 // Finish flushes any remaining content and closes styling left open by a
 // line that never completed. Call once at end of stream instead of Flush.
 func (r *StreamingRenderer) Finish() string {
-	out := r.Flush()
+	var out string
+	if r.lineBuffer.Len() > 0 {
+		out = r.flushPartial()
+	}
 	if r.pending == "*" {
 		out += "*"
 		r.pending = ""
