@@ -498,7 +498,7 @@ func (s *Shell) Run(ctx context.Context) error {
 		s.emitShellIntegration(&firstPrompt)
 
 		line, err := s.readLineWithEditor(ctx)
-		s.updateGhost = ""
+		s.retirePromptGhosts()
 		trace.ShellDetailed("input_ready", map[string]any{
 			"line":  line,
 			"error": errStr(err),

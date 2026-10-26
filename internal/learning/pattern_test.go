@@ -63,3 +63,24 @@ func TestExtractPattern_CommandError(t *testing.T) {
 		t.Errorf("ExitCode = %d, want %d", pattern.ExitCode, 126)
 	}
 }
+
+func TestRelated(t *testing.T) {
+	tests := []struct {
+		failed, fix string
+		want        bool
+	}{
+		{"./deploy.sh", "chmod +x deploy.sh", true},
+		{"gti status", "git status", true},
+		{"make build", "go build ./...", true},
+		{"npm test", "npm install", true},
+		{"git checkout msater", "git fetch --all", true},
+		{"jj log -r x", "git commit --amend", false},
+		{"jj log -r x", "claude", false},
+		{"cd nope", "ls", false},
+	}
+	for _, tt := range tests {
+		if got := Related(tt.failed, tt.fix); got != tt.want {
+			t.Errorf("Related(%q, %q) = %v, want %v", tt.failed, tt.fix, got, tt.want)
+		}
+	}
+}

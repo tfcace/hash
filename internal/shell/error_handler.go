@@ -110,6 +110,9 @@ func (h *ErrorHandler) showLearnedFix(fix learning.Fix, highConfidence bool) {
 		fmt.Fprintf(out, "\n\033[33m✗ Possible fix\033[0m\n")
 		fmt.Fprintf(out, "\n\033[33m?\033[0m %s    \033[90m(tried %d×, worked %d×)\033[0m\n",
 			fix.Fix, fix.SuccessCount+fix.FailureCount, fix.SuccessCount)
+		// Not pre-typed at the prompt, so there is nothing to accept.
+		fmt.Fprintf(out, "  \033[90m└─ ?? to explain\033[0m\n")
+		return
 	}
 	fmt.Fprint(out, acceptFooter)
 }

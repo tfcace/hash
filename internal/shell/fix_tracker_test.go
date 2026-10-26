@@ -21,6 +21,17 @@ func newTestFixStore(t *testing.T) *learning.FixStore {
 	return store
 }
 
+// recordSuccesses stores fix as having worked n times for pattern; two
+// fresh successes clear the confidence bar for ghost text.
+func recordSuccesses(t *testing.T, store *learning.FixStore, pattern learning.Pattern, fix string, n int) {
+	t.Helper()
+	for range n {
+		if err := store.RecordFix(pattern, fix, true); err != nil {
+			t.Fatalf("RecordFix() error = %v", err)
+		}
+	}
+}
+
 func TestFixTracker_LearnsFixFromNextSuccessfulCommand(t *testing.T) {
 	store := newTestFixStore(t)
 	tr := newFixTracker(store)
@@ -54,6 +65,86 @@ func TestFixTracker_DoesNotLearnFromRetry(t *testing.T) {
 	}
 	if count != 0 {
 		t.Errorf("retrying the same command should not record a fix, got %d patterns", count)
+	}
+}
+
+func TestFixTracker_DoesNotLearnUnrelatedSuccess(t *testing.T) {
+	store := newTestFixStore(t)
+	tr := newFixTracker(store)
+
+	// A different tool that names nothing from the failure: the user moved
+	// on, they did not fix it.
+	tr.Observe("jj log -r @--no-graph", "Error: Failed to parse revset: Syntax error", 1)
+	tr.Observe("claude", "", 0)
+
+	count, err := store.PatternCount()
+	if err != nil {
+		t.Fatalf("PatternCount() error = %v", err)
+	}
+	if count != 0 {
+		t.Errorf("unrelated success should not record a fix, got %d patterns", count)
+	}
+}
+
+func TestFixTracker_DoesNotSuggestUnrelatedStoredFix(t *testing.T) {
+	store := newTestFixStore(t)
+	pattern := learning.ExtractPattern("jj log -r x", "Error: Failed to parse revset: Syntax error", 1)
+	recordSuccesses(t, store, pattern, "git commit --amend", 3)
+
+	tr := newFixTracker(store)
+	if fix, found := tr.Observe("jj log -r @--no-graph", "Error: Failed to parse revset: Syntax error", 1); found {
+		t.Errorf("suggested %q for an unrelated failure", fix.Fix)
+	}
+}
+
+func TestShell_TentativeFixIsNotGhosted(t *testing.T) {
+	store := newTestFixStore(t)
+	pattern := learning.ExtractPattern("jj log -r x", "Error: Failed to parse revset: Syntax error", 1)
+	recordSuccesses(t, store, pattern, "jj git push -b feature", 1)
+
+	var banner bytes.Buffer
+	s := &Shell{
+		fixes:  newFixTracker(store),
+		errors: &ErrorHandler{out: &banner},
+	}
+	cap1 := newStderrCapture(io.Discard)
+	_, _ = cap1.Write([]byte("Error: Failed to parse revset: Syntax error"))
+	s.handleExecutionResult("jj log -r @--no-graph", &executor.Result{ExitCode: 1}, nil, cap1)
+
+	out := banner.String()
+	if !strings.Contains(out, "jj git push -b feature") {
+		t.Fatalf("tentative fix should still be named in the banner, got: %q", out)
+	}
+	if strings.Contains(out, "to accept") {
+		t.Errorf("banner teaches an accept key for a fix that is not pre-typed: %q", out)
+	}
+	if got := s.promptGhost(); got != "" {
+		t.Errorf("promptGhost() = %q: a fix that worked once must not be one keystroke away", got)
+	}
+}
+
+func TestShell_FixGhostOffersOnlyOnce(t *testing.T) {
+	store := newTestFixStore(t)
+	pattern := learning.ExtractPattern("./deploy.sh", "permission denied", 126)
+	recordSuccesses(t, store, pattern, "chmod +x deploy.sh", 2)
+
+	s := &Shell{
+		fixes:  newFixTracker(store),
+		errors: &ErrorHandler{out: io.Discard},
+	}
+	cap1 := newStderrCapture(io.Discard)
+	_, _ = cap1.Write([]byte("permission denied"))
+	s.handleExecutionResult("./deploy.sh", &executor.Result{ExitCode: 126}, nil, cap1)
+
+	if got := s.promptGhost(); got != "chmod +x deploy.sh" {
+		t.Fatalf("promptGhost() = %q, want the learned fix", got)
+	}
+
+	// The prompt that offered it has been answered (a ?? turn, a dismissal):
+	// later prompts must not bring it back.
+	s.retirePromptGhosts()
+	if got := s.promptGhost(); got != "" {
+		t.Errorf("promptGhost() after the offering prompt = %q, want empty", got)
 	}
 }
 
@@ -99,9 +190,7 @@ func TestFixTracker_RecordsFailureWhenSuggestedFixFails(t *testing.T) {
 func TestFixTracker_SuggestedFixLifecycle(t *testing.T) {
 	store := newTestFixStore(t)
 	pattern := learning.ExtractPattern("./deploy.sh", "permission denied", 126)
-	if err := store.RecordFix(pattern, "chmod +x deploy.sh", true); err != nil {
-		t.Fatalf("RecordFix() error = %v", err)
-	}
+	recordSuccesses(t, store, pattern, "chmod +x deploy.sh", 2)
 
 	tr := newFixTracker(store)
 	if got := tr.SuggestedFix(); got != "" {
@@ -122,9 +211,7 @@ func TestFixTracker_SuggestedFixLifecycle(t *testing.T) {
 func TestShell_LearnedFixShownAndGhostedAfterFailure(t *testing.T) {
 	store := newTestFixStore(t)
 	pattern := learning.ExtractPattern("./deploy.sh", "permission denied", 126)
-	if err := store.RecordFix(pattern, "chmod +x deploy.sh", true); err != nil {
-		t.Fatalf("RecordFix() error = %v", err)
-	}
+	recordSuccesses(t, store, pattern, "chmod +x deploy.sh", 2)
 
 	var banner bytes.Buffer
 	s := &Shell{
@@ -154,8 +241,8 @@ func TestShell_LearnedFixShownAndGhostedAfterFailure(t *testing.T) {
 	if !found {
 		t.Fatal("fix should exist in store")
 	}
-	if fix.SuccessCount != 2 {
-		t.Errorf("SuccessCount = %d, want 2 (prerecorded + reinforced)", fix.SuccessCount)
+	if fix.SuccessCount != 3 {
+		t.Errorf("SuccessCount = %d, want 3 (prerecorded + reinforced)", fix.SuccessCount)
 	}
 }
 
@@ -209,9 +296,7 @@ func TestShell_PromptGhostIsBareForLearnedFix(t *testing.T) {
 	// carries only the suggested command, fish-style.
 	store := newTestFixStore(t)
 	pattern := learning.ExtractPattern("./deploy.sh", "permission denied", 126)
-	if err := store.RecordFix(pattern, "chmod +x deploy.sh", true); err != nil {
-		t.Fatalf("RecordFix() error = %v", err)
-	}
+	recordSuccesses(t, store, pattern, "chmod +x deploy.sh", 2)
 
 	s := &Shell{
 		fixes:  newFixTracker(store),
