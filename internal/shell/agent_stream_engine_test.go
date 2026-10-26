@@ -174,3 +174,24 @@ func TestTextStreamFromEvents_ReportsContextErrorOnErrChan(t *testing.T) {
 		t.Fatal("expected the deadline to surface on errCh")
 	}
 }
+
+// Replies are wrapped by hash, word by word, across chunk boundaries.
+func TestCollectAgentEventStream_WrapsToWidth(t *testing.T) {
+	events := make(chan agent.StreamEvent, 2)
+	errCh := make(chan error)
+	events <- agent.StreamEvent{Type: agent.StreamEventText, Text: "aaa bbb c"}
+	events <- agent.StreamEvent{Type: agent.StreamEventText, Text: "cc ddd\n"}
+	close(events)
+	close(errCh)
+
+	var rendered strings.Builder
+	sh := &Shell{}
+	sh.collectAgentEventStream(context.Background(), events, errCh, agentStreamCollectionOptions{
+		writeRendered: func(text string) { rendered.WriteString(text) },
+		wrapWidth:     8,
+	}, nil)
+
+	if got, want := rendered.String(), "aaa bbb\nccc ddd\n"; got != want {
+		t.Errorf("rendered = %q, want %q", got, want)
+	}
+}

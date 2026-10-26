@@ -27,6 +27,7 @@ const (
 	agentConversationReplyPromptWidth  = 8
 	agentConversationAgentPrefix       = agentConversationSolidRail + " " + agentConversationAgentLabel + " › "
 	agentConversationAgentContinuation = agentConversationSolidRail + "         "
+	agentConversationAgentPrefixWidth  = 10 // "│ agent › " and its continuation
 	emptyAgentResponseMessage          = "agent ended the turn without text"
 	legacyAwaitingInputMarker          = "[AWAITING_INPUT]"
 	legacyConversationMarker           = "[CONVERSATION]"
