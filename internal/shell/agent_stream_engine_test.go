@@ -186,12 +186,17 @@ func TestCollectAgentEventStream_WrapsToWidth(t *testing.T) {
 
 	var rendered strings.Builder
 	sh := &Shell{}
-	sh.collectAgentEventStream(context.Background(), events, errCh, agentStreamCollectionOptions{
+	result := sh.collectAgentEventStream(context.Background(), events, errCh, agentStreamCollectionOptions{
 		writeRendered: func(text string) { rendered.WriteString(text) },
 		wrapWidth:     8,
 	}, nil)
 
 	if got, want := rendered.String(), "aaa bbb\nccc ddd\n"; got != want {
 		t.Errorf("rendered = %q, want %q", got, want)
+	}
+	// Rows drawn, not lines in the reply: erasing by this count must take
+	// back exactly what was drawn.
+	if result.lineCount != 2 {
+		t.Errorf("lineCount = %d, want 2 rows", result.lineCount)
 	}
 }

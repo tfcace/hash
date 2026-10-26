@@ -196,3 +196,22 @@ func TestHandleAgentConfirmAction_RunShowsTheCommandAsTyped(t *testing.T) {
 		t.Errorf("want the command shown as a submitted input line, got %q", got)
 	}
 }
+
+// Leaving a finished explanation removes only its key hint: the answer the
+// user just read stays, whether they press Enter or Esc. Erasing it by row
+// count left orphaned fragments once the answer had scrolled.
+func TestHandleAgentConfirmAction_ExplanationKeepsText(t *testing.T) {
+	for _, action := range []ConfirmAction{ConfirmRun, ConfirmCancel} {
+		var out bytes.Buffer
+		sh := newShellForAgentCommand(t)
+		sh.responseUI = NewResponseUI(&out)
+
+		sh.handleAgentConfirmAction(context.Background(), action, ConfirmTypeExplanation,
+			agent.Response{Type: agent.ResponseTypeExplanation, Explanation: "answer"},
+			agentTurn{prompt: "q", response: "answer"}, 60)
+
+		if ups := strings.Count(out.String(), "\033[A"); ups != 2 {
+			t.Errorf("action %v moved up %d rows, want 2 (the hint and its blank line)", action, ups)
+		}
+	}
+}
