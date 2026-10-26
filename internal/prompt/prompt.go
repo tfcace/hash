@@ -30,10 +30,9 @@ type PromptContext struct {
 
 // precomputeResult holds a precomputed prompt output for fast reuse.
 type precomputeResult struct {
-	cwd        string
-	output     string
-	timeOutput string // raw starship module time output (for patching)
-	timeStr    string // extracted HH:MM from timeOutput
+	cwd     string
+	output  string
+	timeStr string // HH:MM the time module showed, patched to now at render
 }
 
 // Prompt generates shell prompts.
@@ -202,8 +201,7 @@ func (p *Prompt) StartPrecompute(cwd string) {
 
 		p.mu.Lock()
 		p.precomputed = &precomputeResult{
-			cwd: cwd, output: output,
-			timeOutput: timeOutput, timeStr: timeStr,
+			cwd: cwd, output: output, timeStr: timeStr,
 		}
 		p.mu.Unlock()
 	}()
@@ -232,12 +230,15 @@ func (p *Prompt) TryPrecomputed(ctx PromptContext) (string, bool) {
 	}
 
 	result := pc.output
-	// Patch the time module inline if precomputed time differs from now.
-	if pc.timeStr != "" && pc.timeOutput != "" {
+	// Patch the clock if it moved since the precompute. Replace the time
+	// itself, not the module's bytes: in the full prompt starship merges the
+	// segment's colors with its neighbor's, so those bytes never match. The
+	// time sits at the right of the prompt, so its last occurrence is the
+	// clock.
+	if pc.timeStr != "" {
 		now := time.Now().Format("15:04")
-		if now != pc.timeStr {
-			freshTime := strings.Replace(pc.timeOutput, pc.timeStr, now, 1)
-			result = strings.Replace(result, pc.timeOutput, freshTime, 1)
+		if i := strings.LastIndex(result, pc.timeStr); i >= 0 && now != pc.timeStr {
+			result = result[:i] + now + result[i+len(pc.timeStr):]
 		}
 	}
 	return result, true
