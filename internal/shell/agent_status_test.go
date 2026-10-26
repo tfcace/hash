@@ -137,7 +137,7 @@ func TestHandleToolPermission_BlocksThenResumes(t *testing.T) {
 func TestHandleAgentStreamError_ReportsError(t *testing.T) {
 	sh, buf := newStatusShell(agent.NewMockTransport())
 
-	sh.handleAgentStreamError(context.Background(), parser.ParseResult{}, "m", errors.New("adapter crashed"), 0, 0)
+	sh.handleAgentStreamError(context.Background(), parser.ParseResult{}, "m", errors.New("adapter crashed"), 0)
 
 	if want := rootReport(programstatus.Error, "", "adapter crashed"); !strings.HasPrefix(buf.String(), want) {
 		t.Errorf("wrote %q\nwant it to start with %q", buf.String(), want)

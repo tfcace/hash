@@ -318,7 +318,7 @@ func TestStreamAgentFollowUpTurn_FirstChunkDuringPermissionPrompt(t *testing.T) 
 	// first text chunk arrives. The chunk must be buffered, not written.
 	aoc.EnterPermission()
 
-	_, text, _, ok := sh.streamAgentFollowUpTurn(context.Background(), "go ahead", nil)
+	_, text, ok := sh.streamAgentFollowUpTurn(context.Background(), "go ahead", nil)
 	if !ok {
 		t.Fatal("streamAgentFollowUpTurn failed")
 	}
@@ -527,7 +527,7 @@ func TestStreamAgentFollowUpTurn_EmptyStreamShowsErrorWithoutResponse(t *testing
 		agentOutput:  NewAgentOutputCoordinator(&out),
 	}
 
-	_, _, _, ok := sh.streamAgentFollowUpTurn(
+	_, _, ok := sh.streamAgentFollowUpTurn(
 		context.Background(),
 		"ready",
 		[]agentConversationMessage{{Role: "user", Text: "play twenty questions"}},
