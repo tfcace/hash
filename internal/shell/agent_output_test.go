@@ -3,6 +3,7 @@ package shell
 import (
 	"bytes"
 	"fmt"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -208,7 +209,7 @@ func TestAgentOutputCoordinator_RenderPermission(t *testing.T) {
 	if !strings.Contains(output, "kubectl get pods") {
 		t.Errorf("missing command in output: %q", output)
 	}
-	if !strings.Contains(output, "[y]allow") {
+	if !strings.Contains(output, "y to allow") {
 		t.Errorf("missing keybindings in output: %q", output)
 	}
 }
@@ -307,9 +308,9 @@ func TestAgentOutputCoordinator_ShowHints(t *testing.T) {
 		hintType ConfirmationType
 		expected []string
 	}{
-		{"command", ConfirmTypeCommand, []string{"cmd ·", "[Enter: run]"}},
-		{"explanation", ConfirmTypeExplanation, []string{"agent ·", "[r: reply]"}},
-		{"error", ConfirmTypeError, []string{"error ·", "[Enter: retry]"}},
+		{"command", ConfirmTypeCommand, []string{"cmd ·", "enter to run"}},
+		{"explanation", ConfirmTypeExplanation, []string{"agent ·", "r to reply"}},
+		{"error", ConfirmTypeError, []string{"error ·", "enter to retry"}},
 	}
 
 	for _, tt := range tests {
@@ -490,3 +491,36 @@ func TestAgentOutputCoordinator_PermissionPromptOnFreeRowReturnsToIt(t *testing.
 		t.Errorf("moved down %d rows and up %d: cursor did not return to the prompt's row", down, up)
 	}
 }
+
+// A failed tool keeps its kind, like every other row, and says why it
+// failed: "✗ failed · Read x" told the user neither.
+func TestAgentOutputCoordinator_FailedToolShowsKindAndReason(t *testing.T) {
+	var buf bytes.Buffer
+	aoc := NewAgentOutputCoordinator(&buf)
+	aoc.RenderToolResult(agent.ToolCallUpdate{
+		Kind:    "read",
+		Title:   "Read does-not-exist.txt",
+		Status:  agent.ToolCallFailed,
+		Content: "<tool_use_error>File does not exist.\nCurrent directory: /tmp</tool_use_error>",
+	}, "")
+
+	got := stripANSI(buf.String())
+	want := "  ✗ read · Read does-not-exist.txt · File does not exist.\n"
+	if got != want {
+		t.Errorf("failed row = %q, want %q", got, want)
+	}
+}
+
+// A canceled turn ends with a row in the tool-row style, not a bare
+// "hash: request canceled".
+func TestShowTurnCanceled(t *testing.T) {
+	var buf bytes.Buffer
+	showTurnCanceled(&buf)
+	if got, want := stripANSI(buf.String()), "  – canceled\n"; got != want {
+		t.Errorf("canceled row = %q, want %q", got, want)
+	}
+}
+
+var testSGRRe = regexp.MustCompile(`\x1b\[[0-9;]*m`)
+
+func stripANSI(s string) string { return testSGRRe.ReplaceAllString(s, "") }

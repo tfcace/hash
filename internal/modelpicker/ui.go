@@ -130,7 +130,7 @@ func (ui *PickerUI) View() tea.View {
 		}
 	}
 
-	fmt.Fprintf(&b, "\n%s", dimStyle.Render("[↑/↓: move] [Enter: select] [Esc: cancel]"))
+	fmt.Fprintf(&b, "\n%s", dimStyle.Render("↑↓ to move · enter to select · esc to cancel"))
 
 	v := tea.NewView(b.String())
 	v.AltScreen = true

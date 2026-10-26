@@ -42,7 +42,7 @@ func agentConversationInputFrame(openRail bool) *editor.InputFrame {
 		PrefixWidth: agentConversationReplyPromptWidth,
 	}
 	if openRail {
-		frame.TopLine = agentConversationLiveRailStyle + "╭─ conversation\x1b[0m \x1b[90mEnter sends · Esc/Ctrl+C leaves · /exit ends\x1b[0m"
+		frame.TopLine = agentConversationLiveRailStyle + "╭─ conversation\x1b[0m \x1b[90menter to send · esc to leave · /exit to end\x1b[0m"
 	}
 	return frame
 }

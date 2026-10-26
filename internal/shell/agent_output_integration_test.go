@@ -58,7 +58,7 @@ func TestAgentOutputCoordinator_FullAgentFlow(t *testing.T) {
 		"find large files",
 		"Agent wants to run",
 		"find . -size +100M",
-		"[y]allow",
+		"y to allow",
 	}
 
 	for _, expected := range mustContain {
@@ -91,8 +91,8 @@ func TestAgentOutputCoordinator_NoHintsOverlap(t *testing.T) {
 	output := buf.String()
 
 	// Count hint occurrences - should only see one set
-	runCount := strings.Count(output, "[Enter: run]")
-	allowCount := strings.Count(output, "[y]allow")
+	runCount := strings.Count(output, "enter to run")
+	allowCount := strings.Count(output, "y to allow")
 
 	if runCount > 1 {
 		t.Errorf("hints appear multiple times: run=%d", runCount)

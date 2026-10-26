@@ -147,7 +147,7 @@ func TestAgentConversationEditorConfigCancelsOnEscape(t *testing.T) {
 	if !cfg.CancelOnEscape {
 		t.Fatal("conversation reply editor should let Escape leave the conversation")
 	}
-	if cfg.InputFrame == nil || !strings.Contains(cfg.InputFrame.TopLine, "Esc/Ctrl+C leaves") {
+	if cfg.InputFrame == nil || !strings.Contains(cfg.InputFrame.TopLine, "esc to leave") {
 		t.Fatalf("conversation reply editor should render matching Escape hint, got %#v", cfg.InputFrame)
 	}
 }
@@ -427,7 +427,7 @@ func TestHandleAgentFullStreaming_QuestionShowsReplyHintWithoutAutoStartingConve
 	if got := len(mock.Requests()); got != 1 {
 		t.Fatalf("mock recorded %d requests, want only the initial request", got)
 	}
-	if !strings.Contains(out.String(), "[r: reply]") {
+	if !strings.Contains(out.String(), "r to reply") {
 		t.Fatalf("question response should show reply hint, got:\n%s", out.String())
 	}
 }
@@ -461,7 +461,7 @@ func TestHandleAgentFullStreaming_ExplicitConversationPromptStillWaitsForReplyAc
 	if got := len(mock.Requests()); got != 1 {
 		t.Fatalf("mock recorded %d requests, want only the initial request", got)
 	}
-	if !strings.Contains(out.String(), "[r: reply]") {
+	if !strings.Contains(out.String(), "r to reply") {
 		t.Fatalf("explicit conversation prompt should still show reply hint first, got:\n%s", out.String())
 	}
 }
@@ -488,7 +488,7 @@ func TestHandleAgentFullStreaming_CommandClassifiedQuestionShowsReplyHint(t *tes
 	if strings.Contains(output, "cmd ·") {
 		t.Fatalf("natural-language question should not show command confirmation, got:\n%s", output)
 	}
-	if !strings.Contains(output, "[r: reply]") {
+	if !strings.Contains(output, "r to reply") {
 		t.Fatalf("natural-language question should show reply hint, got:\n%s", output)
 	}
 }
@@ -512,7 +512,7 @@ func TestHandleAgentFullStreaming_EmptyStreamShowsErrorWithoutRetryPrompt(t *tes
 	if !strings.Contains(output, emptyAgentResponseMessage) {
 		t.Fatalf("expected empty response error, got:\n%s", output)
 	}
-	if strings.Contains(output, "[Enter: retry]") {
+	if strings.Contains(output, "enter to retry") {
 		t.Fatalf("empty response should not show retry confirmation, got:\n%s", output)
 	}
 }
@@ -540,7 +540,7 @@ func TestStreamAgentFollowUpTurn_EmptyStreamShowsErrorWithoutResponse(t *testing
 	if !strings.Contains(output, emptyAgentResponseMessage) {
 		t.Fatalf("expected empty response error, got:\n%s", output)
 	}
-	if strings.Contains(output, "[Enter: retry]") {
+	if strings.Contains(output, "enter to retry") {
 		t.Fatalf("empty response should not show retry confirmation, got:\n%s", output)
 	}
 }

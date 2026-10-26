@@ -247,6 +247,10 @@ func visibleWidthAtByteIndex(s string, col int) int {
 	return visibleWidth(s[:col])
 }
 
+// inlineAcceptHint follows a finished inline ?? suggestion, in the key
+// vocabulary hash uses for every hint.
+const inlineAcceptHint = "   enter to run · tab to edit · esc to cancel"
+
 // renderedGhostSuffixWidth returns the visible width added by ghost rendering.
 func renderedGhostSuffixWidth(ghostText string, streaming, fromAgent bool, notice string) int {
 	if ghostText == "" {
@@ -269,7 +273,7 @@ func renderedGhostSuffixWidth(ghostText string, streaming, fromAgent bool, notic
 		if streaming {
 			width += visibleWidth("▌")
 		} else {
-			width += visibleWidth("   [enter]run  [tab]edit  [esc]")
+			width += visibleWidth(inlineAcceptHint)
 		}
 	}
 
@@ -540,7 +544,7 @@ func (d *Display) RenderWithGhost(buf *Buffer, cur *Cursor, hasSelection bool, g
 					if state.Streaming {
 						sb.WriteString("\x1b[90m▌\x1b[0m")
 					} else {
-						sb.WriteString("\x1b[90m   [enter]run  [tab]edit  [esc]\x1b[0m")
+						sb.WriteString("\x1b[90m" + inlineAcceptHint + "\x1b[0m")
 					}
 				} else {
 					// Predictions: fish-shell style - just dim gray, no hints
@@ -1267,7 +1271,7 @@ func (d *Display) RenderPermissionPrompt(command, accentColor string) {
 		barStyle + "│" + ansiReset + " " + ansiBold + "Agent wants to run:" + ansiReset,
 		barStyle + "│" + ansiReset + " " + accentCode + ansiBold + command + ansiReset,
 		barStyle + "│" + ansiReset,
-		barStyle + "│" + ansiReset + " [y]allow  [n]deny  [a]always allow",
+		barStyle + "│" + ansiReset + " y to allow · n to deny · a to always allow",
 	}
 
 	for _, line := range lines {

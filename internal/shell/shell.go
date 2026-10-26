@@ -1307,7 +1307,7 @@ func (s *Shell) handleAgentFullStreaming(ctx context.Context, parsed parser.Pars
 	if streamResult.canceled {
 		s.agentStatus.idle()
 		s.responseUI.ClearLine()
-		fmt.Fprintln(os.Stderr, "hash: request canceled")
+		showTurnCanceled(os.Stdout)
 		s.lastExitCode = 1
 		return nil
 	}
@@ -1541,7 +1541,7 @@ func (s *Shell) streamAgentFollowUpTurn(
 	if streamResult.canceled {
 		s.responseUI.ClearLine()
 		s.agentStatus.idle()
-		fmt.Fprintln(os.Stderr, "hash: request canceled")
+		showTurnCanceled(os.Stdout)
 		s.lastExitCode = 1
 		return agent.Response{}, "", 0, false
 	}
