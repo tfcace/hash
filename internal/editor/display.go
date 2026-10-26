@@ -775,12 +775,16 @@ func (d *Display) Finalize(buf *Buffer) {
 	}
 	var sb strings.Builder
 
-	// Move cursor to beginning of the displayed content
+	// Move cursor to beginning of the displayed content and clear every row
+	// the live render used: the redraw's prefix differs, so a wrapped line
+	// lands on different columns and per-line clears would leave old tails.
 	if d.lastCursorRow > 0 {
 		fmt.Fprintf(&sb, ansiCursorUp, d.lastCursorRow)
 	}
 	sb.WriteString("\r")
+	sb.WriteString(ansiClearToEnd)
 
+	rows := 0
 	// Re-render each line with background highlight
 	for i := 0; i < buf.LineCount(); i++ {
 		sb.WriteString(ansiClearLine)
@@ -828,10 +832,11 @@ func (d *Display) Finalize(buf *Buffer) {
 		}
 
 		sb.WriteString("\r\n")
+		rows += d.visualRowsForChars(contentWidth)
 	}
 
 	d.out.Write([]byte(sb.String()))
-	d.finalizedLines = buf.LineCount()
+	d.finalizedLines = rows
 	d.lastLines = 0
 	d.lastCursorRow = 0
 }
@@ -839,19 +844,21 @@ func (d *Display) Finalize(buf *Buffer) {
 func (d *Display) finalizeWithFrame(buf *Buffer) {
 	frame := d.frame
 	var sb strings.Builder
-	previousLines := d.lastLines
 
-	// Move cursor to beginning of the displayed content
+	// Move cursor to beginning of the displayed content and clear every row
+	// the live render used (its live top line and prefix differ from the
+	// committed ones, so rows shift).
 	if d.lastCursorRow > 0 {
 		fmt.Fprintf(&sb, ansiCursorUp, d.lastCursorRow)
 	}
 	sb.WriteString("\r")
+	sb.WriteString(ansiClearToEnd)
 
-	linesWritten := 0
+	rows := 0
 	if frame.TopLine != "" {
 		d.renderFrameLine(&sb, frame.TopLine, frame.LineBg)
 		sb.WriteString("\r\n")
-		linesWritten++
+		rows += d.visualRowsForChars(visibleWidth(frame.TopLine))
 	}
 
 	for i := 0; i < buf.LineCount(); i++ {
@@ -864,7 +871,7 @@ func (d *Display) finalizeWithFrame(buf *Buffer) {
 		}
 
 		sb.WriteString("\r\n")
-		linesWritten++
+		rows += d.visualRowsForChars(frame.PrefixWidth + visibleWidth(buf.Line(i)))
 	}
 
 	if frame.BottomLine != "" {
@@ -874,7 +881,7 @@ func (d *Display) finalizeWithFrame(buf *Buffer) {
 		}
 		d.renderFrameLine(&sb, frame.BottomLine, bottomLineBg)
 		sb.WriteString("\r\n")
-		linesWritten++
+		rows += d.visualRowsForChars(visibleWidth(frame.BottomLine))
 	}
 	if frame.BottomExtraLine != "" {
 		extraLineBg := frame.LineBg
@@ -883,18 +890,11 @@ func (d *Display) finalizeWithFrame(buf *Buffer) {
 		}
 		d.renderFrameLine(&sb, frame.BottomExtraLine, extraLineBg)
 		sb.WriteString("\r\n")
-		linesWritten++
-	}
-
-	for i := linesWritten; i < previousLines; i++ {
-		sb.WriteString(ansiClearLine)
-		if i < previousLines-1 {
-			sb.WriteString("\r\n")
-		}
+		rows += d.visualRowsForChars(visibleWidth(frame.BottomExtraLine))
 	}
 
 	d.out.Write([]byte(sb.String()))
-	d.finalizedLines = linesWritten
+	d.finalizedLines = rows
 	d.lastLines = 0
 	d.lastCursorRow = 0
 }
