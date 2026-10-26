@@ -155,9 +155,12 @@ func Parse(line string) ParseResult {
 	// Check for " ??" first, then bare "??"
 	if idx := strings.Index(line, " ??"); idx != -1 {
 		cmd := strings.TrimSpace(line[:idx])
-		// Preserve trailing = if present (like --flag=??)
+		// The suggestion is appended to cmd verbatim: keep the boundary the
+		// user typed, a trailing = (--flag=??) or the space before ??.
 		if strings.HasSuffix(line[:idx], "=") {
 			cmd = line[:idx]
+		} else if cmd != "" {
+			cmd += " "
 		}
 		prompt := strings.TrimSpace(line[idx+3:])
 		return makeInlineResult(cmd, prompt, "inline_space", idx, traced)

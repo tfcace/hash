@@ -54,6 +54,20 @@ func TestParse_AgentInline(t *testing.T) {
 	}
 }
 
+// The space before ?? separates the suggestion from the last word: the
+// editor appends the agent's reply to Command verbatim, so dropping it
+// turns `jj log -r @ ?? ...` into `jj log -r @--no-graph`.
+func TestParse_AgentInlineKeepsSeparatingSpace(t *testing.T) {
+	result := Parse("jj log -r @ ?? only the change id")
+
+	if result.Type != CommandTypeAgentInline {
+		t.Fatalf("Type = %v, want %v", result.Type, CommandTypeAgentInline)
+	}
+	if result.Command != "jj log -r @ " {
+		t.Errorf("Command = %q, want %q", result.Command, "jj log -r @ ")
+	}
+}
+
 func TestParse_EmptyLine(t *testing.T) {
 	result := Parse("")
 
