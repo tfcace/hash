@@ -24,6 +24,13 @@ func TestCommandFromResponse(t *testing.T) {
 		{"trailing explanation keeps output", "The command is:\n  find . -name '*.go'\nThis lists all Go files.", "", false},
 		{"second line prose is output", "The command is:\nThis will list the files.", "", false},
 		{"prose stays output", "The largest files are config.db and logs.tar", "", false},
+		// A sentence that happens to open with a command's name is prose;
+		// Enter on it would run the paragraph as a shell command.
+		{"sentence opening with a command name", "Hash wraps long agent replies at word boundaries so text never splits mid-word.", "", false},
+		{"sentence with a semicolon", "Make sure the build passes; then push the branch.", "", false},
+		{"sentence naming a path", "Find the config under ~/.config/hash before editing it.", "", false},
+		{"lowercase command still a command", "make build", "make build", true},
+		{"env-prefixed command still a command", "FOO=1 make build", "FOO=1 make build", true},
 		{"empty", "", "", false},
 	}
 	for _, tt := range tests {
