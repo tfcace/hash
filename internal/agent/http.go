@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 // HTTPConfig configures the HTTP transport.
@@ -197,7 +199,16 @@ func (t *HTTPTransport) buildPrompt(req Request) string {
 
 // looksLikeCommand checks if the text appears to be a shell command.
 //
+// looksLikeSentence reports whether text reads as a sentence: it opens with
+// a capital letter and ends with sentence punctuation.
+//
 //nolint:gocyclo // heuristic pattern matching requires multiple checks
+func looksLikeSentence(text string) bool {
+	first, _ := utf8.DecodeRuneInString(text)
+	last, _ := utf8.DecodeLastRuneInString(text)
+	return unicode.IsUpper(first) && strings.ContainsRune(".!?", last)
+}
+
 func looksLikeCommand(text string) bool {
 	text = unwrapMarkdownInline(strings.TrimSpace(text))
 	if text == "" {
@@ -206,6 +217,12 @@ func looksLikeCommand(text string) bool {
 
 	// Multi-line text is likely an explanation
 	if strings.Contains(text, "\n") {
+		return false
+	}
+
+	// A capitalized line ending like a sentence is prose, whatever word it
+	// opens with ("Hash wraps...", "Make sure...; then...").
+	if looksLikeSentence(text) {
 		return false
 	}
 
@@ -220,9 +237,9 @@ func looksLikeCommand(text string) bool {
 		"rustup ", "terraform ", "source ", "export ", "./", "../", "~/", "/",
 	}
 
-	lower := strings.ToLower(text)
+	// Commands are typed in lowercase; "Find the config" is an instruction.
 	for _, prefix := range prefixes {
-		if strings.HasPrefix(lower, prefix) {
+		if strings.HasPrefix(text, prefix) {
 			return true
 		}
 	}
@@ -250,6 +267,7 @@ func looksLikeCommand(text string) bool {
 	}
 
 	// Explanatory text patterns - if it has these, it's not a command
+	lower := strings.ToLower(text)
 	if strings.Contains(text, ". ") || // Multiple sentences
 		strings.HasPrefix(lower, "the ") ||
 		strings.HasPrefix(lower, "this ") ||
