@@ -54,6 +54,41 @@ func ExtractPattern(command, stderr string, exitCode int) Pattern {
 	}
 }
 
+// Related reports whether fix plausibly addresses the failed command rather
+// than being whatever the user ran next: it runs the same program (npm
+// install after npm test) or shares an argument (chmod +x deploy.sh after
+// ./deploy.sh). A different tool that names nothing from the failure (claude
+// after a jj error) is the user moving on.
+func Related(failed, fix string) bool {
+	if normalizeCommand(failed) == normalizeCommand(fix) {
+		return true
+	}
+	failedArgs := argWords(failed)
+	for word := range argWords(fix) {
+		if failedArgs[word] {
+			return true
+		}
+	}
+	return false
+}
+
+// argWords returns a command's non-flag arguments, plus the program itself
+// when it is a script path (./deploy.sh is what chmod +x deploy.sh names).
+func argWords(cmd string) map[string]bool {
+	words := map[string]bool{}
+	for i, f := range strings.Fields(cmd) {
+		f = strings.TrimPrefix(strings.Trim(f, `'"`), "./")
+		if f == "" || strings.HasPrefix(f, "-") {
+			continue
+		}
+		if i == 0 && !strings.Contains(f, "/") && !strings.Contains(f, ".") {
+			continue
+		}
+		words[f] = true
+	}
+	return words
+}
+
 // normalizeCommand extracts a pattern from a command.
 func normalizeCommand(cmd string) string {
 	parts := strings.Fields(cmd)
