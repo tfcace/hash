@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -71,6 +72,8 @@ type Shell struct {
 	allowlist           *allowlist.Manager
 	agentOutput         *AgentOutputCoordinator
 	agentStatus         *agentStatus                                     // OSC 7501 reports for the ?? turn
+	turnCancel          context.CancelFunc                               // cancels the ?? turn in flight (Ctrl+C, Esc)
+	streamKeys          atomic.Pointer[streamKeyWatcher]                 // reads Esc while a reply streams
 	updateNotices       chan agentupdate.Notice                          // newer-adapter notices from the background check, drained before a prompt
 	updateGhost         string                                           // "model update" offered as ghost text at the next prompt only
 	updateChecker       func(context.Context) (agentupdate.Notice, bool) // nil = real detect + registry check
@@ -1083,6 +1086,8 @@ func (s *Shell) handleAgentRequest(ctx context.Context, parsed parser.ParseResul
 	// This allows Ctrl+C to cancel the agent operation without exiting the shell.
 	agentCtx, agentCancel := context.WithCancel(context.Background())
 	defer agentCancel()
+	s.turnCancel = agentCancel
+	defer func() { s.turnCancel = nil }()
 
 	// Set up SIGINT handler for this agent request
 	sigCh := make(chan os.Signal, 1)
@@ -1280,6 +1285,7 @@ func (s *Shell) handleAgentFullStreaming(ctx context.Context, parsed parser.Pars
 	events, errCh = paceAgentEvents(requestCtx, events, errCh, agentStreamPacerOptions{})
 	s.agentOutput.BeginToolTurn()
 
+	stopKeys := s.watchTurnKeys()
 	streamResult := s.collectAgentEventStream(ctx, events, errCh, agentStreamCollectionOptions{
 		onFirstChunk: func() {
 			// Stop the spinner before claiming the line. ClearActiveLine
@@ -1296,6 +1302,7 @@ func (s *Shell) handleAgentFullStreaming(ctx context.Context, parsed parser.Pars
 	}, func(update agent.ToolCallUpdate) {
 		s.presentAgentToolUpdate(update, "")
 	})
+	stopKeys()
 
 	if streamResult.canceled {
 		s.agentStatus.idle()
@@ -1512,6 +1519,7 @@ func (s *Shell) streamAgentFollowUpTurn(
 		s.agentOutput.WriteStream(rendered)
 	})
 
+	stopKeys := s.watchTurnKeys()
 	streamResult := s.collectAgentEventStream(ctx, events, errCh, agentStreamCollectionOptions{
 		onFirstChunk: func() {
 			// Same permission-aware sequence as handleAgentFullStreaming.
@@ -1528,6 +1536,7 @@ func (s *Shell) streamAgentFollowUpTurn(
 		// assistant prose.
 		s.presentAgentToolUpdate(update, agentConversationAgentContinuation)
 	})
+	stopKeys()
 
 	if streamResult.canceled {
 		s.responseUI.ClearLine()
@@ -2079,6 +2088,11 @@ func (s *Shell) handleToolPermission(ctx context.Context, req agent.ToolPermissi
 		waitingFor = req.ToolName
 	}
 	s.agentStatus.blocked(programstatus.Permission, waitingFor)
+
+	// The prompt reads its own key; keep the stream watcher off stdin.
+	keys := s.streamKeys.Load()
+	keys.Pause()
+	defer keys.Resume()
 
 	// Stop the spinner so it doesn't overwrite the permission prompt, and
 	// give its row to the prompt so its last frame is not left behind.
