@@ -474,3 +474,19 @@ func TestAgentOutputCoordinator_ClearPermission_Denied(t *testing.T) {
 		t.Errorf("expected denied feedback with command, got: %q", output)
 	}
 }
+
+// A prompt drawn on a free row (the spinner's, just cleared) gives that row
+// back when it clears: the cursor ends where the prompt began, so the tool
+// row that follows takes the spinner's place.
+func TestAgentOutputCoordinator_PermissionPromptOnFreeRowReturnsToIt(t *testing.T) {
+	var buf bytes.Buffer
+	aoc := NewAgentOutputCoordinator(&buf)
+
+	aoc.RenderPermissionPromptOnRow("ls -la", "", "", true)
+	aoc.ClearPermissionPromptSilently(true)
+
+	out := buf.String()
+	if down, up := strings.Count(out, "\n"), strings.Count(out, ansiCursorUp); down != up {
+		t.Errorf("moved down %d rows and up %d: cursor did not return to the prompt's row", down, up)
+	}
+}
