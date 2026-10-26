@@ -482,9 +482,6 @@ func (s *Shell) Run(ctx context.Context) error {
 	// reducing starship subprocess spawns from 4 to 2 (~75ms savings).
 	s.initPromptAndPalette()
 	s.startUpdateCheck(ctx)
-	trace.ShellHigh("prompt_start", map[string]any{
-		"mode": "editor",
-	})
 
 	firstPrompt := true
 	for {
@@ -496,6 +493,9 @@ func (s *Shell) Run(ctx context.Context) error {
 
 		s.flushUpdateNotice(time.Now())
 		s.emitShellIntegration(&firstPrompt)
+		trace.ShellHigh("prompt_start", map[string]any{
+			"mode": "editor",
+		})
 
 		line, err := s.readLineWithEditor(ctx)
 		s.retirePromptGhosts()

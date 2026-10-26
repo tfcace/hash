@@ -8,6 +8,7 @@ import (
 	"github.com/tfcace/hash/internal/agent"
 	"github.com/tfcace/hash/internal/editor"
 	"github.com/tfcace/hash/internal/markdown"
+	"github.com/tfcace/hash/internal/trace"
 )
 
 const agentStreamFrameInterval = 40 * time.Millisecond
@@ -329,7 +330,31 @@ func (s *Shell) collectAgentEventStream(
 	trimLeadingResponse := opts.trimLeadingNewline
 	firstRender := false
 
+	// The turn's trace pairs each raw chunk with what hash drew for it, so a
+	// rendering bug can be read off the trace instead of a screen capture.
+	started := time.Now()
+	traced := trace.Enabled("agent")
+	var chunkRendered strings.Builder
+	trace.AgentHigh("turn_start", nil)
+	defer func() {
+		errText := ""
+		if result.streamErr != nil {
+			errText = result.streamErr.Error()
+		}
+		trace.AgentHigh("turn_end", map[string]any{
+			"ms":            time.Since(started).Milliseconds(),
+			"chars":         response.Len(),
+			"lines":         result.lineCount,
+			"canceled":      result.canceled,
+			"error":         errText,
+			"rendered_tail": chunkRendered.String(),
+		})
+	}()
+
 	writeRendered := func(text string) {
+		if traced {
+			chunkRendered.WriteString(text)
+		}
 		if text == "" || opts.writeRendered == nil {
 			return
 		}
@@ -373,9 +398,24 @@ func (s *Shell) collectAgentEventStream(
 				text := trimLeadingSingleNewline(event.Text, &trimLeadingResponse)
 				cleanText := sanitizer.Write(text)
 				appendResponse(cleanText)
+				chunkRendered.Reset()
 				writeRendered(renderer.Write(cleanText))
 				writeRendered(renderer.Flush())
+				if traced {
+					trace.AgentDetailed("turn_text", map[string]any{
+						"raw":      event.Text,
+						"clean":    cleanText,
+						"rendered": chunkRendered.String(),
+					})
+				}
 			case agent.StreamEventToolCall:
+				trace.AgentHigh("turn_tool", map[string]any{
+					"id":     event.ToolCall.ID,
+					"kind":   event.ToolCall.Kind,
+					"title":  event.ToolCall.Title,
+					"status": string(event.ToolCall.Status),
+					"denied": event.ToolCall.PermissionDenied,
+				})
 				writeRendered(renderer.Flush())
 				if response.Len() > 0 && !strings.HasSuffix(response.String(), "\n") {
 					writeRendered("\n")
@@ -387,6 +427,7 @@ func (s *Shell) collectAgentEventStream(
 		}
 	}
 
+	chunkRendered.Reset()
 	cleanTail := sanitizer.Flush()
 	appendResponse(cleanTail)
 	writeRendered(renderer.Write(cleanTail))
