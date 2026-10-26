@@ -199,14 +199,23 @@ func (t *HTTPTransport) buildPrompt(req Request) string {
 
 // looksLikeCommand checks if the text appears to be a shell command.
 //
-// looksLikeSentence reports whether text reads as a sentence: it opens with
-// a capital letter and ends with sentence punctuation.
-//
-//nolint:gocyclo // heuristic pattern matching requires multiple checks
+// looksLikeSentence reports whether text reads as a sentence: it ends with
+// sentence punctuation and either opens with a capital letter or runs on
+// for several words with the punctuation right after a word ("rm is how you
+// delete files, so be careful."). Commands end in a path ("find ."), a
+// quote or a bare word, and the short ones that do end in a period
+// ("echo done.") stay commands.
 func looksLikeSentence(text string) bool {
 	first, _ := utf8.DecodeRuneInString(text)
-	last, _ := utf8.DecodeLastRuneInString(text)
-	return unicode.IsUpper(first) && strings.ContainsRune(".!?", last)
+	last, size := utf8.DecodeLastRuneInString(text)
+	if !strings.ContainsRune(".!?", last) {
+		return false
+	}
+	if unicode.IsUpper(first) {
+		return true
+	}
+	beforeLast, _ := utf8.DecodeLastRuneInString(text[:len(text)-size])
+	return unicode.IsLetter(beforeLast) && len(strings.Fields(text)) >= 4
 }
 
 func looksLikeCommand(text string) bool {
