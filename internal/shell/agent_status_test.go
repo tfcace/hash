@@ -7,6 +7,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/tfcace/hash/internal/agent"
 	"github.com/tfcace/hash/internal/config"
@@ -140,5 +141,38 @@ func TestHandleAgentStreamError_ReportsError(t *testing.T) {
 
 	if want := rootReport(programstatus.Error, "", "adapter crashed"); !strings.HasPrefix(buf.String(), want) {
 		t.Errorf("wrote %q\nwant it to start with %q", buf.String(), want)
+	}
+}
+
+// The activity spinner's row must not survive a permission prompt: its last
+// frame ("agent · running · ...") used to stay in scrollback above the tool.
+func TestHandleToolPermission_ClearsSpinnerRow(t *testing.T) {
+	sh, _ := newStatusShell(agent.NewMockTransport())
+	var ui bytes.Buffer
+	sh.responseUI = NewResponseUI(&ui)
+	sh.agentOutput = NewAgentOutputCoordinator(&ui)
+	sh.readKey = func(ctx context.Context) byte { return 'n' }
+
+	sh.responseUI.ShowActivity("agent · running · ls")
+	time.Sleep(200 * time.Millisecond) // let a frame draw
+	sh.handleToolPermission(context.Background(), agent.ToolPermissionRequest{Command: "ls", ToolName: "bash"})
+	sh.responseUI.StopSpinner()
+
+	out := ui.String()
+	prompt := strings.Index(out, "Agent wants to run")
+	if prompt < 0 {
+		t.Fatalf("no permission prompt in %q", out)
+	}
+	before := out[:prompt]
+	frame := strings.LastIndex(before, "agent · running · ls")
+	if frame < 0 {
+		t.Fatalf("spinner never drew: %q", before)
+	}
+	if !strings.Contains(before[frame:], "\r\x1b[K") {
+		t.Errorf("spinner row not cleared before the prompt: %q", before[frame:])
+	}
+	after := out[strings.LastIndex(before, "\r\x1b[K"):]
+	if down, up := strings.Count(after, "\n"), strings.Count(after, ansiCursorUp); down != up {
+		t.Errorf("moved down %d rows and up %d: the spinner's row is left behind", down, up)
 	}
 }

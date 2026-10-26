@@ -2080,11 +2080,12 @@ func (s *Shell) handleToolPermission(ctx context.Context, req agent.ToolPermissi
 	}
 	s.agentStatus.blocked(programstatus.Permission, waitingFor)
 
-	// Stop the spinner so it doesn't overwrite the permission prompt.
-	s.responseUI.StopSpinner()
+	// Stop the spinner so it doesn't overwrite the permission prompt, and
+	// give its row to the prompt so its last frame is not left behind.
+	rowFree := s.responseUI.StopSpinnerAndClear()
 
 	if s.agentOutput != nil {
-		s.agentOutput.RenderPermissionPrompt(req.Command, req.ToolName, s.colorPalette.Primary)
+		s.agentOutput.RenderPermissionPromptOnRow(req.Command, req.ToolName, s.colorPalette.Primary, rowFree)
 		os.Stdout.Sync()
 	}
 

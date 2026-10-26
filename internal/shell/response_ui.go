@@ -296,6 +296,20 @@ func (u *ResponseUI) StopSpinner() {
 	u.progress.Done()
 }
 
+// StopSpinnerAndClear stops the spinner and erases its row, reporting
+// whether it was running: the row it drew on is then free for other output.
+func (u *ResponseUI) StopSpinnerAndClear() bool {
+	u.spinnerMu.Lock()
+	running := u.spinnerRunning
+	u.spinnerMu.Unlock()
+	if !running {
+		return false
+	}
+	u.StopSpinner()
+	fmt.Fprint(u.out, "\r\033[K")
+	return true
+}
+
 // ShowStateWithSize displays state with context size info.
 func (u *ResponseUI) ShowStateWithSize(state AgentState, sizeBytes int) {
 	u.spinnerMu.Lock()

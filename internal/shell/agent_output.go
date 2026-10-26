@@ -299,6 +299,14 @@ const (
 // Automatically enters permission state and pauses streaming.
 // toolName is optional -- if non-empty, it's shown as context (e.g., "Bash", "Write").
 func (aoc *AgentOutputCoordinator) RenderPermissionPrompt(command, toolName, accentColor string) {
+	aoc.RenderPermissionPromptOnRow(command, toolName, accentColor, false)
+}
+
+// RenderPermissionPromptOnRow is RenderPermissionPrompt for a caller that
+// knows whether the cursor's row is free (it held only the spinner, now
+// cleared). A free row becomes the prompt's top blank line, so clearing the
+// prompt hands the row back instead of leaving it behind in scrollback.
+func (aoc *AgentOutputCoordinator) RenderPermissionPromptOnRow(command, toolName, accentColor string, rowFree bool) {
 	aoc.EnterPermission()
 
 	aoc.mu.Lock()
@@ -344,8 +352,12 @@ func (aoc *AgentOutputCoordinator) RenderPermissionPrompt(command, toolName, acc
 	}
 
 	var sb strings.Builder
-	for _, line := range lines {
-		sb.WriteString("\r\n")
+	for i, line := range lines {
+		if i == 0 && rowFree {
+			sb.WriteString("\r")
+		} else {
+			sb.WriteString("\r\n")
+		}
 		sb.WriteString(ansiClearLine)
 		sb.WriteString(line)
 	}
