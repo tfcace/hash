@@ -1361,6 +1361,7 @@ func (s *Shell) handleAgentFullStreaming(ctx context.Context, parsed parser.Pars
 	s.responseUI.StopProgress()
 
 	if action == ConfirmReply {
+		s.clearConfirmationHint() // the reply box takes the hint's place
 		s.recordAgentTurn(turn, true, 0)
 		return s.runAgentConversationLoop(ctx, modelName, transcript)
 	}
@@ -1462,6 +1463,7 @@ func (s *Shell) runAgentConversationLoop(ctx context.Context, modelName string, 
 		s.responseUI.StopProgress()
 
 		if action == ConfirmReply {
+			s.clearConfirmationHint()
 			s.recordAgentTurn(turn, true, 0)
 			continue
 		}
@@ -1625,8 +1627,10 @@ func (s *Shell) handleAgentConfirmAction(ctx context.Context, action ConfirmActi
 		if confirmType == ConfirmTypeCommand {
 			s.showAgentCommandAsTyped(resp.Command)
 			commandID, err = s.runAgentCommand(ctx, resp.Command)
+			break
 		}
-		// For explanations, ConfirmRun just dismisses
+		// An explanation is done: drop its hint, keep the answer.
+		s.clearConfirmationHint()
 	case ConfirmEdit:
 		if confirmType == ConfirmTypeCommand {
 			s.clearConfirmationHint() // the editor takes the hint's place
@@ -1634,14 +1638,21 @@ func (s *Shell) handleAgentConfirmAction(ctx context.Context, action ConfirmActi
 			break
 		}
 		// Copy explanation to system clipboard
+		s.clearConfirmationHint()
 		if copyErr := copyToSystemClipboard(turn.response); copyErr != nil {
 			fmt.Fprintf(os.Stderr, "\033[90mCould not copy: %v\033[0m\n", copyErr)
 		} else {
 			fmt.Fprintf(os.Stdout, "\033[90mCopied to clipboard\033[0m\n")
 		}
 	case ConfirmCancel:
-		// Clear the streamed response from screen
-		// +1 for confirmation hint line, +1 for the blank line after fmt.Println()
+		if confirmType != ConfirmTypeCommand {
+			// The user has read the answer; declining it is not a reason to
+			// erase it, and rows already scrolled away could not be erased.
+			s.clearConfirmationHint()
+			break
+		}
+		// Take back the proposed command: its rows, the hint line, and the
+		// blank line after fmt.Println().
 		s.responseUI.ClearLines(lineCount + 2)
 	}
 	accepted := action != ConfirmCancel

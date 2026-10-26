@@ -370,6 +370,9 @@ func (s *Shell) collectAgentEventStream(
 		if traced {
 			chunkRendered.WriteString(text)
 		}
+		// Count rows drawn, not lines in the reply: fences draw none and a
+		// wrapped line draws several.
+		result.lineCount += strings.Count(text, "\n")
 		if text == "" || opts.writeRendered == nil {
 			return
 		}
@@ -386,7 +389,6 @@ func (s *Shell) collectAgentEventStream(
 			return
 		}
 		response.WriteString(text)
-		result.lineCount += strings.Count(text, "\n")
 	}
 
 	for events != nil || errCh != nil {
