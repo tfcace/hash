@@ -593,6 +593,7 @@ type Executor struct {
 	env               *envStore
 	positionalArgs    []string    // $0, $1, $2, etc. for -c execution
 	ptyActive         atomic.Bool // set when PTY is in use, disables progress
+	outTerm, errTerm  atomic.Bool // this execution's stdout/stderr are the terminal
 	captureLimit      int64
 
 	// Persistent interpreter state - keeps function definitions across executions
@@ -1352,6 +1353,11 @@ func (e *Executor) Execute(ctx context.Context, command string, stdout, stderr i
 		captureWriter = &captureBuf
 	}
 
+	// A command whose output goes to these writers unredirected gets a
+	// terminal for it; output captured into a buffer does not.
+	e.outTerm.Store(writerIsTerminal(stdout))
+	e.errTerm.Store(writerIsTerminal(stderr))
+
 	// Switch writers for this execution
 	if stdout != nil {
 		e.switchStdout.Set(io.MultiWriter(stdout, captureWriter))
@@ -1400,40 +1406,57 @@ func (e *Executor) Execute(ctx context.Context, command string, stdout, stderr i
 	}, nil
 }
 
-// pipelineContext holds the results of pipeline/terminal detection for command execution.
+// pipelineContext says which of a command's streams are the terminal.
 type pipelineContext struct {
-	stdinIsTerm    bool // Real stdin (os.Stdin) is a terminal
-	hcStdinIsTerm  bool // Handler's stdin is a terminal (not piped)
-	hcStdoutIsPipe bool // Handler's stdout is a pipe (upstream in pipeline)
+	stdinIsTerm   bool // Real stdin (os.Stdin) is a terminal: an interactive session
+	hcStdinIsTerm bool // The command's stdin is the terminal (not a file or pipe)
+	stdoutIsTerm  bool // The command's stdout is the terminal (not redirected, piped or captured)
+	stderrIsTerm  bool // The command's stderr is the terminal
 }
 
-// detectPipelineContext analyzes the handler context to determine terminal/pipeline state.
-func detectPipelineContext(hc interp.HandlerContext) pipelineContext {
+// detectPipelineContext works out which of the command's streams are the
+// terminal. A redirect or pipe replaces the shell's own writer with a file;
+// the shell's writer is the terminal when this execution's output is.
+func (e *Executor) detectPipelineContext(hc interp.HandlerContext) pipelineContext {
 	pc := pipelineContext{
 		stdinIsTerm: term.IsTerminal(int(os.Stdin.Fd())),
 	}
-
-	// Check if hc.Stdin is a terminal (detects downstream pipe position)
 	if f, ok := hc.Stdin.(*os.File); ok {
 		pc.hcStdinIsTerm = term.IsTerminal(int(f.Fd()))
 	}
-
-	// Check if hc.Stdout is a pipe (detects upstream pipe position)
-	// When in a pipeline like `cmd1 | cmd2`, mvdan/sh sets hc.Stdout
-	// to a pipe *os.File for cmd1. We need to know this to disable
-	// ONLCR on the PTY to prevent LF→CRLF translation.
-	if f, ok := hc.Stdout.(*os.File); ok {
-		if fi, err := f.Stat(); err == nil {
-			pc.hcStdoutIsPipe = fi.Mode()&os.ModeNamedPipe != 0
-		}
+	pc.stdoutIsTerm = hc.Stdout == io.Writer(e.switchStdout) && e.outTerm.Load()
+	switch hc.Stderr {
+	case io.Writer(e.switchStderr):
+		pc.stderrIsTerm = e.errTerm.Load()
+	case io.Writer(e.switchStdout): // 2>&1
+		pc.stderrIsTerm = pc.stdoutIsTerm
 	}
-
 	return pc
 }
 
-// needsPTY returns true if the command should run with a PTY.
+// needsPTY reports whether the command runs on a PTY: in an interactive
+// session, when its stdout is the terminal. Whether a program animates or
+// colors depends on where its output goes, as in any shell, so stdin does
+// not decide (`prog < file` still draws). A pipeline gets at most one PTY,
+// for its last command.
 func (pc pipelineContext) needsPTY() bool {
-	return pc.stdinIsTerm && pc.hcStdinIsTerm && !pc.hcStdoutIsPipe
+	return pc.stdinIsTerm && pc.stdoutIsTerm
+}
+
+// writerIsTerminal reports whether w is a terminal, or wraps one (a writer
+// that tees a terminal exposes it with Unwrap).
+func writerIsTerminal(w io.Writer) bool {
+	for w != nil {
+		switch v := w.(type) {
+		case *os.File:
+			return term.IsTerminal(int(v.Fd()))
+		case interface{ Unwrap() io.Writer }:
+			w = v.Unwrap()
+		default:
+			return false
+		}
+	}
+	return false
 }
 
 // execHandler spawns external commands with PTY when needed.
@@ -1455,12 +1478,12 @@ func (e *Executor) execHandler(next interp.ExecHandlerFunc) interp.ExecHandlerFu
 		cmd.Env = environToSlice(hc.Env)
 		cmd.Env = append(cmd.Env, "HASH_SHELL=1", "SHELL="+e.shellPath)
 
-		pc := detectPipelineContext(hc)
+		pc := e.detectPipelineContext(hc)
 
 		if pc.needsPTY() {
 			// PTY mode: skip OSC 133;C to avoid interference with TUI apps
 			// that send their own terminal queries on startup
-			return e.runWithPTY(ctx, cmd, hc, pc.hcStdoutIsPipe)
+			return e.runWithPTY(ctx, cmd, hc, pc)
 		}
 
 		// Non-PTY: emit OSC 133;C only if running interactively.
@@ -1567,19 +1590,33 @@ func setupPTYResize(stdinFd int, ptmx *os.File, ptyTr *ptyTrace) func() {
 	}
 }
 
-// runWithPTY runs a command with a pseudo-terminal.
-// If stdoutIsPipe is true, ONLCR is disabled on the PTY to prevent LF→CRLF
-// translation which would corrupt piped data (e.g., `curl ... | bash`).
+// runWithPTY runs a command with a pseudo-terminal for its output. Streams
+// the command line sends elsewhere (`< file`, `2> log`) keep their file:
+// pty.Start attaches the PTY only to the ones left unset. Keystrokes still
+// reach the PTY from the real terminal, so Ctrl+C and full-screen input work.
 //
 //nolint:gocyclo // PTY coordination requires managing multiple concurrent I/O streams
-func (e *Executor) runWithPTY(ctx context.Context, cmd *exec.Cmd, hc interp.HandlerContext, stdoutIsPipe bool) error {
-	// When stdout is a pipe, we need to disable ONLCR on the PTY slave.
-	// Use pty.Open() to get access to both master and slave for configuration.
-	if stdoutIsPipe {
-		return e.runWithPTYRaw(ctx, cmd, hc)
+func (e *Executor) runWithPTY(ctx context.Context, cmd *exec.Cmd, hc interp.HandlerContext, pc pipelineContext) error {
+	keys := hc.Stdin
+	if !pc.hcStdinIsTerm {
+		cmd.Stdin = hc.Stdin
+		keys = os.Stdin
+	}
+	if !pc.stderrIsTerm {
+		cmd.Stderr = hc.Stderr
 	}
 
-	ptmx, err := pty.Start(cmd)
+	// The PTY becomes the controlling terminal through a descriptor that is
+	// on it: stdin normally, stdout when stdin was redirected from a file.
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
+	}
+	cmd.SysProcAttr.Setsid = true
+	cmd.SysProcAttr.Setctty = true
+	if !pc.hcStdinIsTerm {
+		cmd.SysProcAttr.Ctty = 1
+	}
+	ptmx, err := pty.StartWithAttrs(cmd, nil, cmd.SysProcAttr)
 	if err != nil {
 		cmd.Stdin = hc.Stdin
 		cmd.Stdout = hc.Stdout
@@ -1645,7 +1682,7 @@ func (e *Executor) runWithPTY(ctx context.Context, cmd *exec.Cmd, hc interp.Hand
 	}
 	cancelable = startStdinCopy(stdinCopyConfig{
 		ptmx:      ptmx,
-		stdin:     hc.Stdin,
+		stdin:     keys,
 		done:      done,
 		stdinDone: stdinDone,
 		onInput:   onInput,
@@ -1726,143 +1763,6 @@ func (e *Executor) runWithPTY(ctx context.Context, cmd *exec.Cmd, hc interp.Hand
 			}
 			_ = ptmx.Close()
 			stdoutErr = <-stdoutDone
-		}
-	}
-
-	if cmdErr == nil && stdoutErr != nil {
-		return stdoutErr
-	}
-	return normalizeExternalCommandError(cmdErr)
-}
-
-// runWithPTYRaw runs a command with a PTY that has ONLCR disabled.
-// This is used when stdout is a pipe to prevent LF→CRLF translation.
-//
-//nolint:gocyclo // PTY raw mode coordination requires managing multiple concurrent I/O streams
-func (e *Executor) runWithPTYRaw(ctx context.Context, cmd *exec.Cmd, hc interp.HandlerContext) error {
-	// Use pty.Open() to get access to both master and slave
-	ptmx, pts, err := pty.Open()
-	if err != nil {
-		// Fall back to non-PTY execution
-		cmd.Stdin = hc.Stdin
-		cmd.Stdout = hc.Stdout
-		cmd.Stderr = hc.Stderr
-		return normalizeExternalCommandError(cmd.Run())
-	}
-	defer ptmx.Close()
-
-	// Disable ONLCR on the PTY slave to prevent LF→CRLF translation
-	if err := disablePTYOutputProcessing(pts); err != nil {
-		pts.Close()
-		cmd.Stdin = hc.Stdin
-		cmd.Stdout = hc.Stdout
-		cmd.Stderr = hc.Stderr
-		return normalizeExternalCommandError(cmd.Run())
-	}
-
-	// Connect command to PTY slave and start it
-	cmd.Stdin = pts
-	cmd.Stdout = pts
-	cmd.Stderr = pts
-	if cmd.SysProcAttr == nil {
-		cmd.SysProcAttr = &syscall.SysProcAttr{}
-	}
-	cmd.SysProcAttr.Setsid = true
-	cmd.SysProcAttr.Setctty = true
-
-	if err := cmd.Start(); err != nil {
-		pts.Close()
-		cmd.Stdin = hc.Stdin
-		cmd.Stdout = hc.Stdout
-		cmd.Stderr = hc.Stderr
-		return normalizeExternalCommandError(cmd.Run())
-	}
-	pts.Close() // Close slave in parent after child has it
-
-	// Signal PTY is active to disable progress indicator
-	e.ptyActive.Store(true)
-
-	// Put the real terminal in raw mode
-	stdinFd := int(os.Stdin.Fd())
-	if cleanup := setupTerminalRawMode(stdinFd, nil); cleanup != nil {
-		defer cleanup()
-	}
-
-	// Handle terminal resize
-	defer setupPTYResize(stdinFd, ptmx, nil)()
-
-	drainTerminalResponses(stdinFd, nil)
-
-	// Copy stdin to PTY
-	done := make(chan struct{})
-	stdinDone := make(chan struct{})
-	var lastCtrlC time.Time
-	onInput := func(buf []byte) {
-		for _, b := range buf {
-			if b != ctrlCByte {
-				continue
-			}
-			now := time.Now()
-			if !lastCtrlC.IsZero() && now.Sub(lastCtrlC) <= doubleCtrlCWait {
-				signalProcessGroup(cmd, syscall.SIGINT)
-			}
-			lastCtrlC = now
-		}
-	}
-
-	cancelable := startStdinCopy(stdinCopyConfig{
-		ptmx:      ptmx,
-		stdin:     hc.Stdin,
-		done:      done,
-		stdinDone: stdinDone,
-		onInput:   onInput,
-		onWrite:   nil,
-		ptyTr:     nil,
-	})
-
-	// Copy PTY to stdout
-	stdoutDone := make(chan error, 1)
-	go func() {
-		err := copyWithRetry(e.watchOwner(hc.Stdout), ptmx, nil, nil)
-		stdoutDone <- err
-	}()
-
-	// Wait for command
-	cmdDone := make(chan error, 1)
-	go func() {
-		cmdDone <- cmd.Wait()
-	}()
-
-	var cmdErr error
-	var stdoutErr error
-	stdoutFinished := false
-
-	select {
-	case cmdErr = <-cmdDone:
-	case stdoutErr = <-stdoutDone:
-		stdoutFinished = true
-		select {
-		case cmdErr = <-cmdDone:
-		case <-time.After(ptyStopGrace):
-			signalProcessGroup(cmd, syscall.SIGTERM)
-			cmdErr = <-cmdDone
-			if cmdErr == nil && stdoutErr != nil {
-				cmdErr = stdoutErr
-			}
-		}
-	}
-
-	close(done)
-	if cancelable {
-		<-stdinDone
-	}
-
-	if !stdoutFinished {
-		select {
-		case stdoutErr = <-stdoutDone:
-		case <-time.After(ptyStopGrace):
-			_ = ptmx.Close()
-			<-stdoutDone
 		}
 	}
 
