@@ -3,6 +3,7 @@ package executor
 import (
 	"bytes"
 	"context"
+	"io"
 	"os"
 	osexec "os/exec"
 	"path/filepath"
@@ -1578,5 +1579,73 @@ func TestExecutor_UnsetRemovesFunction(t *testing.T) {
 		if name == "removeme" {
 			t.Errorf("'removeme' should be removed from Functions() after unset -f")
 		}
+	}
+}
+
+// ttyShell runs line interactively: stdin and stdout are terminals, as at
+// the prompt. It returns what the command wrote to stdout.
+func ttyShell(t *testing.T, line string) string {
+	t.Helper()
+	inMaster, inSlave, err := pty.Open()
+	if err != nil {
+		t.Skipf("pty unavailable: %v", err)
+	}
+	defer inMaster.Close()
+	defer inSlave.Close()
+	outMaster, outSlave, err := pty.Open()
+	if err != nil {
+		t.Skipf("pty unavailable: %v", err)
+	}
+	defer outMaster.Close()
+	defer outSlave.Close()
+	go io.Copy(io.Discard, outMaster) //nolint:errcheck // drain the terminal
+
+	// A real session's stdin is fd 0 as a plain blocking file, without read
+	// deadlines; the poller-backed file pty.Open returns accepts a deadline
+	// on darwin and then blocks anyway. Wrap the fd the way fd 0 is.
+	origStdin := os.Stdin
+	os.Stdin = os.NewFile(inSlave.Fd(), "stdin")
+	defer func() { os.Stdin = origStdin }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	result, err := New().Execute(ctx, line, outSlave, io.Discard)
+	if err != nil {
+		t.Fatalf("Execute(%q) error = %v", line, err)
+	}
+	return strings.ReplaceAll(result.CapturedOutput, "\r", "")
+}
+
+const ttyProbe = `sh -c '[ -t 1 ] && echo out-tty || echo out-notty; [ -t 2 ] && echo err-tty >&2 || echo err-notty >&2'`
+
+// Whether a command may animate depends on where its output goes, as in
+// any shell: `< file` changes only its input.
+func TestExecute_StdinRedirectKeepsTerminalOutput(t *testing.T) {
+	if got := ttyShell(t, ttyProbe+" < /dev/null"); !strings.Contains(got, "out-tty") {
+		t.Errorf("prog < file: stdout should be a terminal, got %q", got)
+	}
+}
+
+// `> file` must not hand the command a terminal: it would write spinner
+// frames and escape codes into the file.
+func TestExecute_StdoutRedirectIsNotATerminal(t *testing.T) {
+	out := filepath.Join(t.TempDir(), "out.txt")
+	ttyShell(t, ttyProbe+" > "+out+" 2>/dev/null")
+	data, _ := os.ReadFile(out)
+	if got := string(data); got != "out-notty\n" {
+		t.Errorf("prog > file wrote %q, want %q", got, "out-notty\n")
+	}
+}
+
+// `2> file` must reach the file, while stdout stays on the terminal.
+func TestExecute_StderrRedirectReachesFile(t *testing.T) {
+	errFile := filepath.Join(t.TempDir(), "err.txt")
+	got := ttyShell(t, ttyProbe+" 2> "+errFile)
+	data, _ := os.ReadFile(errFile)
+	if string(data) != "err-notty\n" {
+		t.Errorf("prog 2> file wrote %q to the file, want %q", data, "err-notty\n")
+	}
+	if !strings.Contains(got, "out-tty") || strings.Contains(got, "err-") {
+		t.Errorf("stdout = %q, want out-tty and no stderr", got)
 	}
 }
