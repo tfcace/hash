@@ -63,3 +63,44 @@ func TestExtractPattern_CommandError(t *testing.T) {
 		t.Errorf("ExitCode = %d, want %d", pattern.ExitCode, 126)
 	}
 }
+
+func TestRelated(t *testing.T) {
+	tests := []struct {
+		failed, fix string
+		want        bool
+	}{
+		{"./deploy.sh", "chmod +x deploy.sh", true},
+		{"gti status", "git status", true},
+		{"make build", "go build ./...", true},
+		{"npm test", "npm install", true},
+		{"git checkout msater", "git fetch --all", true},
+		{"jj log -r x", "git commit --amend", false},
+		{"jj log -r x", "claude", false},
+		{"cd nope", "ls", false},
+	}
+	for _, tt := range tests {
+		if got := Related(tt.failed, tt.fix); got != tt.want {
+			t.Errorf("Related(%q, %q) = %v, want %v", tt.failed, tt.fix, got, tt.want)
+		}
+	}
+}
+
+// An error that quotes the word the user typed ("unrecognized subcommand
+// 'stauts'") is about that word: a fix learned for one typo must not be
+// offered for another. Quoted words the user did not type still generalize.
+func TestExtractPattern_KeepsQuotedWordFromCommand(t *testing.T) {
+	stauts := ExtractPattern("jj stauts", "error: unrecognized subcommand 'stauts'\n\n  tip: a similar subcommand exists: 'status'", 2)
+	fetch := ExtractPattern("jj fetch", "error: unrecognized subcommand 'fetch'", 2)
+	if stauts.ErrorPattern == fetch.ErrorPattern {
+		t.Errorf("two typos share the signature %q", stauts.ErrorPattern)
+	}
+	if want := "error: unrecognized subcommand 'stauts'"; stauts.ErrorPattern != want {
+		t.Errorf("ErrorPattern = %q, want %q", stauts.ErrorPattern, want)
+	}
+
+	a := ExtractPattern("make", "make: *** No rule to make target 'build-a'.  Stop.", 2)
+	b := ExtractPattern("make", "make: *** No rule to make target 'build-b'.  Stop.", 2)
+	if a.ErrorPattern != b.ErrorPattern {
+		t.Errorf("quoted words the user did not type should generalize: %q vs %q", a.ErrorPattern, b.ErrorPattern)
+	}
+}

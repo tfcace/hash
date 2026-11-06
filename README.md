@@ -21,12 +21,12 @@ Hash is a shell that treats AI as a first-class citizen without locking you into
 ?? find all Go files modified today
 → Found 31 Go files modified today, mostly under internal/shell and
   internal/history. The largest change is in internal/shell/shell.go.
-  [Enter: done] [Tab: copy] [r: reply] [Esc: cancel]
+  agent · enter to finish · tab to copy · r to reply
 
 # When the reply is a single command, Hash offers to run it instead
 ?? one-liner to count lines in every Go file
 → find . -name "*.go" | xargs wc -l
-  [Enter: run] [Tab: edit] [Esc: cancel]
+  cmd · enter to run · tab to edit · esc to cancel
 
 # Pipe output through the agent
 kubectl get pods -o json | ?? extract names and status

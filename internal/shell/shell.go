@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -70,7 +71,11 @@ type Shell struct {
 	colorPalette        prompt.Palette
 	allowlist           *allowlist.Manager
 	agentOutput         *AgentOutputCoordinator
-	agentStatus         *agentStatus                                     // OSC 7501 reports for the ?? turn
+	agentStatus         *agentStatus                     // OSC 7501 reports for the ?? turn
+	turnCancel          context.CancelFunc               // cancels the ?? turn in flight (Ctrl+C, Esc)
+	streamKeys          atomic.Pointer[streamKeyWatcher] // reads Esc while a reply streams
+	deniedMu            sync.Mutex
+	denied              map[string]bool                                  // commands denied at a permission prompt during the ?? request
 	updateNotices       chan agentupdate.Notice                          // newer-adapter notices from the background check, drained before a prompt
 	updateGhost         string                                           // "model update" offered as ghost text at the next prompt only
 	updateChecker       func(context.Context) (agentupdate.Notice, bool) // nil = real detect + registry check
@@ -482,9 +487,6 @@ func (s *Shell) Run(ctx context.Context) error {
 	// reducing starship subprocess spawns from 4 to 2 (~75ms savings).
 	s.initPromptAndPalette()
 	s.startUpdateCheck(ctx)
-	trace.ShellHigh("prompt_start", map[string]any{
-		"mode": "editor",
-	})
 
 	firstPrompt := true
 	for {
@@ -496,9 +498,12 @@ func (s *Shell) Run(ctx context.Context) error {
 
 		s.flushUpdateNotice(time.Now())
 		s.emitShellIntegration(&firstPrompt)
+		trace.ShellHigh("prompt_start", map[string]any{
+			"mode": "editor",
+		})
 
 		line, err := s.readLineWithEditor(ctx)
-		s.updateGhost = ""
+		s.retirePromptGhosts()
 		trace.ShellDetailed("input_ready", map[string]any{
 			"line":  line,
 			"error": errStr(err),
@@ -1083,6 +1088,9 @@ func (s *Shell) handleAgentRequest(ctx context.Context, parsed parser.ParseResul
 	// This allows Ctrl+C to cancel the agent operation without exiting the shell.
 	agentCtx, agentCancel := context.WithCancel(context.Background())
 	defer agentCancel()
+	s.turnCancel = agentCancel
+	defer func() { s.turnCancel = nil }()
+	s.resetDeniedCommands()
 
 	// Set up SIGINT handler for this agent request
 	sigCh := make(chan os.Signal, 1)
@@ -1280,6 +1288,7 @@ func (s *Shell) handleAgentFullStreaming(ctx context.Context, parsed parser.Pars
 	events, errCh = paceAgentEvents(requestCtx, events, errCh, agentStreamPacerOptions{})
 	s.agentOutput.BeginToolTurn()
 
+	stopKeys := s.watchTurnKeys()
 	streamResult := s.collectAgentEventStream(ctx, events, errCh, agentStreamCollectionOptions{
 		onFirstChunk: func() {
 			// Stop the spinner before claiming the line. ClearActiveLine
@@ -1292,14 +1301,16 @@ func (s *Shell) handleAgentFullStreaming(ctx context.Context, parsed parser.Pars
 		writeRendered: func(rendered string) {
 			s.agentOutput.WriteStream(rendered)
 		},
+		wrapWidth: replyWidth(0),
 	}, func(update agent.ToolCallUpdate) {
 		s.presentAgentToolUpdate(update, "")
 	})
+	stopKeys()
 
 	if streamResult.canceled {
 		s.agentStatus.idle()
-		s.responseUI.ClearLine()
-		fmt.Fprintln(os.Stderr, "hash: request canceled")
+		s.endCanceledRow()
+		showTurnCanceled(os.Stdout, "")
 		s.lastExitCode = 1
 		return nil
 	}
@@ -1313,7 +1324,6 @@ func (s *Shell) handleAgentFullStreaming(ctx context.Context, parsed parser.Pars
 			modelName,
 			streamResult.streamErr,
 			len(streamResult.responseText),
-			streamResult.lineCount,
 		)
 	}
 
@@ -1327,16 +1337,15 @@ func (s *Shell) handleAgentFullStreaming(ctx context.Context, parsed parser.Pars
 	}
 	turn := agentTurn{prompt: parsed.AgentPrompt, response: responseText, latency: time.Since(started)}
 
-	// Success path - add newline after response and clear spinner
-	fmt.Println()
-	s.responseUI.ClearLine()
-	lineCount := streamResult.lineCount + 1
+	// Success path - end the reply's last row and clear the spinner
+	s.endReplyRow()
 
 	// Determine response type (single-turn flow)
 	collector := agent.NewStreamCollector()
 	collector.Append(responseText)
 	resp := collector.Response()
 	resp = agentTurnResponseForConfirmation(parsed.Type, resp, responseText)
+	resp = s.demoteDeniedCommand(resp)
 
 	allowReply := agentTurnAllowsReply(parsed.Type, resp)
 	transcript := s.initialAgentConversationTranscript(parsed, responseText)
@@ -1360,11 +1369,12 @@ func (s *Shell) handleAgentFullStreaming(ctx context.Context, parsed parser.Pars
 	s.responseUI.StopProgress()
 
 	if action == ConfirmReply {
+		s.clearConfirmationHint() // the reply box takes the hint's place
 		s.recordAgentTurn(turn, true, 0)
 		return s.runAgentConversationLoop(ctx, modelName, transcript)
 	}
 
-	return s.handleAgentConfirmAction(ctx, action, confirmType, resp, turn, lineCount)
+	return s.handleAgentConfirmAction(ctx, action, confirmType, resp, turn)
 }
 
 func (s *Shell) presentAgentToolUpdate(update agent.ToolCallUpdate, prefix string) {
@@ -1429,7 +1439,7 @@ func (s *Shell) runAgentConversationLoop(ctx context.Context, modelName string, 
 
 		priorTranscript := append([]agentConversationMessage(nil), transcript...)
 		started := time.Now()
-		resp, responseText, lineCount, ok := s.streamAgentFollowUpTurn(ctx, reply, priorTranscript)
+		resp, responseText, ok := s.streamAgentFollowUpTurn(ctx, reply, priorTranscript)
 		transcript = append(transcript, agentConversationMessage{Role: "user", Text: reply})
 		if !ok {
 			return nil
@@ -1442,6 +1452,7 @@ func (s *Shell) runAgentConversationLoop(ctx context.Context, modelName string, 
 			continue
 		}
 
+		resp = s.demoteDeniedCommand(resp)
 		confirmType, needsConfirmation := confirmationTypeForAgentResponse(
 			resp,
 			agentTurnAllowsReply(parser.CommandTypeAgent, resp),
@@ -1461,10 +1472,11 @@ func (s *Shell) runAgentConversationLoop(ctx context.Context, modelName string, 
 		s.responseUI.StopProgress()
 
 		if action == ConfirmReply {
+			s.clearConfirmationHint()
 			s.recordAgentTurn(turn, true, 0)
 			continue
 		}
-		return s.handleAgentConfirmAction(ctx, action, confirmType, resp, turn, lineCount)
+		return s.handleAgentConfirmAction(ctx, action, confirmType, resp, turn)
 	}
 }
 
@@ -1494,7 +1506,7 @@ func (s *Shell) streamAgentFollowUpTurn(
 	ctx context.Context,
 	reply string,
 	transcript []agentConversationMessage,
-) (response agent.Response, responseText string, lineCount int, ok bool) {
+) (response agent.Response, responseText string, ok bool) {
 	s.agentStatus.working(reply)
 	requestCtx, timeoutCancel := context.WithTimeout(ctx, s.agentRequestTimeout())
 	defer timeoutCancel()
@@ -1509,6 +1521,7 @@ func (s *Shell) streamAgentFollowUpTurn(
 		s.agentOutput.WriteStream(rendered)
 	})
 
+	stopKeys := s.watchTurnKeys()
 	streamResult := s.collectAgentEventStream(ctx, events, errCh, agentStreamCollectionOptions{
 		onFirstChunk: func() {
 			// Same permission-aware sequence as handleAgentFullStreaming.
@@ -1519,18 +1532,20 @@ func (s *Shell) streamAgentFollowUpTurn(
 		writeRendered: func(rendered string) {
 			railPrefixer.Write(rendered)
 		},
+		wrapWidth: replyWidth(agentConversationAgentPrefixWidth),
 	}, func(update agent.ToolCallUpdate) {
 		// Tool rows share the conversation rail without pretending they are
 		// assistant prose.
 		s.presentAgentToolUpdate(update, agentConversationAgentContinuation)
 	})
+	stopKeys()
 
 	if streamResult.canceled {
-		s.responseUI.ClearLine()
+		s.endCanceledRow()
 		s.agentStatus.idle()
-		fmt.Fprintln(os.Stderr, "hash: request canceled")
+		showTurnCanceled(os.Stdout, agentConversationAgentContinuation)
 		s.lastExitCode = 1
-		return agent.Response{}, "", 0, false
+		return agent.Response{}, "", false
 	}
 
 	s.agentOutput.EndStreaming()
@@ -1540,7 +1555,7 @@ func (s *Shell) streamAgentFollowUpTurn(
 		s.responseUI.ClearLine()
 		s.responseUI.ShowError(agentStreamErrorMessage(streamResult.streamErr))
 		s.lastExitCode = 1
-		return agent.Response{}, "", 0, false
+		return agent.Response{}, "", false
 	}
 
 	responseText = strings.TrimSpace(streamResult.responseText)
@@ -1549,15 +1564,14 @@ func (s *Shell) streamAgentFollowUpTurn(
 		s.responseUI.ClearLine()
 		s.responseUI.ShowError(emptyAgentResponseMessage)
 		s.lastExitCode = 1
-		return agent.Response{}, "", 0, false
+		return agent.Response{}, "", false
 	}
 
-	fmt.Println()
-	s.responseUI.ClearLine()
+	s.endReplyRow()
 
 	collector := agent.NewStreamCollector()
 	collector.Append(responseText)
-	return collector.Response(), responseText, streamResult.lineCount + 1, true
+	return collector.Response(), responseText, true
 }
 
 func confirmationTypeForAgentResponse(resp agent.Response, allowExplanationReply bool) (ConfirmationType, bool) {
@@ -1612,7 +1626,7 @@ func (s *Shell) recordAgentTurn(turn agentTurn, accepted bool, commandID int64) 
 // handleAgentConfirmAction processes the user's confirmation choice. A
 // command the user runs or edits takes the same path as a typed line, so
 // the error it returns (such as exit) is the shell's to act on.
-func (s *Shell) handleAgentConfirmAction(ctx context.Context, action ConfirmAction, confirmType ConfirmationType, resp agent.Response, turn agentTurn, lineCount int) error {
+func (s *Shell) handleAgentConfirmAction(ctx context.Context, action ConfirmAction, confirmType ConfirmationType, resp agent.Response, turn agentTurn) error {
 	// The user acted: hash is at rest, and a command that runs now reports
 	// for itself.
 	s.agentStatus.idle()
@@ -1623,8 +1637,10 @@ func (s *Shell) handleAgentConfirmAction(ctx context.Context, action ConfirmActi
 		if confirmType == ConfirmTypeCommand {
 			s.showAgentCommandAsTyped(resp.Command)
 			commandID, err = s.runAgentCommand(ctx, resp.Command)
+			break
 		}
-		// For explanations, ConfirmRun just dismisses
+		// An explanation is done: drop its hint, keep the answer.
+		s.clearConfirmationHint()
 	case ConfirmEdit:
 		if confirmType == ConfirmTypeCommand {
 			s.clearConfirmationHint() // the editor takes the hint's place
@@ -1632,15 +1648,17 @@ func (s *Shell) handleAgentConfirmAction(ctx context.Context, action ConfirmActi
 			break
 		}
 		// Copy explanation to system clipboard
+		s.clearConfirmationHint()
 		if copyErr := copyToSystemClipboard(turn.response); copyErr != nil {
 			fmt.Fprintf(os.Stderr, "\033[90mCould not copy: %v\033[0m\n", copyErr)
 		} else {
 			fmt.Fprintf(os.Stdout, "\033[90mCopied to clipboard\033[0m\n")
 		}
 	case ConfirmCancel:
-		// Clear the streamed response from screen
-		// +1 for confirmation hint line, +1 for the blank line after fmt.Println()
-		s.responseUI.ClearLines(lineCount + 2)
+		// Declining keeps what the agent said, a proposed command included:
+		// the user has read it, its lead-in explains it, and rows already
+		// scrolled away could not be erased anyway. Only the hint goes.
+		s.clearConfirmationHint()
 	}
 	accepted := action != ConfirmCancel
 	if confirmType == ConfirmTypeCommand {
@@ -1689,7 +1707,7 @@ func (s *Shell) runAgentCommand(ctx context.Context, command string) (commandID 
 // handleAgentStreamError handles errors during agent streaming. The caller
 // returns its result: nil once the error is handled, or the outcome of a
 // retried turn.
-func (s *Shell) handleAgentStreamError(ctx context.Context, parsed parser.ParseResult, modelName string, streamErr error, responseLen, lineCount int) error {
+func (s *Shell) handleAgentStreamError(ctx context.Context, parsed parser.ParseResult, modelName string, streamErr error, responseLen int) error {
 	s.agentStatus.failed(agentStreamErrorMessage(streamErr))
 	s.responseUI.ClearLine() // Stop spinner and clear the line
 	s.responseUI.ShowError(agentStreamErrorMessage(streamErr))
@@ -1739,9 +1757,8 @@ func (s *Shell) handleAgentStreamError(ctx context.Context, parsed parser.ParseR
 	if action == ConfirmRun { // Retry
 		return s.handleAgentFullStreaming(ctx, parsed, modelName)
 	}
-	// Cancel: clear error + any partial response
-	// lineCount + error line + confirmation line + blank line
-	s.responseUI.ClearLines(lineCount + 3)
+	// Cancel: the partial reply and the error stay; only the hint goes.
+	s.clearConfirmationHint()
 	return nil
 }
 
@@ -1784,7 +1801,75 @@ func (s *Shell) handleEditCommand(ctx context.Context, command string) (int64, e
 		return 0, nil
 	}
 
-	return s.runAgentCommand(ctx, result.Text)
+	return s.runEditedCommand(ctx, command, result.Text)
+}
+
+// endReplyRow ends the reply's last row, if it is unfinished, so the footer
+// starts on its own row: a reply ending in a code block already did, and a
+// second newline drew a blank row before the footer.
+func (s *Shell) endReplyRow() {
+	if s.agentOutput.EndsMidRow() {
+		fmt.Println()
+	}
+	s.responseUI.ClearLine()
+}
+
+// endCanceledRow makes room for the canceled row without erasing what the
+// reply drew: the spinner's row is cleared, a half-drawn row is ended.
+func (s *Shell) endCanceledRow() {
+	if !s.responseUI.StopSpinnerAndClear() && s.agentOutput.EndsMidRow() {
+		fmt.Fprintln(os.Stdout)
+	}
+}
+
+// runEditedCommand runs the line the user made of the agent's command. The
+// edits are the user's typing, so a ?? they added is a request, as at the
+// prompt; a ?? the agent's command already had stays shell syntax.
+func (s *Shell) runEditedCommand(ctx context.Context, original, edited string) (int64, error) {
+	line := strings.TrimSpace(edited)
+	if !strings.Contains(original, "??") && parser.Parse(line).Type != parser.CommandTypeRegular {
+		return 0, s.dispatchCommand(ctx, line)
+	}
+	return s.runAgentCommand(ctx, edited)
+}
+
+func (s *Shell) resetDeniedCommands() {
+	s.deniedMu.Lock()
+	s.denied = nil
+	s.deniedMu.Unlock()
+}
+
+func (s *Shell) noteDeniedCommand(command string) {
+	command = strings.TrimSpace(command)
+	if command == "" {
+		return
+	}
+	s.deniedMu.Lock()
+	if s.denied == nil {
+		s.denied = map[string]bool{}
+	}
+	s.denied[command] = true
+	s.deniedMu.Unlock()
+}
+
+// demoteDeniedCommand keeps a command the user denied during this request
+// from coming back one Enter away. The agent is told to reply with a denied
+// command, so the reply stays readable, just not runnable.
+func (s *Shell) demoteDeniedCommand(resp agent.Response) agent.Response {
+	if resp.Type != agent.ResponseTypeCommand {
+		return resp
+	}
+	s.deniedMu.Lock()
+	denied := s.denied[strings.TrimSpace(resp.Command)]
+	s.deniedMu.Unlock()
+	if !denied {
+		return resp
+	}
+	resp.Type = agent.ResponseTypeExplanation
+	if resp.Explanation == "" {
+		resp.Explanation = resp.Command
+	}
+	return resp
 }
 
 func (s *Shell) updatePrompt() {
@@ -2067,11 +2152,17 @@ func (s *Shell) handleToolPermission(ctx context.Context, req agent.ToolPermissi
 	}
 	s.agentStatus.blocked(programstatus.Permission, waitingFor)
 
-	// Stop the spinner so it doesn't overwrite the permission prompt.
-	s.responseUI.StopSpinner()
+	// The prompt reads its own key; keep the stream watcher off stdin.
+	keys := s.streamKeys.Load()
+	keys.Pause()
+	defer keys.Resume()
+
+	// Stop the spinner so it doesn't overwrite the permission prompt, and
+	// give its row to the prompt so its last frame is not left behind.
+	rowFree := s.responseUI.StopSpinnerAndClear()
 
 	if s.agentOutput != nil {
-		s.agentOutput.RenderPermissionPrompt(req.Command, req.ToolName, s.colorPalette.Primary)
+		s.agentOutput.RenderPermissionPromptOnRow(req.Command, req.ToolName, s.colorPalette.Primary, rowFree)
 		os.Stdout.Sync()
 	}
 
@@ -2086,6 +2177,9 @@ func (s *Shell) handleToolPermission(ctx context.Context, req agent.ToolPermissi
 	if always && s.allowlist != nil {
 		s.refreshProjectAllowlist()
 		_ = s.allowlist.Allow(req.Command)
+	}
+	if !allow {
+		s.noteDeniedCommand(req.Command)
 	}
 
 	trace.AgentHigh("tool_permission", map[string]any{

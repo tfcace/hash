@@ -285,7 +285,7 @@ func TestDisplay_RenderWithFrame_UsesLivePrefixOnlyUntilFinalize(t *testing.T) {
 	if !strings.Contains(finalOutput, "│ you › yes") {
 		t.Fatalf("finalized input should use committed prefix, got %q", finalOutput)
 	}
-	if strings.Count(finalOutput, ansiClearLine) < 2 {
+	if !strings.Contains(finalOutput, ansiClearToEnd) {
 		t.Fatalf("finalize should clear the stale live connector row, got %q", finalOutput)
 	}
 	if strings.Contains(finalOutput, "╎ you › yes") {
@@ -566,5 +566,64 @@ func TestDisplay_RenderCompletionMenu_LongValuesFitTerminalWidth(t *testing.T) {
 		if got > width {
 			t.Errorf("menu row %d is %d columns wide, terminal is %d; values must be width-capped", i, got, width)
 		}
+	}
+}
+
+// Finalize redraws a submitted line with a different prefix than the live
+// one (the "i│" mode bar becomes "│"), so a wrapped line lands on its rows
+// shifted. Every row the live render used must be cleared first, or the old
+// row's tail shows through ("word29" became "word299").
+func TestDisplay_FinalizeClearsWrappedRowsFirst(t *testing.T) {
+	var out bytes.Buffer
+	d := NewDisplay(&out, 10, 24)
+	d.SetGutter(true)
+	d.SetPrompt("$ ")
+
+	buf := NewBufferFromString("abcdefghijklmno")
+	cur := NewCursor()
+	cur.MoveTo(0, len("abcdefghijklmno"))
+	d.Render(buf, cur, false)
+
+	out.Reset()
+	d.Finalize(buf)
+	output := out.String()
+
+	clear := strings.Index(output, ansiClearToEnd)
+	if clear < 0 || clear > strings.Index(output, "abc") {
+		t.Fatalf("finalize must clear to end of screen before redrawing, got %q", output)
+	}
+	// "│$ " + 15 characters on a 10-column terminal: two rows.
+	if got := d.FinalizedLines(); got != 2 {
+		t.Errorf("FinalizedLines() = %d, want 2 wrapped rows", got)
+	}
+}
+
+func TestDisplay_FinalizeWithFrameClearsWrappedRowsFirst(t *testing.T) {
+	var out bytes.Buffer
+	d := NewDisplay(&out, 20, 24)
+	d.SetFrame(&InputFrame{
+		Prefix:      "│ you › ",
+		LiveTopLine: "╎",
+		LivePrefix:  "╎ you › ",
+		PrefixWidth: 8,
+	})
+
+	text := strings.Repeat("word ", 6)
+	buf := NewBufferFromString(text)
+	cur := NewCursor()
+	cur.MoveTo(0, len(text))
+	d.Render(buf, cur, false)
+
+	out.Reset()
+	d.Finalize(buf)
+	output := out.String()
+
+	clear := strings.Index(output, ansiClearToEnd)
+	if clear < 0 || clear > strings.Index(output, "│ you › ") {
+		t.Fatalf("finalize must clear to end of screen before redrawing, got %q", output)
+	}
+	// 8 + 30 columns on a 20-column terminal: two rows.
+	if got := d.FinalizedLines(); got != 2 {
+		t.Errorf("FinalizedLines() = %d, want 2 wrapped rows", got)
 	}
 }

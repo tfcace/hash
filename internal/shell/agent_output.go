@@ -2,8 +2,10 @@ package shell
 
 import (
 	"fmt"
+	"github.com/mattn/go-runewidth"
 	"io"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 	"unicode"
@@ -50,6 +52,7 @@ type AgentOutputCoordinator struct {
 	out            io.Writer
 	state          AgentOutputState
 	streamBuffer   strings.Builder // Buffers text when permission is active
+	midRow         bool            // the last streamed text drawn left the row unfinished
 	wasStreaming   bool            // Track if we were streaming before permission
 	pendingCommand string          // Command currently being prompted for permission
 	accentColorFn  func() string   // Callback to get current accent color
@@ -163,12 +166,41 @@ func (aoc *AgentOutputCoordinator) RenderToolResult(update agent.ToolCallUpdate,
 	if update.PermissionDenied {
 		icon, label, color = "–", "denied", "\x1b[33m"
 	} else if update.Status != agent.ToolCallCompleted {
-		icon, label, color = "✗", "failed", "\x1b[31m"
+		// The red mark says it failed; the row still names the tool and,
+		// when the agent sent one, why.
+		icon, color = "✗", "\x1b[31m"
+		if reason := toolFailureReason(update.Content); reason != "" {
+			title += " · " + reason
+		}
+	}
+
+	// One row: in a narrow pane the end is cut, a failure's reason first.
+	if budget := rowBudget(terminalColumns()); budget > 0 {
+		used := visibleCols(prefix) + len("  ✓ ") + runewidth.StringWidth(label) + len(" · ")
+		title = fitText(title, max(budget-used, 1))
 	}
 
 	aoc.mu.Lock()
 	defer aoc.mu.Unlock()
 	fmt.Fprintf(aoc.out, "%s  %s%s\x1b[0m \x1b[90m%s · %s\x1b[0m\n", prefix, color, icon, label, title)
+}
+
+var toolMarkupRe = regexp.MustCompile(`</?[a-z_]+>`)
+
+// toolFailureReason is the first line of a failed tool's output, without
+// the markup some agents wrap errors in, short enough for one row.
+func toolFailureReason(content string) string {
+	content = strings.TrimSpace(toolMarkupRe.ReplaceAllString(content, ""))
+	if i := strings.IndexByte(content, '\n'); i >= 0 {
+		content = strings.TrimSpace(content[:i])
+	}
+	return truncateTerminalText(sanitizeTerminalText(content), 80)
+}
+
+// showTurnCanceled closes a canceled ?? turn with a row in the style of the
+// tool rows above it, behind the same prefix (the conversation rail).
+func showTurnCanceled(w io.Writer, prefix string) {
+	fmt.Fprint(w, prefix+"  \x1b[33m–\x1b[0m \x1b[90mcanceled\x1b[0m\n")
 }
 
 func truncateTerminalText(text string, limit int) string {
@@ -202,6 +234,7 @@ func (aoc *AgentOutputCoordinator) StartStreaming() {
 	}
 	aoc.state = AgentOutputStateStreaming
 	aoc.streamBuffer.Reset()
+	aoc.midRow = false
 }
 
 // WriteStream writes streaming text, or buffers it if permission is active.
@@ -211,7 +244,7 @@ func (aoc *AgentOutputCoordinator) WriteStream(text string) {
 
 	switch aoc.state {
 	case AgentOutputStateStreaming:
-		fmt.Fprint(aoc.out, text)
+		aoc.drawStreamLocked(text)
 	case AgentOutputStatePermission:
 		// Buffer for later
 		aoc.streamBuffer.WriteString(text)
@@ -249,7 +282,7 @@ func (aoc *AgentOutputCoordinator) ExitPermission() {
 		aoc.state = AgentOutputStateStreaming
 		// Flush buffered content
 		if aoc.streamBuffer.Len() > 0 {
-			fmt.Fprint(aoc.out, aoc.streamBuffer.String())
+			aoc.drawStreamLocked(aoc.streamBuffer.String())
 			aoc.streamBuffer.Reset()
 		}
 	} else {
@@ -299,6 +332,14 @@ const (
 // Automatically enters permission state and pauses streaming.
 // toolName is optional -- if non-empty, it's shown as context (e.g., "Bash", "Write").
 func (aoc *AgentOutputCoordinator) RenderPermissionPrompt(command, toolName, accentColor string) {
+	aoc.RenderPermissionPromptOnRow(command, toolName, accentColor, false)
+}
+
+// RenderPermissionPromptOnRow is RenderPermissionPrompt for a caller that
+// knows whether the cursor's row is free (it held only the spinner, now
+// cleared). A free row becomes the prompt's top blank line, so clearing the
+// prompt hands the row back instead of leaving it behind in scrollback.
+func (aoc *AgentOutputCoordinator) RenderPermissionPromptOnRow(command, toolName, accentColor string, rowFree bool) {
 	aoc.EnterPermission()
 
 	aoc.mu.Lock()
@@ -309,6 +350,19 @@ func (aoc *AgentOutputCoordinator) RenderPermissionPrompt(command, toolName, acc
 
 	// Store command for feedback when cleared
 	aoc.pendingCommand = safeCommand
+
+	// The prompt is erased as five rows, so none of them may wrap. The bar
+	// and pad take four columns.
+	width := terminalColumns()
+	rowWidth := 0
+	if budget := rowBudget(width); budget > 4 {
+		rowWidth = budget - 4
+	}
+	safeCommand = fitText(safeCommand, rowWidth)
+	if rowWidth > 0 {
+		safeToolName = fitText(safeToolName, max(rowWidth-len("Agent wants to run ():"), 1))
+	}
+	keys := fitHint("", "", []string{"y to allow", "n to deny", "a to always allow"}, max(width-4, 0))
 
 	// Use callback for accent color if available, otherwise use passed-in color
 	color := accentColor
@@ -340,12 +394,16 @@ func (aoc *AgentOutputCoordinator) RenderPermissionPrompt(command, toolName, acc
 		barStyle + "│" + ansiReset + " " + permissionPad + header,
 		barStyle + "│" + ansiReset + " " + permissionPad + accentCode + ansiBold + safeCommand + ansiReset,
 		barStyle + "│" + ansiReset + " " + permissionPad,
-		barStyle + "│" + ansiReset + " " + permissionPad + "[y]allow  [n]deny  [a]always allow",
+		barStyle + "│" + ansiReset + " " + permissionPad + keys,
 	}
 
 	var sb strings.Builder
-	for _, line := range lines {
-		sb.WriteString("\r\n")
+	for i, line := range lines {
+		if i == 0 && rowFree {
+			sb.WriteString("\r")
+		} else {
+			sb.WriteString("\r\n")
+		}
 		sb.WriteString(ansiClearLine)
 		sb.WriteString(line)
 	}
@@ -439,7 +497,7 @@ func (aoc *AgentOutputCoordinator) clearPermissionPrompt(allowed, showFeedback b
 	if aoc.wasStreaming {
 		aoc.state = AgentOutputStateStreaming
 		if aoc.streamBuffer.Len() > 0 {
-			fmt.Fprint(aoc.out, aoc.streamBuffer.String())
+			aoc.drawStreamLocked(aoc.streamBuffer.String())
 			aoc.streamBuffer.Reset()
 		}
 	} else {
@@ -475,20 +533,9 @@ func (aoc *AgentOutputCoordinator) ShowHints(ct ConfirmationType) {
 		return // Don't show hints unless in confirming state
 	}
 
-	var scope, hint string
-	switch ct {
-	case ConfirmTypeCommand:
-		scope = "cmd"
-		hint = "[Enter: run] [Tab: edit] [Esc: cancel]"
-	case ConfirmTypeExplanation:
-		scope = "agent"
-		hint = "[Enter: done] [Tab: copy] [r: reply] [Esc: cancel]"
-	case ConfirmTypeError:
-		scope = "error"
-		hint = "[Enter: retry] [Esc: cancel]"
-	}
-
-	fmt.Fprintf(aoc.out, "  \x1b[90m%s · %s\x1b[0m\n", scope, hint)
+	// Fitted to the pane: the hint is erased as one row when the user acts.
+	scope, hints := confirmationHints(ct)
+	fmt.Fprintf(aoc.out, "\x1b[90m%s\x1b[0m\n", fitHint("  ", scope, hints, terminalColumns()))
 }
 
 // ExitConfirming returns to idle state.
@@ -506,6 +553,7 @@ func (aoc *AgentOutputCoordinator) Cancel() {
 	defer aoc.mu.Unlock()
 
 	wasPermission := aoc.state == AgentOutputStatePermission
+	wasStreaming := aoc.state == AgentOutputStateStreaming
 
 	aoc.state = AgentOutputStateIdle
 	aoc.streamBuffer.Reset()
@@ -522,10 +570,28 @@ func (aoc *AgentOutputCoordinator) Cancel() {
 			sb.WriteString(ansiClearLine)
 		}
 		aoc.out.Write([]byte(sb.String()))
-	} else {
-		// Just clear current line to clean up any partial output
+	} else if !wasStreaming {
+		// Clear the spinner's row. A streaming row is the reply itself:
+		// what the user already read stays.
 		fmt.Fprint(aoc.out, "\r\x1b[K")
 	}
 
 	aoc.flushLocked()
+}
+
+// drawStreamLocked writes reply text and remembers whether it left the row
+// unfinished. Must be called with mu held.
+func (aoc *AgentOutputCoordinator) drawStreamLocked(text string) {
+	fmt.Fprint(aoc.out, text)
+	if text != "" {
+		aoc.midRow = !strings.HasSuffix(text, "\n")
+	}
+}
+
+// EndsMidRow reports whether the reply drawn so far stopped partway through
+// a row, so whatever follows must start a new one.
+func (aoc *AgentOutputCoordinator) EndsMidRow() bool {
+	aoc.mu.Lock()
+	defer aoc.mu.Unlock()
+	return aoc.midRow
 }

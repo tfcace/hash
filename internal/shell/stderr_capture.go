@@ -19,6 +19,12 @@ func newStderrCapture(original io.Writer) *stderrCapture {
 	return &stderrCapture{original: original}
 }
 
+// Unwrap exposes the writer the capture tees into, so the executor can tell
+// that a command's stderr reaches the terminal and give it one.
+func (c *stderrCapture) Unwrap() io.Writer {
+	return c.original
+}
+
 func (c *stderrCapture) Write(p []byte) (n int, err error) {
 	c.mu.Lock()
 	// Only capture up to maxStderrCapture

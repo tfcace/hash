@@ -2,7 +2,6 @@ package shell
 
 import (
 	"strings"
-	"unicode/utf8"
 
 	"github.com/tfcace/hash/internal/agent"
 	"github.com/tfcace/hash/internal/editor"
@@ -27,6 +26,7 @@ const (
 	agentConversationReplyPromptWidth  = 8
 	agentConversationAgentPrefix       = agentConversationSolidRail + " " + agentConversationAgentLabel + " › "
 	agentConversationAgentContinuation = agentConversationSolidRail + "         "
+	agentConversationAgentPrefixWidth  = 10 // "│ agent › " and its continuation
 	emptyAgentResponseMessage          = "agent ended the turn without text"
 	legacyAwaitingInputMarker          = "[AWAITING_INPUT]"
 	legacyConversationMarker           = "[CONVERSATION]"
@@ -41,7 +41,9 @@ func agentConversationInputFrame(openRail bool) *editor.InputFrame {
 		PrefixWidth: agentConversationReplyPromptWidth,
 	}
 	if openRail {
-		frame.TopLine = agentConversationLiveRailStyle + "╭─ conversation\x1b[0m \x1b[90mEnter sends · Esc/Ctrl+C leaves · /exit ends\x1b[0m"
+		const title = "╭─ conversation "
+		hints := fitHint("", "", []string{"enter to send", "esc to leave", "/exit to end"}, max(terminalColumns()-len([]rune(title)), 0))
+		frame.TopLine = agentConversationLiveRailStyle + strings.TrimSuffix(title, " ") + "\x1b[0m \x1b[90m" + hints + "\x1b[0m"
 	}
 	return frame
 }
@@ -58,6 +60,7 @@ func agentConversationEditorConfig(base editor.Config, openRail bool) editor.Con
 	cfg.DisableContextPicker = true
 	cfg.DisableLineContinuation = true
 	cfg.CancelOnEscape = true
+	cfg.ClearOnCancel = true // leaving takes the reply box with it
 	return cfg
 }
 
@@ -117,19 +120,26 @@ func (s *legacyAgentMarkerSanitizer) Write(text string) string {
 
 	s.pending += text
 	s.pending = stripLegacyAgentMarkers(s.pending)
-	if len(s.pending) <= legacyMarkerTailBytes {
-		return ""
-	}
 
-	emitLen := len(s.pending) - legacyMarkerTailBytes
-	// Never cut inside a multibyte character: each piece is rendered on its
-	// own, and a partial character would show as replacement glyphs.
-	for emitLen > 0 && !utf8.RuneStart(s.pending[emitLen]) {
-		emitLen--
-	}
+	// Hold back only a tail that could still grow into a marker; the rest
+	// shows now. Markers are ASCII and open with "[", so the cut never lands
+	// inside a multibyte character.
+	emitLen := len(s.pending) - possibleMarkerTail(s.pending)
 	out := s.pending[:emitLen]
 	s.pending = s.pending[emitLen:]
 	return out
+}
+
+// possibleMarkerTail is the length of the longest suffix of text that is the
+// start of a legacy marker, 0 when none could be.
+func possibleMarkerTail(text string) int {
+	for n := min(len(text), legacyMarkerTailBytes); n > 0; n-- {
+		tail := text[len(text)-n:]
+		if strings.HasPrefix(legacyAwaitingInputMarker, tail) || strings.HasPrefix(legacyConversationMarker, tail) {
+			return n
+		}
+	}
+	return 0
 }
 
 func (s *legacyAgentMarkerSanitizer) Flush() string {

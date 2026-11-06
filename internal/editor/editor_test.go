@@ -548,3 +548,19 @@ func TestEditor_CompletionReadyIgnoredAfterCursorMoved(t *testing.T) {
 		t.Error("a stale pending completion must be cleared, not left armed")
 	}
 }
+
+// Leaving with Escape takes the input box with it when the caller asks, as
+// Ctrl+C already did: the conversation reply box stayed in scrollback.
+func TestEditor_EscapeClearsWhenConfigured(t *testing.T) {
+	input := bytes.NewReader([]byte("half typed\x1b"))
+	var output bytes.Buffer
+	ed := New(Config{Keybindings: "helix", CancelOnEscape: true, ClearOnCancel: true}, input, &output)
+
+	if result, err := ed.Run(context.Background()); err != nil || !result.Canceled {
+		t.Fatalf("Run() = %#v, %v; want canceled", result, err)
+	}
+	out := output.String()
+	if !strings.HasSuffix(out, "\r"+ansiClearToEnd) {
+		t.Errorf("escape should clear the input area last, got %q", out[max(0, len(out)-40):])
+	}
+}

@@ -2,12 +2,16 @@ package shell
 
 import (
 	"context"
+	"os"
 	"strings"
 	"time"
+
+	"golang.org/x/term"
 
 	"github.com/tfcace/hash/internal/agent"
 	"github.com/tfcace/hash/internal/editor"
 	"github.com/tfcace/hash/internal/markdown"
+	"github.com/tfcace/hash/internal/trace"
 )
 
 const agentStreamFrameInterval = 40 * time.Millisecond
@@ -190,6 +194,17 @@ type agentStreamCollectionOptions struct {
 	writeRendered      func(rendered string)
 	flushDelay         time.Duration
 	trimLeadingNewline bool
+	wrapWidth          int // columns to word-wrap the reply to; 0 leaves it to the terminal
+}
+
+// replyWidth is the width a reply is wrapped to, less the columns a prefix
+// drawn at each row start takes, or 0 when stdout is not a terminal.
+func replyWidth(prefixCols int) int {
+	w, _, err := term.GetSize(int(os.Stdout.Fd()))
+	if err != nil || w-prefixCols < 20 {
+		return 0
+	}
+	return w - prefixCols
 }
 
 type agentStreamCollectionResult struct {
@@ -328,8 +343,36 @@ func (s *Shell) collectAgentEventStream(
 	sanitizer := newLegacyAgentMarkerSanitizer()
 	trimLeadingResponse := opts.trimLeadingNewline
 	firstRender := false
+	wrapper := markdown.NewWrapper(opts.wrapWidth)
+
+	// The turn's trace pairs each raw chunk with what hash drew for it, so a
+	// rendering bug can be read off the trace instead of a screen capture.
+	started := time.Now()
+	traced := trace.Enabled("agent")
+	var chunkRendered strings.Builder
+	trace.AgentHigh("turn_start", nil)
+	defer func() {
+		errText := ""
+		if result.streamErr != nil {
+			errText = result.streamErr.Error()
+		}
+		trace.AgentHigh("turn_end", map[string]any{
+			"ms":            time.Since(started).Milliseconds(),
+			"chars":         response.Len(),
+			"lines":         result.lineCount,
+			"canceled":      result.canceled,
+			"error":         errText,
+			"rendered_tail": chunkRendered.String(),
+		})
+	}()
 
 	writeRendered := func(text string) {
+		if traced {
+			chunkRendered.WriteString(text)
+		}
+		// Count rows drawn, not lines in the reply: fences draw none and a
+		// wrapped line draws several.
+		result.lineCount += strings.Count(text, "\n")
 		if text == "" || opts.writeRendered == nil {
 			return
 		}
@@ -346,7 +389,6 @@ func (s *Shell) collectAgentEventStream(
 			return
 		}
 		response.WriteString(text)
-		result.lineCount += strings.Count(text, "\n")
 	}
 
 	for events != nil || errCh != nil {
@@ -373,12 +415,27 @@ func (s *Shell) collectAgentEventStream(
 				text := trimLeadingSingleNewline(event.Text, &trimLeadingResponse)
 				cleanText := sanitizer.Write(text)
 				appendResponse(cleanText)
-				writeRendered(renderer.Write(cleanText))
-				writeRendered(renderer.Flush())
+				chunkRendered.Reset()
+				writeRendered(wrapper.Write(renderer.Write(cleanText) + renderer.Flush()))
+				if traced {
+					trace.AgentDetailed("turn_text", map[string]any{
+						"raw":      event.Text,
+						"clean":    cleanText,
+						"rendered": chunkRendered.String(),
+					})
+				}
 			case agent.StreamEventToolCall:
-				writeRendered(renderer.Flush())
+				// The agent's view of the call; a denial is hash's own and is
+				// traced at the permission prompt (tool_permission).
+				trace.AgentHigh("turn_tool", map[string]any{
+					"id":     event.ToolCall.ID,
+					"kind":   event.ToolCall.Kind,
+					"title":  event.ToolCall.Title,
+					"status": string(event.ToolCall.Status),
+				})
+				writeRendered(wrapper.Write(renderer.Flush()) + wrapper.Flush())
 				if response.Len() > 0 && !strings.HasSuffix(response.String(), "\n") {
-					writeRendered("\n")
+					writeRendered(wrapper.Write("\n"))
 				}
 				if onToolUpdate != nil {
 					onToolUpdate(event.ToolCall)
@@ -387,10 +444,11 @@ func (s *Shell) collectAgentEventStream(
 		}
 	}
 
+	chunkRendered.Reset()
 	cleanTail := sanitizer.Flush()
 	appendResponse(cleanTail)
-	writeRendered(renderer.Write(cleanTail))
-	writeRendered(renderer.Finish())
+	writeRendered(wrapper.Write(renderer.Write(cleanTail)+renderer.Finish()) + wrapper.Flush())
+	result.lineCount += wrapper.SoftRows()
 	result.responseText = response.String()
 	return result
 }

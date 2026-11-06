@@ -564,6 +564,9 @@ func (e *Editor) cancelInput() Result {
 	e.ghost.Clear()
 	e.ghostStreamChan = nil
 	e.ghostErrChan = nil
+	if e.config.ClearOnCancel {
+		e.display.Clear()
+	}
 	return Result{Canceled: true}
 }
 
@@ -832,7 +835,7 @@ func (e *Editor) handleGhostTextKey(key Key) bool {
 
 	case KeyEnter:
 		if e.ghost.FromAgent {
-			// The [enter]run hint only appears once streaming is done;
+			// The accept hint only appears once streaming is done;
 			// before that, Enter must not run a partial or bare command.
 			if e.ghost.Streaming {
 				trace.AgentHigh("ghost_accept", map[string]any{

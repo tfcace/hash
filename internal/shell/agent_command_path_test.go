@@ -68,7 +68,7 @@ func TestHandleAgentConfirmAction_CommandTurnWithoutARunIsNotAccepted(t *testing
 	sh := newShellForAgentCommand(t)
 
 	sh.handleAgentConfirmAction(context.Background(), ConfirmRun, ConfirmTypeCommand,
-		agent.Response{Type: agent.ResponseTypeCommand, Command: "   "}, agentTurn{prompt: "noop", response: "   "}, 1)
+		agent.Response{Type: agent.ResponseTypeCommand, Command: "   "}, agentTurn{prompt: "noop", response: "   "})
 
 	turns, err := sh.history.GetAgentInteractions("", 10)
 	if err != nil || len(turns) != 1 {
@@ -88,7 +88,7 @@ func TestHandleAgentConfirmAction_FailedCommandBecomesLastError(t *testing.T) {
 	cmd := "cat " + missing
 
 	sh.handleAgentConfirmAction(context.Background(), ConfirmRun, ConfirmTypeCommand,
-		agent.Response{Type: agent.ResponseTypeCommand, Command: cmd}, agentTurn{response: cmd}, 1)
+		agent.Response{Type: agent.ResponseTypeCommand, Command: cmd}, agentTurn{response: cmd})
 
 	if sh.lastCommand != cmd {
 		t.Errorf("lastCommand = %q, want the agent command %q", sh.lastCommand, cmd)
@@ -109,7 +109,7 @@ func TestHandleAgentConfirmAction_CommandContainingDoubleQuestionMarkRunsAsShell
 	cmd := "echo a??b"
 
 	sh.handleAgentConfirmAction(context.Background(), ConfirmRun, ConfirmTypeCommand,
-		agent.Response{Type: agent.ResponseTypeCommand, Command: cmd}, agentTurn{response: cmd}, 1)
+		agent.Response{Type: agent.ResponseTypeCommand, Command: cmd}, agentTurn{response: cmd})
 
 	if sh.lastCommand != cmd {
 		t.Errorf("lastCommand = %q, want %q to have run as a shell line", sh.lastCommand, cmd)
@@ -124,7 +124,7 @@ func TestHandleAgentConfirmAction_ExitEndsTheShell(t *testing.T) {
 	sh := newShellForAgentCommand(t)
 
 	err := sh.handleAgentConfirmAction(context.Background(), ConfirmRun, ConfirmTypeCommand,
-		agent.Response{Type: agent.ResponseTypeCommand, Command: "exit"}, agentTurn{response: "exit"}, 1)
+		agent.Response{Type: agent.ResponseTypeCommand, Command: "exit"}, agentTurn{response: "exit"})
 
 	if err != errExit {
 		t.Fatalf("handleAgentConfirmAction() error = %v, want errExit", err)
@@ -138,7 +138,7 @@ func TestHandleAgentConfirmAction_RunLinksTheTurnToItsCommand(t *testing.T) {
 	turn := agentTurn{prompt: "print linked", response: "echo linked"}
 
 	sh.handleAgentConfirmAction(context.Background(), ConfirmRun, ConfirmTypeCommand,
-		agent.Response{Type: agent.ResponseTypeCommand, Command: "echo linked"}, turn, 1)
+		agent.Response{Type: agent.ResponseTypeCommand, Command: "echo linked"}, turn)
 
 	recent, err := sh.history.GetRecent(1)
 	if err != nil || len(recent) != 1 || recent[0].Command != "echo linked" {
@@ -167,7 +167,7 @@ func TestHandleAgentConfirmAction_CancelRecordsTheTurnAsDeclined(t *testing.T) {
 	turn := agentTurn{prompt: "delete everything", response: "rm -rf /"}
 
 	sh.handleAgentConfirmAction(context.Background(), ConfirmCancel, ConfirmTypeCommand,
-		agent.Response{Type: agent.ResponseTypeCommand, Command: "rm -rf /"}, turn, 1)
+		agent.Response{Type: agent.ResponseTypeCommand, Command: "rm -rf /"}, turn)
 
 	turns, err := sh.history.GetAgentInteractions("", 10)
 	if err != nil || len(turns) != 1 {
@@ -186,7 +186,7 @@ func TestHandleAgentConfirmAction_RunShowsTheCommandAsTyped(t *testing.T) {
 	sh.responseUI = NewResponseUI(&out)
 
 	sh.handleAgentConfirmAction(context.Background(), ConfirmRun, ConfirmTypeCommand,
-		agent.Response{Type: agent.ResponseTypeCommand, Command: "true"}, agentTurn{response: "true"}, 1)
+		agent.Response{Type: agent.ResponseTypeCommand, Command: "true"}, agentTurn{response: "true"})
 
 	got := out.String()
 	if !strings.HasPrefix(got, "\x1b[A\x1b[K\x1b[A\x1b[K") {
@@ -194,5 +194,59 @@ func TestHandleAgentConfirmAction_RunShowsTheCommandAsTyped(t *testing.T) {
 	}
 	if !strings.Contains(got, "\x1b[1mtrue\x1b[0m") {
 		t.Errorf("want the command shown as a submitted input line, got %q", got)
+	}
+}
+
+// Leaving a finished explanation removes only its key hint: the answer the
+// user just read stays, whether they press Enter or Esc. Erasing it by row
+// count left orphaned fragments once the answer had scrolled.
+func TestHandleAgentConfirmAction_ExplanationKeepsText(t *testing.T) {
+	for _, action := range []ConfirmAction{ConfirmRun, ConfirmCancel} {
+		var out bytes.Buffer
+		sh := newShellForAgentCommand(t)
+		sh.responseUI = NewResponseUI(&out)
+
+		sh.handleAgentConfirmAction(context.Background(), action, ConfirmTypeExplanation,
+			agent.Response{Type: agent.ResponseTypeExplanation, Explanation: "answer"},
+			agentTurn{prompt: "q", response: "answer"})
+
+		if ups := strings.Count(out.String(), "\033[A"); ups != 2 {
+			t.Errorf("action %v moved up %d rows, want 2 (the hint and its blank line)", action, ups)
+		}
+	}
+}
+
+// A command the user denied during the turn is not offered back one Enter
+// away: the agent is told to reply with it, so it shows as text instead.
+func TestDemoteDeniedCommand(t *testing.T) {
+	sh := newShellForAgentCommand(t)
+	sh.noteDeniedCommand("mkdir -p /tmp/x")
+
+	got := sh.demoteDeniedCommand(agent.Response{Type: agent.ResponseTypeCommand, Command: " mkdir -p /tmp/x "})
+	if got.Type != agent.ResponseTypeExplanation {
+		t.Errorf("denied command offered as %v, want an explanation", got.Type)
+	}
+	other := sh.demoteDeniedCommand(agent.Response{Type: agent.ResponseTypeCommand, Command: "ls /tmp/x"})
+	if other.Type != agent.ResponseTypeCommand {
+		t.Errorf("a command that was not denied became %v", other.Type)
+	}
+}
+
+// A line the user edits runs the way a typed line would: a ?? they type is
+// a new request, not a two-character glob. A ?? the agent's command already
+// had keeps its shell meaning.
+func TestRunEditedCommand_TypedQuestionMarksAreARequest(t *testing.T) {
+	sh := newShellForAgentCommand(t)
+	edited := "?? explain this"
+	sh.runEditedCommand(context.Background(), "echo hi", edited)
+	if sh.lastCommand == edited {
+		t.Errorf("edited ?? line ran as shell code")
+	}
+
+	sh = newShellForAgentCommand(t)
+	glob := "echo a??b c"
+	sh.runEditedCommand(context.Background(), "echo a??b", glob)
+	if sh.lastCommand != glob || sh.lastExitCode != 0 {
+		t.Errorf("agent's ?? glob: lastCommand = %q exit %d, want it run as shell", sh.lastCommand, sh.lastExitCode)
 	}
 }

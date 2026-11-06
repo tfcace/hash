@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 // HTTPConfig configures the HTTP transport.
@@ -195,6 +197,25 @@ func (t *HTTPTransport) buildPrompt(req Request) string {
 	return b.String()
 }
 
+// looksLikeSentence reports whether text reads as a sentence: it ends with
+// sentence punctuation and either opens with a capital letter or runs on
+// for several words with the punctuation right after a word ("rm is how you
+// delete files, so be careful."). Commands end in a path ("find ."), a
+// quote or a bare word, and the short ones that do end in a period
+// ("echo done.") stay commands.
+func looksLikeSentence(text string) bool {
+	first, _ := utf8.DecodeRuneInString(text)
+	last, size := utf8.DecodeLastRuneInString(text)
+	if !strings.ContainsRune(".!?", last) {
+		return false
+	}
+	if unicode.IsUpper(first) {
+		return true
+	}
+	beforeLast, _ := utf8.DecodeLastRuneInString(text[:len(text)-size])
+	return unicode.IsLetter(beforeLast) && len(strings.Fields(text)) >= 4
+}
+
 // looksLikeCommand checks if the text appears to be a shell command.
 //
 //nolint:gocyclo // heuristic pattern matching requires multiple checks
@@ -209,6 +230,12 @@ func looksLikeCommand(text string) bool {
 		return false
 	}
 
+	// A capitalized line ending like a sentence is prose, whatever word it
+	// opens with ("Hash wraps...", "Make sure...; then...").
+	if looksLikeSentence(text) {
+		return false
+	}
+
 	// Common command prefixes
 	prefixes := []string{
 		"find ", "grep ", "ls ", "cat ", "echo ", "cd ", "mkdir ", "rm ",
@@ -220,9 +247,9 @@ func looksLikeCommand(text string) bool {
 		"rustup ", "terraform ", "source ", "export ", "./", "../", "~/", "/",
 	}
 
-	lower := strings.ToLower(text)
+	// Commands are typed in lowercase; "Find the config" is an instruction.
 	for _, prefix := range prefixes {
-		if strings.HasPrefix(lower, prefix) {
+		if strings.HasPrefix(text, prefix) {
 			return true
 		}
 	}
@@ -250,6 +277,7 @@ func looksLikeCommand(text string) bool {
 	}
 
 	// Explanatory text patterns - if it has these, it's not a command
+	lower := strings.ToLower(text)
 	if strings.Contains(text, ". ") || // Multiple sentences
 		strings.HasPrefix(lower, "the ") ||
 		strings.HasPrefix(lower, "this ") ||

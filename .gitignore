@@ -22,6 +22,7 @@ coverage.txt
 
 # Claude Code local settings
 .claude/settings.local.json
+.claude/settings.json
 
 # Trace/debug logs
 hash-*.log

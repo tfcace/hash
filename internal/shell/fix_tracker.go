@@ -6,12 +6,17 @@ import (
 	"github.com/tfcace/hash/internal/learning"
 )
 
+// highConfidenceScore is the score at which a learned fix is presented as
+// the answer (→, ghost text) rather than a possibility (?, banner only).
+const highConfidenceScore = 0.7
+
 // pendingFailure remembers the last failed command until the next command
 // resolves it (a different success is recorded as its fix).
 type pendingFailure struct {
 	pattern   learning.Pattern
 	command   string
 	suggested string // learned fix offered for this failure, if any
+	ghost     bool   // offer suggested as ghost text at the next prompt
 }
 
 // fixTracker observes command outcomes to drive the learning loop: failures
@@ -35,7 +40,7 @@ func (t *fixTracker) Observe(command, stderr string, exitCode int) (learning.Fix
 	}
 
 	if exitCode == 0 {
-		if p := t.pending; p != nil && command != p.command {
+		if p := t.pending; p != nil && command != p.command && learning.Related(p.command, command) {
 			_ = t.store.RecordFix(p.pattern, command, true)
 		}
 		t.pending = nil
@@ -51,10 +56,13 @@ func (t *fixTracker) Observe(command, stderr string, exitCode int) (learning.Fix
 	t.pending = &pendingFailure{pattern: pattern, command: command}
 
 	fix, found := t.store.GetFix(pattern)
-	if !found || fix.Score < 0.5 {
+	if !found || fix.Score < 0.5 || !learning.Related(command, fix.Fix) {
 		return learning.Fix{}, false
 	}
 	t.pending.suggested = fix.Fix
+	// One keystroke accepts a ghost: only a fix that has earned confidence
+	// gets one. A tentative fix is shown in the banner, not pre-typed.
+	t.pending.ghost = fix.Score >= highConfidenceScore
 	return fix, true
 }
 
@@ -63,12 +71,22 @@ func (t *fixTracker) active() bool {
 	return t != nil && t.store != nil
 }
 
-// SuggestedFix returns the fix suggested for the pending failure, or "".
+// SuggestedFix returns the fix offered as ghost text for the pending failure,
+// or "" when there is none or the prompt that offered it has been answered.
 func (t *fixTracker) SuggestedFix() string {
-	if t == nil || t.pending == nil {
+	if t == nil || t.pending == nil || !t.pending.ghost {
 		return ""
 	}
 	return t.pending.suggested
+}
+
+// RetireSuggestion stops offering the pending failure's fix. The failure
+// itself stays pending, so a fix found another way (say, through ??) is
+// still learned when it runs.
+func (t *fixTracker) RetireSuggestion() {
+	if t != nil && t.pending != nil {
+		t.pending.ghost = false
+	}
 }
 
 // SetSuggested replaces the suggestion for the pending failure, so ghost
@@ -79,6 +97,7 @@ func (t *fixTracker) SetSuggested(fix string) {
 		return
 	}
 	t.pending.suggested = fix
+	t.pending.ghost = true
 }
 
 // observeCommandOutcome feeds a finished command into the learning loop and
@@ -120,7 +139,14 @@ func (s *Shell) observeCommandOutcome(line string) {
 	if !found {
 		return
 	}
-	h.showLearnedFix(fix, fix.Score >= 0.7)
+	h.showLearnedFix(fix, fix.Score >= highConfidenceScore)
+}
+
+// retirePromptGhosts drops the one-prompt offers once that prompt has been
+// answered: a fix or update the user typed past is not offered again.
+func (s *Shell) retirePromptGhosts() {
+	s.updateGhost = ""
+	s.fixes.RetireSuggestion()
 }
 
 // promptGhost returns the ghost text for the next prompt: a learned fix for
