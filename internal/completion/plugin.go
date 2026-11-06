@@ -683,12 +683,14 @@ func (c *PluginCompleter) sourceLines(ctx context.Context, rule *PluginRule, arg
 		return nil, errPluginSourceFailed
 	}
 
-	call := c.startSourceCall(key, rule, argv, dir)
-
 	// Serve an expired-but-recent result immediately while the refresh runs.
-	if lines, ok := c.cache.getStale(key, now, staleGrace); ok {
-		emit("stale_while_refreshing", len(lines))
-		return lines, nil
+	// Read it before the refresh starts: a fast source could otherwise
+	// replace it first, and which answer this TAB got would be a race.
+	stale, haveStale := c.cache.getStale(key, now, staleGrace)
+	call := c.startSourceCall(key, rule, argv, dir)
+	if haveStale {
+		emit("stale_while_refreshing", len(stale))
+		return stale, nil
 	}
 
 	// Nothing cached: wait briefly, then leave the rest of the completion
