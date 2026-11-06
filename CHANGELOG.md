@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.9.1](https://github.com/tfcace/hash/compare/v0.9.0...v0.9.1) (2026-11-06)
+
+
+### Bug Fixes
+
+* agent turn presentation and terminal output for 0.9.1 ([#127](https://github.com/tfcace/hash/issues/127)) ([f151d32](https://github.com/tfcace/hash/commit/f151d325944c7f17d9264c55a327754345640fdd))
+
+
+### Dependencies
+
+* bump charm.land/bubbletea/v2 from 2.0.10 to 2.1.1 ([#126](https://github.com/tfcace/hash/issues/126)) ([ec70aac](https://github.com/tfcace/hash/commit/ec70aacc21df6b16531de748645739375ccf5c0e))
+* bump github.com/mattn/go-runewidth from 0.0.30 to 0.0.31 ([#123](https://github.com/tfcace/hash/issues/123)) ([70ceb1e](https://github.com/tfcace/hash/commit/70ceb1e0fbf023c826e904c8b1c1590f68cffe17))
+* bump github.com/mattn/go-sqlite3 from 1.14.50 to 1.14.52 ([#119](https://github.com/tfcace/hash/issues/119)) ([dba72ed](https://github.com/tfcace/hash/commit/dba72ed7a9ec663d141804f108555ead6eb55857))
+* bump golang.org/x/term from 0.45.0 to 0.47.0 ([#122](https://github.com/tfcace/hash/issues/122)) ([3cd71c6](https://github.com/tfcace/hash/commit/3cd71c6e655caef7b37d9b522cebfd1c01ab9d25))
+
 ## [0.9.0](https://github.com/tfcace/hash/compare/v0.8.0...v0.9.0) (2026-10-10)
 
 
