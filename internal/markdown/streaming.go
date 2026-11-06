@@ -81,7 +81,8 @@ func (r *StreamingRenderer) lineStartUndecided(fragment string) bool {
 	// A fence line renders nothing and its language follows the backticks:
 	// hold it whole, and hold the backticks that may still become one.
 	if strings.HasPrefix(fragment, "`") {
-		return strings.HasPrefix("```", fragment) || strings.HasPrefix(fragment, "```")
+		onlyBackticks := strings.Trim(fragment, "`") == ""
+		return (onlyBackticks && len(fragment) <= 3) || strings.HasPrefix(fragment, "```")
 	}
 	if r.inCodeBlock {
 		return false

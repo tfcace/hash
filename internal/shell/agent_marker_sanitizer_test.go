@@ -50,7 +50,7 @@ func TestLegacyAgentMarkerSanitizer_HoldsOnlyPossibleMarkers(t *testing.T) {
 		{"see [docs] here", "see [docs] here"},
 		{"Which directory?\n[AWAI", "Which directory?\n"},
 		{"done [", "done "},
-		{"list [CONVERS", "list "},
+		{"list [CONVE", "list "},
 	}
 	for _, tt := range tests {
 		s := newLegacyAgentMarkerSanitizer()
