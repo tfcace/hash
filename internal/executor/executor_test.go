@@ -8,6 +8,7 @@ import (
 	osexec "os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -1602,9 +1603,17 @@ func ttyShell(t *testing.T, line string) string {
 
 	// A real session's stdin is fd 0 as a plain blocking file, without read
 	// deadlines; the poller-backed file pty.Open returns accepts a deadline
-	// on darwin and then blocks anyway. Wrap the fd the way fd 0 is.
+	// on darwin and then blocks anyway. Wrap a duplicate of the fd the way
+	// fd 0 is: wrapping the same fd twice would let one File's finalizer
+	// close a number a later test has reused.
+	dup, err := syscall.Dup(int(inSlave.Fd()))
+	if err != nil {
+		t.Fatalf("dup: %v", err)
+	}
+	stdin := os.NewFile(uintptr(dup), "stdin")
+	defer stdin.Close()
 	origStdin := os.Stdin
-	os.Stdin = os.NewFile(inSlave.Fd(), "stdin")
+	os.Stdin = stdin
 	defer func() { os.Stdin = origStdin }()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
