@@ -16,7 +16,6 @@ type Model struct {
 	agents  []Agent // adapters detected on PATH (may be empty)
 	version string
 	cursor  int
-	done    bool
 	chosen  *Agent // non-nil only when the user picked an agent
 	width   int
 	height  int
@@ -64,7 +63,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "ctrl+c", "esc", "q", "s", "S":
 			m.chosen = nil
-			m.done = true
 			return m, tea.Quit
 		case "enter":
 			if m.cursor < len(m.agents) {
@@ -73,7 +71,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else {
 				m.chosen = nil // Skip row
 			}
-			m.done = true
 			return m, tea.Quit
 		case "up", "k":
 			if m.cursor > 0 {
@@ -128,7 +125,7 @@ func (m *Model) render() string {
 	tips := [][2]string{
 		{"??", "ask the AI"}, {"Ctrl+R", "search history"},
 		{"cmd | ??", "pipe to AI"}, {"Ctrl+P", "pick context"},
-		{"Ctrl+Y", "copy command"}, {"Ctrl+O", "copy last output"},
+		{"copy cmd", "copy command"}, {"copy out", "copy last output"},
 	}
 	for i := 0; i < len(tips); i += 2 {
 		left := fmt.Sprintf("  %-10s %-16s", tips[i][0], tips[i][1])

@@ -1,10 +1,20 @@
 // internal/editor/cursor.go
 package editor
 
+// selectionKind is the selection state of a cursor.
+type selectionKind int
+
+const (
+	selectNone selectionKind = iota // no selection; anchor is meaningless
+	selectChar                      // charwise, from v or Shift+motion
+	selectLine                      // linewise, from x: always whole lines
+)
+
 // Cursor tracks position and optional selection anchor.
 type Cursor struct {
-	Pos    Position  // Current cursor position
-	Anchor *Position // Selection anchor (nil if no selection)
+	Pos       Position // Current cursor position
+	anchor    Position // Selection anchor; only meaningful when selection != selectNone
+	selection selectionKind
 }
 
 // NewCursor creates a cursor at position 0,0.
@@ -20,58 +30,72 @@ func (c *Cursor) MoveTo(row, col int) {
 
 // HasSelection returns true if there's an active selection.
 func (c *Cursor) HasSelection() bool {
-	return c.Anchor != nil
+	return c.selection != selectNone
 }
 
-// StartSelection begins a selection at the current position.
+// StartSelection begins a charwise selection at the current position.
 func (c *Cursor) StartSelection() {
-	anchor := c.Pos // Copy
-	c.Anchor = &anchor
+	c.anchor = c.Pos
+	c.selection = selectChar
+}
+
+// selectLines makes the selection linewise, covering whole lines from the
+// anchor's row through the cursor's row (just the cursor's row when nothing
+// was selected). The cursor ends at the far end of the span.
+func (c *Cursor) selectLines(buf *Buffer) {
+	anchorRow := c.Pos.Row
+	if c.HasSelection() {
+		anchorRow = c.anchor.Row
+	}
+	top, bottom := min(anchorRow, c.Pos.Row), max(anchorRow, c.Pos.Row)
+	c.anchor = Position{Row: top, Col: 0}
+	c.Pos = Position{Row: bottom, Col: len(buf.Line(bottom))}
+	c.selection = selectLine
 }
 
 // ClearSelection removes the selection.
 func (c *Cursor) ClearSelection() {
-	c.Anchor = nil
+	c.selection = selectNone
+	c.anchor = Position{}
 }
 
 // SelectionRange returns start and end positions (normalized so start < end).
-func (c *Cursor) SelectionRange() (start, end Position) {
-	if c.Anchor == nil {
+// A linewise selection always spans whole lines of buf, wherever the cursor
+// column has moved since.
+func (c *Cursor) SelectionRange(buf *Buffer) (start, end Position) {
+	if !c.HasSelection() {
 		return c.Pos, c.Pos
 	}
 
-	a, b := *c.Anchor, c.Pos
+	a, b := c.anchor, c.Pos
 	if a.Row > b.Row || (a.Row == b.Row && a.Col > b.Col) {
 		a, b = b, a
+	}
+	if c.selection == selectLine {
+		a.Col = 0
+		b.Col = len(buf.Line(b.Row))
 	}
 	return a, b
 }
 
-// Clamp ensures cursor is within buffer bounds.
+// Clamp ensures the cursor, and the selection anchor, are within buffer bounds.
 func (c *Cursor) Clamp(buf *Buffer) {
-	if c.Pos.Row < 0 {
-		c.Pos.Row = 0
+	c.Pos = clampPosition(buf, c.Pos)
+	if c.HasSelection() {
+		c.anchor = clampPosition(buf, c.anchor)
 	}
-	if c.Pos.Row >= buf.LineCount() {
-		c.Pos.Row = buf.LineCount() - 1
-	}
+}
 
-	lineLen := len(buf.Line(c.Pos.Row))
-	if c.Pos.Col < 0 {
-		c.Pos.Col = 0
-	}
-	if c.Pos.Col > lineLen {
-		c.Pos.Col = lineLen
-	}
-	c.Pos.Col = clampByteIndexToRuneBoundary(buf.Line(c.Pos.Row), c.Pos.Col)
+func clampPosition(buf *Buffer, p Position) Position {
+	p.Row = max(0, min(p.Row, buf.LineCount()-1))
+	line := buf.Line(p.Row)
+	p.Col = max(0, min(p.Col, len(line)))
+	p.Col = clampByteIndexToRuneBoundary(line, p.Col)
+	return p
 }
 
 // Clone creates a deep copy of the cursor.
 func (c *Cursor) Clone() *Cursor {
-	clone := &Cursor{Pos: c.Pos}
-	if c.Anchor != nil {
-		anchor := *c.Anchor
-		clone.Anchor = &anchor
-	}
-	return clone
+	clone := *c
+	return &clone
 }

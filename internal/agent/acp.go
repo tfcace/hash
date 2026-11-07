@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 )
 
@@ -50,34 +51,200 @@ type ToolPermissionRequest struct {
 }
 
 // ACPTransport communicates with an ACP-compatible agent via JSON-RPC 2.0.
+//
+// Lifecycle (link): disconnected until a request needs the agent; connect
+// spawns and initializes a process and the link is connected; Close ends it
+// for good (closed), and only Restart reopens it. A connection carries at
+// most one session and is torn down in exactly one place (dropConnLocked),
+// with a reason: a lost connection (broken pipe, stdout ended, idle timeout,
+// failed initialize) keeps a session the agent can resume as the resume
+// candidate, Close forgets it.
 type ACPTransport struct {
-	config     ACPConfig
-	cmd        *exec.Cmd
-	stdin      io.WriteCloser
-	stdout     io.ReadCloser
-	reader     *bufio.Reader
-	mu         sync.Mutex
-	requestID  atomic.Int64
-	sessionID  string
-	sessionCWD string
+	config    ACPConfig
+	requestID atomic.Int64
 
-	capabilities     acpCapabilities
-	resumeSessionID  string
-	resumeSessionCWD string
+	// exchange admits one reader of the connection's message stream at a time:
+	// a prompt turn or a plain request. Without it a model switch during a turn
+	// would read the same stream and each side would drop the other's replies.
+	exchange chan struct{}
 
-	// Model selection (ACP session config option with category "model").
-	modelConfigID   string        // option id, "" when the agent exposes no model option
-	currentModelVal string        // the currently selected option value
-	availableModels []ModelOption // resolved choices the agent advertises
-	preferredModel  string        // sticky user choice (a value), re-applied across reconnects
-
-	// Channel for incoming messages
-	messages chan []byte
-	done     chan struct{}
+	mu   sync.Mutex
+	link link // the agent process: disconnected, connected or closed
+	// resume is the session to resume on the next connection: set when a
+	// connection with a resumable session is lost, cleared when a session
+	// starts and by Close and Restart. nil means the next connection starts
+	// a fresh session.
+	resume *acpSession
+	// model describes the model option of the most recent session. Every
+	// session start replaces it; after a lost connection it is the last
+	// known value. The zero value means unknown or none: no session since
+	// Close or Restart, or a session with no model selection (CurrentModel
+	// and AvailableModels report nothing either way).
+	model modelConfig
+	// preferredModel is the user's sticky choice (an option value),
+	// re-applied to each new session; "" means no pin. Close keeps it; a
+	// session that no longer offers it drops it.
+	preferredModel string
 
 	// Permission handler callback
 	permissionHandler  func(ctx context.Context, req ToolPermissionRequest) (allow bool, always bool)
 	permissionPromptMu sync.Mutex
+
+	idle time.Duration // how long a turn waits for the agent; IdleTimeout unless a test shortens it
+}
+
+// linkState is where the transport stands with its agent process.
+type linkState int
+
+const (
+	linkDisconnected linkState = iota // no process; the next request spawns one
+	linkConnected                     // conn is the live process
+	linkClosed                        // Close ended it; nothing reconnects until Restart
+)
+
+// link is the transport's hold on an agent process; conn is set only while
+// connected.
+type link struct {
+	state linkState
+	conn  *acpConn
+}
+
+// dropReason says why a connection ended, which decides what survives it.
+type dropReason int
+
+const (
+	notDropped dropReason = iota // the connection is live
+	dropLost                     // the process failed us; a resumable session survives
+	dropClosed                   // hash closed it (Close, Restart); nothing survives
+)
+
+// acpConn is one agent process. Everything that is only meaningful for that
+// process lives here, so a teardown cannot leave half of it behind and a
+// goroutine holding an old conn can never write to a newer process.
+type acpConn struct {
+	cmd      *exec.Cmd // nil for in-memory test connections
+	stdin    io.WriteCloser
+	writeMu  sync.Mutex    // one JSON-RPC line at a time on stdin
+	messages chan []byte   // agent output lines; closed by readLoop when stdout ends
+	closed   chan struct{} // closed by shutdown so readLoop never blocks on a dead conn
+
+	// Guarded by ACPTransport.mu.
+	capabilities acpCapabilities
+	session      *acpSession // nil: no session on this connection
+	dropped      dropReason  // why the connection ended; notDropped while live
+}
+
+// acpSession identifies an agent session and the directory it was opened in.
+type acpSession struct {
+	id  string
+	cwd string
+}
+
+// modelConfig is a session's "model" config option. The zero value means the
+// session exposes no model selection.
+type modelConfig struct {
+	id      string        // option id
+	current string        // selected value
+	options []ModelOption // advertised choices
+}
+
+func modelConfigFrom(opts []configOption) modelConfig {
+	for _, opt := range opts {
+		if opt.Category != "model" {
+			continue
+		}
+		m := modelConfig{id: opt.ID, current: opt.CurrentValue}
+		for _, v := range opt.Options {
+			m.options = append(m.options, ModelOption(v))
+		}
+		return m
+	}
+	return modelConfig{}
+}
+
+func (m modelConfig) offers(value string) bool {
+	for _, o := range m.options {
+		if o.Value == value {
+			return true
+		}
+	}
+	return false
+}
+
+func newACPConn(stdin io.WriteCloser) *acpConn {
+	return &acpConn{
+		stdin:    stdin,
+		messages: make(chan []byte, 1024),
+		closed:   make(chan struct{}),
+	}
+}
+
+// write sends one JSON-RPC line.
+func (c *acpConn) write(data []byte) error {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	_, err := c.stdin.Write(append(data, '\n'))
+	return err
+}
+
+// respond answers a request the agent sent on this connection.
+func (c *acpConn) respond(id int64, result interface{}, rpcErr *jsonRPCError) {
+	data, err := json.Marshal(jsonRPCResponse{JSONRPC: "2.0", ID: id, Result: result, Error: rpcErr})
+	if err != nil {
+		return
+	}
+	_ = c.write(data) // best effort: a dead agent is noticed by the reader
+}
+
+// readLoop forwards agent output lines until stdout ends or the conn shuts
+// down. ended, when not nil, runs first when it stops: the conn can never
+// answer another request.
+func (c *acpConn) readLoop(r io.Reader, ended func()) {
+	defer close(c.messages)
+	if ended != nil {
+		defer ended()
+	}
+	reader := bufio.NewReader(r)
+	for {
+		line, err := reader.ReadBytes('\n')
+		if err != nil {
+			return
+		}
+		select {
+		case c.messages <- line: // backpressure instead of dropping replies
+		case <-c.closed:
+			return
+		}
+	}
+}
+
+// shutdown ends the agent process. Called once, by dropConnLocked.
+func (c *acpConn) shutdown() {
+	close(c.closed)
+	_ = c.stdin.Close()
+	if c.cmd != nil && c.cmd.Process != nil {
+		// The whole group: the adapter's own children go with it.
+		if syscall.Kill(-c.cmd.Process.Pid, syscall.SIGKILL) != nil {
+			_ = c.cmd.Process.Kill() // best effort
+		}
+		_ = c.cmd.Wait() // reaps the process and closes the stdout pipe
+	}
+}
+
+// acpMessage is any JSON-RPC line from the agent: a response (id, no method),
+// a request (id and method) or a notification (method, no id).
+type acpMessage struct {
+	ID     *int64          `json:"id"`
+	Method string          `json:"method"`
+	Params json.RawMessage `json:"params"`
+	Result json.RawMessage `json:"result"`
+	Error  *jsonRPCError   `json:"error"`
+}
+
+func (m *acpMessage) isRequest() bool { return m.ID != nil && m.Method != "" }
+
+func (m *acpMessage) isResponseTo(id int64) bool {
+	return m.ID != nil && m.Method == "" && *m.ID == id
 }
 
 // JSON-RPC 2.0 message types
@@ -92,6 +259,18 @@ type jsonRPCError struct {
 	Code    int             `json:"code"`
 	Message string          `json:"message"`
 	Data    json.RawMessage `json:"data,omitempty"`
+}
+
+// rpcError is the agent's error reply as hash reads it, with the kind its
+// data names, if any.
+func (e *jsonRPCError) rpcError() *RPCError {
+	var data struct {
+		ErrorKind string `json:"errorKind"`
+	}
+	if len(e.Data) > 0 && json.Unmarshal(e.Data, &data) != nil {
+		data.ErrorKind = "" // data of another shape: no kind
+	}
+	return &RPCError{Code: e.Code, Message: e.Message, ErrorKind: data.ErrorKind}
 }
 
 // ACP protocol types
@@ -276,9 +455,13 @@ type permissionResponse struct {
 	Outcome *permissionOutcome `json:"outcome"`
 }
 
+// permissionCanceled is the ACP outcome for a permission request the client
+// did not put to the user.
+const permissionCanceled = "cancelled" //nolint:misspell // ACP wire value
+
 type permissionOutcome struct {
-	Outcome  string `json:"outcome"`  // "selected" or "canceled"
-	OptionID string `json:"optionId"` // Which option was selected
+	Outcome  string `json:"outcome"`            // "selected" or permissionCanceled
+	OptionID string `json:"optionId,omitempty"` // Which option was selected; none for permissionCanceled
 }
 
 // jsonRPCResponse is used to send responses to agent requests.
@@ -293,8 +476,8 @@ type jsonRPCResponse struct {
 func NewACPTransport(cfg ACPConfig) *ACPTransport {
 	return &ACPTransport{
 		config:   cfg,
-		messages: make(chan []byte, 1024),
-		done:     make(chan struct{}),
+		exchange: make(chan struct{}, 1),
+		idle:     IdleTimeout,
 	}
 }
 
@@ -314,229 +497,261 @@ func (t *ACPTransport) Name() string {
 	return "acp"
 }
 
-// Connect starts the agent process and initializes the ACP session.
-func (t *ACPTransport) Connect(ctx context.Context) error {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	return t.connectLocked(ctx)
+// beginExchange waits for exclusive use of the message stream. Every public
+// entry point that reads agent replies holds it; Close does not, so it can
+// always tear a stuck connection down.
+func (t *ACPTransport) beginExchange(ctx context.Context) (release func(), err error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	select {
+	case t.exchange <- struct{}{}:
+		return func() { <-t.exchange }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }
 
-func (t *ACPTransport) connectLocked(ctx context.Context) error {
-	if t.stdin != nil {
-		return nil // Already connected
-	}
-
-	program, args := t.config.ParsedCommand()
-	t.cmd = exec.Command(program, args...)
-
-	var err error
-	t.stdin, err = t.cmd.StdinPipe()
+// Connect starts the agent process and initializes the ACP session.
+func (t *ACPTransport) Connect(ctx context.Context) error {
+	release, err := t.beginExchange(ctx)
 	if err != nil {
-		return errors.Join(ErrACPStartFailed, fmt.Errorf("stdin pipe: %w", err))
+		return err
 	}
+	defer release()
+	_, err = t.connect(ctx)
+	return err
+}
 
-	t.stdout, err = t.cmd.StdoutPipe()
-	if err != nil {
-		t.stdin.Close()
-		t.stdin = nil
-		return errors.Join(ErrACPStartFailed, fmt.Errorf("stdout pipe: %w", err))
-	}
-
-	// Discard stderr to avoid blocking
-	t.cmd.Stderr = nil
-
-	if err = t.cmd.Start(); err != nil {
-		t.stdin.Close()
-		t.stdin = nil
-		t.stdout = nil // stdout pipe is already invalidated when cmd fails to start
-		return errors.Join(ErrACPStartFailed, fmt.Errorf("start agent: %w", err))
-	}
-
-	t.reader = bufio.NewReader(t.stdout)
-
-	// Start reading messages in background
-	go t.readLoop(t.reader, t.messages, t.done)
-
-	// Release the lock before initialize — it calls sendRequest which may
-	// call sendCancel or resetConnection, both of which acquire mu.
-	t.mu.Unlock()
-	err = t.initialize(ctx)
+// currentConn returns the live connection, or nil while not connected.
+func (t *ACPTransport) currentConn() *acpConn {
 	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.link.conn
+}
 
-	if err != nil {
-		t.resetConnectionLocked()
-		return fmt.Errorf("initialize: %w", err)
+// liveConn returns the live connection, or why there is none.
+func (t *ACPTransport) liveConn() (*acpConn, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.liveConnLocked()
+}
+
+func (t *ACPTransport) liveConnLocked() (*acpConn, error) {
+	switch t.link.state {
+	case linkConnected:
+		return t.link.conn, nil
+	case linkClosed:
+		return nil, ErrACPTransportClosed
+	default:
+		return nil, fmt.Errorf("%w: not connected", ErrACPConnectionClosed)
 	}
+}
 
+// connect returns the live connection, spawning and initializing the agent
+// when disconnected. A connected link is live: a connection whose output
+// ends (the agent died between requests) is lost the moment its read loop
+// ends (spawn), so a prompt is never written to a process nobody listens
+// to. The caller holds the exchange, so nobody else reads the new
+// connection's messages while initialize waits for its reply.
+func (t *ACPTransport) connect(ctx context.Context) (*acpConn, error) {
+	t.mu.Lock()
+	if t.link.state != linkDisconnected {
+		c, err := t.liveConnLocked()
+		t.mu.Unlock()
+		return c, err
+	}
+	c, err := t.spawn()
+	if err != nil {
+		t.mu.Unlock()
+		return nil, err
+	}
+	t.link = link{state: linkConnected, conn: c} // before initialize, so Close can kill a hung startup
+	t.mu.Unlock()
+
+	if err := t.initialize(ctx, c); err != nil {
+		if lostErr := t.lost(c, err); errors.Is(lostErr, ErrACPTransportClosed) {
+			return nil, lostErr
+		}
+		return nil, fmt.Errorf("initialize: %w", err)
+	}
+	return c, nil
+}
+
+// lost ends c after a failure on it (write error, stdout ended, idle
+// timeout, failed initialize) and returns the error to report: the cause, as
+// the next request reconnects, unless hash closed c meanwhile (Close, or a
+// Restart that may already have a new process), which is final for c's
+// request: retrying it would replay it.
+func (t *ACPTransport) lost(c *acpConn, cause error) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.link.state == linkClosed || c.dropped == dropClosed {
+		return ErrACPTransportClosed
+	}
+	t.dropConnLocked(c, dropLost)
+	return cause
+}
+
+// spawn starts the agent process and its read loop.
+func (t *ACPTransport) spawn() (*acpConn, error) {
+	program, args := t.config.ParsedCommand()
+	cmd := exec.Command(program, args...)
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return nil, errors.Join(ErrACPStartFailed, fmt.Errorf("stdin pipe: %w", err))
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		_ = stdin.Close()
+		return nil, errors.Join(ErrACPStartFailed, fmt.Errorf("stdout pipe: %w", err))
+	}
+	cmd.Stderr = nil // discard stderr to avoid blocking
+	// Its own process group: the terminal's Ctrl+C goes to hash's foreground
+	// group and must not kill the adapter mid-conversation.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		_ = stdin.Close()
+		return nil, errors.Join(ErrACPStartFailed, fmt.Errorf("start agent: %w", err))
+	}
+	c := newACPConn(stdin)
+	c.cmd = cmd
+	// The end of its output loses the connection (a resumable session
+	// survives); after a shutdown it changes nothing.
+	go c.readLoop(stdout, func() { _ = t.lost(c, ErrACPConnectionClosed) })
+	return c, nil
+}
+
+// dropConnLocked is the one teardown path: c, if it is still the current
+// connection, ends and the link is disconnected. A stale c (already replaced
+// or closed) is left alone, so a late error on an old connection cannot kill
+// its successor. Must be called with mu held.
+func (t *ACPTransport) dropConnLocked(c *acpConn, why dropReason) {
+	if c == nil || t.link.conn != c {
+		return
+	}
+	t.link = link{state: linkDisconnected}
+	c.dropped = why
+	if why == dropLost && c.capabilities.SessionResume && c.session != nil {
+		t.resume = c.session
+	}
+	c.shutdown()
+}
+
+// resetConnection drops the current connection so the next request
+// reconnects (and resumes the session when the agent supports it).
+func (t *ACPTransport) resetConnection() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.dropConnLocked(t.link.conn, dropLost)
+}
+
+// Close terminates the agent process and forgets its session. It is final:
+// a request in flight ends with ErrACPTransportClosed and nothing spawns a
+// new process until Restart.
+func (t *ACPTransport) Close() error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.endLocked(linkClosed)
 	return nil
 }
 
-func (t *ACPTransport) readLoop(reader *bufio.Reader, messages chan []byte, done chan struct{}) {
-	defer close(done)
-	defer close(messages)
-
-	if reader == nil {
-		return
-	}
-
-	for {
-		line, err := reader.ReadBytes('\n')
-		if err != nil {
-			return
-		}
-		// Send to channel; backpressure avoids dropping responses.
-		messages <- line
-	}
-}
-
-const acpSessionCloseTimeout = 1500 * time.Millisecond
-
-func (t *ACPTransport) takeCurrentSessionForShutdown() (sessionID string, canClose bool) {
+// Restart ends the agent process and session, as Close does, and connects a
+// new one (a freshly installed adapter answers). The user's model pin is
+// re-applied to the new session. The old process ends and the link reopens
+// in one critical section; a request still on the old process ends as it
+// would after Close (see lost).
+func (t *ACPTransport) Restart(ctx context.Context) error {
 	t.mu.Lock()
-	defer t.mu.Unlock()
-
-	sessionID = t.sessionID
-	if sessionID == "" {
-		return "", false
-	}
-
-	canClose = t.capabilities.SessionClose && t.stdin != nil
-	t.sessionID = ""
-	t.sessionCWD = ""
-	return sessionID, canClose
+	t.endLocked(linkDisconnected)
+	t.mu.Unlock()
+	return t.EnsureModelInfo(ctx)
 }
 
-func (t *ACPTransport) sendCancelNotification(sessionID string) {
+// endLocked ends the agent process and forgets its session, leaving the
+// link in state: closed for Close, disconnected for Restart. Must be called
+// with mu held.
+func (t *ACPTransport) endLocked(state linkState) {
+	t.dropConnLocked(t.link.conn, dropClosed)
+	t.link = link{state: state}
+	t.resume = nil
+	t.model = modelConfig{}
+	// preferredModel stays: it is the user's pin, and ensureSession re-applies
+	// it to the next session (or drops it if that session no longer offers it).
+}
+
+// acpCancelTimeout bounds how long a canceled turn waits for the agent to
+// stop; an agent that does not is treated as lost.
+const acpCancelTimeout = 1500 * time.Millisecond
+
+// notifyCancel sends the session/cancel notification: the agent stops the
+// session's prompt turn and answers it with the canceled stop reason.
+func (c *acpConn) notifyCancel(sessionID string) {
 	// Notifications don't have an ID field.
-	notification := struct {
+	data, err := json.Marshal(struct {
 		JSONRPC string      `json:"jsonrpc"`
 		Method  string      `json:"method"`
 		Params  interface{} `json:"params"`
 	}{
 		JSONRPC: "2.0",
 		Method:  "session/cancel",
-		Params: struct {
-			SessionID string `json:"sessionId"`
-		}{
-			SessionID: sessionID,
-		},
-	}
-
-	data, err := json.Marshal(notification)
-	if err != nil {
-		return // Best effort.
-	}
-
-	t.mu.Lock()
-	stdin := t.stdin
-	t.mu.Unlock()
-	if stdin != nil {
-		_, _ = stdin.Write(append(data, '\n'))
-	}
-}
-
-// sendCancel stops ongoing session work. Agents with session/close support get
-// a close request; older agents get the baseline session/cancel notification.
-// After cancel, the session is invalidated to force a fresh session on next request.
-func (t *ACPTransport) sendCancel() {
-	sessionID, canClose := t.takeCurrentSessionForShutdown()
-	if sessionID == "" {
-		return
-	}
-
-	if canClose {
-		ctx, cancel := context.WithTimeout(context.Background(), acpSessionCloseTimeout)
-		err := t.closeSession(ctx, sessionID)
-		cancel()
-		if err == nil {
-			return
-		}
-		t.resetConnection()
-		return
-	}
-
-	t.sendCancelNotification(sessionID)
-}
-
-func (t *ACPTransport) closeCurrentSession() {
-	t.sendCancel()
-}
-
-func (t *ACPTransport) closeSession(ctx context.Context, sessionID string) error {
-	_, err := t.sendRequestWithoutCancel(ctx, "session/close", closeSessionParams{
-		SessionID: sessionID,
+		Params:  closeSessionParams{SessionID: sessionID},
 	})
-	return err
-}
-
-func (t *ACPTransport) sendRequest(ctx context.Context, method string, params interface{}) (json.RawMessage, error) {
-	return t.sendRequestWithOptions(ctx, method, params, true)
-}
-
-func (t *ACPTransport) sendRequestWithoutCancel(ctx context.Context, method string, params interface{}) (json.RawMessage, error) {
-	return t.sendRequestWithOptions(ctx, method, params, false)
-}
-
-func (t *ACPTransport) sendRequestWithOptions(ctx context.Context, method string, params interface{}, cancelOnContext bool) (json.RawMessage, error) {
-	id := t.requestID.Add(1)
-
-	req := jsonRPCRequest{
-		JSONRPC: "2.0",
-		ID:      id,
-		Method:  method,
-		Params:  params,
+	if err == nil {
+		_ = c.write(data) // best effort
 	}
+}
 
-	data, err := json.Marshal(req)
+// sendRequest sends one request on the current connection and waits for its
+// reply. The caller holds the exchange. A canceled wait leaves the session
+// alone: the late reply is skipped by whoever reads the stream next.
+func (t *ACPTransport) sendRequest(ctx context.Context, method string, params interface{}) (json.RawMessage, error) {
+	c, err := t.liveConn()
+	if err != nil {
+		return nil, err
+	}
+	id := t.requestID.Add(1)
+	data, err := json.Marshal(jsonRPCRequest{JSONRPC: "2.0", ID: id, Method: method, Params: params})
 	if err != nil {
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}
 
-	if _, err := t.stdin.Write(append(data, '\n')); err != nil {
-		// Write failed - pipe is likely broken (e.g., agent exited after cancel).
-		// Reset connection so next Send() will reconnect via lazy connect.
-		t.resetConnection()
-		return nil, errors.Join(ErrACPConnectionClosed, fmt.Errorf("write request: %w", err))
+	if err := c.write(data); err != nil {
+		// The pipe is broken (e.g. the agent exited); the next request
+		// reconnects.
+		return nil, t.lost(c, errors.Join(ErrACPConnectionClosed, fmt.Errorf("write request: %w", err)))
 	}
 
-	// Wait for response with matching ID
 	for {
 		select {
 		case <-ctx.Done():
-			if cancelOnContext {
-				t.sendCancel()
-			}
 			return nil, ctx.Err()
-		case line, ok := <-t.messages:
+		case line, ok := <-c.messages:
 			if !ok {
-				// Connection closed (readLoop exited) - reset for reconnect
-				t.resetConnection()
-				return nil, fmt.Errorf("%w: connection closed", ErrACPConnectionClosed)
+				return nil, t.lost(c, fmt.Errorf("%w: connection closed", ErrACPConnectionClosed))
 			}
-
-			var msg struct {
-				JSONRPC string          `json:"jsonrpc"`
-				ID      *int64          `json:"id"`
-				Result  json.RawMessage `json:"result"`
-				Error   *jsonRPCError   `json:"error"`
-			}
+			var msg acpMessage
 			if err := json.Unmarshal(line, &msg); err != nil {
 				continue
 			}
-
-			// Check if this is our response
-			if msg.ID != nil && *msg.ID == id {
+			if msg.isRequest() {
+				// No prompt turn is running, so there is nothing to grant;
+				// answer anyway or the agent waits forever.
+				t.handleIncomingRequest(ctx, c, "", *msg.ID, msg.Method, msg.Params)
+				continue
+			}
+			if msg.isResponseTo(id) {
 				if msg.Error != nil {
-					return nil, fmt.Errorf("rpc error %d: %s", msg.Error.Code, msg.Error.Message)
+					return nil, msg.Error.rpcError()
 				}
 				return msg.Result, nil
 			}
-			// Not our response, continue waiting
+			// A notification or a stale reply: not ours, keep waiting.
 		}
 	}
 }
 
-func (t *ACPTransport) initialize(ctx context.Context) error {
+func (t *ACPTransport) initialize(ctx context.Context, c *acpConn) error {
 	params := initializeParams{
 		ProtocolVersion: 1,
 		ClientInfo: clientInfo{
@@ -572,7 +787,7 @@ func (t *ACPTransport) initialize(ctx context.Context) error {
 		return err
 	}
 	t.mu.Lock()
-	t.capabilities = initResult.AgentCapabilities.normalized()
+	c.capabilities = initResult.AgentCapabilities.normalized()
 	t.mu.Unlock()
 	return nil
 }
@@ -595,7 +810,7 @@ func rejectKnownUnsupportedAgent(info agentInfo) error {
 	)
 }
 
-func (t *ACPTransport) newSession(ctx context.Context, cwd string) (string, error) {
+func (t *ACPTransport) newSession(ctx context.Context, cwd string) (string, []configOption, error) {
 	params := newSessionParams{
 		Cwd:        normalizeSessionCWD(cwd),
 		McpServers: []interface{}{},
@@ -603,85 +818,104 @@ func (t *ACPTransport) newSession(ctx context.Context, cwd string) (string, erro
 
 	result, err := t.sendRequest(ctx, "session/new", params)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 
 	var sessionResult newSessionResult
 	if err := json.Unmarshal(result, &sessionResult); err != nil {
-		return "", fmt.Errorf("parse session result: %w", err)
+		return "", nil, fmt.Errorf("parse session result: %w", err)
 	}
-
-	t.storeModelConfig(sessionResult.ConfigOptions)
-	return sessionResult.SessionID, nil
+	return sessionResult.SessionID, sessionResult.ConfigOptions, nil
 }
 
-func (t *ACPTransport) resumeSession(ctx context.Context, sessionID, cwd string) error {
+// resumeSession returns the resumed session's config options, which can
+// differ from what the previous process had (an agent restarted by a reset
+// comes back on its default model).
+func (t *ACPTransport) resumeSession(ctx context.Context, sessionID, cwd string) ([]configOption, error) {
 	params := resumeSessionParams{
 		SessionID:  sessionID,
 		Cwd:        normalizeSessionCWD(cwd),
 		McpServers: []interface{}{},
 	}
 
-	_, err := t.sendRequest(ctx, "session/resume", params)
-	return err
+	result, err := t.sendRequest(ctx, "session/resume", params)
+	if err != nil {
+		return nil, err
+	}
+	var res setConfigOptionResult // same {"configOptions": [...]} shape
+	_ = json.Unmarshal(result, &res)
+	return res.ConfigOptions, nil
 }
 
+// ensureSession returns the current connection's session, resuming the
+// resume candidate or opening a new session when there is none.
+//
+// The session keeps the directory it was opened in when the shell changes
+// directory: a new session per cd would drop the conversation, and every
+// prompt already states the shell's current working directory.
 func (t *ACPTransport) ensureSession(ctx context.Context, cwd string) (string, error) {
 	normalizedCWD := normalizeSessionCWD(cwd)
 
 	t.mu.Lock()
-	if t.sessionID != "" {
-		sessionID := t.sessionID
+	c, err := t.liveConnLocked()
+	if err != nil {
+		t.mu.Unlock()
+		return "", err
+	}
+	if c.session != nil {
+		sessionID := c.session.id
 		t.mu.Unlock()
 		return sessionID, nil
 	}
-	resumeID := t.resumeSessionID
-	resumeCWD := t.resumeSessionCWD
-	canResume := t.capabilities.SessionResume
+	resume := t.resume
+	canResume := c.capabilities.SessionResume
 	t.mu.Unlock()
 
-	if canResume && resumeID != "" {
-		if resumeCWD == "" {
-			resumeCWD = normalizedCWD
+	if canResume && resume != nil {
+		session := *resume
+		if session.cwd == "" {
+			session.cwd = normalizedCWD
 		}
-		if err := t.resumeSession(ctx, resumeID, resumeCWD); err == nil {
-			t.mu.Lock()
-			t.sessionID = resumeID
-			t.sessionCWD = resumeCWD
-			t.resumeSessionID = ""
-			t.resumeSessionCWD = ""
-			t.mu.Unlock()
+		opts, resumeErr := t.resumeSession(ctx, session.id, session.cwd)
+		if resumeErr == nil {
+			t.startSession(c, &session, opts, true)
 			t.reapplyPreferredModel(ctx)
-			return resumeID, nil
-		} else if IsRetryableError(err) {
-			return "", err
+			return session.id, nil
+		} else if IsRetryableError(resumeErr) {
+			return "", resumeErr
 		}
 
 		t.mu.Lock()
-		if t.resumeSessionID == resumeID {
-			t.resumeSessionID = ""
-			t.resumeSessionCWD = ""
+		if t.resume == resume {
+			t.resume = nil
 		}
 		t.mu.Unlock()
 	}
 
-	newSessionID, err := t.newSession(ctx, normalizedCWD)
+	newSessionID, opts, err := t.newSession(ctx, normalizedCWD)
 	if err != nil {
 		return "", err
 	}
-	t.mu.Lock()
-	t.sessionID = newSessionID
-	t.sessionCWD = normalizedCWD
-	t.resumeSessionID = ""
-	t.resumeSessionCWD = ""
-	t.mu.Unlock()
+	t.startSession(c, &acpSession{id: newSessionID, cwd: normalizedCWD}, opts, false)
 	t.reapplyPreferredModel(ctx)
 	return newSessionID, nil
 }
 
-// storeModelConfig extracts the option with category "model" from the agent's
-// config options and caches the current value and available choices. When no
-// such option is present, model selection is treated as unsupported.
+// startSession makes s the connection's session and replaces the model cache
+// with what the session reports. A resumed session that reports nothing keeps
+// the cache: it is the same session the cache describes.
+func (t *ACPTransport) startSession(c *acpConn, s *acpSession, opts []configOption, resumed bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	c.session = s
+	t.resume = nil
+	if len(opts) > 0 || !resumed {
+		t.model = modelConfigFrom(opts)
+	}
+}
+
+// storeModelConfig refreshes the model cache from a config snapshot sent for
+// the current session (config_option_update, set_config_option reply).
 func (t *ACPTransport) storeModelConfig(opts []configOption) {
 	// Guard against a malformed/empty notification wiping known state. ACP sends
 	// the complete configOptions array, so a real "no model option" agent still
@@ -689,28 +923,9 @@ func (t *ACPTransport) storeModelConfig(opts []configOption) {
 	if len(opts) == 0 {
 		return
 	}
-
-	var (
-		id      string
-		current string
-		models  []ModelOption
-	)
-	for _, opt := range opts {
-		if opt.Category != "model" {
-			continue
-		}
-		id = opt.ID
-		current = opt.CurrentValue
-		for _, v := range opt.Options {
-			models = append(models, ModelOption(v))
-		}
-		break
-	}
-
+	m := modelConfigFrom(opts)
 	t.mu.Lock()
-	t.modelConfigID = id
-	t.currentModelVal = current
-	t.availableModels = models
+	t.model = m
 	t.mu.Unlock()
 }
 
@@ -719,39 +934,42 @@ func (t *ACPTransport) storeModelConfig(opts []configOption) {
 func (t *ACPTransport) CurrentModel() string {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if t.modelConfigID == "" {
+	if t.model.id == "" {
 		return ""
 	}
-	for _, m := range t.availableModels {
-		if m.Value == t.currentModelVal {
+	for _, m := range t.model.options {
+		if m.Value == t.model.current {
 			return m.Name
 		}
 	}
-	return t.currentModelVal
+	return t.model.current
 }
 
 // AvailableModels returns a copy of the advertised model choices, or nil.
 func (t *ACPTransport) AvailableModels() []ModelOption {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if len(t.availableModels) == 0 {
+	if len(t.model.options) == 0 {
 		return nil
 	}
-	return append([]ModelOption(nil), t.availableModels...)
+	return append([]ModelOption(nil), t.model.options...)
 }
 
 // EnsureModelInfo connects and establishes a session so the cached model
 // information reflects what the agent advertises.
 func (t *ACPTransport) EnsureModelInfo(ctx context.Context) error {
-	t.mu.Lock()
-	if t.stdin == nil {
-		if err := t.connectLocked(ctx); err != nil {
-			t.mu.Unlock()
-			return err
-		}
+	release, err := t.beginExchange(ctx)
+	if err != nil {
+		return err
 	}
-	t.mu.Unlock()
+	defer release()
+	return t.ensureModelInfo(ctx)
+}
 
+func (t *ACPTransport) ensureModelInfo(ctx context.Context) error {
+	if _, err := t.connect(ctx); err != nil {
+		return err
+	}
 	_, err := t.ensureSession(ctx, "")
 	return err
 }
@@ -759,17 +977,15 @@ func (t *ACPTransport) EnsureModelInfo(ctx context.Context) error {
 // SetModel selects a model by value and remembers it as the session preference
 // so it survives transparent reconnects.
 func (t *ACPTransport) SetModel(ctx context.Context, value string) error {
-	if err := t.EnsureModelInfo(ctx); err != nil {
+	release, err := t.beginExchange(ctx)
+	if err != nil {
 		return err
 	}
+	defer release()
 
-	t.mu.Lock()
-	configID := t.modelConfigID
-	t.mu.Unlock()
-	if configID == "" {
-		return fmt.Errorf("agent does not expose model selection")
+	if err := t.ensureModelInfo(ctx); err != nil {
+		return err
 	}
-
 	if err := t.setModel(ctx, value); err != nil {
 		return err
 	}
@@ -784,8 +1000,11 @@ func (t *ACPTransport) SetModel(ctx context.Context, value string) error {
 // cached state from the agent's response.
 func (t *ACPTransport) setModel(ctx context.Context, value string) error {
 	t.mu.Lock()
-	sessionID := t.sessionID
-	configID := t.modelConfigID
+	var sessionID string
+	if c := t.link.conn; c != nil && c.session != nil {
+		sessionID = c.session.id
+	}
+	configID := t.model.id
 	t.mu.Unlock()
 	if configID == "" {
 		return fmt.Errorf("agent does not expose model selection")
@@ -809,33 +1028,26 @@ func (t *ACPTransport) setModel(ctx context.Context, value string) error {
 	} else {
 		// Agent returned no config snapshot; trust the value we just set.
 		t.mu.Lock()
-		t.currentModelVal = value
+		t.model.current = value
 		t.mu.Unlock()
 	}
 	return nil
 }
 
-// reapplyPreferredModel re-selects the user's sticky model choice after a fresh
-// session reverts to the agent default. No-op when nothing is pinned, the choice
-// already matches, or the model is no longer advertised (the stale pin is dropped).
+// reapplyPreferredModel re-selects the user's sticky model choice after a
+// session start, comparing against the model that session reported. No-op
+// when nothing is pinned or the choice already matches; a pin the session no
+// longer offers is dropped.
 func (t *ACPTransport) reapplyPreferredModel(ctx context.Context) {
 	t.mu.Lock()
 	preferred := t.preferredModel
-	current := t.currentModelVal
-	configID := t.modelConfigID
-	stillOffered := false
-	for _, m := range t.availableModels {
-		if m.Value == preferred {
-			stillOffered = true
-			break
-		}
-	}
+	model := t.model
 	t.mu.Unlock()
 
-	if preferred == "" || configID == "" || preferred == current {
+	if preferred == "" || model.id == "" || preferred == model.current {
 		return
 	}
-	if !stillOffered {
+	if !model.offers(preferred) {
 		t.mu.Lock()
 		t.preferredModel = ""
 		t.mu.Unlock()
@@ -1000,33 +1212,75 @@ func promptStopReason(result json.RawMessage) string {
 	return parsedPromptResult.StopReason
 }
 
-// handleIncomingRequest processes requests from the agent (like session/request_permission).
-// ctx is the prompt turn's context; cancellation propagates to handlers that
-// wait on user input.
-func (t *ACPTransport) handleIncomingRequest(ctx context.Context, id int64, method string, params json.RawMessage) {
+// handleIncomingRequest answers a request the agent sent on c (like
+// session/request_permission). turnSession is the session of the prompt turn
+// that received it, or "" outside a turn. ctx is the turn's context;
+// cancellation propagates to handlers that wait on user input.
+func (t *ACPTransport) handleIncomingRequest(ctx context.Context, c *acpConn, turnSession string, id int64, method string, params json.RawMessage) {
 	switch method {
 	case "session/request_permission":
-		t.handleRequestPermission(ctx, id, params)
+		t.handleRequestPermission(ctx, c, turnSession, id, params)
 	default:
-		// Unknown method - send error response
-		t.sendResponse(id, nil, &jsonRPCError{
+		c.respond(id, nil, &jsonRPCError{
 			Code:    -32601,
 			Message: "Method not found",
 		})
 	}
 }
 
-// handleRequestPermission handles permission requests from the agent.
-func (t *ACPTransport) handleRequestPermission(ctx context.Context, id int64, params json.RawMessage) {
+// handleRequestPermission handles permission requests from the agent. Only a
+// request for the running turn's session reaches the user; anything else is
+// left over from a canceled turn and is answered with the canceled outcome.
+func (t *ACPTransport) handleRequestPermission(ctx context.Context, c *acpConn, turnSession string, id int64, params json.RawMessage) {
 	var p requestPermissionParams
 	if err := json.Unmarshal(params, &p); err != nil {
-		t.sendResponse(id, nil, &jsonRPCError{
+		c.respond(id, nil, &jsonRPCError{
 			Code:    -32602,
 			Message: "Invalid params",
 		})
 		return
 	}
+	if turnSession == "" || p.SessionID != turnSession {
+		c.respond(id, permissionResponse{Outcome: &permissionOutcome{Outcome: permissionCanceled}}, nil)
+		return
+	}
 
+	reject := permissionOutcome{Outcome: "selected", OptionID: resolveOptionID(p.Options, "reject_once", "reject")}
+	req, ok := permissionRequestFrom(p)
+	t.mu.Lock()
+	handler := t.permissionHandler
+	t.mu.Unlock()
+	if !ok || handler == nil {
+		// Unknown command or no handler: deny by default.
+		c.respond(id, permissionResponse{Outcome: &reject}, nil)
+		return
+	}
+
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	t.permissionPromptMu.Lock()
+	allow, always := handler(ctx, req)
+	t.permissionPromptMu.Unlock()
+	if ctx.Err() != nil {
+		// The turn ended under the prompt: ACP wants the canceled outcome.
+		c.respond(id, permissionResponse{Outcome: &permissionOutcome{Outcome: permissionCanceled}}, nil)
+		return
+	}
+
+	outcome := reject
+	switch {
+	case allow && always:
+		outcome = permissionOutcome{Outcome: "selected", OptionID: resolveOptionID(p.Options, "allow_always", "allow_always")}
+	case allow:
+		outcome = permissionOutcome{Outcome: "selected", OptionID: resolveOptionID(p.Options, "allow_once", "allow")}
+	}
+	c.respond(id, permissionResponse{Outcome: &outcome}, nil)
+}
+
+// permissionRequestFrom describes the tool call for the user. ok is false when
+// the command the agent wants to run cannot be determined.
+func permissionRequestFrom(p requestPermissionParams) (req ToolPermissionRequest, ok bool) {
 	// Extract command from tool call title or raw input
 	command := p.ToolCall.Title
 	if command == "" {
@@ -1045,64 +1299,11 @@ func (t *ACPTransport) handleRequestPermission(ctx context.Context, id int64, pa
 	if toolName == "" {
 		toolName = p.ToolCall.Kind
 	}
-
-	// Reject if we can't determine what command the agent wants to run
-	if command == "" {
-		t.sendResponse(id, permissionResponse{
-			Outcome: &permissionOutcome{
-				Outcome:  "selected",
-				OptionID: resolveOptionID(p.Options, "reject_once", "reject"),
-			},
-		}, nil)
-		return
-	}
-
-	// Call the permission handler
-	t.mu.Lock()
-	handler := t.permissionHandler
-	t.mu.Unlock()
-
-	req := ToolPermissionRequest{
+	return ToolPermissionRequest{
 		Command:    command,
 		ToolName:   toolName,
 		ToolCallID: p.ToolCall.ToolCallID,
-	}
-
-	var outcome permissionOutcome
-	if handler == nil {
-		// No handler - deny by default
-		outcome = permissionOutcome{
-			Outcome:  "selected",
-			OptionID: resolveOptionID(p.Options, "reject_once", "reject"),
-		}
-	} else {
-		if ctx == nil {
-			ctx = context.Background()
-		}
-		t.permissionPromptMu.Lock()
-		allow, always := handler(ctx, req)
-		t.permissionPromptMu.Unlock()
-		if allow {
-			if always {
-				outcome = permissionOutcome{
-					Outcome:  "selected",
-					OptionID: resolveOptionID(p.Options, "allow_always", "allow_always"),
-				}
-			} else {
-				outcome = permissionOutcome{
-					Outcome:  "selected",
-					OptionID: resolveOptionID(p.Options, "allow_once", "allow"),
-				}
-			}
-		} else {
-			outcome = permissionOutcome{
-				Outcome:  "selected",
-				OptionID: resolveOptionID(p.Options, "reject_once", "reject"),
-			}
-		}
-	}
-
-	t.sendResponse(id, permissionResponse{Outcome: &outcome}, nil)
+	}, command != ""
 }
 
 // resolveOptionID finds the optionId for the given kind from the agent's
@@ -1135,27 +1336,6 @@ func extractToolName(rawInput json.RawMessage) string {
 		return fields.Tool
 	}
 	return fields.Name
-}
-
-// sendResponse sends a JSON-RPC response.
-func (t *ACPTransport) sendResponse(id int64, result interface{}, err *jsonRPCError) {
-	resp := jsonRPCResponse{
-		JSONRPC: "2.0",
-		ID:      id,
-		Result:  result,
-		Error:   err,
-	}
-
-	data, marshalErr := json.Marshal(resp)
-	if marshalErr != nil {
-		return
-	}
-
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	if t.stdin != nil {
-		t.stdin.Write(append(data, '\n'))
-	}
 }
 
 // buildPromptWithContext builds a prompt that includes context information.
@@ -1218,87 +1398,20 @@ func buildPromptWithContext(req Request) string {
 	return b.String()
 }
 
-// resetConnection closes the current connection and resets state so that
-// the next SendStreaming() will reconnect via lazy connect. This is called when
-// a write error occurs (e.g., broken pipe after agent exits).
-func (t *ACPTransport) resetConnection() {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	t.resetConnectionLocked()
-}
-
-func (t *ACPTransport) rememberResumeCandidateLocked() {
-	if t.capabilities.SessionResume && t.sessionID != "" {
-		t.resumeSessionID = t.sessionID
-		t.resumeSessionCWD = t.sessionCWD
-	}
-}
-
-// resetConnectionLocked closes the current connection and resets state.
-// Must be called with mu held.
-func (t *ACPTransport) resetConnectionLocked() {
-	t.rememberResumeCandidateLocked()
-	if t.stdin != nil {
-		t.stdin.Close()
-		t.stdin = nil
-	}
-	if t.stdout != nil {
-		t.stdout.Close()
-		t.stdout = nil
-	}
-	t.reader = nil
-	t.sessionID = ""
-	t.sessionCWD = ""
-	t.capabilities = acpCapabilities{}
-	if t.cmd != nil && t.cmd.Process != nil {
-		t.cmd.Process.Kill() //nolint:errcheck // best-effort kill
-		t.cmd.Wait()         //nolint:errcheck // ignore exit status
-		t.cmd = nil
-	}
-	// Recreate channels so the next connectLocked()/readLoop() cycle
-	// doesn't close already-closed channels (panic on double close).
-	t.messages = make(chan []byte, 1024)
-	t.done = make(chan struct{})
-}
-
-// Close terminates the agent process.
-func (t *ACPTransport) Close() error {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
-	if t.stdin != nil {
-		t.stdin.Close()
-		t.stdin = nil
-	}
-	if t.cmd != nil && t.cmd.Process != nil {
-		t.cmd.Process.Kill() //nolint:errcheck // best-effort kill during cleanup
-		t.cmd.Wait()         //nolint:errcheck // ignore exit status during cleanup
-	}
-	t.sessionID = ""
-	t.sessionCWD = ""
-	t.resumeSessionID = ""
-	t.resumeSessionCWD = ""
-	t.capabilities = acpCapabilities{}
-	t.modelConfigID = ""
-	t.currentModelVal = ""
-	t.availableModels = nil
-	// preferredModel stays: it is the user's pin, and ensureSession re-applies
-	// it to the next session (or drops it if that session no longer offers it).
-	return nil
-}
-
 // IdleTimeout is the maximum time to wait without receiving any message from the agent.
 // If exceeded, the request is considered stuck and canceled.
 const IdleTimeout = 30 * time.Second
 
-func idleTimeoutForContext(ctx context.Context) time.Duration {
+// idleTimeoutForContext is how long a turn waits for the next message: idle,
+// or the context's whole remaining time when that is longer.
+func idleTimeoutForContext(ctx context.Context, idle time.Duration) time.Duration {
 	if deadline, ok := ctx.Deadline(); ok {
 		remaining := time.Until(deadline)
-		if remaining > IdleTimeout {
+		if remaining > idle {
 			return remaining
 		}
 	}
-	return IdleTimeout
+	return idle
 }
 
 // SendStreaming implements the legacy text-only Transport interface. Rich ACP
@@ -1313,24 +1426,24 @@ func (t *ACPTransport) SendStreaming(ctx context.Context, req Request) (<-chan s
 	go func() {
 		defer close(textCh)
 		defer close(errCh)
-		for events != nil || eventErrs != nil {
+		// Text first, then the error: SendEventStream reports its error
+		// before closing events, so forwarding in this order keeps a reader
+		// that stops at the error from missing text. A reader that stops
+		// reading is released by ctx; the event stream stops on ctx too.
+		for event := range events {
+			if event.Type != StreamEventText || event.Text == "" {
+				continue
+			}
 			select {
-			case event, ok := <-events:
-				if !ok {
-					events = nil
-					continue
-				}
-				if event.Type == StreamEventText && event.Text != "" {
-					textCh <- event.Text
-				}
-			case err, ok := <-eventErrs:
-				if !ok {
-					eventErrs = nil
-					continue
-				}
-				if err != nil {
-					errCh <- err
-				}
+			case textCh <- event.Text:
+			case <-ctx.Done():
+				errCh <- ctx.Err()
+				return
+			}
+		}
+		for err := range eventErrs {
+			if err != nil {
+				errCh <- err
 			}
 		}
 	}()
@@ -1349,6 +1462,12 @@ func (t *ACPTransport) SendEventStream(ctx context.Context, req Request) (<-chan
 		defer close(eventCh)
 		defer close(errCh)
 
+		release, err := t.beginExchange(ctx)
+		if err != nil {
+			errCh <- err
+			return
+		}
+		defer release()
 		if err := t.streamEventsWithRetry(ctx, req, eventCh, t.sendEventStreamingAttempt, t.resetConnection); err != nil {
 			errCh <- err
 		}
@@ -1357,8 +1476,12 @@ func (t *ACPTransport) SendEventStream(ctx context.Context, req Request) (<-chan
 	return eventCh, errCh
 }
 
-// streamEventsWithRetry retries only before an event becomes visible. Replaying
-// a prompt after text or a tool lifecycle risks duplicated output or effects.
+// streamEventsWithRetry retries only a prompt that never reached the agent
+// (the connection failed before or while sending it). Once the agent has
+// the prompt, a resend would put it in the conversation twice (a resumed
+// session keeps it) and could repeat what the turn showed or did, so a
+// later failure (no output, idle timeout, a lost process) is the user's to
+// retry.
 func (t *ACPTransport) streamEventsWithRetry(
 	ctx context.Context,
 	req Request,
@@ -1368,14 +1491,14 @@ func (t *ACPTransport) streamEventsWithRetry(
 ) error {
 	const maxAttempts = 2 // Initial try + one transparent reconnect retry.
 	for attempt := 0; attempt < maxAttempts; attempt++ {
-		observedOutput, err := attemptFn(ctx, req, eventCh)
+		delivered, err := attemptFn(ctx, req, eventCh)
 		if err == nil {
 			return nil
 		}
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		if attempt < maxAttempts-1 && !observedOutput && IsRetryableError(err) {
+		if attempt < maxAttempts-1 && !delivered && IsRetryableError(err) {
 			resetFn()
 			continue
 		}
@@ -1384,260 +1507,345 @@ func (t *ACPTransport) streamEventsWithRetry(
 	return nil
 }
 
-// sendEventStreamingAttempt performs one ACP streaming attempt. Its boolean
-// result reports whether anything user-visible was emitted before failure.
-func (t *ACPTransport) sendEventStreamingAttempt( //nolint:gocyclo // streaming protocol handler with multiple message types
+// sendEventStreamingAttempt performs one ACP streaming attempt. delivered
+// reports that the agent received the prompt (everything the user can see
+// comes after that).
+func (t *ACPTransport) sendEventStreamingAttempt(
 	ctx context.Context,
 	req Request,
 	eventCh chan<- StreamEvent,
-) (observedOutput bool, retErr error) {
-	t.mu.Lock()
-
-	// Lazy connect
-	if t.stdin == nil {
-		if connectErr := t.connectLocked(ctx); connectErr != nil {
-			t.mu.Unlock()
-			return false, connectErr
-		}
+) (delivered bool, retErr error) {
+	c, err := t.connect(ctx)
+	if err != nil {
+		return false, err
+	}
+	sessionID, err := t.ensureSession(ctx, req.Context.Cwd)
+	if err != nil {
+		return false, err
 	}
 
-	t.mu.Unlock()
-
-	sessionID, sessionErr := t.ensureSession(ctx, req.Context.Cwd)
-	if sessionErr != nil {
-		return false, sessionErr
-	}
-
-	// Build prompt with context
-	promptText := buildPromptWithContext(req)
-
-	// Send prompt request
 	id := t.requestID.Add(1)
-	rpcReq := jsonRPCRequest{
+	data, err := json.Marshal(jsonRPCRequest{
 		JSONRPC: "2.0",
 		ID:      id,
 		Method:  "session/prompt",
 		Params: promptParams{
 			SessionID: sessionID,
-			Prompt: []promptPart{
-				{Type: "text", Text: promptText},
-			},
+			Prompt:    []promptPart{{Type: "text", Text: buildPromptWithContext(req)}},
 		},
-	}
-
-	data, err := json.Marshal(rpcReq)
+	})
 	if err != nil {
 		return false, err
 	}
-
-	t.mu.Lock()
-	_, err = t.stdin.Write(append(data, '\n'))
-	t.mu.Unlock()
-	if err != nil {
-		// Write failed - reset connection so retry can lazily reconnect.
-		t.resetConnection()
-		return false, errors.Join(ErrACPConnectionClosed, fmt.Errorf("write prompt: %w", err))
+	if err = c.write(data); err != nil {
+		// Write failed - a retry can lazily reconnect.
+		return false, t.lost(c, errors.Join(ErrACPConnectionClosed, fmt.Errorf("write prompt: %w", err)))
 	}
 
-	idleTimeout := idleTimeoutForContext(ctx)
-	var permissionRequestsInFlight atomic.Int32
-	// Create idle timer
+	// The turn's own context ends with the turn, releasing any permission
+	// prompt the agent left open (it answered the prompt without waiting).
+	turnCtx, endTurn := context.WithCancel(ctx)
+	defer endTurn()
+	turn := &promptTurn{
+		t:         t,
+		c:         c,
+		ctx:       turnCtx,
+		events:    eventCh,
+		sessionID: sessionID,
+		requestID: id,
+	}
+	return true, turn.run()
+}
+
+// promptTurn is one session/prompt exchange: it reads the connection until
+// the prompt's reply arrives and tracks what the user has seen so far.
+type promptTurn struct {
+	t         *ACPTransport
+	c         *acpConn
+	ctx       context.Context // ends with the turn; permission prompts run on it
+	events    chan<- StreamEvent
+	sessionID string
+	requestID int64
+
+	// What the user has seen of the reply, changed only by showText and
+	// showTool.
+	last      lastShown
+	textShown bool // reply text was shown
+	// unanswered is the tool text since the last agent text, by tool call
+	// id in arrival order; it stands in for the reply if the turn ends on it.
+	unanswered  []toolText
+	toolUpdates int
+
+	permissionsInFlight atomic.Int32 // local prompts the agent is blocked on
+}
+
+// lastShown is what the user saw last in a turn's reply.
+type lastShown int
+
+const (
+	shownNothing  lastShown = iota
+	shownText               // agent text
+	shownTool               // tool activity with no text of its own since the last agent text
+	shownToolText           // a tool's text since the last agent text
+)
+
+type toolText struct{ id, text string }
+
+// turnEnd is how a prompt turn stopped reading the connection.
+type turnEnd int
+
+const (
+	turnReplied  turnEnd = iota // the prompt's reply arrived
+	turnCanceled                // the turn's context ended first
+	turnLost                    // the connection failed (stdout ended, idle timeout)
+)
+
+// run reads the turn to its end. Every way out goes through end, so a turn
+// whose context ended before the reply always cancels and drains, wherever
+// the read loop noticed it (waiting for a message or sending an event).
+func (p *promptTurn) run() error {
+	return p.end(p.read())
+}
+
+// end finishes the turn for how it ended. A canceled turn sends
+// session/cancel and reads on until the agent answers, so nothing of it
+// reaches the next turn; a lost one drops the connection.
+func (p *promptTurn) end(how turnEnd, err error) error {
+	switch how {
+	case turnCanceled:
+		p.cancel()
+		return p.ctx.Err()
+	case turnLost:
+		return p.t.lost(p.c, err)
+	default:
+		return err
+	}
+}
+
+// read handles agent messages until the turn ends, and says how it did.
+func (p *promptTurn) read() (turnEnd, error) {
+	idleTimeout := idleTimeoutForContext(p.ctx, p.t.idle)
 	idleTimer := time.NewTimer(idleTimeout)
 	defer idleTimer.Stop()
 
-	toolContentByID := make(map[string]string)
-	var toolContentOrder []string
-	toolUpdateCount := 0
-	agentTextAfterLatestTool := true
-	receivedText := false
-	// sawToolSinceText tracks whether any tool activity occurred since the last
-	// agent text chunk. Adjacent assistant text blocks split by a tool call
-	// arrive as separate chunks with no separator; without one they glue
-	// together ("Let me investigate." + "jj does see" -> "investigate.jj does see").
-	sawToolSinceText := false
-	rememberToolContent := func(update sessionUpdate, text string) {
-		toolCallID := update.ToolCallID
-		if toolCallID == "" {
-			toolCallID = fmt.Sprintf("__unkeyed_tool_%d", len(toolContentOrder)+1)
-		}
-		if _, exists := toolContentByID[toolCallID]; !exists {
-			toolContentOrder = append(toolContentOrder, toolCallID)
-		}
-		toolContentByID[toolCallID] = text
-		agentTextAfterLatestTool = false
-	}
-	toolFallbackText := func() string {
-		var b strings.Builder
-		for _, toolCallID := range toolContentOrder {
-			appendTextPart(&b, toolContentByID[toolCallID])
-		}
-		return b.String()
-	}
-	emit := func(event StreamEvent) bool {
-		select {
-		case eventCh <- event:
-			return true
-		case <-ctx.Done():
-			return false
-		}
-	}
-	emitToolFallback := func() error {
-		if agentTextAfterLatestTool {
-			return nil
-		}
-		text := toolFallbackText()
-		if strings.TrimSpace(text) == "" {
-			return nil
-		}
-		if receivedText && !emit(StreamEvent{Type: StreamEventText, Text: "\n"}) {
-			return ctx.Err()
-		}
-		if !emit(StreamEvent{Type: StreamEventText, Text: text}) {
-			return ctx.Err()
-		}
-		receivedText = true
-		agentTextAfterLatestTool = true
-		return nil
-	}
-
-	// Stream response text as it arrives
 	for {
 		select {
-		case <-ctx.Done():
-			t.sendCancel()
-			return observedOutput, ctx.Err()
+		case <-p.ctx.Done():
+			return turnCanceled, nil
 
 		case <-idleTimer.C:
-			// Don't timeout while we're waiting on a local permission prompt.
+			// Don't time out while we're waiting on a local permission prompt.
 			// The agent is blocked on our response, so this is user think-time,
 			// not transport idleness.
-			if permissionRequestsInFlight.Load() > 0 {
+			if p.permissionsInFlight.Load() > 0 {
 				idleTimer.Reset(idleTimeout)
 				continue
 			}
-
 			// No message received for IdleTimeout - agent may be stuck.
-			t.sendCancel()
-			// Force reconnect after idle timeout: the process may be hung.
-			t.resetConnection()
-			return observedOutput, errors.Join(
+			// Drop the process (it may be hung) but not the conversation:
+			// the next connection resumes the session when it can.
+			p.c.notifyCancel(p.sessionID)
+			return turnLost, errors.Join(
 				ErrACPIdleTimeout,
 				fmt.Errorf("agent idle timeout (%v without response)", idleTimeout),
 			)
 
-		case line, ok := <-t.messages:
+		case line, ok := <-p.c.messages:
 			if !ok {
-				// Connection closed (readLoop exited) - reset for reconnect.
-				t.resetConnection()
-				return observedOutput, fmt.Errorf("%w: connection closed", ErrACPConnectionClosed)
-			}
-
-			// Reset idle timer on any message.
-			if !idleTimer.Stop() {
-				select {
-				case <-idleTimer.C:
-				default:
-				}
+				// The agent's stdout ended - reconnect on the next request.
+				return turnLost, fmt.Errorf("%w: connection closed", ErrACPConnectionClosed)
 			}
 			idleTimer.Reset(idleTimeout)
-
-			var msg struct {
-				JSONRPC string          `json:"jsonrpc"`
-				ID      *int64          `json:"id"`
-				Method  string          `json:"method"`
-				Params  json.RawMessage `json:"params"`
-				Result  json.RawMessage `json:"result"`
-				Error   *jsonRPCError   `json:"error"`
+			var msg acpMessage
+			if json.Unmarshal(line, &msg) != nil {
+				continue // not JSON-RPC; ignore
 			}
-			if err := json.Unmarshal(line, &msg); err != nil {
-				continue
-			}
-
-			// Check if this is an incoming request (has both ID and Method).
-			if msg.ID != nil && msg.Method != "" {
-				permissionRequestsInFlight.Add(1)
-				go func(id int64, method string, params json.RawMessage) {
-					defer permissionRequestsInFlight.Add(-1)
-					t.handleIncomingRequest(ctx, id, method, params)
-				}(*msg.ID, msg.Method, msg.Params)
-				continue
-			}
-
-			// Check if it's our response (end of prompt).
-			if msg.ID != nil && *msg.ID == id {
-				if msg.Error != nil {
-					return observedOutput, fmt.Errorf("rpc error %d: %s", msg.Error.Code, msg.Error.Message)
-				}
-				if err := emitToolFallback(); err != nil {
-					return observedOutput, err
-				}
-				if !receivedText {
-					return observedOutput, noOutputPromptError(msg.Result, toolUpdateCount)
-				}
-				return observedOutput, nil
-			}
-
-			// Handle session/update notification - stream text chunks.
-			if msg.Method == "session/update" {
-				var updateParams sessionUpdateParams
-				if err := json.Unmarshal(msg.Params, &updateParams); err != nil {
-					continue
-				}
-				// Ignore stale updates from previous sessions.
-				if updateParams.SessionID != sessionID {
-					continue
-				}
-
-				switch updateParams.Update.SessionUpdate {
-				case "tool_call", "tool_call_update":
-					toolUpdateCount++
-					sawToolSinceText = true
-					observedOutput = true
-					content, _ := toolCallUpdateText(updateParams.Update)
-					if !emit(StreamEvent{
-						Type: StreamEventToolCall,
-						ToolCall: ToolCallUpdate{
-							ID:      updateParams.Update.ToolCallID,
-							Title:   updateParams.Update.Title,
-							Kind:    updateParams.Update.Kind,
-							Status:  ToolCallStatus(updateParams.Update.Status),
-							Content: content,
-						},
-					}) {
-						return observedOutput, ctx.Err()
-					}
-				case "config_option_update":
-					// The agent switched a config option on its own (e.g. model
-					// fallback on rate limit); refresh our cached model state.
-					t.storeModelConfig(updateParams.Update.ConfigOptions)
-					continue
-				}
-
-				if text, ok := agentMessageChunkText(updateParams.Update); ok {
-					// Separate this text block from a preceding one that was
-					// split off by a tool call, so the two don't glue together.
-					if sawToolSinceText && receivedText {
-						if !emit(StreamEvent{Type: StreamEventText, Text: "\n\n"}) {
-							return observedOutput, ctx.Err()
-						}
-					}
-					sawToolSinceText = false
-					// Send text chunk immediately.
-					if !emit(StreamEvent{Type: StreamEventText, Text: text}) {
-						return observedOutput, ctx.Err()
-					}
-					observedOutput = true
-					receivedText = true
-					agentTextAfterLatestTool = true
-					continue
-				}
-
-				if text, ok := toolCallUpdateText(updateParams.Update); ok {
-					rememberToolContent(updateParams.Update, text)
-				}
+			if done, err := p.handle(&msg); done {
+				return turnReplied, err
+			} else if err != nil {
+				return turnCanceled, nil // an event send stopped on the ended context
 			}
 		}
 	}
+}
+
+// cancel stops the agent's work on a turn the user canceled and keeps the
+// session, so the conversation survives: it sends session/cancel and reads
+// on until the agent answers the prompt, so nothing of the canceled turn
+// reaches the next one. Requests meanwhile get the canceled outcome. An
+// agent that does not stop in time is treated as lost (a resumable session
+// survives that too).
+func (p *promptTurn) cancel() {
+	p.c.notifyCancel(p.sessionID)
+	timer := time.NewTimer(acpCancelTimeout)
+	defer timer.Stop()
+	for {
+		select {
+		case <-timer.C:
+			_ = p.t.lost(p.c, ErrACPIdleTimeout)
+			return
+		case line, ok := <-p.c.messages:
+			if !ok {
+				_ = p.t.lost(p.c, ErrACPConnectionClosed)
+				return
+			}
+			var msg acpMessage
+			if json.Unmarshal(line, &msg) != nil {
+				continue
+			}
+			switch {
+			case msg.isResponseTo(p.requestID):
+				return
+			case msg.isRequest():
+				p.t.handleIncomingRequest(p.ctx, p.c, "", *msg.ID, msg.Method, msg.Params)
+			}
+		}
+	}
+}
+
+// handle processes one agent message. done reports the prompt's reply;
+// before that, an error means the turn's context ended mid-send.
+func (p *promptTurn) handle(msg *acpMessage) (done bool, err error) {
+	switch {
+	case msg.isRequest():
+		p.permissionsInFlight.Add(1)
+		go func(id int64, method string, params json.RawMessage) {
+			defer p.permissionsInFlight.Add(-1)
+			p.t.handleIncomingRequest(p.ctx, p.c, p.sessionID, id, method, params)
+		}(*msg.ID, msg.Method, msg.Params)
+		return false, nil
+	case msg.isResponseTo(p.requestID):
+		return true, p.finish(msg)
+	case msg.Method == "session/update":
+		var params sessionUpdateParams
+		// Ignore malformed updates and stale ones from previous sessions.
+		if json.Unmarshal(msg.Params, &params) == nil && params.SessionID == p.sessionID {
+			return false, p.update(params.Update)
+		}
+	}
+	return false, nil
+}
+
+// finish handles the prompt's reply.
+func (p *promptTurn) finish(msg *acpMessage) error {
+	if msg.Error != nil {
+		return msg.Error.rpcError()
+	}
+	if err := p.emitToolFallback(); err != nil {
+		return err
+	}
+	if !p.textShown {
+		return noOutputPromptError(msg.Result, p.toolUpdates)
+	}
+	return nil
+}
+
+// update handles one session update. Its only error is an event send that
+// stopped because the turn's context ended.
+func (p *promptTurn) update(update sessionUpdate) error {
+	switch update.SessionUpdate {
+	case "tool_call", "tool_call_update":
+		content, _ := toolCallUpdateText(update)
+		p.showTool(update.ToolCallID, content)
+		if !p.emit(StreamEvent{
+			Type: StreamEventToolCall,
+			ToolCall: ToolCallUpdate{
+				ID:      update.ToolCallID,
+				Title:   update.Title,
+				Kind:    update.Kind,
+				Status:  ToolCallStatus(update.Status),
+				Content: content,
+			},
+		}) {
+			return p.ctx.Err()
+		}
+		return nil
+	case "config_option_update":
+		// The agent switched a config option on its own (e.g. model
+		// fallback on rate limit); refresh our cached model state.
+		p.t.storeModelConfig(update.ConfigOptions)
+		return nil
+	}
+
+	text, ok := agentMessageChunkText(update)
+	if !ok {
+		return nil
+	}
+	// Separate this text block from a preceding one that was split off by a
+	// tool call. Adjacent blocks arrive with no separator and would glue
+	// together ("Let me investigate." + "jj does see" -> "investigate.jj").
+	if p.textShown && (p.last == shownTool || p.last == shownToolText) {
+		if !p.emit(StreamEvent{Type: StreamEventText, Text: "\n\n"}) {
+			return p.ctx.Err()
+		}
+	}
+	if !p.emit(StreamEvent{Type: StreamEventText, Text: text}) {
+		return p.ctx.Err()
+	}
+	p.showText()
+	return nil
+}
+
+// showText records agent text: it answers the tool text before it.
+func (p *promptTurn) showText() {
+	p.last = shownText
+	p.textShown = true
+	p.unanswered = nil
+}
+
+// showTool records tool activity and the text it produced, if any.
+func (p *promptTurn) showTool(id, text string) {
+	p.toolUpdates++
+	if text == "" {
+		if p.last != shownToolText {
+			p.last = shownTool
+		}
+		return
+	}
+	p.last = shownToolText
+	if id == "" {
+		id = fmt.Sprintf("__unkeyed_tool_%d", len(p.unanswered)+1)
+	}
+	for i := range p.unanswered {
+		if p.unanswered[i].id == id {
+			p.unanswered[i].text = text // a later update of the same call
+			return
+		}
+	}
+	p.unanswered = append(p.unanswered, toolText{id: id, text: text})
+}
+
+func (p *promptTurn) emit(event StreamEvent) bool {
+	select {
+	case p.events <- event:
+		return true
+	case <-p.ctx.Done():
+		return false
+	}
+}
+
+// emitToolFallback shows tool output as the reply when the agent ended the
+// turn without commenting on its latest tool's output.
+func (p *promptTurn) emitToolFallback() error {
+	if p.last != shownToolText {
+		return nil
+	}
+	var b strings.Builder
+	for _, tt := range p.unanswered {
+		appendTextPart(&b, tt.text)
+	}
+	text := b.String()
+	if strings.TrimSpace(text) == "" {
+		return nil
+	}
+	if p.textShown && !p.emit(StreamEvent{Type: StreamEventText, Text: "\n"}) {
+		return p.ctx.Err()
+	}
+	if !p.emit(StreamEvent{Type: StreamEventText, Text: text}) {
+		return p.ctx.Err()
+	}
+	p.showText()
+	return nil
 }
 
 // Compile-time check

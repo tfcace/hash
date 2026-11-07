@@ -4,6 +4,8 @@ import (
 	"context"
 	"os"
 	"strings"
+
+	"github.com/tfcace/hash/internal/shlex"
 )
 
 // EnvProvider is the interface for getting environment variables from the executor.
@@ -43,11 +45,10 @@ func (c *EnvCompleter) Complete(ctx context.Context, line string, pos int) (Resu
 	pos = clampCursor(line, pos)
 
 	// Find $VAR or ${VAR pattern before cursor
-	prefix, hasDollar := extractEnvPrefix(line, pos)
-	if !hasDollar {
+	prefix, dollar, hasDollar := extractEnvPrefix(line, pos)
+	if !hasDollar || !dollarExpands(line, dollar) {
 		return Result{}, nil
 	}
-
 	// Get environment variables from provider or fallback
 	var environ []string
 	switch {
@@ -59,7 +60,16 @@ func (c *EnvCompleter) Complete(ctx context.Context, line string, pos int) (Resu
 		environ = os.Environ()
 	}
 
-	var items []Item
+	// The items replace the reference from its $ on: the word may start
+	// before it ("PATH=$HO", `"$HO`, "$((1 + $HO"), and that head stays.
+	// Inside ${ } they replace the name only, so the braces stay, a closing
+	// one already typed included.
+	from, sigil := dollar, "$"
+	if strings.HasPrefix(line[dollar:], "${") {
+		from, sigil = dollar+2, ""
+	}
+
+	result := Result{ReplaceFrom: from, refs: &variableRefs{sigil: sigil}}
 	for _, env := range environ {
 		parts := strings.SplitN(env, "=", 2)
 		if len(parts) != 2 {
@@ -67,24 +77,34 @@ func (c *EnvCompleter) Complete(ctx context.Context, line string, pos int) (Resu
 		}
 		name, value := parts[0], parts[1]
 
-		if strings.HasPrefix(name, prefix) {
+		// The item is written as it is: a name no shell variable has
+		// ("A$(id)", from env(1)) would run as code.
+		if isShellName(name) && strings.HasPrefix(name, prefix) {
 			displayValue := value
 			if c.maskSensitive && isSensitiveEnvName(name) {
 				displayValue = maskValue(value)
 			}
-			items = append(items, Item{
-				Value:       "$" + name, // Include $ so replacement works correctly
+			if !result.add(Item{
+				Value:       sigil + name,
 				Display:     name,
 				Description: truncateValue(displayValue, 40),
 				Icon:        "$",
-			})
-			if len(items) >= completionItemLimit {
+			}) {
 				break
 			}
 		}
 	}
 
-	return Result{Items: items}, nil
+	return result, nil
+}
+
+// dollarExpands reports whether the shell would expand the $ at index
+// dollar: not inside single quotes, escaped, in a comment or in the body of
+// a heredoc with a quoted delimiter.
+func dollarExpands(line string, dollar int) bool {
+	var lex shlex.Lexer
+	lex.Scan(line[:dollar])
+	return lex.Expands()
 }
 
 // sensitivePatterns contains substrings that indicate a sensitive env var.
@@ -132,10 +152,11 @@ func maskValue(value string) string {
 }
 
 // extractEnvPrefix extracts the environment variable prefix being typed.
-// Returns the prefix (without $) and whether we're in an env var context.
-func extractEnvPrefix(line string, pos int) (string, bool) {
+// Returns the prefix (without $), the index of its $, and whether we're in
+// an env var context.
+func extractEnvPrefix(line string, pos int) (prefix string, dollar int, ok bool) {
 	if pos == 0 {
-		return "", false
+		return "", 0, false
 	}
 
 	// Work backwards from cursor to find $ or ${
@@ -147,11 +168,11 @@ func extractEnvPrefix(line string, pos int) (string, bool) {
 		ch := line[start-1]
 		if ch == '$' {
 			// Found the dollar sign
-			return line[start:end], true
+			return line[start:end], start - 1, true
 		}
 		if ch == '{' && start > 1 && line[start-2] == '$' {
 			// Found ${
-			return line[start:end], true
+			return line[start:end], start - 2, true
 		}
 		// Valid env var chars: A-Z, a-z, 0-9, _
 		if !isEnvChar(ch) {
@@ -160,7 +181,21 @@ func extractEnvPrefix(line string, pos int) (string, bool) {
 		start--
 	}
 
-	return "", false
+	return "", 0, false
+}
+
+// isShellName reports whether name is a shell variable's name: a letter or
+// underscore, then letters, digits and underscores.
+func isShellName(name string) bool {
+	if name == "" || '0' <= name[0] && name[0] <= '9' {
+		return false
+	}
+	for i := 0; i < len(name); i++ {
+		if !isEnvChar(name[i]) {
+			return false
+		}
+	}
+	return true
 }
 
 // isEnvChar returns true if the byte is valid in an environment variable name.

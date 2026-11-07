@@ -2,10 +2,10 @@
 package compat
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestFullMigrationFlow(t *testing.T) {
@@ -41,9 +41,9 @@ myfunc() {
 	}
 
 	// Run migration
-	report, err := SourceWithCompat(context.Background(), zshrc, "zsh", nil)
+	_, report, err := FilterWithDialect(zshrc, "zsh", "bash")
 	if err != nil {
-		t.Fatalf("SourceWithCompat() error = %v", err)
+		t.Fatalf("FilterWithDialect() error = %v", err)
 	}
 
 	// Verify imports
@@ -80,12 +80,16 @@ myfunc() {
 
 	// Save and reload state
 	statePath := filepath.Join(dataDir, "migration.json")
+	info, err := os.Stat(zshrc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mtime := info.ModTime()
 	state := &State{
-		SourceFile:  zshrc,
+		Status:      StatusImported,
 		SourceShell: "zsh",
-		SourceMtime: report.SourceMtime,
-		LastImport:  report.ImportTime,
-		Summary:     report.Summary,
+		Paths:       []string{zshrc},
+		Import:      &ImportRecord{Time: report.ImportTime, Summary: report.Summary, Mtimes: map[string]time.Time{zshrc: mtime}},
 	}
 	if err := state.Save(statePath); err != nil {
 		t.Fatalf("Save() error = %v", err)
@@ -95,7 +99,7 @@ myfunc() {
 	if err != nil {
 		t.Fatalf("LoadState() error = %v", err)
 	}
-	if loaded.Summary.Aliases != report.Summary.Aliases {
-		t.Errorf("loaded aliases = %d, want %d", loaded.Summary.Aliases, report.Summary.Aliases)
+	if loaded.Import.Summary.Aliases != report.Summary.Aliases {
+		t.Errorf("loaded aliases = %d, want %d", loaded.Import.Summary.Aliases, report.Summary.Aliases)
 	}
 }

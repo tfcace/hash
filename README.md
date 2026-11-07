@@ -40,6 +40,8 @@ git log --format=?? oneline with hash
 
 No mode switching. No special commands. Just `??` where you need help. The agent decides the shape of its reply: it can run commands itself, each tool call asking your permission, and answer in prose, or hand back one command that never runs until you press Enter. And when the agent answers with a question, Hash opens a conversation prompt so you can reply turn by turn in the same session.
 
+While a request runs, Esc cancels it. What you type meanwhile is your next prompt's, up to and including the first Enter; anything typed after that Enter is dropped, never run or saved, so a password typed ahead for a `sudo` line never becomes a command. Ctrl+R or Ctrl+P typed ahead opens its picker empty. A permission prompt (and any question that changes something) takes only a key typed a moment (300ms) after it appears and after the key before it, so a key you were already typing never answers it: it is dropped, and the prompt says "too quick, answer again". Esc and Ctrl+C act at once.
+
 ## Highlights
 
 - **Agent-agnostic** — any ACP agent (Claude Code, Cursor CLI, Gemini CLI) over stdio, or Ollama-style HTTP model servers.
@@ -47,8 +49,8 @@ No mode switching. No special commands. Just `??` where you need help. The agent
 - **Turn-by-turn conversations** *(new in 0.6)* — follow-up questions continue in the same agent session; leave with Esc, `/exit`, or just "done".
 - **Context you control** — the Ctrl+P picker decides exactly what is sent to the agent.
 - **Learns locally** — repeated error fixes are suggested instantly, no agent call, nothing leaves your machine.
-- **Editor-style input** — multiline editing, visual selection, Helix/Vim/Emacs keybindings.
-- **Smart completion** — tool-native (Cobra), aliases and functions, env vars, files, agent fallback.
+- **Editor-style input** — multiline editing, visual selection, Helix-style keybindings.
+- **Smart completion** — tool-native (Cobra), aliases and functions, env vars, files.
 - **Rich history** — SQLite with full-text search, sudo tracking, and agent-interaction recall.
 - **Plays nice** — Starship prompts, shell-integration escapes (OSC 133), program status for tab headers and session pickers (OSC 7501), zoxide/direnv/fzf setup, configurable builtins.
 - **Experimental zsh dialect** *(new in 0.6)* — parse commands and startup files as zsh via `shell.dialect`.
@@ -116,7 +118,9 @@ sudo sh -c 'echo $(which hash) >> /etc/shells'
 chsh -s $(which hash)
 ```
 
-Login shells source `/etc/profile`, `~/.profile`, and `~/.hash_profile`; interactive shells source `~/.hashrc`. Hash parses shell code as bash by default — set `shell.dialect = "zsh"` (experimental) to parse zsh syntax and source your zsh startup files directly. See the [config reference](docs/config-reference.md) for details.
+Interactive login shells source `/etc/profile`, `~/.profile`, and `~/.hash_profile`, then your previous shell's migrated files, then `~/.hashrc`; other interactive shells source the migrated files, then `~/.hashrc`. Hash parses shell code as bash by default: set `shell.dialect = "zsh"` (experimental) to parse zsh syntax and source your zsh startup files directly. See the [config reference](docs/config-reference.md) for details.
+
+Hash is interactive when its stdin is a terminal. Like bash, it runs non-interactively for `hash -c 'cmd' [name args...]`, `hash script.sh args...`, and a stdin that is not a terminal (`printf 'echo hi\n' | hash`, `cmds | hash -s args...`): bash code runs with no prompt, editor, agent, history or terminal escapes, and the exit status is the last command's, `exit N`'s, or an `exit` in the EXIT trap. Startup files follow bash: a login shell (`-l`, or a name starting with `-`) reads the login files and the migrated login files (`~/.zprofile`) even when it is not interactive (`$SHELL -l -c env` is how editors find your `PATH`), `-i` reads the migrated rc files and `~/.hashrc` first (`hash -ic cmd`), and a plain `-c`, script or piped stdin reads none. bash's set options pass through (`hash -e -o pipefail -c cmd`, `+x`; the interactive shell refuses them, run `set` there instead), `-` ends the options, and `--norc` and `--noprofile` are accepted. A `??` agent request needs the interactive shell: in a script, a command named `??` is refused with status 127. A syntax error ends a non-interactive shell with status 2.
 
 On first launch, Hash detects your previous shell and asks before loading compatible settings. Run `hash migrate` to re-run migration, or `hash migrate status` to see what was imported and skipped.
 
@@ -132,16 +136,26 @@ go build -o hash ./cmd/hash    # Build
 ./scripts/build.sh             # Build with version info (--install for /usr/local/bin)
 go test ./...                   # Run all tests
 go vet ./...                    # Lint
-go test -fuzz=Fuzz -fuzztime=30s ./internal/...   # Fuzz parser and learning
+```
+
+Go fuzzes one target in one package per run, for example:
+
+```bash
+go test -fuzz=FuzzLexer -fuzztime=30s ./internal/shlex/
+go test -fuzz=FuzzFilterOutputParses -fuzztime=30s ./internal/compat/
+go test -fuzz=FuzzFilterRC_ExecutingOracle -fuzztime=60s ./internal/compat/  # runs /bin/zsh
+go test -fuzz=FuzzParse -fuzztime=30s ./internal/parser/
+go test -fuzz=FuzzNormalizeError -fuzztime=30s ./internal/learning/
 ```
 
 ```
 hash/
 ├── cmd/hash/          # Main entry point
 ├── internal/
-│   ├── parser/        # mvdan/sh wrapper + ?? detection
+│   ├── shlex/         # Quoting state of shell input, byte by byte
+│   ├── parser/        # ?? detection and command classification
+│   ├── compat/        # Previous shell's config: migration and rc filtering
 │   ├── executor/      # Command execution via PTY, job control
-│   ├── readline/      # Input handling, completions, keybindings
 │   ├── agent/         # ACP client with transport abstraction
 │   ├── history/       # SQLite storage with FTS5, sudo tracking
 │   ├── learning/      # Error pattern matching and fix scoring
@@ -158,10 +172,12 @@ This project uses [jj (Jujutsu)](https://github.com/martinvonz/jj) for version c
 ## Status & limitations
 
 - **Tested on** — macOS + Ghostty + Claude (ACP via `claude-agent-acp`) only. Other platforms, terminals, and agents may work but are untested.
-- **Stability** — There will be bugs. Lots of them. File issues for anything broken.
+- **Stability** — There will be bugs. Lots of them. File issues for anything broken: a line of just `!!` drafts one about the last command in your editor (`issue --last`), after asking.
+- **`!!` is not history expansion**: hash has none. `!!` alone is the issue shortcut above, and `sudo !!` hands sudo a literal `!!`. Press Up to bring back the last line instead.
 - **Performance** — Built for responsiveness, not raw throughput. Go is fast enough for a shell, but this isn't a Rust rewrite of bash.
 - **Scope** — This is shaped around my preferences (Helix keybindings, local-first, agent-agnostic). It may not fit yours.
 - **SSH** — Not supported. Hash is designed for local terminal use only.
+- **bash differences**: hash runs shell code with the mvdan/sh interpreter. Traps, background jobs, PTY commands and some error statuses differ from bash 5.2: see [docs/bash-differences.md](docs/bash-differences.md).
 
 ## See also
 

@@ -70,6 +70,9 @@ func TestEnvCompleter_LimitsLargeEnvironment(t *testing.T) {
 	if len(result.Items) != completionItemLimit {
 		t.Fatalf("env completion returned %d items, want %d", len(result.Items), completionItemLimit)
 	}
+	if !result.Hidden().NotShown() {
+		t.Fatalf("env completion stopped at its limit without saying more were not shown")
+	}
 }
 
 func TestEnvCompleter_NoDollar_NoMatch(t *testing.T) {
@@ -307,5 +310,34 @@ func TestEnvCompleter_MaskingDisabled(t *testing.T) {
 	// With masking disabled, full value should be shown (truncated if needed)
 	if result.Items[0].Description != "sk-proj-abc123xyz789" {
 		t.Errorf("expected unmasked value, got %q", result.Items[0].Description)
+	}
+}
+
+// The environment can hold names no shell variable has ("ZZQ$(touch x)"
+// from env(1) or a parent process). The item is shell text, $NAME, written
+// as it is, so such a name would run its substitution: it is not offered.
+func TestEnvCompleter_OffersOnlyShellNames(t *testing.T) {
+	c := NewEnvCompleter(nil)
+	c.envFunc = func() []string {
+		return []string{"ZZQ$(touch x)=1", "ZZQ;id=1", "ZZQ-a=1", "ZZQ é=1", "ZZQ_ok1=1", "=x"}
+	}
+	result, _ := c.Complete(context.Background(), "echo $ZZQ", len("echo $ZZQ"))
+	if len(result.Items) != 1 || result.Items[0].Value != "$ZZQ_ok1" {
+		t.Errorf("Complete = %#v, want $ZZQ_ok1 alone", result.Items)
+	}
+}
+
+// A variable completes in the head of a for (( loop and in a [[ test the
+// line leaves open, which hash's parser does not recover.
+func TestRouter_CompletesAVariableInAnUnclosedLoopHeadOrTest(t *testing.T) {
+	c := NewEnvCompleter(nil)
+	c.envFunc = func() []string { return []string{"HOME=/home/user"} }
+	router := NewRouter()
+	router.Register(c, PriorityEnv)
+	for _, before := range []string{"for ((i=0; i<$HO", "for (($HO", "[[ -d $HO", `[[ -n "$HO`, "case $HO"} {
+		r, _ := router.Complete(context.Background(), before, len(before))
+		if len(r.Items) != 1 || r.Items[0].Value != "$HOME" {
+			t.Errorf("router Complete(%q) = %#v", before, r.Items)
+		}
 	}
 }

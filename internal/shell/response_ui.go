@@ -1,22 +1,13 @@
 package shell
 
 import (
-	"bufio"
 	"fmt"
-	"github.com/mattn/go-runewidth"
 	"io"
-	"math/rand"
-	"os"
 	"strings"
-	"sync"
-	"syscall"
-	"time"
 
-	"github.com/tfcace/hash/internal/agent"
-	"github.com/tfcace/hash/internal/markdown"
-	"github.com/tfcace/hash/internal/progress"
-	"golang.org/x/sys/unix"
-	"golang.org/x/term"
+	"github.com/mattn/go-runewidth"
+
+	"github.com/tfcace/hash/internal/termtext"
 )
 
 var agentStatusReplacementPool = []string{
@@ -50,6 +41,7 @@ const (
 	ConfirmEdit                        // User pressed Tab - edit the command
 	ConfirmCancel                      // User pressed Esc - cancel
 	ConfirmReply                       // User pressed r - continue the conversation
+	ConfirmEnded                       // The shell ended (a fatal signal) before a key answered: nothing more is drawn or recorded
 )
 
 // ConfirmationType determines which confirmation options to show.
@@ -101,165 +93,28 @@ func agentStateLabel(state AgentState, model string) string {
 }
 
 // cleanModelLabel tidies an agent-advertised model name for display: it trims
-// surrounding whitespace and drops the trailing " (recommended)" tag the agent
-// appends to its default model.
+// surrounding whitespace, drops the trailing " (recommended)" tag the agent
+// appends to its default model, and draws the rest inert.
 func cleanModelLabel(model string) string {
 	model = strings.TrimSpace(model)
 	const tag = " (recommended)"
 	if len(model) >= len(tag) && strings.EqualFold(model[len(model)-len(tag):], tag) {
 		model = strings.TrimSpace(model[:len(model)-len(tag)])
 	}
-	return model
+	return termtext.Inert(model)
 }
 
 // ResponseUI handles displaying agent responses.
 type ResponseUI struct {
 	out      io.Writer
-	in       *os.File
-	progress *progress.OSC
-
-	// Spinner state
-	spinnerMu      sync.Mutex
-	spinnerRunning bool
-	spinnerStop    chan struct{}
-	spinnerDone    chan struct{} // signals when spinner goroutine has exited
-	spinnerText    string
-	spinnerRand    agentStatusRandom
-	agentModel     string      // active model shown in spinner labels, "" hides it
-	drawGate       func() bool // nil = always draw; false = skip spinner frames
-}
-
-// SetDrawGate installs a predicate consulted before each spinner frame.
-// When it returns false the frame is skipped (the spinner keeps ticking),
-// so the spinner cannot overwrite output it does not own, such as an
-// active permission prompt.
-func (u *ResponseUI) SetDrawGate(gate func() bool) {
-	u.spinnerMu.Lock()
-	u.drawGate = gate
-	u.spinnerMu.Unlock()
-}
-
-// SetAgentModel sets the model name shown in agent spinner labels. Pass "" to
-// hide the bracketed model tag.
-func (u *ResponseUI) SetAgentModel(name string) {
-	u.spinnerMu.Lock()
-	u.agentModel = name
-	u.spinnerMu.Unlock()
+	progress *progressBar // the OSC 9;4 indicator: the ?? turn and model update own it, not the spinner
 }
 
 // NewResponseUI creates a new response UI.
 func NewResponseUI(out io.Writer) *ResponseUI {
 	return &ResponseUI{
-		out:         out,
-		in:          os.Stdin,
-		progress:    progress.NewOSC(out),
-		spinnerRand: rand.New(rand.NewSource(time.Now().UnixNano())), //nolint:gosec // UI animation jitter does not require crypto randomness.
-	}
-}
-
-// ShowResponse displays an agent response.
-func (u *ResponseUI) ShowResponse(resp agent.Response) {
-	switch resp.Type {
-	case agent.ResponseTypeCommand:
-		u.showCommand(resp.Command)
-	case agent.ResponseTypeExplanation:
-		u.showExplanation(resp.Explanation)
-	case agent.ResponseTypeError:
-		u.showError(resp.Error)
-	}
-}
-
-func (u *ResponseUI) showCommand(cmd string) {
-	// Green arrow, command, then help text - write together to avoid split output
-	_, hints := confirmationHints(ConfirmTypeCommand)
-	output := fmt.Sprintf("\033[32m→\033[0m %s\n\033[90m%s\033[0m\n", cmd, fitHint("  ", "", hints, terminalColumns()))
-	fmt.Fprint(u.out, output)
-	// Flush if output is buffered
-	switch w := u.out.(type) {
-	case *os.File:
-		w.Sync()
-	case *bufio.Writer:
-		w.Flush()
-	}
-}
-
-func (u *ResponseUI) showExplanation(text string) {
-	// Render markdown for explanations
-	rendered := markdown.Render(text)
-	fmt.Fprintln(u.out, rendered)
-}
-
-func (u *ResponseUI) showError(err string) {
-	// Red text for errors
-	fmt.Fprintf(u.out, "\033[31mAgent error: %s\033[0m\n", err)
-}
-
-// ShowState displays the current agent state with animated spinner.
-// If a spinner is already running, it updates the text.
-// If no spinner is running, it starts one.
-func (u *ResponseUI) ShowState(state AgentState) {
-	u.spinnerMu.Lock()
-	defer u.spinnerMu.Unlock()
-	u.showSpinnerLocked(agentStateLabel(state, u.agentModel))
-}
-
-// ShowActivity updates the existing response spinner with structured agent
-// activity. It shares the same animation and lifecycle as ShowState.
-func (u *ResponseUI) ShowActivity(label string) {
-	if strings.TrimSpace(label) == "" {
-		label = "agent · working"
-	}
-	u.spinnerMu.Lock()
-	defer u.spinnerMu.Unlock()
-	u.showSpinnerLocked(label)
-}
-
-func (u *ResponseUI) showSpinnerLocked(text string) {
-
-	if u.spinnerRunning {
-		// Update the spinner text
-		u.spinnerText = text
-		return
-	}
-
-	// Start new spinner
-	u.spinnerText = text
-	u.spinnerStop = make(chan struct{})
-	u.spinnerDone = make(chan struct{})
-	u.spinnerRunning = true
-
-	// Start OSC progress bar
-	u.progress.Start()
-
-	go u.runSpinner()
-}
-
-// runSpinner animates the spinner until stopped.
-func (u *ResponseUI) runSpinner() {
-	defer close(u.spinnerDone)
-
-	ticker := time.NewTicker(80 * time.Millisecond)
-	defer ticker.Stop()
-
-	frame := 0
-	for {
-		select {
-		case <-u.spinnerStop:
-			return
-		case <-ticker.C:
-			u.spinnerMu.Lock()
-			text := u.spinnerText
-			gate := u.drawGate
-			u.spinnerMu.Unlock()
-
-			if gate != nil && !gate() {
-				continue // screen owned elsewhere (e.g. permission prompt)
-			}
-
-			motion := selectAgentStatusMotion(frame, u.spinnerRand)
-			fmt.Fprintf(u.out, "\r\033[K%s", spinnerFrame(text, motion))
-			frame++
-		}
+		out:      out,
+		progress: newProgressBar(out),
 	}
 }
 
@@ -293,143 +148,14 @@ func formatAgentStatusMotion(text, motion string) string {
 	return fmt.Sprintf(" %s%s\033[0m \033[90m%s\033[0m", agentConversationLiveRailStyle, motion, text)
 }
 
-// StopSpinner stops the animated spinner if running and waits for it to exit.
-func (u *ResponseUI) StopSpinner() {
-	u.spinnerMu.Lock()
-	if !u.spinnerRunning {
-		u.spinnerMu.Unlock()
-		return
-	}
-
-	close(u.spinnerStop)
-	done := u.spinnerDone
-	u.spinnerRunning = false
-	u.spinnerMu.Unlock()
-
-	// Wait for the spinner goroutine to exit before returning
-	<-done
-	u.progress.Done()
-}
-
-// StopSpinnerAndClear stops the spinner and erases its row, reporting
-// whether it was running: the row it drew on is then free for other output.
-func (u *ResponseUI) StopSpinnerAndClear() bool {
-	u.spinnerMu.Lock()
-	running := u.spinnerRunning
-	u.spinnerMu.Unlock()
-	if !running {
-		return false
-	}
-	u.StopSpinner()
-	fmt.Fprint(u.out, "\r\033[K")
-	return true
-}
-
-// ShowStateWithSize displays state with context size info.
-func (u *ResponseUI) ShowStateWithSize(state AgentState, sizeBytes int) {
-	u.spinnerMu.Lock()
-	defer u.spinnerMu.Unlock()
-
-	sizeStr := formatSize(sizeBytes)
-	text := fmt.Sprintf("%s (%s)", state.String(), sizeStr)
-
-	if u.spinnerRunning {
-		u.spinnerText = text
-		return
-	}
-
-	// Start new spinner with size info
-	u.spinnerText = text
-	u.spinnerStop = make(chan struct{})
-	u.spinnerDone = make(chan struct{})
-	u.spinnerRunning = true
-	u.progress.Start()
-
-	go u.runSpinner()
-}
-
-func formatSize(bytes int) string {
-	if bytes < 1024 {
-		return fmt.Sprintf("%d B", bytes)
-	}
-	return fmt.Sprintf("%.1f KB", float64(bytes)/1024)
-}
-
-// ShowThinking displays a thinking indicator with optional model name.
-//
-// Deprecated: Use ShowState(AgentStateThinking) instead for consistent styling.
-func (u *ResponseUI) ShowThinking(model string) {
-	u.ShowState(AgentStateThinking)
-}
-
-// ClearThinking clears the thinking indicator.
-func (u *ResponseUI) ClearThinking() {
-	u.StopSpinner()
-	fmt.Fprintf(u.out, "\r\033[K")
-}
-
 // StartProgress starts the OSC 9;4 progress bar without showing text.
 func (u *ResponseUI) StartProgress() {
-	u.progress.Start()
+	u.progress.start()
 }
 
 // StopProgress stops the OSC 9;4 progress bar.
 func (u *ResponseUI) StopProgress() {
-	u.progress.Done()
-}
-
-// WaitForConfirmation waits for user to press Enter, Tab, or Esc.
-func (u *ResponseUI) WaitForConfirmation() ConfirmAction {
-	fd := int(u.in.Fd())
-	if !term.IsTerminal(fd) {
-		return ConfirmCancel
-	}
-
-	// Enter raw mode
-	oldState, err := term.MakeRaw(fd)
-	if err != nil {
-		return ConfirmCancel
-	}
-	defer term.Restore(fd, oldState)
-
-	// Read one byte at a time
-	buf := make([]byte, 3)
-	for {
-		n, err := u.in.Read(buf[:1])
-		if err != nil || n == 0 {
-			return ConfirmCancel
-		}
-
-		switch buf[0] {
-		case '\r', '\n': // Enter
-			return ConfirmRun
-		case '\t': // Tab
-			return ConfirmEdit
-		case 0x1b: // Escape - might be standalone or start of sequence
-			// Use channel-based timeout since SetReadDeadline doesn't work on terminals
-			if u.isStandaloneEscape(buf[1:]) {
-				return ConfirmCancel
-			}
-			// Escape sequence (arrow keys, etc.) - ignore and continue
-			continue
-		case 0x03: // Ctrl+C
-			return ConfirmCancel
-		}
-		// Ignore other keys
-	}
-}
-
-// ShowThinkingInline displays thinking indicator (for streaming modes).
-//
-// Deprecated: Use ShowState(AgentStateThinking) instead for consistent styling.
-func (u *ResponseUI) ShowThinkingInline(model string) {
-	u.ShowState(AgentStateThinking)
-}
-
-// ClearLine clears the current line (for replacing thinking with response).
-func (u *ResponseUI) ClearLine() {
-	u.StopSpinner()
-	fmt.Fprintf(u.out, "\r\033[K")
+	u.progress.done()
 }
 
 // ClearLines moves cursor up n lines and clears each one.
@@ -440,16 +166,14 @@ func (u *ResponseUI) ClearLines(n int) {
 	}
 }
 
-// ShowStreamedResponse displays a streamed response with dim styling.
-// The response appears tentative until confirmed.
-func (u *ResponseUI) ShowStreamedResponse(text string, isCommand bool) {
-	// Dim styling for tentative response
-	fmt.Fprintf(u.out, "\033[90m%s\033[0m\n", text)
-}
-
-// ShowError displays an error message in the response area.
+// ShowError displays an error message in the response area. The message
+// may be the agent's (an RPC error), so each of its lines is drawn inert.
 func (u *ResponseUI) ShowError(errMsg string) {
-	fmt.Fprintf(u.out, "\033[31m✗ %s\033[0m\n", errMsg)
+	lines := strings.Split(strings.ReplaceAll(errMsg, "\r\n", "\n"), "\n")
+	for i, line := range lines {
+		lines[i] = termtext.Inert(line)
+	}
+	fmt.Fprintf(u.out, "\033[31m✗ %s\033[0m\n", strings.Join(lines, "\n"))
 }
 
 const claudeAgentACPInstallCommand = "npm install -g @agentclientprotocol/claude-agent-acp"
@@ -483,15 +207,6 @@ func (u *ResponseUI) ShowModelHint() {
 	fmt.Fprintln(u.out)
 }
 
-// ShowConfirmation displays the compact confirmation UI below the response.
-//
-// Deprecated: Use AgentOutputCoordinator.ShowHints instead for proper
-// coordination with streaming output and permission prompts.
-func (u *ResponseUI) ShowConfirmation(ct ConfirmationType) {
-	_, hints := confirmationHints(ct)
-	fmt.Fprintf(u.out, "\033[90m%s\033[0m\n", fitHint("  ", "", hints, terminalColumns()))
-}
-
 // confirmationHints are the scope label and keys of a confirmation footer.
 func confirmationHints(ct ConfirmationType) (scope string, hints []string) {
 	switch ct {
@@ -503,80 +218,4 @@ func confirmationHints(ct ConfirmationType) (scope string, hints []string) {
 		return "error", []string{"enter to retry", "esc to cancel"}
 	}
 	return "", nil
-}
-
-// WaitForConfirmationByType waits for confirmation based on response type.
-// Returns ConfirmAction appropriate for the confirmation type.
-func (u *ResponseUI) WaitForConfirmationByType(ct ConfirmationType) ConfirmAction {
-	fd := int(u.in.Fd())
-	if !term.IsTerminal(fd) {
-		return ConfirmCancel
-	}
-
-	oldState, err := term.MakeRaw(fd)
-	if err != nil {
-		return ConfirmCancel
-	}
-	defer term.Restore(fd, oldState)
-
-	buf := make([]byte, 3)
-	for {
-		n, err := u.in.Read(buf[:1])
-		if err != nil || n == 0 {
-			return ConfirmCancel
-		}
-
-		switch buf[0] {
-		case '\r', '\n': // Enter
-			return ConfirmRun // ConfirmRun means "primary action" (run/ok/retry)
-		case '\t': // Tab
-			if ct == ConfirmTypeError {
-				continue // No Tab action for errors
-			}
-			return ConfirmEdit // ConfirmEdit means "secondary action" (edit/copy)
-		case 'r', 'R':
-			if ct == ConfirmTypeExplanation {
-				return ConfirmReply
-			}
-			continue
-		case 0x1b: // Escape - might be standalone or start of sequence
-			// Use channel-based timeout since SetReadDeadline doesn't work on terminals
-			if u.isStandaloneEscape(buf[1:]) {
-				return ConfirmCancel
-			}
-			// Escape sequence (arrow keys, etc.) - ignore and continue
-			continue
-		case 0x03: // Ctrl+C
-			return ConfirmCancel
-		}
-	}
-}
-
-// isStandaloneEscape checks if more bytes are available within a timeout to determine if
-// ESC was pressed alone or as part of an escape sequence (like arrow keys).
-// Uses poll-based I/O to avoid goroutine leaks.
-func (u *ResponseUI) isStandaloneEscape(buf []byte) bool {
-	fd := int(u.in.Fd())
-
-	// Use select/poll to check if more data arrives within 50ms
-	var readSet unix.FdSet
-	readSet.Set(fd)
-	tv := unix.NsecToTimeval((50 * time.Millisecond).Nanoseconds())
-
-	n, err := unix.Select(fd+1, &readSet, nil, nil, &tv)
-	if err != nil || n == 0 {
-		// Timeout or error - standalone ESC
-		return true
-	}
-
-	// Data available - read it to determine if escape sequence
-	if readSet.IsSet(fd) {
-		nRead, err := syscall.Read(fd, buf)
-		if err != nil || nRead == 0 {
-			return true
-		}
-		return false // Got more bytes, this is an escape sequence
-	}
-
-	return true
 }

@@ -1,9 +1,6 @@
 package prediction
 
-import (
-	"strings"
-	"time"
-)
+import "strings"
 
 // Predictor generates predictions based on history patterns.
 type Predictor struct {
@@ -36,133 +33,20 @@ func (p *Predictor) PredictCommand(lastCmd, cwd string) string {
 	// Normalize command (just the base command)
 	lastCmd = normalizeCommand(lastCmd)
 
-	seqs, err := p.store.GetSequences(lastCmd, cwd)
-	if err != nil || len(seqs) == 0 {
+	seqs, err := p.store.RankSequences(lastCmd, cwd, p.config.RecencyWindowHours, 1)
+	if err != nil || len(seqs) == 0 || seqs[0].Score < p.config.ConfidenceThreshold {
 		return ""
 	}
-
-	// Score and filter
-	var best CommandSequence
-	var bestScore float64
-
-	for _, seq := range seqs {
-		score := p.scoreSequence(seq)
-		if score > bestScore && score >= p.config.ConfidenceThreshold {
-			best = seq
-			bestScore = score
-		}
-	}
-
-	if bestScore >= p.config.ConfidenceThreshold {
-		return best.NextCommand
-	}
-	return ""
+	return seqs[0].NextCommand
 }
 
-// PredictPaths predicts paths for a command.
-func (p *Predictor) PredictPaths(cmd, partial, cwd, prevCmd string) []ScoredPrediction {
-	if !p.config.Enabled || p.store == nil {
-		return nil
-	}
-
-	var predictions []ScoredPrediction
-	seen := make(map[string]bool)
-
-	// 1. Command-specific paths
-	cmdPaths, _ := p.store.GetPathsForCommand(normalizeCommand(cmd), cwd)
-	for _, pu := range cmdPaths {
-		if seen[pu.Path] {
-			continue
-		}
-		if partial != "" && !strings.HasPrefix(pu.Path, partial) {
-			continue
-		}
-		if pu.Count >= p.config.PathMinCount {
-			score := p.scorePathUsage(pu)
-			predictions = append(predictions, ScoredPrediction{
-				Text:        pu.Path,
-				Score:       score,
-				Source:      "command",
-				IsPredicted: true,
-			})
-			seen[pu.Path] = true
-		}
-	}
-
-	// 2. Sequence-based paths
-	if prevCmd != "" {
-		seqPaths, _ := p.store.GetPathsAfterCommand(normalizeCommand(prevCmd))
-		for _, ps := range seqPaths {
-			if seen[ps.Path] {
-				continue
-			}
-			if partial != "" && !strings.HasPrefix(ps.Path, partial) {
-				continue
-			}
-			score := p.scorePathSequence(ps)
-			predictions = append(predictions, ScoredPrediction{
-				Text:        ps.Path,
-				Score:       score * 0.8, // Slightly lower weight for sequence-based
-				Source:      "sequence",
-				IsPredicted: true,
-			})
-			seen[ps.Path] = true
-		}
-	}
-
-	SortPredictions(predictions)
-	return predictions
-}
-
-// Record records a successful command for learning.
-func (p *Predictor) Record(prevCmd, cmd, cwd string, paths []string) {
-	if p.store == nil {
+// Record records a successful command for learning: the full command is
+// stored so that "echo world" is suggested, not just "echo".
+func (p *Predictor) Record(prevCmd, cmd, cwd string) {
+	if p.store == nil || prevCmd == "" {
 		return
 	}
-
-	// Record command sequence
-	// Normalize prevCmd for matching, but store full cmd for suggestion
-	if prevCmd != "" {
-		_ = p.store.RecordSequence(
-			normalizeCommand(prevCmd),
-			cmd, // Store full command so we can suggest "echo world" not just "echo"
-			cwd,
-		)
-	}
-
-	// Record path usage
-	baseCmd := normalizeCommand(cmd)
-	for _, path := range paths {
-		_ = p.store.RecordPathUsage(baseCmd, path, cwd)
-		if prevCmd != "" {
-			_ = p.store.RecordPathSequence(normalizeCommand(prevCmd), path)
-		}
-	}
-}
-
-func (p *Predictor) scoreSequence(seq CommandSequence) float64 {
-	// Base score from count
-	countScore := float64(seq.Count) / (float64(seq.Count) + 5.0)
-
-	// Recency boost
-	hoursSince := time.Since(seq.LastUsed).Hours()
-	recencyScore := 1.0 / (1.0 + hoursSince/float64(p.config.PathRecencyHours))
-
-	return countScore*0.7 + recencyScore*0.3
-}
-
-func (p *Predictor) scorePathUsage(pu PathUsage) float64 {
-	countScore := float64(pu.Count) / (float64(pu.Count) + 3.0)
-	hoursSince := time.Since(pu.LastUsed).Hours()
-	recencyScore := 1.0 / (1.0 + hoursSince/float64(p.config.PathRecencyHours))
-	return countScore*0.6 + recencyScore*0.4
-}
-
-func (p *Predictor) scorePathSequence(ps PathSequence) float64 {
-	countScore := float64(ps.Count) / (float64(ps.Count) + 3.0)
-	hoursSince := time.Since(ps.LastUsed).Hours()
-	recencyScore := 1.0 / (1.0 + hoursSince/float64(p.config.PathRecencyHours))
-	return countScore*0.6 + recencyScore*0.4
+	_ = p.store.RecordSequence(normalizeCommand(prevCmd), cmd, cwd)
 }
 
 // normalizeCommand extracts the base command from a full command line.

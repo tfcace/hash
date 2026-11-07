@@ -147,7 +147,7 @@ func TestIntegration_NestedDirectoryCompletion(t *testing.T) {
 
 	// Complete "cat a/b/c/" - should find deep.txt
 	result, _ := router.Complete(context.Background(), "cat a/b/c/", 10)
-	if len(result.Items) != 1 || result.Items[0].Value != "deep.txt" {
+	if len(result.Items) != 1 || applied("cat a/b/c/", result) != "cat a/b/c/deep.txt" {
 		t.Errorf("Should find deep.txt in nested path, got: %v", result.Items)
 	}
 }
@@ -214,7 +214,10 @@ func TestIntegration_CDCompletionUsesFilesystem(t *testing.T) {
 	defer os.Chdir(oldDir)
 
 	router := NewRouter()
-	router.Register(NewAliasCompleter(&mockFunctionProvider{functions: []string{"site"}}), PriorityAlias)
+	exe := NewExecutableCompleter()
+	exe.scanPath = func(string) []string { return []string{"site"} }
+	exe.SetFunctions(&mockFunctionProvider{functions: []string{"site"}})
+	router.Register(exe, PriorityExecutable)
 	router.Register(NewFileCompleter(), PriorityFilesystem)
 
 	result, err := router.Complete(context.Background(), "cd si", len("cd si"))

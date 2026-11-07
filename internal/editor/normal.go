@@ -30,7 +30,7 @@ func (m *NormalMode) HandleKey(key Key, state *EditorState) ModeResult {
 		return m.handleCtrl(key, state)
 	}
 	if key.Alt {
-		return m.handleAlt(key, state)
+		return normalAltKeys.handle(key, state)
 	}
 
 	// Special keys
@@ -62,18 +62,22 @@ func (m *NormalMode) HandleKey(key Key, state *EditorState) ModeResult {
 func (m *NormalMode) handleSpecialKey(key Key, state *EditorState) (ModeResult, bool) {
 	switch key.Special {
 	case KeyEnter:
-		return ModeResult{Submit: true}, true
+		if state.incomplete(state.Buffer.Content()) {
+			continueLine(state)
+			return ModeResult{NewMode: NewInsertMode(), Action: ActionInsert}, true
+		}
+		return ModeResult{Command: CommandSubmit}, true
 	case KeyEscape:
 		state.Cursor.ClearSelection()
 		return ModeResult{}, true
 	case KeyUp:
 		if !visualUp(state) {
-			return ModeResult{HistoryPrev: true}, true
+			return ModeResult{Command: CommandHistoryPrev}, true
 		}
 		return ModeResult{}, true
 	case KeyDown:
 		if !visualDown(state) {
-			return ModeResult{HistoryNext: true}, true
+			return ModeResult{Command: CommandHistoryNext}, true
 		}
 		return ModeResult{}, true
 	case KeyLeft:
@@ -97,12 +101,12 @@ func (m *NormalMode) handleMovement(key Key, state *EditorState) (ModeResult, bo
 		return ModeResult{}, true
 	case 'j':
 		if !visualDown(state) {
-			return ModeResult{HistoryNext: true}, true
+			return ModeResult{Command: CommandHistoryNext}, true
 		}
 		return ModeResult{}, true
 	case 'k':
 		if !visualUp(state) {
-			return ModeResult{HistoryPrev: true}, true
+			return ModeResult{Command: CommandHistoryPrev}, true
 		}
 		return ModeResult{}, true
 	case 'w':
@@ -128,22 +132,23 @@ func (m *NormalMode) handleMovement(key Key, state *EditorState) (ModeResult, bo
 func (m *NormalMode) handleInsertMode(key Key, state *EditorState) (ModeResult, bool) {
 	switch key.Rune {
 	case 'i':
-		return ModeResult{NewMode: NewInsertMode(), Action: ActionModeChange}, true
+		return ModeResult{NewMode: NewInsertMode()}, true
 	case 'a':
+		state.Cursor.ClearSelection()
 		m.moveRight(state)
-		return ModeResult{NewMode: NewInsertMode(), Action: ActionModeChange}, true
+		return ModeResult{NewMode: NewInsertMode()}, true
 	case 'I':
 		state.Cursor.Pos.Col = 0
-		return ModeResult{NewMode: NewInsertMode(), Action: ActionModeChange}, true
+		return ModeResult{NewMode: NewInsertMode()}, true
 	case 'A':
 		state.Cursor.Pos.Col = len(state.Buffer.Line(state.Cursor.Pos.Row))
-		return ModeResult{NewMode: NewInsertMode(), Action: ActionModeChange}, true
+		return ModeResult{NewMode: NewInsertMode()}, true
 	case 'o':
 		m.openLineBelow(state)
-		return ModeResult{NewMode: NewInsertMode(), Action: ActionModeChange}, true
+		return ModeResult{NewMode: NewInsertMode()}, true
 	case 'O':
 		m.openLineAbove(state)
-		return ModeResult{NewMode: NewInsertMode(), Action: ActionModeChange}, true
+		return ModeResult{NewMode: NewInsertMode()}, true
 	}
 	return ModeResult{}, false
 }
@@ -183,13 +188,13 @@ func (m *NormalMode) handleEditing(key Key, state *EditorState) (ModeResult, boo
 		return ModeResult{}, true
 	case 'y':
 		if state.Cursor.HasSelection() {
-			return ModeResult{Yank: true}, true
+			return ModeResult{Command: CommandYank}, true
 		}
 		return ModeResult{}, true
 	case 'p':
-		return ModeResult{Paste: true}, true
+		return ModeResult{Command: CommandPaste}, true
 	case 'P':
-		return ModeResult{PasteBefore: true}, true
+		return ModeResult{Command: CommandPasteBefore}, true
 	}
 	return ModeResult{}, false
 }
@@ -198,19 +203,15 @@ func (m *NormalMode) handleEditing(key Key, state *EditorState) (ModeResult, boo
 func (m *NormalMode) handleUndoRedo(key Key, state *EditorState) (ModeResult, bool) {
 	switch key.Rune {
 	case 'u':
-		if state.UndoStack.CanUndo() {
-			buf, cur := state.UndoStack.Undo()
-			state.Buffer = buf
-			state.Cursor = cur
+		if snap, ok := state.UndoStack.Undo(snapshotOf(state.Buffer, state.Cursor)); ok {
+			state.setBuffer(snap.Buffer, snap.Cursor.Pos)
 		}
-		return ModeResult{}, true
+		return ModeResult{Action: ActionUndo}, true
 	case 'U':
-		if state.UndoStack.CanRedo() {
-			buf, cur := state.UndoStack.Redo()
-			state.Buffer = buf
-			state.Cursor = cur
+		if snap, ok := state.UndoStack.Redo(snapshotOf(state.Buffer, state.Cursor)); ok {
+			state.setBuffer(snap.Buffer, snap.Cursor.Pos)
 		}
-		return ModeResult{}, true
+		return ModeResult{Action: ActionUndo}, true
 	}
 	return ModeResult{}, false
 }
@@ -222,50 +223,54 @@ func (m *NormalMode) handleCtrl(key Key, state *EditorState) ModeResult {
 	case 'e':
 		state.Cursor.Pos.Col = len(state.Buffer.Line(state.Cursor.Pos.Row))
 	case 'p': // Ctrl+P: context picker
-		return ModeResult{ContextPicker: true}
+		if state.AllowContextPicker {
+			return ModeResult{Command: CommandContextPicker}
+		}
 	case 'r': // Ctrl+R: history search
-		return ModeResult{HistorySearch: true}
+		if state.AllowHistorySearch {
+			return ModeResult{Command: CommandHistorySearch}
+		}
 	}
 	return ModeResult{}
 }
 
-func (m *NormalMode) handleAlt(key Key, state *EditorState) ModeResult {
-	switch key.Special {
-	case KeyLeft:
-		m.moveWordBack(state)
-	case KeyRight:
-		m.moveWordForward(state)
+// normalAltKeys are normal mode's Alt keys: word motion.
+var normalAltKeys = func() altKeys {
+	m := &NormalMode{}
+	motion := func(move func(*EditorState)) func(Key, *EditorState) ModeResult {
+		return func(_ Key, state *EditorState) ModeResult {
+			move(state)
+			return ModeResult{}
+		}
 	}
-	switch key.Rune {
-	case 'b':
-		m.moveWordBack(state)
-	case 'f':
-		m.moveWordForward(state)
+	back, forward := motion(m.moveWordBack), motion(m.moveWordForward)
+	return altKeys{
+		{Special: KeyLeft}:  back,
+		{Special: KeyRight}: forward,
+		{Rune: 'b'}:         back,
+		{Rune: 'f'}:         forward,
 	}
-	return ModeResult{}
-}
+}()
 
 func (m *NormalMode) moveLeft(state *EditorState) {
 	if state.Cursor.Pos.Col > 0 {
-		state.Cursor.Pos.Col = previousRuneBoundary(state.Buffer.Line(state.Cursor.Pos.Row), state.Cursor.Pos.Col)
+		state.Cursor.Pos.Col = previousClusterBoundary(state.Buffer.Line(state.Cursor.Pos.Row), state.Cursor.Pos.Col)
 	} else if state.Cursor.Pos.Row > 0 {
 		// Wrap to end of previous line
 		state.Cursor.Pos.Row--
 		state.Cursor.Pos.Col = len(state.Buffer.Line(state.Cursor.Pos.Row))
 	}
-	state.Cursor.ClearSelection()
 }
 
 func (m *NormalMode) moveRight(state *EditorState) {
 	lineLen := len(state.Buffer.Line(state.Cursor.Pos.Row))
 	if state.Cursor.Pos.Col < lineLen {
-		state.Cursor.Pos.Col = nextRuneBoundary(state.Buffer.Line(state.Cursor.Pos.Row), state.Cursor.Pos.Col)
+		state.Cursor.Pos.Col = nextClusterBoundary(state.Buffer.Line(state.Cursor.Pos.Row), state.Cursor.Pos.Col)
 	} else if state.Cursor.Pos.Row < state.Buffer.LineCount()-1 {
 		// Wrap to start of next line
 		state.Cursor.Pos.Row++
 		state.Cursor.Pos.Col = 0
 	}
-	state.Cursor.ClearSelection()
 }
 
 func (m *NormalMode) moveWordForward(state *EditorState) {
@@ -292,22 +297,14 @@ func (m *NormalMode) moveWordEnd(state *EditorState) {
 	state.Cursor.Pos.Col = wordEnd(line, state.Cursor.Pos.Col)
 }
 
+// selectLine selects the cursor's line, turns a charwise selection into the
+// whole lines it touches, or extends a linewise selection by one line.
 func (m *NormalMode) selectLine(state *EditorState) {
-	row := state.Cursor.Pos.Row
-	lineLen := len(state.Buffer.Line(row))
-
-	if state.Cursor.HasSelection() {
-		// Extend to next line
-		if row < state.Buffer.LineCount()-1 {
-			state.Cursor.Pos.Row++
-			state.Cursor.Pos.Col = len(state.Buffer.Line(state.Cursor.Pos.Row))
-		}
-	} else {
-		// Select current line
-		state.Cursor.Pos.Col = 0
-		state.Cursor.StartSelection()
-		state.Cursor.Pos.Col = lineLen
+	cur := state.Cursor
+	if cur.selection == selectLine && cur.Pos.Row < state.Buffer.LineCount()-1 {
+		cur.Pos.Row++
 	}
+	cur.selectLines(state.Buffer)
 }
 
 func (m *NormalMode) openLineBelow(state *EditorState) {
@@ -328,7 +325,7 @@ func (m *NormalMode) deleteSelection(state *EditorState) {
 	if !state.Cursor.HasSelection() {
 		return
 	}
-	start, end := state.Cursor.SelectionRange()
+	start, end := state.Cursor.SelectionRange(state.Buffer)
 	state.Buffer.Delete(start, end)
 	state.Cursor.MoveTo(start.Row, start.Col)
 	state.Cursor.ClearSelection()

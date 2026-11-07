@@ -285,45 +285,19 @@ type PluginCompleter struct {
 	mu      sync.RWMutex
 	entries map[string]pluginEntry
 	runner  pluginRunner
-	cache   stringListCache
-	now     func() time.Time
 	getwd   func() string
 	fuzzy   bool
 
-	inflightMu sync.Mutex
-	inflight   map[string]*pluginSourceCall
-
-	failMu   sync.Mutex
-	failures map[string]time.Time // source key -> when the failure entry expires
-
-	readyMu sync.RWMutex
-	onReady func()
+	// sources holds source output keyed by directory and final argv.
+	sources flightCache[[]string]
+	ready   readyNotifier
 }
 
-// SetOnReady registers a callback fired whenever a source finishes and fills
-// the cache. The UI uses it to refresh a "fetching" menu without another TAB.
+// SetOnReady registers a callback fired whenever a source finishes, success
+// or failure. The UI uses it to refresh a "fetching" menu without another
+// TAB, or to clear it and fall back when the source failed.
 func (c *PluginCompleter) SetOnReady(fn func()) {
-	c.readyMu.Lock()
-	c.onReady = fn
-	c.readyMu.Unlock()
-}
-
-func (c *PluginCompleter) notifyReady() {
-	c.readyMu.RLock()
-	fn := c.onReady
-	c.readyMu.RUnlock()
-	if fn != nil {
-		fn()
-	}
-}
-
-// pluginSourceCall is a single in-flight source execution shared by all
-// waiters for the same exec argv.
-type pluginSourceCall struct {
-	started time.Time
-	done    chan struct{}
-	lines   []string
-	err     error
+	c.ready.set(fn)
 }
 
 // pluginEntry is the handler for a single command, tracking which spec it
@@ -349,9 +323,9 @@ type PluginInfo struct {
 func NewPluginCompleter(userSpecs []*PluginSpec) *PluginCompleter {
 	c := &PluginCompleter{
 		runner: defaultPluginRunner,
-		now:    time.Now,
 		getwd:  defaultGetwd,
 	}
+	c.sources.ready = &c.ready
 	c.SetUserSpecs(userSpecs)
 	return c
 }
@@ -453,64 +427,72 @@ func (c *PluginCompleter) Plugins() []PluginInfo {
 	return infos
 }
 
+// pluginMatch is the rule that owns the word under the cursor.
+type pluginMatch struct {
+	rule    *PluginRule
+	argv    []string // the source argv, forwarded flags included
+	current string
+	dir     string
+}
+
+// matchRule finds the rule owning the word under the cursor, if any.
+func (c *PluginCompleter) matchRule(line string, pos int) (pluginMatch, bool) {
+	cw := parseCommandWords(line, pos)
+	// Only complete arguments, not the command name itself.
+	if !cw.inArgumentPosition() {
+		return pluginMatch{}, false
+	}
+	entry, ok := c.commandEntry(cw.command())
+	if !ok || declinesCurrentWord(cw.current) {
+		return pluginMatch{}, false
+	}
+
+	positionals, flagGroups, currentIsFlagValue := stripFlags(cw.args(), entry.valueFlags)
+	if currentIsFlagValue {
+		return pluginMatch{}, false // The word being typed belongs to a flag, not us.
+	}
+	for _, rule := range entry.rules {
+		if rule.matches(positionals) {
+			return pluginMatch{
+				rule:    rule,
+				argv:    rule.forwardedSourceArgv(flagGroups),
+				current: cw.current,
+				dir:     c.getwd(),
+			}, true
+		}
+	}
+	return pluginMatch{}, false
+}
+
 // Complete returns plugin completions for the current input.
 func (c *PluginCompleter) Complete(ctx context.Context, line string, pos int) (Result, error) {
-	pipeLine, pipePos := ExtractPipeContext(line, pos)
-	segment := pipeLine[:pipePos]
-	trailingSpace := strings.HasSuffix(segment, " ")
-	parts := strings.Fields(segment)
-	if len(parts) == 0 {
-		return Result{}, nil
-	}
-
-	// Only complete arguments, not the command name itself.
-	if len(parts) < 2 && !trailingSpace {
-		return Result{}, nil
-	}
-
-	entry, ok := c.commandEntry(parts[0])
+	m, ok := c.matchRule(line, pos)
 	if !ok {
 		return Result{}, nil
 	}
-
-	current, args := splitCurrentArg(parts[1:], trailingSpace)
-	if declinesCurrentWord(current) {
+	if trace.Enabled("completion") {
+		trace.Emit("completion", "plugin_rule_matched", trace.LevelDetailed, map[string]any{
+			"command":     parseCommandWords(line, pos).command(),
+			"subcommands": strings.Join(m.rule.Subcommands, ","),
+			"argv":        strings.Join(m.argv, " "),
+			"current":     m.current,
+			"dir":         m.dir,
+		})
+	}
+	items, status := c.completeRule(ctx, m.rule, m.argv, m.current, m.dir)
+	switch status {
+	case lookupPending:
+		// Matched, but the data is still on its way. Say so instead of
+		// letting an unrelated completer answer for this argument.
+		return pendingResult(), nil
+	case lookupFailed:
+		// Source failed (tool missing, daemon down): not ours to answer
+		// after all, so the next completer (filenames) gets the argument.
 		return Result{}, nil
 	}
-
-	positionals, flagGroups, currentIsFlagValue := stripFlags(args, entry.valueFlags)
-	if currentIsFlagValue {
-		return Result{}, nil // The word being typed belongs to a flag, not us.
-	}
-	dir := c.getwd()
-	for _, rule := range entry.rules {
-		if !rule.matches(positionals) {
-			continue
-		}
-		argv := rule.forwardedSourceArgv(flagGroups)
-		if trace.Enabled("completion") {
-			trace.Emit("completion", "plugin_rule_matched", trace.LevelDetailed, map[string]any{
-				"command":     parts[0],
-				"subcommands": strings.Join(rule.Subcommands, ","),
-				"argv":        strings.Join(argv, " "),
-				"current":     current,
-				"dir":         dir,
-			})
-		}
-		items, err := c.completeRule(ctx, rule, argv, current, dir)
-		if errors.Is(err, errPluginSourcePending) {
-			// Matched, but the data is still on its way. Say so instead of
-			// letting an unrelated completer answer for this argument.
-			return Result{Pending: true}, nil
-		}
-		if err != nil {
-			return Result{}, nil //nolint:nilerr // Source failed (tool missing, daemon down): stay silent.
-		}
-		// Handled even when empty: this rule owns the argument, and filenames
-		// are not an answer to "which container".
-		return Result{Items: items, Handled: true}, nil
-	}
-	return Result{}, nil
+	// Owned even when empty: this rule owns the argument, and filenames
+	// are not an answer to "which container".
+	return ownedResult(items), nil
 }
 
 // declinesCurrentWord reports whether the word being completed is another
@@ -606,10 +588,10 @@ func (r *PluginRule) maxArgsAllows(completedPositionals int) bool {
 	return r.MaxArgs == 0 || completedPositionals < r.MaxArgs
 }
 
-func (c *PluginCompleter) completeRule(ctx context.Context, rule *PluginRule, argv []string, current, dir string) ([]Item, error) {
-	lines, err := c.sourceLines(ctx, rule, argv, dir)
-	if err != nil {
-		return nil, err
+func (c *PluginCompleter) completeRule(ctx context.Context, rule *PluginRule, argv []string, current, dir string) ([]Item, lookupStatus) {
+	lines, status := c.sourceLines(ctx, rule, argv, dir)
+	if status == lookupPending || status == lookupFailed {
+		return nil, status
 	}
 
 	// In fuzzy mode all candidates go to the router, whose fuzzy filter would
@@ -632,115 +614,91 @@ func (c *PluginCompleter) completeRule(ctx context.Context, rule *PluginRule, ar
 			Display:     value,
 			Description: description,
 		})
-		if len(items) >= completionItemLimit {
-			break
-		}
+		// Every match goes to the router, which keeps the best (fuzzy
+		// mode) or the first, and says when it left more out.
 	}
-	return items, nil
+	return items, status
 }
 
-func (c *PluginCompleter) sourceLines(ctx context.Context, rule *PluginRule, argv []string, dir string) ([]string, error) {
-	start := time.Now()
-	emit := func(outcome string, lines int) {
-		if !trace.Enabled("completion") {
-			return
-		}
-		trace.Emit("completion", "plugin_lookup", trace.LevelDetailed, map[string]any{
-			"argv":    strings.Join(argv, " "),
-			"outcome": outcome,
-			"lines":   lines,
-			"wait_ms": float64(time.Since(start).Microseconds()) / 1000.0,
-		})
-	}
-
+// sourceLines returns the rule's candidate lines. A cold source is waited
+// on only briefly (pluginSourceWait) before reporting pending; an expired
+// result is served while it refreshes; a failed source is not rerun until
+// its failure entry expires. The returned slice is shared with the cache
+// and must not be modified.
+func (c *PluginCompleter) sourceLines(ctx context.Context, rule *PluginRule, argv []string, dir string) ([]string, lookupStatus) {
 	// Static sources have nothing to run, cache, or fail.
 	if len(rule.Source.Static) > 0 {
-		emit("static", len(rule.Source.Static))
-		return rule.Source.Static, nil
+		c.traceLookup(argv, "static", len(rule.Source.Static), time.Now())
+		return rule.Source.Static, lookupFresh
 	}
-
-	key := sourceCacheKey(argv, dir)
-	now := c.now()
-	if lines, ok := c.cache.get(key, now); ok {
-		emit("cache_hit", len(lines))
-		return lines, nil
-	}
-
-	// A zero-TTL rule never serves expired results; freshness is the point.
-	staleGrace := time.Duration(0)
-	if rule.cacheTTL > 0 {
-		staleGrace = pluginStaleGrace
-	}
-
-	// A source that just failed will fail again; don't relaunch it on every
-	// retrigger. Old results are still worth serving while it recovers.
-	if c.recentFailure(key, now) {
-		if lines, ok := c.cache.getStale(key, now, staleGrace); ok {
-			emit("stale_after_failure", len(lines))
-			return lines, nil
-		}
-		emit("suppressed_after_failure", 0)
-		return nil, errPluginSourceFailed
-	}
-
-	// Serve an expired-but-recent result immediately while the refresh runs.
-	// Read it before the refresh starts: a fast source could otherwise
-	// replace it first, and which answer this TAB got would be a race.
-	stale, haveStale := c.cache.getStale(key, now, staleGrace)
-	call := c.startSourceCall(key, rule, argv, dir)
-	if haveStale {
-		emit("stale_while_refreshing", len(stale))
-		return stale, nil
-	}
-
-	// Nothing cached: wait briefly, then leave the rest of the completion
-	// deadline to the other completers. The source keeps running in the
-	// background and fills the cache, so the next TAB answers instantly.
-	timer := time.NewTimer(pluginSourceWait)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		emit("canceled", 0)
-		return nil, ctx.Err()
-	case <-timer.C:
-		emit("pending", 0)
-		return nil, errPluginSourcePending
-	case <-call.done:
-		if call.err != nil {
-			emit("live_error", 0)
-		} else {
-			emit("live", len(call.lines))
-		}
-		return append([]string(nil), call.lines...), call.err
-	}
+	start := time.Now()
+	lines, status := c.sources.get(ctx, sourceCacheKey(argv, dir), sourcePolicy(rule), c.sourceFetch(argv, dir, rule.timeout))
+	c.traceLookup(argv, status.String(), len(lines), start)
+	return lines, status
 }
 
-// errPluginSourcePending means the source is still running. Complete treats it
-// like any other source failure: stay silent and let the router move on.
-var errPluginSourcePending = errors.New("completion: plugin source still running")
-
-// errPluginSourceFailed means the source failed recently and is in the
-// negative cache.
-var errPluginSourceFailed = errors.New("completion: plugin source failed recently")
-
-func (c *PluginCompleter) recentFailure(key string, now time.Time) bool {
-	c.failMu.Lock()
-	defer c.failMu.Unlock()
-	expiry, ok := c.failures[key]
-	return ok && now.Before(expiry)
-}
-
-func (c *PluginCompleter) recordFailure(key string, failed bool) {
-	c.failMu.Lock()
-	defer c.failMu.Unlock()
-	if !failed {
-		delete(c.failures, key)
+func (c *PluginCompleter) traceLookup(argv []string, outcome string, lines int, start time.Time) {
+	if !trace.Enabled("completion") {
 		return
 	}
-	if c.failures == nil {
-		c.failures = make(map[string]time.Time)
+	trace.Emit("completion", "plugin_lookup", trace.LevelDetailed, map[string]any{
+		"argv":    strings.Join(argv, " "),
+		"outcome": outcome,
+		"lines":   lines,
+		"wait_ms": float64(time.Since(start).Microseconds()) / 1000.0,
+	})
+}
+
+// sourcePolicy is how a rule's source output is cached. A source runs for
+// up to the rule's timeout (a cold docker daemon can take seconds), and a
+// Tab during that time joins it rather than launching a duplicate.
+func sourcePolicy(rule *PluginRule) flightPolicy {
+	policy := flightPolicy{
+		ttl:        rule.cacheTTL,
+		staleGrace: pluginStaleGrace,
+		failureTTL: pluginFailureTTL,
+		timeout:    rule.timeout,
+		wait:       pluginSourceWait,
 	}
-	c.failures[key] = c.now().Add(pluginFailureTTL)
+	if rule.cacheTTL == 0 {
+		// A zero-TTL rule never serves expired results; freshness is the
+		// point. The result is held only long enough for the pending Tab's
+		// retry to find it.
+		policy.ttl = pluginHandoffTTL
+		policy.staleGrace = 0
+	}
+	return policy
+}
+
+// sourceFetch runs a source command. The context is the cache's detached
+// one, so a completion deadline cannot kill a slow source before it ever
+// fills the cache.
+func (c *PluginCompleter) sourceFetch(argv []string, dir string, timeout time.Duration) func(context.Context) ([]string, error) {
+	return func(ctx context.Context) ([]string, error) {
+		traced := trace.Enabled("completion")
+		if traced {
+			trace.Emit("completion", "plugin_source_start", trace.LevelDetailed, map[string]any{
+				"argv": strings.Join(argv, " "),
+				"dir":  dir,
+			})
+		}
+		started := time.Now()
+		lines, err := c.runner(ctx, argv, dir, timeout)
+		if traced {
+			errText := ""
+			if err != nil {
+				errText = err.Error()
+			}
+			trace.Emit("completion", "plugin_source_done", trace.LevelDetailed, map[string]any{
+				"argv":        strings.Join(argv, " "),
+				"dir":         dir,
+				"lines":       len(lines),
+				"error":       errText,
+				"duration_ms": float64(time.Since(started).Microseconds()) / 1000.0,
+			})
+		}
+		return lines, err
+	}
 }
 
 // sourceCacheKey includes the working directory: many sources (terraform
@@ -759,130 +717,15 @@ func defaultGetwd() string {
 	return dir
 }
 
-// startSourceCall returns the in-flight call for the source, starting one if
-// needed. Execution is detached from the caller's context and bounded only by
-// the rule's own timeout, so completion UI deadlines can't kill a slow source
-// (e.g. docker ps on a cold daemon) before it ever manages to fill the cache.
-func (c *PluginCompleter) startSourceCall(key string, rule *PluginRule, argv []string, dir string) *pluginSourceCall {
-	now := c.now()
-	c.inflightMu.Lock()
-	if call, ok := c.inflight[key]; ok && !contextReadCallIsStale(call.started, now, 0) {
-		c.inflightMu.Unlock()
-		return call
-	}
-	call := &pluginSourceCall{started: now, done: make(chan struct{})}
-	if c.inflight == nil {
-		c.inflight = make(map[string]*pluginSourceCall)
-	}
-	c.inflight[key] = call
-	c.inflightMu.Unlock()
-
-	if trace.Enabled("completion") {
-		trace.Emit("completion", "plugin_source_start", trace.LevelDetailed, map[string]any{
-			"argv": strings.Join(argv, " "),
-			"dir":  dir,
-		})
-	}
-	go c.finishSourceCall(key, call, rule, argv, dir)
-	return call
-}
-
-func (c *PluginCompleter) finishSourceCall(key string, call *pluginSourceCall, rule *PluginRule, argv []string, dir string) {
-	started := time.Now()
-	lines, err := c.runSourceGuarded(argv, dir, rule.timeout)
-	if trace.Enabled("completion") {
-		errText := ""
-		if err != nil {
-			errText = err.Error()
-		}
-		trace.Emit("completion", "plugin_source_done", trace.LevelDetailed, map[string]any{
-			"argv":        strings.Join(argv, " "),
-			"dir":         dir,
-			"lines":       len(lines),
-			"error":       errText,
-			"duration_ms": float64(time.Since(started).Microseconds()) / 1000.0,
-		})
-	}
-	call.lines, call.err = lines, err
-	if err == nil {
-		ttl := rule.cacheTTL
-		if ttl == 0 {
-			ttl = pluginHandoffTTL // Just enough for the pending retrigger.
-		}
-		c.cache.set(key, lines, c.now().Add(ttl))
-	}
-	c.recordFailure(key, err != nil)
-
-	c.inflightMu.Lock()
-	if c.inflight[key] == call {
-		delete(c.inflight, key)
-	}
-	c.inflightMu.Unlock()
-	close(call.done)
-
-	// Notify on failure too: the editor may be showing "fetching completions"
-	// and needs a wake-up to clear it and fall back to other completers. The
-	// failure entry above keeps that retry from relaunching the source.
-	c.notifyReady()
-}
-
-// runSourceGuarded invokes the runner, converting a panic into an ordinary
-// source failure. Sources run on detached goroutines inside the user's login
-// shell: an unrecovered panic here doesn't just break completion, it kills
-// the shell process and closes their terminal tab.
-func (c *PluginCompleter) runSourceGuarded(argv []string, dir string, timeout time.Duration) (lines []string, err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			lines, err = nil, fmt.Errorf("completion: plugin source panicked: %v", r)
-		}
-	}()
-	return c.runner(context.Background(), argv, dir, timeout)
-}
-
 // Prefetch warms the source cache when the input matches a plugin rule.
 // The router calls this when the user types a space, giving sources a head
 // start over the completion UI deadline.
 func (c *PluginCompleter) Prefetch(line string, pos int) {
-	pipeLine, pipePos := ExtractPipeContext(line, pos)
-	segment := pipeLine[:pipePos]
-	trailingSpace := strings.HasSuffix(segment, " ")
-	parts := strings.Fields(segment)
-	if len(parts) == 0 {
-		return
+	m, ok := c.matchRule(line, pos)
+	if !ok || len(m.rule.Source.Static) > 0 {
+		return // Static sources have nothing to warm.
 	}
-	if len(parts) < 2 && !trailingSpace {
-		return
-	}
-
-	entry, ok := c.commandEntry(parts[0])
-	if !ok {
-		return
-	}
-
-	current, args := splitCurrentArg(parts[1:], trailingSpace)
-	if declinesCurrentWord(current) {
-		return
-	}
-
-	positionals, flagGroups, currentIsFlagValue := stripFlags(args, entry.valueFlags)
-	if currentIsFlagValue {
-		return
-	}
-	dir := c.getwd()
-	for _, rule := range entry.rules {
-		if !rule.matches(positionals) {
-			continue
-		}
-		if len(rule.Source.Static) > 0 {
-			return // Static sources have nothing to warm.
-		}
-		argv := rule.forwardedSourceArgv(flagGroups)
-		key := sourceCacheKey(argv, dir)
-		if _, cached := c.cache.get(key, c.now()); !cached {
-			c.startSourceCall(key, rule, argv, dir)
-		}
-		return
-	}
+	c.sources.warm(sourceCacheKey(m.argv, m.dir), sourcePolicy(m.rule), c.sourceFetch(m.argv, m.dir, m.rule.timeout))
 }
 
 // parseLine splits an output line into a completion value and description.

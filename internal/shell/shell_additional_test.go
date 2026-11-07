@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"strings"
 	"testing"
+
+	"github.com/tfcace/hash/internal/agent"
 )
 
 // TestDedupe tests the dedupe function.
@@ -130,7 +132,7 @@ func TestErrorHandler_HandleCommandNotFound_AllCases(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			var buf bytes.Buffer
 			h := &ErrorHandler{out: &buf}
-			h.HandleCommandNotFound(tt.cmd, tt.suggestions, tt.installHint, false)
+			h.HandleCommandNotFound(tt.cmd, tt.suggestions, tt.installHint)
 
 			output := buf.String()
 			for _, want := range tt.wantContain {
@@ -145,13 +147,7 @@ func TestErrorHandler_HandleCommandNotFound_AllCases(t *testing.T) {
 // TestCommandSuggestor_Suggest tests the Suggest method.
 func TestCommandSuggestor_Suggest(t *testing.T) {
 	// Create suggestor without history store
-	s := &CommandSuggestor{}
-
-	// Manually set PATH cache
-	s.pathCacheMu.Lock()
-	s.pathCache = []string{"git", "grep", "go", "gzip"}
-	s.pathCacheMu.Unlock()
-	s.pathCacheReady.Store(true)
+	s := fixedSuggestor("git", "grep", "go", "gzip")
 
 	tests := []struct {
 		name    string
@@ -211,5 +207,18 @@ func TestInstallHint_UnknownCommand(t *testing.T) {
 	hint := s.InstallHint("totally_unknown_command_xyz")
 	if hint != "" {
 		t.Errorf("InstallHint for unknown command should be empty, got %q", hint)
+	}
+}
+
+// Leaving the shell ends the agent session: the adapter process is not left
+// behind.
+func TestShell_CloseClosesTheAgent(t *testing.T) {
+	tr := &modelsTestTransport{}
+	sh := &Shell{agentHandler: NewAgentHandler(agent.NewClient(tr))}
+	if err := sh.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if tr.closes != 1 {
+		t.Errorf("agent transport closed %d times, want once", tr.closes)
 	}
 }

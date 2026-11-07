@@ -7,38 +7,29 @@ import (
 	"testing"
 )
 
-func newModelTestTransport() (*ACPTransport, *mockPipe) {
-	stdin := newMockPipe()
-	t := &ACPTransport{
-		config:    ACPConfig{Command: "test"},
-		stdin:     stdin,
-		sessionID: "test-session",
-		messages:  make(chan []byte, 10),
-		done:      make(chan struct{}),
-	}
-	return t, stdin
+func newModelTestTransport() (*ACPTransport, *acpConn, *mockPipe) {
+	return newPipeTransport("test-session")
 }
 
 func TestACPTransport_NewSessionParsesModelConfig(t *testing.T) {
-	transport, _ := newModelTestTransport()
-	transport.sessionID = "" // newSession assigns it
-	transport.messages <- []byte(`{"jsonrpc":"2.0","id":1,"result":{"sessionId":"sess-1","configOptions":[` +
+	transport, conn, _ := newPipeTransport("") // ensureSession opens the session
+	conn.messages <- []byte(`{"jsonrpc":"2.0","id":1,"result":{"sessionId":"sess-1","configOptions":[` +
 		`{"id":"mode","category":"mode","currentValue":"default","options":[{"value":"default","name":"Default"}]},` +
 		`{"id":"model","category":"model","currentValue":"sonnet","options":[` +
 		`{"value":"default","name":"Default (recommended)","description":"Opus"},` +
 		`{"value":"sonnet","name":"Sonnet","description":"Everyday"},` +
 		`{"value":"haiku","name":"Haiku"}]}]}}`)
 
-	sessionID, err := transport.newSession(context.Background(), "/tmp/hash-test")
+	sessionID, err := transport.ensureSession(context.Background(), "/tmp/hash-test")
 	if err != nil {
-		t.Fatalf("newSession: %v", err)
+		t.Fatalf("ensureSession: %v", err)
 	}
 	if sessionID != "sess-1" {
 		t.Fatalf("sessionID = %q, want sess-1", sessionID)
 	}
 
-	if transport.modelConfigID != "model" {
-		t.Fatalf("modelConfigID = %q, want model", transport.modelConfigID)
+	if transport.model.id != "model" {
+		t.Fatalf("model option id = %q, want model", transport.model.id)
 	}
 	if got := transport.CurrentModel(); got != "Sonnet" {
 		t.Fatalf("CurrentModel() = %q, want Sonnet", got)
@@ -53,7 +44,7 @@ func TestACPTransport_NewSessionParsesModelConfig(t *testing.T) {
 }
 
 func TestACPTransport_NoModelOptionMeansUnsupported(t *testing.T) {
-	transport, _ := newModelTestTransport()
+	transport, _, _ := newModelTestTransport()
 	transport.storeModelConfig([]configOption{
 		{ID: "mode", Category: "mode", CurrentValue: "default",
 			Options: []configOptionValue{{Value: "default", Name: "Default"}}},
@@ -68,11 +59,9 @@ func TestACPTransport_NoModelOptionMeansUnsupported(t *testing.T) {
 }
 
 func TestACPTransport_SetModelSendsConfigOption(t *testing.T) {
-	transport, stdin := newModelTestTransport()
-	transport.modelConfigID = "model"
-	transport.currentModelVal = "default"
-	transport.availableModels = []ModelOption{{Value: "default", Name: "Default"}, {Value: "sonnet", Name: "Sonnet"}}
-	transport.messages <- []byte(`{"jsonrpc":"2.0","id":1,"result":{"configOptions":[` +
+	transport, conn, stdin := newModelTestTransport()
+	transport.model = modelConfig{id: "model", current: "default", options: []ModelOption{{Value: "default", Name: "Default"}, {Value: "sonnet", Name: "Sonnet"}}}
+	conn.messages <- []byte(`{"jsonrpc":"2.0","id":1,"result":{"configOptions":[` +
 		`{"id":"model","category":"model","currentValue":"sonnet","options":[` +
 		`{"value":"default","name":"Default"},{"value":"sonnet","name":"Sonnet"}]}]}}`)
 
@@ -107,14 +96,14 @@ func TestACPTransport_SetModelSendsConfigOption(t *testing.T) {
 }
 
 func TestACPTransport_SetModelErrorsWhenNoModelOption(t *testing.T) {
-	transport, _ := newModelTestTransport()
+	transport, _, _ := newModelTestTransport()
 	if err := transport.setModel(context.Background(), "sonnet"); err == nil {
 		t.Fatal("setModel: expected error when no model option, got nil")
 	}
 }
 
 func TestACPTransport_ConfigOptionUpdateRefreshesModel(t *testing.T) {
-	transport, _ := newModelTestTransport()
+	transport, _, _ := newModelTestTransport()
 	transport.storeModelConfig([]configOption{
 		{ID: "model", Category: "model", CurrentValue: "sonnet",
 			Options: []configOptionValue{{Value: "sonnet", Name: "Sonnet"}, {Value: "haiku", Name: "Haiku"}}},
@@ -131,7 +120,7 @@ func TestACPTransport_ConfigOptionUpdateRefreshesModel(t *testing.T) {
 }
 
 func TestACPTransport_StoreModelConfigIgnoresEmpty(t *testing.T) {
-	transport, _ := newModelTestTransport()
+	transport, _, _ := newModelTestTransport()
 	transport.storeModelConfig([]configOption{
 		{ID: "model", Category: "model", CurrentValue: "sonnet",
 			Options: []configOptionValue{{Value: "sonnet", Name: "Sonnet"}}},
@@ -143,10 +132,8 @@ func TestACPTransport_StoreModelConfigIgnoresEmpty(t *testing.T) {
 }
 
 func TestACPTransport_ReapplyPreferredModelDropsStalePin(t *testing.T) {
-	transport, _ := newModelTestTransport()
-	transport.modelConfigID = "model"
-	transport.currentModelVal = "default"
-	transport.availableModels = []ModelOption{{Value: "default", Name: "Default"}}
+	transport, _, _ := newModelTestTransport()
+	transport.model = modelConfig{id: "model", current: "default", options: []ModelOption{{Value: "default", Name: "Default"}}}
 	transport.preferredModel = "sonnet" // no longer offered
 
 	transport.reapplyPreferredModel(context.Background())
@@ -157,10 +144,8 @@ func TestACPTransport_ReapplyPreferredModelDropsStalePin(t *testing.T) {
 }
 
 func TestACPTransport_ReapplyPreferredModelNoopWhenMatching(t *testing.T) {
-	transport, stdin := newModelTestTransport()
-	transport.modelConfigID = "model"
-	transport.currentModelVal = "sonnet"
-	transport.availableModels = []ModelOption{{Value: "sonnet", Name: "Sonnet"}}
+	transport, _, stdin := newModelTestTransport()
+	transport.model = modelConfig{id: "model", current: "sonnet", options: []ModelOption{{Value: "sonnet", Name: "Sonnet"}}}
 	transport.preferredModel = "sonnet" // already active
 
 	transport.reapplyPreferredModel(context.Background())
@@ -174,16 +159,14 @@ func TestACPTransport_ReapplyPreferredModelNoopWhenMatching(t *testing.T) {
 }
 
 func TestACPTransport_ClosePreservesPreferredModel(t *testing.T) {
-	transport, _ := newModelTestTransport()
-	transport.modelConfigID = "model"
-	transport.currentModelVal = "sonnet"
-	transport.availableModels = []ModelOption{{Value: "default", Name: "Default"}, {Value: "sonnet", Name: "Sonnet"}}
+	transport, _, _ := newModelTestTransport()
+	transport.model = modelConfig{id: "model", current: "sonnet", options: []ModelOption{{Value: "default", Name: "Default"}, {Value: "sonnet", Name: "Sonnet"}}}
 	transport.preferredModel = "sonnet"
 
 	if err := transport.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	if transport.sessionID != "" || transport.modelConfigID != "" {
+	if transport.connected() || transport.model.id != "" {
 		t.Fatal("Close should drop the session and its model state")
 	}
 	if transport.preferredModel != "sonnet" {
@@ -192,11 +175,12 @@ func TestACPTransport_ClosePreservesPreferredModel(t *testing.T) {
 
 	// The next session comes up on the agent default; the pin is re-sent.
 	stdin := newMockPipe()
-	transport.stdin = stdin // stands in for the reconnect
-	transport.messages <- []byte(`{"jsonrpc":"2.0","id":1,"result":{"sessionId":"sess-2","configOptions":[` +
+	conn := newACPConn(stdin)
+	transport.link = link{state: linkConnected, conn: conn} // stands in for the reconnect (Restart)
+	conn.messages <- []byte(`{"jsonrpc":"2.0","id":1,"result":{"sessionId":"sess-2","configOptions":[` +
 		`{"id":"model","category":"model","currentValue":"default","options":[` +
 		`{"value":"default","name":"Default"},{"value":"sonnet","name":"Sonnet"}]}]}}`)
-	transport.messages <- []byte(`{"jsonrpc":"2.0","id":2,"result":{"configOptions":[` +
+	conn.messages <- []byte(`{"jsonrpc":"2.0","id":2,"result":{"configOptions":[` +
 		`{"id":"model","category":"model","currentValue":"sonnet","options":[` +
 		`{"value":"default","name":"Default"},{"value":"sonnet","name":"Sonnet"}]}]}}`)
 

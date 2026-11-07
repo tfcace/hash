@@ -8,24 +8,41 @@ import (
 	toml "github.com/pelletier/go-toml/v2"
 )
 
+// LoadErrorKind is how loading config.toml went wrong. A missing file and a
+// clean load are not errors: Config.LoadIssue is nil for both.
+type LoadErrorKind int
+
+const (
+	// LoadReadFailed: the file exists but could not be read (permissions,
+	// a directory in its place). All settings use defaults.
+	LoadReadFailed LoadErrorKind = iota + 1
+	// LoadSyntaxError: the file is not valid TOML. All settings use defaults.
+	LoadSyntaxError
+	// LoadPartial: the file parsed but some sections did not decode; those
+	// (BadSections) use defaults and everything else was kept.
+	LoadPartial
+)
+
 // LoadError describes a config.toml that could not be fully loaded.
-// When BadSections is non-empty, only those sections fell back to defaults
-// and everything else was kept; when it is empty, the whole file was
-// unparseable and defaults apply.
 type LoadError struct {
+	Kind        LoadErrorKind
 	Path        string   // config file path
-	BadSections []string // sections reverted to defaults; empty means the whole file
+	BadSections []string // LoadPartial only: sections reverted to defaults
 	Detail      string   // human-readable position and cause
-	Err         error    // underlying decode error
+	Err         error    // underlying read or decode error
 }
 
 // Error returns a one-line summary.
 func (e *LoadError) Error() string {
-	if len(e.BadSections) == 0 {
+	switch e.Kind {
+	case LoadReadFailed:
+		return fmt.Sprintf("config error in %s (%s): could not be read, using defaults", e.Path, e.Detail)
+	case LoadPartial:
+		return fmt.Sprintf("config error in %s (%s): defaults used for [%s]",
+			e.Path, e.Detail, strings.Join(e.BadSections, "], ["))
+	default:
 		return fmt.Sprintf("config error in %s (%s): using defaults", e.Path, e.Detail)
 	}
-	return fmt.Sprintf("config error in %s (%s): defaults used for [%s]",
-		e.Path, e.Detail, strings.Join(e.BadSections, "], ["))
 }
 
 // Unwrap exposes the underlying decode error.
@@ -40,11 +57,14 @@ func (e *LoadError) Warning() string {
 	if e.Detail != "" {
 		fmt.Fprintf(&b, "  %s\n", e.Detail)
 	}
-	if len(e.BadSections) == 0 {
-		b.WriteString("  The file could not be parsed; all settings use defaults.\n")
-	} else {
+	switch e.Kind {
+	case LoadReadFailed:
+		b.WriteString("  The file could not be read; all settings use defaults.\n")
+	case LoadPartial:
 		fmt.Fprintf(&b, "  Reverted to defaults: [%s]. All other settings were kept.\n",
 			strings.Join(e.BadSections, "], ["))
+	default:
+		b.WriteString("  The file could not be parsed; all settings use defaults.\n")
 	}
 	b.WriteString("  Run \033[36mstatus\033[0m in hash to review; fix the file to restore your settings.\n")
 	return b.String()

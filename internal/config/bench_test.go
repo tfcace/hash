@@ -12,7 +12,6 @@ import (
 const benchConfigTOML = `# hash configuration
 [shell]
 editor = "nvim"
-keybindings = "emacs"
 dialect = "bash"
 disable_builtins = ["cd"]
 rc_commands = ["source ~/.aliases"]
@@ -22,7 +21,6 @@ login = ["/etc/profile", "~/.profile"]
 interactive = ["~/.hashrc"]
 
 [input]
-keybindings = "helix"
 gutter = true
 max_paste_size = "10MB"
 
@@ -88,7 +86,8 @@ func BenchmarkLoad(b *testing.B) {
 	dir := benchConfigDir(b, benchConfigTOML)
 	b.ReportAllocs()
 	for b.Loop() {
-		cfg, err := Load(dir)
+		cfg := Load(dir)
+		err := cfg.LoadIssue
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -104,7 +103,8 @@ func BenchmarkLoadRecovery(b *testing.B) {
 	dir := benchConfigDir(b, brokenBenchConfigTOML())
 	b.ReportAllocs()
 	for b.Loop() {
-		cfg, err := Load(dir)
+		cfg := Load(dir)
+		err := cfg.LoadIssue
 		if err == nil {
 			b.Fatal("expected a load error for the broken section")
 		}

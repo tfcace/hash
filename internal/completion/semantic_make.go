@@ -2,7 +2,8 @@ package completion
 
 import (
 	"context"
-	"os"
+	"errors"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -11,10 +12,8 @@ import (
 // MakeHandler provides completions for make targets.
 type MakeHandler struct {
 	readFile func(path string) ([]string, error)
-	reader   contextLinesReader
-	cache    stringListCache
 	cacheTTL time.Duration
-	now      func() time.Time
+	targets  flightCache[[]string] // keyed by directory
 }
 
 // NewMakeHandler creates a make completion handler.
@@ -22,9 +21,12 @@ func NewMakeHandler() *MakeHandler {
 	return &MakeHandler{
 		readFile: readLines,
 		cacheTTL: 2 * time.Second,
-		now:      time.Now,
 	}
 }
+
+func (h *MakeHandler) setReady(n *readyNotifier) { h.targets.ready = n }
+
+var errNoMakefile = errors.New("completion: no makefile")
 
 // Commands returns the commands this handler supports.
 func (h *MakeHandler) Commands() []string {
@@ -39,62 +41,29 @@ func (h *MakeHandler) Complete(ctx context.Context, args []string, current strin
 		return Result{}
 	}
 
-	targets := h.parseTargets(ctx)
-	return prefixFilterItems(targets, current)
+	targets, status := h.parseTargets(ctx)
+	return sourceResult(targets, status, current)
 }
 
-func (h *MakeHandler) parseTargets(ctx context.Context) []string {
-	cacheKey := h.cacheKey()
-	if h.cacheTTL > 0 {
-		if targets, ok := h.cache.get(cacheKey, h.timeNow()); ok {
-			return targets
-		}
+// parseTargets returns the targets of the makefile in the working directory.
+// A missing makefile is remembered like any other failure, for cacheTTL.
+func (h *MakeHandler) parseTargets(ctx context.Context) ([]string, lookupStatus) {
+	dir := defaultGetwd()
+	policy := flightPolicy{
+		ttl:        h.cacheTTL,
+		failureTTL: h.cacheTTL,
+		timeout:    fileSourceTimeout,
+		wait:       sourceWait,
 	}
-
-	// Try Makefile, then GNUmakefile, then makefile
-	for _, name := range []string{"Makefile", "GNUmakefile", "makefile"} {
-		targets, ok := h.parseExistingFile(ctx, name)
-		if !ok {
-			if ctx.Err() != nil {
-				return nil
+	return h.targets.get(ctx, dir, policy, func(context.Context) ([]string, error) {
+		// Try Makefile, then GNUmakefile, then makefile
+		for _, name := range []string{"Makefile", "GNUmakefile", "makefile"} {
+			if lines, err := h.readFile(filepath.Join(dir, name)); err == nil {
+				return h.parseLines(lines), nil
 			}
-			continue
 		}
-		if h.cacheTTL > 0 {
-			h.cache.set(cacheKey, targets, h.timeNow().Add(h.cacheTTL))
-		}
-		return targets
-	}
-	if ctx.Err() != nil {
-		return nil
-	}
-	if h.cacheTTL > 0 {
-		h.cache.set(cacheKey, nil, h.timeNow().Add(h.cacheTTL))
-	}
-	return nil
-}
-
-func (h *MakeHandler) parseExistingFile(ctx context.Context, path string) ([]string, bool) {
-	lines, err := h.reader.read(ctx, h.readFile, path)
-	if err != nil {
-		return nil, false
-	}
-	return h.parseLines(lines), true
-}
-
-func (h *MakeHandler) cacheKey() string {
-	cwd, err := os.Getwd()
-	if err != nil {
-		return ""
-	}
-	return cwd
-}
-
-func (h *MakeHandler) timeNow() time.Time {
-	if h.now != nil {
-		return h.now()
-	}
-	return time.Now()
+		return nil, errNoMakefile
+	})
 }
 
 func (h *MakeHandler) parseFile(path string) []string {

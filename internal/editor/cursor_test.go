@@ -31,7 +31,7 @@ func TestCursor_Selection(t *testing.T) {
 		t.Error("HasSelection() = false, want true")
 	}
 
-	start, end := c.SelectionRange()
+	start, end := c.SelectionRange(NewBuffer())
 	if start.Col != 5 || end.Col != 10 {
 		t.Errorf("SelectionRange() = %+v, %+v, want {0,5}, {0,10}", start, end)
 	}
@@ -43,7 +43,7 @@ func TestCursor_SelectionRange_Backwards(t *testing.T) {
 	c.StartSelection()
 	c.MoveTo(0, 5)
 
-	start, end := c.SelectionRange()
+	start, end := c.SelectionRange(NewBuffer())
 	if start.Col != 5 || end.Col != 10 {
 		t.Errorf("SelectionRange() should normalize: got %+v, %+v", start, end)
 	}

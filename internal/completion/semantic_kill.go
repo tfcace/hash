@@ -3,35 +3,23 @@ package completion
 import (
 	"context"
 	"strings"
-	"sync"
 	"time"
 )
+
+// processListTimeout bounds one ps query.
+const processListTimeout = 2 * time.Second
 
 // KillHandler provides completions for kill and killall commands.
 type KillHandler struct {
 	command       string
 	listProcesses func(ctx context.Context) ([]processInfo, error)
-	cacheMu       sync.Mutex
 	cacheTTL      time.Duration
-	cacheExpires  time.Time
-	cached        []processInfo
-	now           func() time.Time
-
-	inflightMu         sync.Mutex
-	inflight           map[string]*processListCall
-	inflightMaxWaitAge time.Duration
+	processes     flightCache[[]processInfo]
 }
 
 type processInfo struct {
 	PID  string
 	Name string
-}
-
-type processListCall struct {
-	done      chan struct{}
-	started   time.Time
-	processes []processInfo
-	err       error
 }
 
 // NewKillHandler creates a kill/killall completion handler.
@@ -40,9 +28,10 @@ func NewKillHandler(command string) *KillHandler {
 		command:       command,
 		listProcesses: defaultListProcesses,
 		cacheTTL:      time.Second,
-		now:           time.Now,
 	}
 }
+
+func (h *KillHandler) setReady(n *readyNotifier) { h.processes.ready = n }
 
 // Commands returns the commands this handler supports.
 func (h *KillHandler) Commands() []string {
@@ -58,132 +47,38 @@ func (h *KillHandler) Complete(ctx context.Context, args []string, current strin
 		return Result{}
 	}
 
-	processes, err := h.cachedProcesses(ctx)
-	if err != nil {
-		return Result{}
+	policy := flightPolicy{ttl: h.cacheTTL, failureTTL: h.cacheTTL, timeout: processListTimeout, wait: sourceWait}
+	processes, status := h.processes.get(ctx, "processes", policy, func(ctx context.Context) ([]processInfo, error) {
+		list := h.listProcesses
+		if list == nil {
+			list = defaultListProcesses
+		}
+		return list(ctx)
+	})
+	if status == lookupPending || status == lookupFailed {
+		return sourceResult(nil, status, current)
 	}
 
-	var items []Item
+	var result Result
 	seen := make(map[string]bool)
 	for _, p := range processes {
+		item := Item{Value: p.PID, Display: p.PID, Description: p.Name}
 		if h.command == "killall" {
-			if !seen[p.Name] && strings.HasPrefix(p.Name, current) {
-				seen[p.Name] = true
-				items = append(items, Item{
-					Value:   p.Name,
-					Display: p.Name,
-				})
-				if len(items) >= completionItemLimit {
-					break
-				}
-			}
+			item = Item{Value: p.Name, Display: p.Name}
+		}
+		if seen[item.Value] || !strings.HasPrefix(item.Value, current) {
 			continue
 		}
-
-		if !seen[p.PID] && strings.HasPrefix(p.PID, current) {
-			seen[p.PID] = true
-			items = append(items, Item{
-				Value:       p.PID,
-				Display:     p.PID,
-				Description: p.Name,
-			})
-			if len(items) >= completionItemLimit {
-				break
-			}
+		seen[item.Value] = true
+		if !result.add(item) {
+			break
 		}
 	}
-	return Result{Items: items}
-}
-
-func (h *KillHandler) cachedProcesses(ctx context.Context) ([]processInfo, error) {
-	if h.cacheTTL > 0 {
-		h.cacheMu.Lock()
-		if h.timeNow().Before(h.cacheExpires) {
-			processes := append([]processInfo(nil), h.cached...)
-			h.cacheMu.Unlock()
-			return processes, nil
-		}
-		h.cacheMu.Unlock()
-	}
-
-	processes, err := h.lookupProcesses(ctx)
-	if err != nil {
-		return nil, err
-	}
-	if h.cacheTTL > 0 {
-		h.cacheMu.Lock()
-		h.cached = append([]processInfo(nil), processes...)
-		h.cacheExpires = h.timeNow().Add(h.cacheTTL)
-		h.cacheMu.Unlock()
-	}
-	return processes, nil
-}
-
-func (h *KillHandler) lookupProcesses(ctx context.Context) ([]processInfo, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-
-	key := h.command
-	now := time.Now()
-	h.inflightMu.Lock()
-	if call, ok := h.inflight[key]; ok {
-		if !contextReadCallIsStale(call.started, now, h.inflightMaxWaitAge) {
-			h.inflightMu.Unlock()
-			return waitForProcessList(ctx, call)
-		}
-		delete(h.inflight, key)
-	}
-
-	call := &processListCall{done: make(chan struct{}), started: now}
-	if h.inflight == nil {
-		h.inflight = make(map[string]*processListCall)
-	}
-	h.inflight[key] = call
-	h.inflightMu.Unlock()
-
-	go h.finishProcessList(ctx, key, call)
-	return waitForProcessList(ctx, call)
-}
-
-func (h *KillHandler) finishProcessList(ctx context.Context, key string, call *processListCall) {
-	list := h.listProcesses
-	if list == nil {
-		list = defaultListProcesses
-	}
-	processes, err := list(ctx)
-
-	h.inflightMu.Lock()
-	call.processes = processes
-	call.err = err
-	if h.inflight[key] == call {
-		delete(h.inflight, key)
-	}
-	h.inflightMu.Unlock()
-	close(call.done)
-}
-
-func waitForProcessList(ctx context.Context, call *processListCall) ([]processInfo, error) {
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case <-call.done:
-		return append([]processInfo(nil), call.processes...), call.err
-	}
-}
-
-func (h *KillHandler) timeNow() time.Time {
-	if h.now != nil {
-		return h.now()
-	}
-	return time.Now()
+	return result
 }
 
 func defaultListProcesses(ctx context.Context) ([]processInfo, error) {
-	queryCtx, cancel := context.WithTimeout(ctx, vcsQueryTimeout)
-	defer cancel()
-
-	lines, err := runIsolatedCommand(queryCtx, "ps", "-eo", "pid,comm")
+	lines, err := runIsolatedCommand(ctx, "ps", "-eo", "pid,comm")
 	if err != nil {
 		return nil, err
 	}

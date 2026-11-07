@@ -1,170 +1,32 @@
 package shell
 
 import (
-	"context"
 	"testing"
-	"time"
 )
 
-// alwaysReadyPoll reports input available immediately (legacy blocking-read behavior).
-func alwaysReadyPoll(int, time.Duration) (bool, error) { return true, nil }
-
-func TestPermissionDecisionForKey(t *testing.T) {
+func TestPermissionAnswerForKey(t *testing.T) {
 	tests := []struct {
-		name       string
-		key        byte
-		wantAllow  bool
-		wantAlways bool
+		name string
+		key  byte
+		want permissionAnswer
 	}{
-		{name: "allow lowercase y", key: 'y', wantAllow: true, wantAlways: false},
-		{name: "allow uppercase y", key: 'Y', wantAllow: true, wantAlways: false},
-		{name: "deny carriage return", key: '\r', wantAllow: false, wantAlways: false},
-		{name: "deny newline", key: '\n', wantAllow: false, wantAlways: false},
-		{name: "allow always lowercase a", key: 'a', wantAllow: true, wantAlways: true},
-		{name: "allow always uppercase a", key: 'A', wantAllow: true, wantAlways: true},
-		{name: "deny lowercase n", key: 'n', wantAllow: false, wantAlways: false},
-		{name: "deny escape", key: 0x1b, wantAllow: false, wantAlways: false},
-		{name: "deny unknown", key: 'x', wantAllow: false, wantAlways: false},
+		{name: "allow lowercase y", key: 'y', want: permissionAllow},
+		{name: "allow uppercase y", key: 'Y', want: permissionAllow},
+		{name: "deny carriage return", key: '\r', want: permissionDeny},
+		{name: "deny newline", key: '\n', want: permissionDeny},
+		{name: "allow always lowercase a", key: 'a', want: permissionAlwaysAllow},
+		{name: "allow always uppercase a", key: 'A', want: permissionAlwaysAllow},
+		{name: "deny lowercase n", key: 'n', want: permissionDeny},
+		{name: "deny escape", key: 0x1b, want: permissionDeny},
+		{name: "cancel ctrl+c", key: 0x03, want: permissionCancel},
+		{name: "deny unknown", key: 'x', want: permissionDeny},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			gotAllow, gotAlways := permissionDecisionForKey(tt.key)
-			if gotAllow != tt.wantAllow || gotAlways != tt.wantAlways {
-				t.Fatalf(
-					"permissionDecisionForKey(%q) = (allow=%v, always=%v), want (allow=%v, always=%v)",
-					tt.key,
-					gotAllow,
-					gotAlways,
-					tt.wantAllow,
-					tt.wantAlways,
-				)
+			if got := permissionAnswerForKey(tt.key); got != tt.want {
+				t.Fatalf("permissionAnswerForKey(%q) = %v, want %v", tt.key, got, tt.want)
 			}
 		})
-	}
-}
-
-func TestReadSingleKeyWithHooks_SkipsStaleNewlines(t *testing.T) {
-	// Simulate: drain clears buffer, but a stale \n arrives before
-	// the real keypress. readSingleKeyWithHooks should skip the \n
-	// and return the real key.
-	callCount := 0
-	read := func(buf []byte) (int, error) {
-		callCount++
-		switch callCount {
-		case 1:
-			buf[0] = '\n' // stale newline
-		case 2:
-			buf[0] = '\r' // another stale CR
-		default:
-			buf[0] = 'y' // real keypress
-		}
-		return 1, nil
-	}
-
-	drain := func(int) {}
-	sleep := func(time.Duration) {}
-
-	got := readSingleKeyWithHooks(context.Background(), 0, alwaysReadyPoll, read, drain, sleep)
-	if got != 'y' {
-		t.Fatalf("readSingleKeyWithHooks() = %q, want %q", got, 'y')
-	}
-	if callCount != 3 {
-		t.Fatalf("read called %d times, want 3 (2 stale newlines + real key)", callCount)
-	}
-}
-
-func TestReadSingleKeyWithHooks_DrainsLateSubmitNewline(t *testing.T) {
-	var queue []byte
-
-	read := func(buf []byte) (int, error) {
-		if len(queue) == 0 {
-			queue = append(queue, 'y')
-		}
-		buf[0] = queue[0]
-		queue = queue[1:]
-		return 1, nil
-	}
-
-	drainCalls := 0
-	drain := func(int) {
-		drainCalls++
-		queue = nil
-	}
-
-	sleep := func(time.Duration) {
-		queue = append(queue, '\n')
-	}
-
-	got := readSingleKeyWithHooks(context.Background(), 0, alwaysReadyPoll, read, drain, sleep)
-	if got != 'y' {
-		t.Fatalf("readSingleKeyWithHooks() = %q, want %q", got, 'y')
-	}
-	if drainCalls != 2 {
-		t.Fatalf("drain called %d times, want 2", drainCalls)
-	}
-}
-
-func TestReadSingleKeyWithHooks_CanceledContextDenies(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-
-	read := func(buf []byte) (int, error) {
-		t.Fatal("read must not be called after cancellation")
-		return 0, nil
-	}
-	neverReady := func(int, time.Duration) (bool, error) { return false, nil }
-
-	got := readSingleKeyWithHooks(ctx, 0, neverReady, read, func(int) {}, func(time.Duration) {})
-	if got != 'n' {
-		t.Fatalf("readSingleKeyWithHooks() = %q, want 'n' (deny) on canceled context", got)
-	}
-}
-
-func TestReadSingleKeyWithHooks_CancelDuringWaitDenies(t *testing.T) {
-	// The user never presses a key; the turn is canceled (Ctrl+C / timeout)
-	// while the prompt is waiting. The read loop must notice and deny
-	// instead of blocking forever in raw mode.
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	polls := 0
-	poll := func(int, time.Duration) (bool, error) {
-		polls++
-		if polls == 3 {
-			cancel()
-		}
-		return false, nil
-	}
-	read := func(buf []byte) (int, error) {
-		t.Fatal("read must not be called when input never arrives")
-		return 0, nil
-	}
-
-	got := readSingleKeyWithHooks(ctx, 0, poll, read, func(int) {}, func(time.Duration) {})
-	if got != 'n' {
-		t.Fatalf("readSingleKeyWithHooks() = %q, want 'n' (deny) after cancel", got)
-	}
-	if polls < 3 {
-		t.Fatalf("poll called %d times, want at least 3", polls)
-	}
-}
-
-func TestReadSingleKeyWithHooks_EscapeThroughNewlines(t *testing.T) {
-	// ESC should be returned even after stale newlines.
-	callCount := 0
-	read := func(buf []byte) (int, error) {
-		callCount++
-		if callCount == 1 {
-			buf[0] = '\n'
-		} else {
-			buf[0] = 0x1b
-		}
-		return 1, nil
-	}
-
-	got := readSingleKeyWithHooks(context.Background(), 0, alwaysReadyPoll, read, func(int) {}, func(time.Duration) {})
-	if got != 0x1b {
-		t.Fatalf("readSingleKeyWithHooks() = %q, want ESC", got)
 	}
 }

@@ -3,6 +3,7 @@ package parser
 import (
 	"strings"
 
+	"github.com/tfcace/hash/internal/shlex"
 	"github.com/tfcace/hash/internal/trace"
 )
 
@@ -39,18 +40,6 @@ type ParseResult struct {
 	Type        CommandType
 	Command     string // The shell command part (if any)
 	AgentPrompt string // The agent prompt part (if any)
-}
-
-// makeInlineResult creates an inline agent result with tracing.
-func makeInlineResult(cmd, prompt, pattern string, idx int, traced bool) ParseResult {
-	result := ParseResult{
-		Type:        CommandTypeAgentInline,
-		Command:     cmd,
-		AgentPrompt: prompt,
-	}
-	traceDetect(traced, pattern, idx)
-	traceResult(traced, result)
-	return result
 }
 
 // traceDetect emits a detect_agent event. The traced guard lives here so
@@ -105,79 +94,136 @@ func Parse(line string) ParseResult {
 		return result
 	}
 
-	// Pattern 1: ?? prefix (full agent request)
-	if strings.HasPrefix(line, "??") {
-		prompt := strings.TrimSpace(line[2:])
-		result := ParseResult{
-			Type:        CommandTypeAgent,
-			AgentPrompt: prompt,
-		}
-		traceDetect(traced, "prefix", 0)
+	marker, ok := FindAgentMarker(line)
+	if !ok {
+		result := ParseResult{Type: CommandTypeRegular, Command: line}
 		traceResult(traced, result)
 		return result
 	}
 
-	// Pattern 2: pipe to agent (cmd | ?? prompt)
-	// Only match if there's actually a command before the pipe
-	if idx := strings.Index(line, "| ??"); idx > 0 {
-		cmd := strings.TrimSpace(line[:idx])
-		if cmd != "" {
-			prompt := strings.TrimSpace(line[idx+4:])
-			result := ParseResult{
-				Type:        CommandTypeAgentPipe,
-				Command:     cmd,
-				AgentPrompt: prompt,
-			}
-			traceDetect(traced, "pipe_space", idx)
-			traceResult(traced, result)
-			return result
-		}
+	result := ParseResult{Type: marker.Type, AgentPrompt: strings.TrimSpace(line[marker.End:])}
+	switch marker.Type {
+	case CommandTypeAgentPipe:
+		result.Command = strings.TrimSpace(line[:marker.Start])
+	case CommandTypeAgentInline:
+		result.Command = inlineCommand(line, marker.Start)
 	}
-
-	// Also check without space: cmd |?? prompt
-	// Only match if there's actually a command before the pipe
-	if idx := strings.Index(line, "|??"); idx > 0 {
-		cmd := strings.TrimSpace(line[:idx])
-		if cmd != "" {
-			prompt := strings.TrimSpace(line[idx+3:])
-			result := ParseResult{
-				Type:        CommandTypeAgentPipe,
-				Command:     cmd,
-				AgentPrompt: prompt,
-			}
-			traceDetect(traced, "pipe_nospace", idx)
-			traceResult(traced, result)
-			return result
-		}
-	}
-
-	// Pattern 3: inline agent (cmd ?? prompt) - but not at start
-	// Check for " ??" first, then bare "??"
-	if idx := strings.Index(line, " ??"); idx != -1 {
-		cmd := strings.TrimSpace(line[:idx])
-		// The suggestion is appended to cmd verbatim: keep the boundary the
-		// user typed, a trailing = (--flag=??) or the space before ??.
-		if strings.HasSuffix(line[:idx], "=") {
-			cmd = line[:idx]
-		} else if cmd != "" {
-			cmd += " "
-		}
-		prompt := strings.TrimSpace(line[idx+3:])
-		return makeInlineResult(cmd, prompt, "inline_space", idx, traced)
-	}
-
-	// Check for ?? without leading space (like --sort-by=??)
-	if idx := strings.Index(line, "??"); idx > 0 {
-		cmd := line[:idx]
-		prompt := strings.TrimSpace(line[idx+2:])
-		return makeInlineResult(cmd, prompt, "inline_nospace", idx, traced)
-	}
-
-	// Regular command
-	result := ParseResult{
-		Type:    CommandTypeRegular,
-		Command: line,
-	}
+	traceDetect(traced, marker.Type.String(), marker.Start)
 	traceResult(traced, result)
 	return result
+}
+
+// inlineCommand is the command an inline suggestion is appended to verbatim,
+// so it keeps the boundary the user typed: everything up to a glued ??
+// (--flag=??, x=??), or up to the blank before ?? with that one blank kept.
+// The exception is a flag's = (--flag= ??), which absorbs the blank so the
+// fill becomes the flag's value; after == or an empty assignment (FOO= ??)
+// the blank is a word boundary.
+func inlineCommand(line string, at int) string {
+	before := line[:at]
+	trimmed := strings.TrimRight(before, " \t")
+	if trimmed == before || isFlagAssignment(lastWord(trimmed)) {
+		return trimmed
+	}
+	return trimmed + line[at-1:at]
+}
+
+// isFlagAssignment reports whether word is a flag awaiting its value, as in
+// --format= or -o=.
+func isFlagAssignment(word string) bool {
+	return strings.HasPrefix(word, "-") && strings.HasSuffix(word, "=") && !strings.HasSuffix(word, "==")
+}
+
+func lastWord(s string) string {
+	return s[strings.LastIndexAny(s, " \t")+1:]
+}
+
+// Marker is an unquoted ?? that hands a line to the agent.
+type Marker struct {
+	Type  CommandType // CommandTypeAgent, CommandTypeAgentPipe or CommandTypeAgentInline
+	Start int         // byte offset of the ?? (of the | for a pipe)
+	End   int         // byte offset just past the ??
+}
+
+// FindAgentMarker finds the ?? that makes line an agent request, ignoring ??
+// inside quotes, after a backslash, in a comment or inside a substitution.
+// Offsets are into line as given; leading blanks are skipped.
+//
+//   - ?? at the start of the line: CommandTypeAgent.
+//   - | (not ||) followed by ??: CommandTypeAgentPipe; a command must precede it.
+//   - ?? as a word of its own after = or whitespace: CommandTypeAgentInline.
+//     After whitespace it also needs a prompt, so a bare ?? argument (ls ??)
+//     stays a glob; --flag=?? needs none. Everything after the ?? is the
+//     prompt (cp ?? /tmp/ asks with "/tmp/"), and after a command separator
+//     (make; ?? why, a || ?? b) the agent fills the next command.
+//
+// A pipe marker anywhere wins over an earlier inline one, so `cmd ?? x | ?? y`
+// pipes. Only the inline marker must be a word of its own: ?? glued to other
+// characters there (really??, ls ??.go, a??b, ls ???) is a glob. At the start
+// of the line and after | the ?? marks even when text follows it directly
+// (??? why asks "? why", ls | ??.go asks ".go").
+func FindAgentMarker(line string) (Marker, bool) {
+	start := len(line) - len(strings.TrimLeft(line, " \t"))
+	if strings.HasPrefix(line[start:], "??") {
+		return Marker{Type: CommandTypeAgent, Start: start, End: start + 2}, true
+	}
+
+	var inline Marker
+	found := false
+	var lex shlex.Lexer
+	prevCode := false // line[i-1] is shell code at the top level
+	for i := 0; i < len(line); i++ {
+		code := lex.Step(line[i]) == shlex.Code && lex.TopLevel()
+		switch {
+		case !code:
+		case line[i] == '|':
+			if m, ok := pipeMarker(line, i, prevCode); ok {
+				return m, true
+			}
+		case line[i] == '?' && !found:
+			inline, found = inlineMarker(line, i, prevCode)
+		}
+		prevCode = code
+	}
+	return inline, found
+}
+
+// pipeMarker matches `| ??` or `|??` at i, where line[i] == '|' is code and
+// prevCode reports whether line[i-1] is.
+func pipeMarker(line string, i int, prevCode bool) (Marker, bool) {
+	if (prevCode && line[i-1] == '|') || (i+1 < len(line) && line[i+1] == '|') {
+		return Marker{}, false // ||
+	}
+	j := i + 1
+	for j < len(line) && isBlank(line[j]) {
+		j++
+	}
+	if !strings.HasPrefix(line[j:], "??") || strings.TrimSpace(line[:i]) == "" {
+		return Marker{}, false
+	}
+	return Marker{Type: CommandTypeAgentPipe, Start: i, End: j + 2}, true
+}
+
+// inlineMarker matches a ?? word at i, where line[i] == '?' is code and
+// prevCode reports whether line[i-1] is: an escaped blank does not end a
+// word, while = is the same character escaped or not.
+func inlineMarker(line string, i int, prevCode bool) (Marker, bool) {
+	if i == 0 || !strings.HasPrefix(line[i:], "??") {
+		return Marker{}, false
+	}
+	end := i + 2
+	if end < len(line) && !isBlank(line[end]) {
+		return Marker{}, false // ??? or ??.go
+	}
+	switch prev := line[i-1]; {
+	case prev == '=':
+		return Marker{Type: CommandTypeAgentInline, Start: i, End: end}, true
+	case prevCode && isBlank(prev) && strings.TrimSpace(line[end:]) != "":
+		return Marker{Type: CommandTypeAgentInline, Start: i, End: end}, true
+	}
+	return Marker{}, false
+}
+
+func isBlank(c byte) bool {
+	return c == ' ' || c == '\t'
 }

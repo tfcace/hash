@@ -3,17 +3,21 @@ package executor
 import (
 	"bytes"
 	"context"
+	"errors"
+	"golang.org/x/sys/unix"
 	"io"
 	"os"
 	osexec "os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
-	"syscall"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/creack/pty"
 	"github.com/tfcace/hash/internal/version"
+	"mvdan.cc/sh/v3/interp"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -547,44 +551,6 @@ func writeExecutableScript(path, content string) error {
 	return os.WriteFile(path, []byte(content), 0o755) //nolint:gosec // G306: test executable
 }
 
-func TestExecutor_SyncRunnerDir(t *testing.T) {
-	exec := New()
-	var stdout, stderr bytes.Buffer
-
-	// Initialize the runner by running a command
-	_, err := exec.Execute(context.Background(), "pwd", &stdout, &stderr)
-	if err != nil {
-		t.Fatalf("initial pwd failed: %v", err)
-	}
-	initialDir := strings.TrimSpace(stdout.String())
-
-	// Change directory via os.Chdir (simulating builtin cd)
-	tmpDir := t.TempDir()
-	// Resolve symlinks for comparison (macOS has /var -> /private/var)
-	tmpDirResolved, _ := filepath.EvalSymlinks(tmpDir)
-	if err := os.Chdir(tmpDir); err != nil {
-		t.Fatalf("os.Chdir failed: %v", err)
-	}
-	defer os.Chdir(initialDir) // Restore
-
-	// Without SyncRunnerDir, the runner would still be in initialDir
-	// Call SyncRunnerDir to sync the runner's directory
-	exec.SyncRunnerDir()
-
-	// Now pwd should show the new directory
-	stdout.Reset()
-	_, err = exec.Execute(context.Background(), "pwd", &stdout, &stderr)
-	if err != nil {
-		t.Fatalf("second pwd failed: %v", err)
-	}
-
-	newDir := strings.TrimSpace(stdout.String())
-	newDirResolved, _ := filepath.EvalSymlinks(newDir)
-	if newDirResolved != tmpDirResolved {
-		t.Errorf("SyncRunnerDir did not update runner dir: got %q, want %q", newDir, tmpDir)
-	}
-}
-
 func TestExecutor_CdDoubleDash(t *testing.T) {
 	exec := New()
 	ctx := context.Background()
@@ -613,8 +579,9 @@ z ` + tmpDir + " && pwd"},
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// Reset to original directory
-			os.Chdir(origDir) //nolint:errcheck
-			exec.SyncRunnerDir()
+			if _, err := exec.Execute(ctx, "cd "+shellQuote(origDir), io.Discard, io.Discard); err != nil {
+				t.Fatal(err)
+			}
 			stdout.Reset()
 			stderr.Reset()
 
@@ -676,28 +643,6 @@ func TestExecutor_FunctionWithArgs(t *testing.T) {
 	result := strings.TrimSpace(stdout.String())
 	if result != "Hello, World!" {
 		t.Errorf("Expected 'Hello, World!', got: %q", result)
-	}
-}
-
-func TestExecutor_Reset(t *testing.T) {
-	exec := New()
-	ctx := context.Background()
-	var stdout bytes.Buffer
-
-	// Define a function
-	_, err := exec.Execute(ctx, `testfunc() { echo "exists"; }`, &stdout, nil)
-	if err != nil {
-		t.Fatalf("Error defining function: %v", err)
-	}
-	stdout.Reset()
-
-	// Reset the executor
-	exec.Reset()
-
-	// Try to call the function - should fail now
-	result, _ := exec.Execute(ctx, `testfunc`, &stdout, nil)
-	if result.ExitCode == 0 {
-		t.Error("Expected function to not exist after Reset()")
 	}
 }
 
@@ -897,8 +842,8 @@ ${(%):-%n}
 		t.Fatalf("failed to create zsh file: %v", err)
 	}
 
-	// Source should silently skip unparseable content (no error)
-	_, err := exec.Execute(ctx, "source "+zshFile, &stdout, &stderr)
+	// In a startup file, source silently skips unparseable content (no error)
+	_, err := exec.ExecuteStartup(ctx, "", "", "source "+zshFile, &stdout, &stderr)
 	if err != nil {
 		t.Fatalf("source should not error on unparseable zsh file: %v", err)
 	}
@@ -924,8 +869,8 @@ typeset -ag precmd_functions
 precmd_functions=(_direnv_hook $precmd_functions)
 `
 
-	// Eval should silently skip unparseable content
-	_, err := exec.Execute(ctx, `eval '`+zshHookContent+`'`, &stdout, &stderr)
+	// In a startup file, eval silently skips unparseable content
+	_, err := exec.ExecuteStartup(ctx, "", "", `eval '`+zshHookContent+`'`, &stdout, &stderr)
 	if err != nil {
 		t.Fatalf("eval should not error on unparseable zsh content: %v", err)
 	}
@@ -948,7 +893,7 @@ func TestExecutor_EvalZoxideHook_GracefulSkip(t *testing.T) {
 }
 `
 
-	_, err := exec.Execute(ctx, `eval '`+zoxideContent+`'`, &stdout, &stderr)
+	_, err := exec.ExecuteStartup(ctx, "", "", `eval '`+zoxideContent+`'`, &stdout, &stderr) // as in an rc file
 	if err != nil {
 		t.Fatalf("eval should not error on zoxide zsh hook: %v", err)
 	}
@@ -1334,13 +1279,15 @@ fi
 func TestExecutor_StatementRecoveryDoesNotPrintUnsupportedNoise(t *testing.T) {
 	exec := New()
 	var stderr bytes.Buffer
-	exec.switchStderr.Set(&stderr)
 	if err := exec.initRunner(); err != nil {
 		t.Fatalf("initRunner error = %v", err)
 	}
+	if err := interp.StdIO(nil, io.Discard, &stderr)(exec.runner); err != nil {
+		t.Fatal(err)
+	}
 
 	prog := &syntax.File{Stmts: []*syntax.Stmt{nil}}
-	if err := exec.runStatementsWithRecovery(context.Background(), prog, "test.zsh"); err != nil {
+	if err := runStatementsWithRecovery(context.Background(), exec.runner, prog, "test.zsh"); err != nil {
 		t.Fatalf("runStatementsWithRecovery error = %v", err)
 	}
 	if strings.Contains(stderr.String(), "unsupported") || strings.Contains(stderr.String(), "skipping statement") {
@@ -1587,6 +1534,22 @@ func TestExecutor_UnsetRemovesFunction(t *testing.T) {
 // the prompt. It returns what the command wrote to stdout.
 func ttyShell(t *testing.T, line string) string {
 	t.Helper()
+	return ttyShellOn(t, New(), line)
+}
+
+// ttyShellOn is ttyShell with a given executor, in the interactive shell's
+// terminal mode (its escape writers stay as the test set them).
+func ttyShellOn(t *testing.T, e *Executor, line string) string {
+	t.Helper()
+	out, _ := ttyShellAt(t, e, line)
+	return out
+}
+
+// ttyShellAt is ttyShellOn that also names the terminal the line's output
+// went to.
+func ttyShellAt(t *testing.T, e *Executor, line string) (out, outTerminal string) {
+	t.Helper()
+	e.terminal = terminalInteractive
 	inMaster, inSlave, err := pty.Open()
 	if err != nil {
 		t.Skipf("pty unavailable: %v", err)
@@ -1599,30 +1562,62 @@ func ttyShell(t *testing.T, line string) string {
 	}
 	defer outMaster.Close()
 	defer outSlave.Close()
-	go io.Copy(io.Discard, outMaster) //nolint:errcheck // drain the terminal
+	shown := &cappedTerminal{}
+	go io.Copy(shown, outMaster) //nolint:errcheck // what the terminal shows
 
 	// A real session's stdin is fd 0 as a plain blocking file, without read
 	// deadlines; the poller-backed file pty.Open returns accepts a deadline
 	// on darwin and then blocks anyway. Wrap a duplicate of the fd the way
 	// fd 0 is: wrapping the same fd twice would let one File's finalizer
 	// close a number a later test has reused.
-	dup, err := syscall.Dup(int(inSlave.Fd()))
+	dup, err := unix.FcntlInt(inSlave.Fd(), unix.F_DUPFD_CLOEXEC, 0) // closed on exec: tests run side by side
 	if err != nil {
 		t.Fatalf("dup: %v", err)
 	}
 	stdin := os.NewFile(uintptr(dup), "stdin")
 	defer stdin.Close()
-	origStdin := os.Stdin
-	os.Stdin = stdin
-	defer func() { os.Stdin = origStdin }()
+	e.stdin = stdin
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	result, err := New().Execute(ctx, line, outSlave, io.Discard)
-	if err != nil {
+	if _, err := e.Execute(ctx, line, outSlave, io.Discard); err != nil {
 		t.Fatalf("Execute(%q) error = %v", line, err)
 	}
-	return strings.ReplaceAll(result.CapturedOutput, "\r", "")
+	return strings.ReplaceAll(shown.settled(), "\r", ""), outSlave.Name()
+}
+
+// cappedTerminal is what a test's terminal showed.
+type cappedTerminal struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (c *cappedTerminal) Write(p []byte) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.buf.Len() > 1<<20 {
+		return 0, errors.New("terminal output over the test's cap")
+	}
+	return c.buf.Write(p)
+}
+
+// settled is what the terminal showed once 100ms passed with nothing new
+// (output on its way from the terminal's driver), at most a second.
+func (c *cappedTerminal) settled() string {
+	last := -1
+	for range 10 {
+		time.Sleep(100 * time.Millisecond)
+		c.mu.Lock()
+		n := c.buf.Len()
+		c.mu.Unlock()
+		if n == last {
+			break
+		}
+		last = n
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.buf.String()
 }
 
 const ttyProbe = `sh -c '[ -t 1 ] && echo out-tty || echo out-notty; [ -t 2 ] && echo err-tty >&2 || echo err-notty >&2'`
@@ -1630,6 +1625,7 @@ const ttyProbe = `sh -c '[ -t 1 ] && echo out-tty || echo out-notty; [ -t 2 ] &&
 // Whether a command may animate depends on where its output goes, as in
 // any shell: `< file` changes only its input.
 func TestExecute_StdinRedirectKeepsTerminalOutput(t *testing.T) {
+	t.Parallel()
 	if got := ttyShell(t, ttyProbe+" < /dev/null"); !strings.Contains(got, "out-tty") {
 		t.Errorf("prog < file: stdout should be a terminal, got %q", got)
 	}
@@ -1638,6 +1634,7 @@ func TestExecute_StdinRedirectKeepsTerminalOutput(t *testing.T) {
 // `> file` must not hand the command a terminal: it would write spinner
 // frames and escape codes into the file.
 func TestExecute_StdoutRedirectIsNotATerminal(t *testing.T) {
+	t.Parallel()
 	out := filepath.Join(t.TempDir(), "out.txt")
 	ttyShell(t, ttyProbe+" > "+out+" 2>/dev/null")
 	data, _ := os.ReadFile(out)
@@ -1648,6 +1645,7 @@ func TestExecute_StdoutRedirectIsNotATerminal(t *testing.T) {
 
 // `2> file` must reach the file, while stdout stays on the terminal.
 func TestExecute_StderrRedirectReachesFile(t *testing.T) {
+	t.Parallel()
 	errFile := filepath.Join(t.TempDir(), "err.txt")
 	got := ttyShell(t, ttyProbe+" 2> "+errFile)
 	data, _ := os.ReadFile(errFile)
@@ -1656,5 +1654,27 @@ func TestExecute_StderrRedirectReachesFile(t *testing.T) {
 	}
 	if !strings.Contains(got, "out-tty") || strings.Contains(got, "err-") {
 		t.Errorf("stdout = %q, want out-tty and no stderr", got)
+	}
+}
+
+// Functions, for completion, is the shell's functions, as declare -F
+// lists them: not one a subshell, a substitution or a branch that did not
+// run defined, nor one unset since (g); and one eval defined from a
+// variable's text.
+func TestExecutor_FunctionsAreTheShells(t *testing.T) {
+	t.Chdir(t.TempDir())
+	e := New()
+	for _, line := range []string{
+		`g() { :; }; unset g; ( h() { :; } ); x=$(k() { :; }); if false; then m() { :; }; fi`,
+		`src='fa() { :; }'; eval "$src"; kept() { :; }`,
+	} {
+		if _, err := e.Execute(context.Background(), line, io.Discard, io.Discard); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got := e.Functions()
+	slices.Sort(got)
+	if want := []string{"fa", "kept"}; !slices.Equal(got, want) {
+		t.Errorf("Functions() = %v, want %v", got, want)
 	}
 }

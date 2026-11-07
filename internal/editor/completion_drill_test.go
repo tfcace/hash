@@ -6,210 +6,11 @@ import (
 	"testing"
 )
 
-// TestCompletionDrillStackPushPop verifies the drill state can be pushed and popped.
-func TestCompletionDrillStackPushPop(t *testing.T) {
-	e := &Editor{}
-
-	// Initially empty
-	if len(e.completionDrillStack) != 0 {
-		t.Fatalf("expected empty drill stack, got %d", len(e.completionDrillStack))
-	}
-
-	// Push a state
-	e.completionDrillStack = append(e.completionDrillStack, completionDrillState{
-		prefix: "src/",
-		filter: "ma",
-		index:  2,
-	})
-
-	if len(e.completionDrillStack) != 1 {
-		t.Fatalf("expected 1 entry after push, got %d", len(e.completionDrillStack))
-	}
-
-	// Push another state
-	e.completionDrillStack = append(e.completionDrillStack, completionDrillState{
-		prefix: "src/main/",
-		filter: "",
-		index:  0,
-	})
-
-	if len(e.completionDrillStack) != 2 {
-		t.Fatalf("expected 2 entries after second push, got %d", len(e.completionDrillStack))
-	}
-
-	// Pop the top
-	top := e.completionDrillStack[len(e.completionDrillStack)-1]
-	e.completionDrillStack = e.completionDrillStack[:len(e.completionDrillStack)-1]
-
-	if top.prefix != "src/main/" {
-		t.Errorf("expected popped prefix %q, got %q", "src/main/", top.prefix)
-	}
-	if top.filter != "" {
-		t.Errorf("expected popped filter %q, got %q", "", top.filter)
-	}
-	if top.index != 0 {
-		t.Errorf("expected popped index 0, got %d", top.index)
-	}
-
-	// Pop the remaining entry
-	top = e.completionDrillStack[len(e.completionDrillStack)-1]
-	e.completionDrillStack = e.completionDrillStack[:len(e.completionDrillStack)-1]
-
-	if top.prefix != "src/" {
-		t.Errorf("expected popped prefix %q, got %q", "src/", top.prefix)
-	}
-	if top.filter != "ma" {
-		t.Errorf("expected popped filter %q, got %q", "ma", top.filter)
-	}
-	if top.index != 2 {
-		t.Errorf("expected popped index 2, got %d", top.index)
-	}
-
-	if len(e.completionDrillStack) != 0 {
-		t.Fatalf("expected empty drill stack after popping all, got %d", len(e.completionDrillStack))
-	}
-}
-
-// TestCompletionDrillStateFields verifies the drill state struct fields.
-func TestCompletionDrillStateFields(t *testing.T) {
-	state := completionDrillState{
-		prefix: "internal/editor/",
-		filter: "buf",
-		index:  5,
-	}
-
-	if state.prefix != "internal/editor/" {
-		t.Errorf("prefix = %q, want %q", state.prefix, "internal/editor/")
-	}
-	if state.filter != "buf" {
-		t.Errorf("filter = %q, want %q", state.filter, "buf")
-	}
-	if state.index != 5 {
-		t.Errorf("index = %d, want %d", state.index, 5)
-	}
-}
-
-// TestFilterCompletionItems tests filtering with a prefix.
-func TestFilterCompletionItems(t *testing.T) {
-	items := []Completion{
-		{Text: "internal/", Description: "directory"},
-		{Text: "interface.go", Description: "file"},
-		{Text: "init.go", Description: "file"},
-		{Text: "README.md", Description: "file"},
-	}
-
-	t.Run("filter_int_matches_two", func(t *testing.T) {
-		result := filterCompletionItems(items, "int")
-		if len(result) != 2 {
-			t.Fatalf("expected 2 matches for 'int', got %d", len(result))
-		}
-		expected := []string{"internal/", "interface.go"}
-		for i, want := range expected {
-			if result[i].Text != want {
-				t.Errorf("result[%d].Text = %q, want %q", i, result[i].Text, want)
-			}
-		}
-	})
-
-	t.Run("filter_in_matches_three", func(t *testing.T) {
-		result := filterCompletionItems(items, "in")
-		if len(result) != 3 {
-			t.Fatalf("expected 3 matches for 'in', got %d", len(result))
-		}
-		expected := []string{"internal/", "interface.go", "init.go"}
-		for i, want := range expected {
-			if result[i].Text != want {
-				t.Errorf("result[%d].Text = %q, want %q", i, result[i].Text, want)
-			}
-		}
-	})
-
-	t.Run("filter_read_case_insensitive", func(t *testing.T) {
-		result := filterCompletionItems(items, "read")
-		if len(result) != 1 {
-			t.Fatalf("expected 1 match for 'read', got %d", len(result))
-		}
-		if result[0].Text != "README.md" {
-			t.Errorf("result[0].Text = %q, want %q", result[0].Text, "README.md")
-		}
-	})
-
-	t.Run("empty_filter_returns_all", func(t *testing.T) {
-		result := filterCompletionItems(items, "")
-		if len(result) != len(items) {
-			t.Fatalf("expected %d items for empty filter, got %d", len(items), len(result))
-		}
-		for i, item := range items {
-			if result[i].Text != item.Text {
-				t.Errorf("result[%d].Text = %q, want %q", i, result[i].Text, item.Text)
-			}
-		}
-	})
-
-	t.Run("no_match_returns_nil", func(t *testing.T) {
-		result := filterCompletionItems(items, "xyz")
-		if len(result) != 0 {
-			t.Fatalf("expected 0 matches for 'xyz', got %d", len(result))
-		}
-	})
-}
-
-// TestFilteredCompletionItems tests the Editor method that combines items with filter.
-func TestFilteredCompletionItems(t *testing.T) {
-	e := &Editor{}
-	e.completionItems = []Completion{
-		{Text: "alpha", Description: "first"},
-		{Text: "beta", Description: "second"},
-		{Text: "alpine", Description: "third"},
-	}
-
-	t.Run("no_filter", func(t *testing.T) {
-		e.completionFilter = ""
-		result := e.filteredCompletionItems()
-		if len(result) != 3 {
-			t.Fatalf("expected 3 items, got %d", len(result))
-		}
-	})
-
-	t.Run("filter_al", func(t *testing.T) {
-		e.completionFilter = "al"
-		result := e.filteredCompletionItems()
-		if len(result) != 2 {
-			t.Fatalf("expected 2 items for 'al', got %d", len(result))
-		}
-		if result[0].Text != "alpha" {
-			t.Errorf("result[0].Text = %q, want %q", result[0].Text, "alpha")
-		}
-		if result[1].Text != "alpine" {
-			t.Errorf("result[1].Text = %q, want %q", result[1].Text, "alpine")
-		}
-	})
-
-	t.Run("case_insensitive", func(t *testing.T) {
-		e.completionFilter = "AL"
-		result := e.filteredCompletionItems()
-		if len(result) != 2 {
-			t.Fatalf("expected 2 items for 'AL', got %d", len(result))
-		}
-	})
-
-	t.Run("filter_b", func(t *testing.T) {
-		e.completionFilter = "b"
-		result := e.filteredCompletionItems()
-		if len(result) != 1 {
-			t.Fatalf("expected 1 item for 'b', got %d", len(result))
-		}
-		if result[0].Text != "beta" {
-			t.Errorf("result[0].Text = %q, want %q", result[0].Text, "beta")
-		}
-	})
-}
-
 func newTestDisplay() *Display {
 	return &Display{
-		out:    io.Discard,
-		width:  80,
-		height: 24,
+		out:   io.Discard,
+		width: 80,
+		view:  viewport{height: 24},
 	}
 }
 
@@ -219,17 +20,14 @@ func newTestEditorForCompletion(items []Completion) *Editor {
 		state:   NewEditorState(),
 		mode:    NewInsertMode(),
 	}
-	e.completionActive = true
-	e.completionItems = items
-	e.completionIndex = 0
-	e.completionFilter = ""
+	e.menu = &completionMenu{items: items}
 	return e
 }
 
 // TestDrillIntoDirectory verifies drilling into a directory replaces the buffer,
 // pushes state onto the drill stack, and re-queries completions.
 func TestDrillIntoDirectory(t *testing.T) {
-	// Set up a CompleteFunc that returns full-path items (like the real adapter)
+	// Set up a completer that returns full-path items (like the real adapter)
 	completeFunc := func(line string, pos int) []Completion {
 		if pos >= 12 && line[:12] == "ls internal/" {
 			return []Completion{
@@ -248,17 +46,16 @@ func TestDrillIntoDirectory(t *testing.T) {
 	e := &Editor{
 		display: newTestDisplay(),
 		state:   NewEditorState(),
-		config:  Config{CompleteFunc: completeFunc},
+		config:  Config{CompleteOutcomeFunc: itemsOnly(completeFunc)},
 	}
 	// Simulate "ls int" with cursor at col 6, completion started at col 3
 	e.state.Buffer = NewBufferFromString("ls int")
 	e.state.Cursor.MoveTo(0, 6)
-	e.completionActive = true
-	e.completionCol = 3
-	e.completionPrefix = "int"
-	e.completionFilter = ""
-	e.completionIndex = 0
-	e.completionItems = []Completion{
+	e.menu = &completionMenu{}
+	e.menu.from = 3
+	e.menu.word = "int"
+	e.menu.index = 0
+	e.menu.items = []Completion{
 		{Text: "internal/", Description: "directory"},
 		{Text: "cmd/", Description: "directory"},
 		{Text: "go.mod", Description: "file"},
@@ -278,35 +75,30 @@ func TestDrillIntoDirectory(t *testing.T) {
 	}
 
 	// Verify drill stack has 1 entry
-	if len(e.completionDrillStack) != 1 {
-		t.Fatalf("drill stack length = %d, want 1", len(e.completionDrillStack))
+	if len(e.menu.drill) != 1 {
+		t.Fatalf("drill stack length = %d, want 1", len(e.menu.drill))
 	}
-	if e.completionDrillStack[0].prefix != "int" {
-		t.Errorf("drill stack prefix = %q, want %q", e.completionDrillStack[0].prefix, "int")
+	if e.menu.drill[0].word != "int" {
+		t.Errorf("drill stack prefix = %q, want %q", e.menu.drill[0].word, "int")
 	}
 
 	// Verify new completion items from re-query
-	if len(e.completionItems) != 3 {
-		t.Fatalf("completion items = %d, want 3", len(e.completionItems))
+	if len(e.menu.items) != 3 {
+		t.Fatalf("completion items = %d, want 3", len(e.menu.items))
 	}
-	if e.completionItems[0].Text != "internal/editor/" {
-		t.Errorf("first item = %q, want %q", e.completionItems[0].Text, "internal/editor/")
-	}
-
-	// Verify filter is reset
-	if e.completionFilter != "" {
-		t.Errorf("filter = %q, want empty", e.completionFilter)
+	if e.menu.items[0].Text != "internal/editor/" {
+		t.Errorf("first item = %q, want %q", e.menu.items[0].Text, "internal/editor/")
 	}
 
 	// Verify index is reset
-	if e.completionIndex != 0 {
-		t.Errorf("index = %d, want 0", e.completionIndex)
+	if e.menu.index != 0 {
+		t.Errorf("index = %d, want 0", e.menu.index)
 	}
 }
 
 // TestDrillUp verifies drilling up restores parent directory state.
 func TestDrillUp(t *testing.T) {
-	// Set up a CompleteFunc that returns root-level items
+	// Set up a completer that returns root-level items
 	completeFunc := func(line string, pos int) []Completion {
 		return []Completion{
 			{Text: "internal/", Description: "directory"},
@@ -318,74 +110,71 @@ func TestDrillUp(t *testing.T) {
 	e := &Editor{
 		display: newTestDisplay(),
 		state:   NewEditorState(),
-		config:  Config{CompleteFunc: completeFunc},
+		config:  Config{CompleteOutcomeFunc: itemsOnly(completeFunc)},
 	}
 	// Simulate being drilled into "internal/" with buffer "ls internal/"
-	// completionCol points to word start (3), items have full paths
+	// menu.from points to word start (3), items have full paths
 	e.state.Buffer = NewBufferFromString("ls internal/")
 	e.state.Cursor.MoveTo(0, 12)
-	e.completionActive = true
-	e.completionCol = 3 // Word start (where "internal/" begins)
-	e.completionPrefix = "internal/"
-	e.completionFilter = ""
-	e.completionIndex = 1
-	e.completionItems = []Completion{
+	e.menu = &completionMenu{}
+	e.menu.from = 3 // Word start (where "internal/" begins)
+	e.menu.word = "internal/"
+	e.menu.index = 1
+	e.menu.items = []Completion{
 		{Text: "internal/editor/", Description: "directory"},
 		{Text: "internal/parser/", Description: "directory"},
 		{Text: "internal/shell/", Description: "directory"},
 	}
 	// The drill stack stores the parent state, including the col before drilling
-	e.completionDrillStack = []completionDrillState{
-		{prefix: "int", filter: "in", index: 0, col: 3},
+	e.menu.drill = []completionLevel{
+		{word: "int", index: 0, from: 3},
 	}
 
 	// Drill up
 	e.drillUp()
 
-	// Verify buffer restored to parent: "internal/" segment removed from col 3 onwards
-	if got := e.state.Buffer.Content(); got != "ls " {
-		t.Errorf("buffer = %q, want %q", got, "ls ")
+	// Verify buffer restored to parent: the word is back to what it was
+	// before the drill
+	if got := e.state.Buffer.Content(); got != "ls int" {
+		t.Errorf("buffer = %q, want %q", got, "ls int")
 	}
 
-	// Verify cursor position at restored col
-	if e.state.Cursor.Pos.Col != 3 {
-		t.Errorf("cursor col = %d, want 3", e.state.Cursor.Pos.Col)
+	// Verify cursor position at the end of the restored word
+	if e.state.Cursor.Pos.Col != 6 {
+		t.Errorf("cursor col = %d, want 6", e.state.Cursor.Pos.Col)
 	}
 
 	// Verify drill stack is empty
-	if len(e.completionDrillStack) != 0 {
-		t.Errorf("drill stack length = %d, want 0", len(e.completionDrillStack))
+	if len(e.menu.drill) != 0 {
+		t.Errorf("drill stack length = %d, want 0", len(e.menu.drill))
 	}
 
-	// Verify completionCol restored
-	if e.completionCol != 3 {
-		t.Errorf("completionCol = %d, want 3", e.completionCol)
+	// Verify menu.from restored
+	if e.menu.from != 3 {
+		t.Errorf("menu.from = %d, want 3", e.menu.from)
 	}
 
 	// Verify items re-queried for parent
-	if len(e.completionItems) != 3 {
-		t.Fatalf("completion items = %d, want 3", len(e.completionItems))
+	if len(e.menu.items) != 3 {
+		t.Fatalf("completion items = %d, want 3", len(e.menu.items))
 	}
-	if e.completionItems[0].Text != "internal/" {
-		t.Errorf("first item = %q, want %q", e.completionItems[0].Text, "internal/")
+	if e.menu.items[0].Text != "internal/" {
+		t.Errorf("first item = %q, want %q", e.menu.items[0].Text, "internal/")
 	}
 
-	// Verify filter and index restored
-	if e.completionFilter != "in" {
-		t.Errorf("filter = %q, want %q", e.completionFilter, "in")
+	// Verify index and word restored
+	if e.menu.index != 0 {
+		t.Errorf("index = %d, want 0", e.menu.index)
 	}
-	if e.completionIndex != 0 {
-		t.Errorf("index = %d, want 0", e.completionIndex)
-	}
-	if e.completionPrefix != "int" {
-		t.Errorf("prefix = %q, want %q", e.completionPrefix, "int")
+	if e.menu.word != "int" {
+		t.Errorf("prefix = %q, want %q", e.menu.word, "int")
 	}
 }
 
 // TestAutodrillSingleChild verifies that when a directory contains only
 // one subdirectory, drilling auto-continues recursively.
 func TestAutodrillSingleChild(t *testing.T) {
-	// CompleteFunc returns single-child directories for two levels, then multiple items
+	// The completer returns single-child directories for two levels, then multiple items
 	completeFunc := func(line string, pos int) []Completion {
 		switch {
 		case pos >= 15 && line[:15] == "ls src/main/go/":
@@ -415,16 +204,15 @@ func TestAutodrillSingleChild(t *testing.T) {
 	e := &Editor{
 		display: newTestDisplay(),
 		state:   NewEditorState(),
-		config:  Config{CompleteFunc: completeFunc},
+		config:  Config{CompleteOutcomeFunc: itemsOnly(completeFunc)},
 	}
 	e.state.Buffer = NewBufferFromString("ls s")
 	e.state.Cursor.MoveTo(0, 4)
-	e.completionActive = true
-	e.completionCol = 3
-	e.completionPrefix = "s"
-	e.completionFilter = ""
-	e.completionIndex = 0
-	e.completionItems = []Completion{
+	e.menu = &completionMenu{}
+	e.menu.from = 3
+	e.menu.word = "s"
+	e.menu.index = 0
+	e.menu.items = []Completion{
 		{Text: "src/", Description: "directory"},
 		{Text: "README.md", Description: "file"},
 	}
@@ -434,8 +222,8 @@ func TestAutodrillSingleChild(t *testing.T) {
 
 	// Should have auto-drilled through src/ -> main/ -> go/
 	// Drill stack should have 3 entries (one for each level: original, src/, main/)
-	if len(e.completionDrillStack) != 3 {
-		t.Fatalf("drill stack length = %d, want 3 (auto-drilled through single-child dirs)", len(e.completionDrillStack))
+	if len(e.menu.drill) != 3 {
+		t.Fatalf("drill stack length = %d, want 3 (auto-drilled through single-child dirs)", len(e.menu.drill))
 	}
 
 	// Buffer should show the fully drilled path
@@ -444,11 +232,11 @@ func TestAutodrillSingleChild(t *testing.T) {
 	}
 
 	// Final items should be the files in go/
-	if len(e.completionItems) != 2 {
-		t.Fatalf("completion items = %d, want 2", len(e.completionItems))
+	if len(e.menu.items) != 2 {
+		t.Fatalf("completion items = %d, want 2", len(e.menu.items))
 	}
-	if e.completionItems[0].Text != "src/main/go/handler.go" {
-		t.Errorf("first item = %q, want %q", e.completionItems[0].Text, "src/main/go/handler.go")
+	if e.menu.items[0].Text != "src/main/go/handler.go" {
+		t.Errorf("first item = %q, want %q", e.menu.items[0].Text, "src/main/go/handler.go")
 	}
 }
 
@@ -469,16 +257,15 @@ func TestDrillIntoEmptyDirectory(t *testing.T) {
 	e := &Editor{
 		display: newTestDisplay(),
 		state:   NewEditorState(),
-		config:  Config{CompleteFunc: completeFunc},
+		config:  Config{CompleteOutcomeFunc: itemsOnly(completeFunc)},
 	}
 	e.state.Buffer = NewBufferFromString("ls emp")
 	e.state.Cursor.MoveTo(0, 6)
-	e.completionActive = true
-	e.completionCol = 3
-	e.completionPrefix = "emp"
-	e.completionFilter = ""
-	e.completionIndex = 0
-	e.completionItems = []Completion{
+	e.menu = &completionMenu{}
+	e.menu.from = 3
+	e.menu.word = "emp"
+	e.menu.index = 0
+	e.menu.items = []Completion{
 		{Text: "emptdir/", Description: "directory"},
 		{Text: "file.txt", Description: "file"},
 	}
@@ -486,13 +273,8 @@ func TestDrillIntoEmptyDirectory(t *testing.T) {
 	e.drillIntoDirectory(Completion{Text: "emptdir/", Description: "directory"})
 
 	// Empty directory should dismiss completion
-	if e.completionActive {
+	if e.menu != nil {
 		t.Error("expected completion to be dismissed for empty directory")
-	}
-
-	// Drill stack should be empty (the push was rolled back)
-	if len(e.completionDrillStack) != 0 {
-		t.Errorf("drill stack length = %d, want 0", len(e.completionDrillStack))
 	}
 
 	// Buffer should still show the directory path
@@ -509,7 +291,6 @@ func TestDrillUpEmptyStack(t *testing.T) {
 	}
 	e.state.Buffer = NewBufferFromString("ls foo")
 	e.state.Cursor.MoveTo(0, 6)
-	e.completionDrillStack = nil
 
 	// Should not panic
 	e.drillUp()
@@ -527,11 +308,11 @@ func TestSingleDirectoryCompletesInline(t *testing.T) {
 		display: newTestDisplay(),
 		state:   NewEditorState(),
 		config: Config{
-			CompleteFunc: func(line string, pos int) []Completion {
+			CompleteOutcomeFunc: itemsOnly(func(line string, pos int) []Completion {
 				return []Completion{
 					{Text: "internal/", Description: "directory"},
 				}
-			},
+			}),
 		},
 	}
 	e.state.Buffer = NewBufferFromString("ls int")
@@ -539,7 +320,7 @@ func TestSingleDirectoryCompletesInline(t *testing.T) {
 
 	e.triggerCompletion()
 
-	if e.completionActive {
+	if e.menu != nil {
 		t.Error("a single directory match must not open a menu")
 	}
 	if got := e.state.Buffer.Content(); got != "ls internal/" {
@@ -554,11 +335,11 @@ func TestSingleFileAutoInserts(t *testing.T) {
 		display: newTestDisplay(),
 		state:   NewEditorState(),
 		config: Config{
-			CompleteFunc: func(line string, pos int) []Completion {
+			CompleteOutcomeFunc: itemsOnly(func(line string, pos int) []Completion {
 				return []Completion{
 					{Text: "go.mod", Description: "go file"},
 				}
-			},
+			}),
 		},
 	}
 	e.state.Buffer = NewBufferFromString("ls go.m")
@@ -566,7 +347,7 @@ func TestSingleFileAutoInserts(t *testing.T) {
 
 	e.triggerCompletion()
 
-	if e.completionActive {
+	if e.menu != nil {
 		t.Error("expected completion menu to be dismissed for single file match")
 	}
 	if got := e.state.Buffer.Content(); got != "ls go.mod" {
@@ -581,21 +362,21 @@ func TestHandleCompletionKeyTabCycles(t *testing.T) {
 		{Text: "cmd/", Description: "directory"},
 		{Text: "go.mod", Description: "file"},
 	})
-	e.completionIndex = 0
+	e.menu.index = 0
 
 	e.handleCompletionKey(Key{Special: KeyTab})
-	if e.completionIndex != 1 {
-		t.Errorf("expected index 1 after first Tab, got %d", e.completionIndex)
+	if e.menu.index != 1 {
+		t.Errorf("expected index 1 after first Tab, got %d", e.menu.index)
 	}
 	e.handleCompletionKey(Key{Special: KeyTab})
-	if e.completionIndex != 2 {
-		t.Errorf("expected index 2 after second Tab, got %d", e.completionIndex)
+	if e.menu.index != 2 {
+		t.Errorf("expected index 2 after second Tab, got %d", e.menu.index)
 	}
 	e.handleCompletionKey(Key{Special: KeyTab})
-	if e.completionIndex != 0 {
-		t.Errorf("expected index 0 after wrap, got %d", e.completionIndex)
+	if e.menu.index != 0 {
+		t.Errorf("expected index 0 after wrap, got %d", e.menu.index)
 	}
-	if !e.completionActive {
+	if e.menu == nil {
 		t.Error("expected completion to remain active after Tab cycling")
 	}
 }
@@ -609,16 +390,16 @@ func TestHandleCompletionKeyEnterDirectory(t *testing.T) {
 	})
 	e.state.Buffer = NewBufferFromString("ls int")
 	e.state.Cursor.MoveTo(0, 6)
-	e.completionCol = 3
-	e.completionPrefix = "int"
-	e.completionIndex = 0 // "internal/"
+	e.menu.from = 3
+	e.menu.word = "int"
+	e.menu.index = 0 // "internal/"
 
-	handled := e.handleCompletionKey(Key{Special: KeyEnter})
+	handled, _ := e.handleCompletionKey(Key{Special: KeyEnter})
 	if !handled {
 		t.Fatal("expected Enter to be handled")
 	}
 
-	if e.completionActive {
+	if e.menu != nil {
 		t.Error("expected completion to be dismissed after Enter on directory")
 	}
 	if got := e.state.Buffer.Content(); got != "ls internal/" {
@@ -634,16 +415,16 @@ func TestHandleCompletionKeyEnterFile(t *testing.T) {
 	})
 	e.state.Buffer = NewBufferFromString("ls go")
 	e.state.Cursor.MoveTo(0, 5)
-	e.completionCol = 3
-	e.completionPrefix = "go"
-	e.completionIndex = 1 // "go.mod"
+	e.menu.from = 3
+	e.menu.word = "go"
+	e.menu.index = 1 // "go.mod"
 
-	handled := e.handleCompletionKey(Key{Special: KeyEnter})
+	handled, _ := e.handleCompletionKey(Key{Special: KeyEnter})
 	if !handled {
 		t.Fatal("expected Enter to be handled")
 	}
 
-	if e.completionActive {
+	if e.menu != nil {
 		t.Error("expected completion to be dismissed after accepting file")
 	}
 	if got := e.state.Buffer.Content(); got != "ls go.mod" {
@@ -664,7 +445,7 @@ func TestHandleCompletionKeyTyping(t *testing.T) {
 		{Text: "README.md", Description: "file"},
 	}
 	e := newTestEditorForCompletion(items)
-	e.config.CompleteFunc = func(line string, pos int) []Completion {
+	e.config.CompleteOutcomeFunc = itemsOnly(func(line string, pos int) []Completion {
 		var out []Completion
 		for _, item := range items {
 			if strings.HasPrefix(item.Text, line) {
@@ -672,20 +453,20 @@ func TestHandleCompletionKeyTyping(t *testing.T) {
 			}
 		}
 		return out
-	}
+	})
 
-	handled := e.handleCompletionKey(Key{Rune: 'i'})
+	handled, _ := e.handleCompletionKey(Key{Rune: 'i'})
 	if !handled {
 		t.Fatal("expected printable key to narrow the open menu")
 	}
-	if !e.completionActive {
+	if e.menu == nil {
 		t.Fatal("expected the menu to stay open while narrowing")
 	}
 	if got := e.state.Buffer.Content(); got != "i" {
 		t.Fatalf("buffer = %q, want %q", got, "i")
 	}
-	if len(e.completionItems) != 3 {
-		t.Fatalf("items = %+v, want the three i-prefixed entries", e.completionItems)
+	if len(e.menu.items) != 3 {
+		t.Fatalf("items = %+v, want the three i-prefixed entries", e.menu.items)
 	}
 
 	// Narrowing to a single candidate keeps the menu open: the user is
@@ -693,8 +474,8 @@ func TestHandleCompletionKeyTyping(t *testing.T) {
 	for _, r := range "nit" {
 		e.handleCompletionKey(Key{Rune: r})
 	}
-	if !e.completionActive || len(e.completionItems) != 1 || e.completionItems[0].Text != "init.go" {
-		t.Fatalf("after narrowing: active=%v items=%+v, want open menu with init.go", e.completionActive, e.completionItems)
+	if e.menu == nil || len(e.menu.items) != 1 || e.menu.items[0].Text != "init.go" {
+		t.Fatalf("after narrowing: active=%v items=%+v, want open menu with init.go", e.menu != nil, e.menu.items)
 	}
 
 	// Backspace un-narrows.
@@ -703,59 +484,50 @@ func TestHandleCompletionKeyTyping(t *testing.T) {
 	if got := e.state.Buffer.Content(); got != "in" {
 		t.Fatalf("buffer after backspace = %q, want %q", got, "in")
 	}
-	if len(e.completionItems) != 3 {
-		t.Fatalf("items after backspace = %+v, want the three i(n)-prefixed entries", e.completionItems)
+	if len(e.menu.items) != 3 {
+		t.Fatalf("items after backspace = %+v, want the three i(n)-prefixed entries", e.menu.items)
 	}
 }
 
-// TestHandleCompletionKeyNavigation verifies Up/Down cycle through filtered items only.
+// TestHandleCompletionKeyNavigation verifies Up/Down cycle and wrap.
 func TestHandleCompletionKeyNavigation(t *testing.T) {
 	items := []Completion{
 		{Text: "internal/", Description: "directory"},
 		{Text: "interface.go", Description: "file"},
-		{Text: "init.go", Description: "file"},
-		{Text: "README.md", Description: "file"},
 	}
 	e := newTestEditorForCompletion(items)
 
-	// Set filter to "int" — only internal/ and interface.go match
-	e.completionFilter = "int"
-	filtered := e.filteredCompletionItems()
-	if len(filtered) != 2 {
-		t.Fatalf("expected 2 filtered items for 'int', got %d", len(filtered))
-	}
-
 	// Start at index 0 (internal/)
-	if e.completionIndex != 0 {
-		t.Fatalf("expected initial index 0, got %d", e.completionIndex)
+	if e.menu.index != 0 {
+		t.Fatalf("expected initial index 0, got %d", e.menu.index)
 	}
 
 	// Down → index 1 (interface.go)
 	e.handleCompletionKey(Key{Special: KeyDown})
-	if e.completionIndex != 1 {
-		t.Errorf("after Down: index = %d, want 1", e.completionIndex)
+	if e.menu.index != 1 {
+		t.Errorf("after Down: index = %d, want 1", e.menu.index)
 	}
 
 	// Down → wraps to index 0 (internal/)
 	e.handleCompletionKey(Key{Special: KeyDown})
-	if e.completionIndex != 0 {
-		t.Errorf("after second Down: index = %d, want 0 (wrap)", e.completionIndex)
+	if e.menu.index != 0 {
+		t.Errorf("after second Down: index = %d, want 0 (wrap)", e.menu.index)
 	}
 
-	// Up → wraps to index 1 (last filtered item)
+	// Up → wraps to index 1 (last item)
 	e.handleCompletionKey(Key{Special: KeyUp})
-	if e.completionIndex != 1 {
-		t.Errorf("after Up from 0: index = %d, want 1 (wrap)", e.completionIndex)
+	if e.menu.index != 1 {
+		t.Errorf("after Up from 0: index = %d, want 1 (wrap)", e.menu.index)
 	}
 
 	// Up → back to index 0
 	e.handleCompletionKey(Key{Special: KeyUp})
-	if e.completionIndex != 0 {
-		t.Errorf("after second Up: index = %d, want 0", e.completionIndex)
+	if e.menu.index != 0 {
+		t.Errorf("after second Up: index = %d, want 0", e.menu.index)
 	}
 }
 
-// TestHandleCompletionKeyAccept verifies Enter and Right accept the filtered item.
+// TestHandleCompletionKeyAccept verifies Enter and Right accept the selected item.
 func TestHandleCompletionKeyAccept(t *testing.T) {
 	items := []Completion{
 		{Text: "internal/", Description: "directory"},
@@ -766,43 +538,28 @@ func TestHandleCompletionKeyAccept(t *testing.T) {
 
 	t.Run("enter_accepts_filtered", func(t *testing.T) {
 		e := newTestEditorForCompletion(items)
-		e.completionFilter = "int"
-		e.completionIndex = 1 // interface.go in filtered list
+		e.menu.index = 1 // interface.go in filtered list
 
-		handled := e.handleCompletionKey(Key{Special: KeyEnter})
+		handled, _ := e.handleCompletionKey(Key{Special: KeyEnter})
 		if !handled {
 			t.Fatal("expected Enter to be handled")
 		}
 		// After accepting, completion should be dismissed
-		if e.completionActive {
+		if e.menu != nil {
 			t.Error("expected completion to be dismissed after Enter")
 		}
 	})
 
 	t.Run("right_accepts_filtered_file", func(t *testing.T) {
 		e := newTestEditorForCompletion(items)
-		e.completionFilter = "int"
-		e.completionIndex = 1 // interface.go in filtered list
+		e.menu.index = 1 // interface.go in filtered list
 
-		handled := e.handleCompletionKey(Key{Special: KeyRight})
+		handled, _ := e.handleCompletionKey(Key{Special: KeyRight})
 		if !handled {
 			t.Fatal("expected Right to be handled")
 		}
-		if e.completionActive {
+		if e.menu != nil {
 			t.Error("expected completion to be dismissed after Right")
-		}
-	})
-
-	t.Run("enter_with_empty_filtered_dismisses", func(t *testing.T) {
-		e := newTestEditorForCompletion(items)
-		e.completionFilter = "xyz" // no matches
-
-		handled := e.handleCompletionKey(Key{Special: KeyEnter})
-		if !handled {
-			t.Fatal("expected Enter to be handled")
-		}
-		if e.completionActive {
-			t.Error("expected completion to be dismissed when no filtered items")
 		}
 	})
 }
@@ -816,10 +573,10 @@ func TestHandleCompletionKeyRightDrillsIntoDirectory(t *testing.T) {
 	e.state = NewEditorState()
 	e.state.Buffer = NewBufferFromString("ls int")
 	e.state.Cursor.MoveTo(0, 6)
-	e.completionCol = 3
-	e.completionPrefix = "int"
-	e.completionIndex = 0
-	e.config.CompleteFunc = func(line string, pos int) []Completion {
+	e.menu.from = 3
+	e.menu.word = "int"
+	e.menu.index = 0
+	e.config.CompleteOutcomeFunc = itemsOnly(func(line string, pos int) []Completion {
 		if line == "ls internal/" && pos == len(line) {
 			return []Completion{
 				{Text: "internal/editor/", Description: "directory"},
@@ -827,23 +584,23 @@ func TestHandleCompletionKeyRightDrillsIntoDirectory(t *testing.T) {
 			}
 		}
 		return nil
-	}
+	})
 
-	handled := e.handleCompletionKey(Key{Special: KeyRight})
+	handled, _ := e.handleCompletionKey(Key{Special: KeyRight})
 	if !handled {
 		t.Fatal("expected Right to be handled")
 	}
-	if !e.completionActive {
+	if e.menu == nil {
 		t.Fatal("expected completion to stay active after drilling into a directory")
 	}
 	if got := e.state.Buffer.Content(); got != "ls internal/" {
 		t.Fatalf("buffer = %q, want %q", got, "ls internal/")
 	}
-	if len(e.completionItems) != 2 || e.completionItems[0].Text != "internal/editor/" {
-		t.Fatalf("completion items after drill = %#v", e.completionItems)
+	if len(e.menu.items) != 2 || e.menu.items[0].Text != "internal/editor/" {
+		t.Fatalf("completion items after drill = %#v", e.menu.items)
 	}
-	if len(e.completionDrillStack) != 1 {
-		t.Fatalf("drill stack length = %d, want 1", len(e.completionDrillStack))
+	if len(e.menu.drill) != 1 {
+		t.Fatalf("drill stack length = %d, want 1", len(e.menu.drill))
 	}
 }
 
@@ -858,9 +615,9 @@ func TestCompletionMenuTypingContinuesEditing(t *testing.T) {
 	e.ghost = NewGhostText()
 	e.state.Buffer = NewBufferFromString("ls r")
 	e.state.Cursor.MoveTo(0, 4)
-	e.completionCol = 3
-	e.completionPrefix = "r"
-	e.config.CompleteFunc = func(line string, pos int) []Completion {
+	e.menu.from = 3
+	e.menu.word = "r"
+	e.config.CompleteOutcomeFunc = itemsOnly(func(line string, pos int) []Completion {
 		word := strings.TrimPrefix(line, "ls ")
 		var out []Completion
 		for _, item := range files {
@@ -869,27 +626,27 @@ func TestCompletionMenuTypingContinuesEditing(t *testing.T) {
 			}
 		}
 		return out
-	}
+	})
 
 	result, done := e.handleKeyEvent(Key{Rune: 'e'})
 	if done {
 		t.Fatalf("typing while completion is active should not finish editing: %#v", result)
 	}
-	if !e.completionActive {
+	if e.menu == nil {
 		t.Fatal("typing while completion is active should narrow the menu, not dismiss it")
 	}
 	if got := e.state.Buffer.Content(); got != "ls re" {
 		t.Fatalf("buffer = %q, want %q", got, "ls re")
 	}
-	if len(e.completionItems) != 2 {
-		t.Fatalf("items = %+v, want both re-matching files (README case-insensitively)", e.completionItems)
+	if len(e.menu.items) != 2 {
+		t.Fatalf("items = %+v, want both re-matching files (README case-insensitively)", e.menu.items)
 	}
 
 	// A space ends the word and falls back to normal editing.
 	if _, done := e.handleKeyEvent(Key{Rune: ' '}); done {
 		t.Fatal("space should not finish editing")
 	}
-	if e.completionActive {
+	if e.menu != nil {
 		t.Fatal("space should dismiss the menu")
 	}
 	if got := e.state.Buffer.Content(); got != "ls re " {
@@ -906,69 +663,65 @@ func TestHandleCompletionKeyDismiss(t *testing.T) {
 
 	t.Run("escape_dismisses", func(t *testing.T) {
 		e := newTestEditorForCompletion(items)
-		e.completionFilter = "int"
 
-		handled := e.handleCompletionKey(Key{Special: KeyEscape})
+		handled, _ := e.handleCompletionKey(Key{Special: KeyEscape})
 		if !handled {
 			t.Fatal("expected Escape to be handled")
 		}
-		if e.completionActive {
+		if e.menu != nil {
 			t.Error("expected completion to be dismissed after Escape")
-		}
-		if e.completionFilter != "" {
-			t.Errorf("expected filter cleared, got %q", e.completionFilter)
 		}
 	})
 
-	t.Run("backspace_empty_filter_no_drill_dismisses", func(t *testing.T) {
+	t.Run("backspace_at_word_start_dismisses", func(t *testing.T) {
 		e := newTestEditorForCompletion(items)
-		e.completionFilter = ""
-		e.completionDrillStack = nil
 
-		handled := e.handleCompletionKey(Key{Special: KeyBackspace})
+		handled, _ := e.handleCompletionKey(Key{Special: KeyBackspace})
 		if handled {
-			t.Fatal("expected Backspace with empty filter and no drill stack to return false")
+			t.Fatal("expected Backspace at the word start with no drill stack to return false")
 		}
-		if e.completionActive {
+		if e.menu != nil {
 			t.Error("expected completion to be dismissed")
 		}
 	})
 
-	t.Run("backspace_empty_filter_with_drill_drills_up", func(t *testing.T) {
+	t.Run("backspace_on_drilled_word_drills_up", func(t *testing.T) {
 		e := newTestEditorForCompletion(items)
 		e.state = NewEditorState()
 		e.state.Buffer = NewBufferFromString("ls src/main/")
 		e.state.Cursor.MoveTo(0, 12)
-		e.completionCol = 12 // After drill, col is at cursor
-		e.completionFilter = ""
-		e.completionPrefix = "main/"
-		e.config.CompleteFunc = func(line string, pos int) []Completion {
+		e.menu.from = 3 // word start; the drilled word is the whole path
+		e.menu.word = "src/main/"
+		e.config.CompleteOutcomeFunc = itemsOnly(func(line string, pos int) []Completion {
 			return items
-		}
-		e.completionDrillStack = []completionDrillState{
-			{prefix: "src/", filter: "", index: 0, col: 3},
+		})
+		e.menu.drill = []completionLevel{
+			{word: "src/", index: 0, from: 3},
 		}
 
-		handled := e.handleCompletionKey(Key{Special: KeyBackspace})
+		handled, _ := e.handleCompletionKey(Key{Special: KeyBackspace})
 		if !handled {
 			t.Fatal("expected Backspace with drill stack to return true (drillUp stays in menu)")
 		}
-		if !e.completionActive {
-			t.Error("expected completion to remain active after drillUp")
+		if e.menu == nil {
+			t.Fatal("expected completion to remain active after drillUp")
 		}
-		if len(e.completionDrillStack) != 0 {
-			t.Errorf("expected empty drill stack after drillUp, got %d", len(e.completionDrillStack))
+		if got := e.state.Buffer.Content(); got != "ls src/" {
+			t.Errorf("buffer = %q, want the parent level %q", got, "ls src/")
+		}
+		if len(e.menu.drill) != 0 {
+			t.Errorf("expected empty drill stack after drillUp, got %d", len(e.menu.drill))
 		}
 	})
 
 	t.Run("non_printable_dismisses", func(t *testing.T) {
 		e := newTestEditorForCompletion(items)
 		// Ctrl+A is non-printable
-		handled := e.handleCompletionKey(Key{Rune: 'a', Ctrl: true})
+		handled, _ := e.handleCompletionKey(Key{Rune: 'a', Ctrl: true})
 		if handled {
 			t.Fatal("expected Ctrl+A to pass through (not handled)")
 		}
-		if e.completionActive {
+		if e.menu != nil {
 			t.Error("expected completion to be dismissed on non-printable key")
 		}
 	})

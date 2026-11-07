@@ -3,6 +3,7 @@ package completion
 import (
 	"context"
 	"testing"
+	"time"
 )
 
 func TestSemanticCompleter_Name(t *testing.T) {
@@ -54,5 +55,41 @@ func TestSemanticCompleter_CommandPositionOnly(t *testing.T) {
 	}
 	if len(result.Items) != 0 {
 		t.Fatalf("should not complete command name, got %d items", len(result.Items))
+	}
+}
+
+// A semantic source still loading claims the argument (no fall-through to
+// filenames) and wakes the UI once it lands, so the menu fills itself in.
+func TestSemanticCompleter_PendingSourceNotifiesWhenItLands(t *testing.T) {
+	c := NewSemanticCompleter()
+	release := make(chan struct{})
+	h := &MakeHandler{
+		cacheTTL: time.Minute,
+		readFile: func(path string) ([]string, error) {
+			<-release
+			return []string{"build:"}, nil
+		},
+	}
+	h.setReady(&c.ready)
+	c.handlers["make"] = h
+	ready := make(chan struct{}, 1)
+	c.SetOnReady(func() { ready <- struct{}{} })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	result, _ := c.Complete(ctx, "make ", len("make "))
+	if result.Outcome() != OutcomePending {
+		t.Fatalf("outcome = %v, want pending while the Makefile read runs", result.Outcome())
+	}
+
+	close(release)
+	select {
+	case <-ready:
+	case <-time.After(time.Second):
+		t.Fatal("no ready notification after the source landed")
+	}
+	result, _ = c.Complete(context.Background(), "make ", len("make "))
+	if len(result.Items) != 1 || result.Items[0].Value != "build" {
+		t.Fatalf("after ready, items = %#v, want build", result.Items)
 	}
 }

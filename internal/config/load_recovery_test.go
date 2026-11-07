@@ -20,7 +20,7 @@ func writeTestConfig(t *testing.T, content string) string {
 func TestLoad_TypeErrorKeepsOtherSections(t *testing.T) {
 	dir := writeTestConfig(t, `
 [shell]
-keybindings = 123
+dialect = 123
 
 [history]
 path = "/custom/history.db"
@@ -29,7 +29,8 @@ path = "/custom/history.db"
 command = "my-agent"
 `)
 
-	cfg, err := Load(dir)
+	cfg := Load(dir)
+	err := cfg.LoadIssue
 	if err == nil {
 		t.Fatal("expected an error for the invalid [shell] section")
 	}
@@ -49,15 +50,16 @@ command = "my-agent"
 		t.Errorf("Agent.Command = %q, want the user's value preserved", cfg.Agent.Command)
 	}
 	// The broken section falls back to defaults.
-	if cfg.Shell.Keybindings != "emacs" {
-		t.Errorf("Shell.Keybindings = %q, want default %q", cfg.Shell.Keybindings, "emacs")
+	if cfg.Shell.Dialect != "bash" {
+		t.Errorf("Shell.Dialect = %q, want default %q", cfg.Shell.Dialect, "bash")
 	}
 }
 
 func TestLoad_SyntaxErrorFallsBackWithPosition(t *testing.T) {
-	dir := writeTestConfig(t, "[shell\nkeybindings = \"vim\"\n")
+	dir := writeTestConfig(t, "[shell\ndialect = \"zsh\"\n")
 
-	cfg, err := Load(dir)
+	cfg := Load(dir)
+	err := cfg.LoadIssue
 	if err == nil {
 		t.Fatal("expected an error for broken TOML syntax")
 	}
@@ -80,7 +82,7 @@ func TestLoad_SyntaxErrorFallsBackWithPosition(t *testing.T) {
 func TestLoad_RecoveredConfigStillLoadsNamedAgents(t *testing.T) {
 	dir := writeTestConfig(t, `
 [shell]
-keybindings = 123
+dialect = 123
 
 [agent]
 default = "mine"
@@ -90,7 +92,8 @@ transport = "stdio"
 command = "my-agent"
 `)
 
-	cfg, err := Load(dir)
+	cfg := Load(dir)
+	err := cfg.LoadIssue
 	if err == nil {
 		t.Fatal("expected an error for the invalid [shell] section")
 	}
@@ -101,6 +104,7 @@ command = "my-agent"
 
 func TestLoadError_WarningIsLoudAndSpecific(t *testing.T) {
 	le := &LoadError{
+		Kind:        LoadPartial,
 		Path:        "/home/u/.config/hash/config.toml",
 		BadSections: []string{"shell"},
 		Detail:      "line 3, column 15: cannot decode",
@@ -122,28 +126,128 @@ func TestLoadError_WarningIsLoudAndSpecific(t *testing.T) {
 }
 
 func TestLoad_ValidConfigHasNoLoadIssue(t *testing.T) {
-	dir := writeTestConfig(t, "[shell]\nkeybindings = \"vim\"\n")
+	dir := writeTestConfig(t, "[shell]\ndialect = \"zsh\"\n")
 
-	cfg, err := Load(dir)
+	cfg := Load(dir)
+	err := cfg.LoadIssue
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
 	if cfg.LoadIssue != nil {
 		t.Errorf("LoadIssue = %v, want nil", cfg.LoadIssue)
 	}
-	if cfg.Shell.Keybindings != "vim" {
-		t.Errorf("Shell.Keybindings = %q, want vim", cfg.Shell.Keybindings)
+	if cfg.Shell.Dialect != "zsh" {
+		t.Errorf("Shell.Dialect = %q, want zsh", cfg.Shell.Dialect)
 	}
 }
 
 func TestLoad_BrokenConfigCarriesLoadIssue(t *testing.T) {
-	dir := writeTestConfig(t, "[shell]\nkeybindings = 123\n")
+	dir := writeTestConfig(t, "[shell]\ndialect = 123\n")
 
-	cfg, err := Load(dir)
+	cfg := Load(dir)
+	err := cfg.LoadIssue
 	if err == nil {
 		t.Fatal("expected error")
 	}
 	if cfg.LoadIssue == nil {
 		t.Fatal("recovered config should carry its LoadIssue for status reporting")
+	}
+}
+
+// A config.toml that exists but cannot be read (here: it is a directory)
+// must still yield a usable config. Returning nil made the login shell
+// dereference a nil config and panic before the first prompt.
+func TestLoad_ReadErrorFallsBackToDefaults(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, "config.toml"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := Load(dir)
+	err := cfg.LoadIssue
+	if err == nil {
+		t.Fatal("expected an error for an unreadable config.toml")
+	}
+	if cfg == nil {
+		t.Fatal("Load returned a nil config on a read error")
+	}
+	var le *LoadError
+	if !errors.As(err, &le) {
+		t.Fatalf("error should be a *LoadError, got %T: %v", err, err)
+	}
+	if le.Kind != LoadReadFailed {
+		t.Errorf("Kind = %v, want LoadReadFailed", le.Kind)
+	}
+	if cfg.Agent.Command != "claude-agent-acp" {
+		t.Errorf("Agent.Command = %q, want the default", cfg.Agent.Command)
+	}
+	if w := le.Warning(); !strings.Contains(w, "could not be read") {
+		t.Errorf("warning should say the file could not be read, got %q", w)
+	}
+}
+
+func TestLoad_IssueKinds(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		want    LoadErrorKind
+	}{
+		{"syntax", "[shell\n", LoadSyntaxError},
+		{"partial", "[shell]\ndialect = 123\n", LoadPartial},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Load(writeTestConfig(t, tt.content))
+			err := cfg.LoadIssue
+			var le *LoadError
+			if !errors.As(err, &le) {
+				t.Fatalf("error should be a *LoadError, got %T: %v", err, err)
+			}
+			if le.Kind != tt.want || cfg.LoadIssue.Kind != tt.want {
+				t.Errorf("Kind = %v, want %v", le.Kind, tt.want)
+			}
+		})
+	}
+}
+
+// [agent].headers is a field of the flat agent config, not a named agent.
+func TestLoad_AgentHeadersTableIsNotANamedAgent(t *testing.T) {
+	cfg := Load(writeTestConfig(t, `
+[agent]
+transport = "http"
+
+[agent.headers]
+Authorization = "Bearer x"
+
+[agent.mine]
+command = "my-agent"
+`))
+	err := cfg.LoadIssue
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if _, ok := cfg.Agents["headers"]; ok {
+		t.Error("[agent.headers] was loaded as a named agent")
+	}
+	if cfg.Agent.Headers["Authorization"] != "Bearer x" {
+		t.Errorf("Agent.Headers = %v, want the flat headers", cfg.Agent.Headers)
+	}
+	if _, ok := cfg.Agents["mine"]; !ok {
+		t.Error("named agent [agent.mine] should still load")
+	}
+}
+
+// keybindings was a setting the editor never read. Configs written while it
+// was documented still set it, and must keep loading clean.
+func TestLoad_RetiredKeybindingsSettingStillLoadsClean(t *testing.T) {
+	dir := writeTestConfig(t, "[shell]\nkeybindings = \"vim\"\n\n[input]\nkeybindings = \"emacs\"\ngutter = true\n")
+
+	cfg := Load(dir)
+	err := cfg.LoadIssue
+	if err != nil || cfg.LoadIssue != nil {
+		t.Fatalf("Load() err = %v, LoadIssue = %v; want a clean load", err, cfg.LoadIssue)
+	}
+	if !cfg.Input.Gutter {
+		t.Error("Input.Gutter = false, want the rest of [input] applied")
 	}
 }

@@ -2,7 +2,14 @@ package executor
 
 import (
 	"bytes"
+	"context"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"mvdan.cc/sh/v3/expand"
 )
@@ -315,5 +322,113 @@ func TestNormalizeEnvName(t *testing.T) {
 	name = normalizeEnvName("lower")
 	if name != "lower" {
 		t.Errorf("normalizeEnvName(lower) = %q, want lower", name)
+	}
+}
+
+// Positional arguments set after the first line still apply.
+func TestExecutor_SetPositionalArgsAppliesAfterFirstLine(t *testing.T) {
+	e := New()
+	if _, err := e.Execute(context.Background(), `:`, io.Discard, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	e.SetPositionalArgs([]string{"script", "a", "b"})
+	var out bytes.Buffer
+	if _, err := e.Execute(context.Background(), `echo "$0 $1 $2"`, &out, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if got := out.String(); got != "script a b\n" {
+		t.Fatalf("stdout = %q, want %q", got, "script a b\n")
+	}
+}
+
+// A bare return returns the last command's status, as in bash: the
+// interpreter's own return returned 0.
+func TestExecute_BareReturnKeepsTheLastStatus(t *testing.T) {
+	tests := []struct{ line, want string }{
+		{`f() { false; return; }; f; echo $?`, "1"},
+		{`f() { sh -c 'exit 7'; return; }; f; echo $?`, "7"},
+		{`f() { return; }; false; f; echo $?`, "1"},
+		{`f() { true; return; }; f; echo $?`, "0"},
+		{`f() { return 3; }; f; echo $?`, "3"},
+	}
+	for _, tt := range tests {
+		var out bytes.Buffer
+		if _, err := New().Execute(context.Background(), tt.line, &out, io.Discard); err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.TrimSpace(out.String()); got != tt.want {
+			t.Errorf("%s: $? = %q, want %s", tt.line, got, tt.want)
+		}
+	}
+}
+
+// A read of a stdin that takes no deadlines (an inherited, blocking pipe)
+// ends when the line's context does: hash's fatal signals cancel it. It
+// used to block until the pipe had data.
+func TestExecute_ReadOfABlockingStdinEndsWithTheContext(t *testing.T) {
+	var fds [2]int
+	if err := syscall.Pipe(fds[:]); err != nil {
+		t.Fatal(err)
+	}
+	r, w := os.NewFile(uintptr(fds[0]), "stdin"), os.NewFile(uintptr(fds[1]), "writer")
+	defer r.Close()
+	defer w.Close()
+	if r.SetReadDeadline(time.Time{}) == nil {
+		t.Skip("the pipe takes deadlines here")
+	}
+	origStdin := os.Stdin
+	os.Stdin = r
+	defer func() { os.Stdin = origStdin }()
+
+	e := New()
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = e.Execute(ctx, `read x`, io.Discard, io.Discard)
+	}()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		_, _ = w.WriteString("unblock\n")
+		t.Fatal("read did not end with its context")
+	}
+	// With data the read reads it.
+	_, _ = w.WriteString("hello\n")
+	var out bytes.Buffer
+	if _, err := e.Execute(context.Background(), `read x; echo "got $x"`, &out, io.Discard); err != nil || out.String() != "got hello\n" {
+		t.Fatalf("read with data: %q, %v", out.String(), err)
+	}
+}
+
+// source takes its path as the shell expanded it, as bash: an unquoted ~
+// is the home directory, a quoted "~/x" is the file ~/x, and ~nosuchuser
+// stays as it is. It used to expand the tilde again, quoted or not, and
+// read ~nosuchuser/x from $HOME/nosuchuser/x.
+func TestExecute_SourceTakesThePathAsExpanded(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	for _, dir := range []string{home, filepath.Join(home, "hash_no_such_user")} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "x.sh"), []byte("echo sourced\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Chdir(t.TempDir())
+	for line, want := range map[string]string{
+		`source ~/x.sh; echo "rc=$?"`:                  "sourced\nrc=0\n",
+		`source "~/x.sh"; echo "rc=$?"`:                "rc=1\n",
+		`source ~hash_no_such_user/x.sh; echo "rc=$?"`: "rc=1\n",
+	} {
+		var out bytes.Buffer
+		if _, err := New().Execute(context.Background(), line, &out, io.Discard); err != nil {
+			t.Fatal(err)
+		}
+		if out.String() != want {
+			t.Errorf("%s: stdout %q, want %q", line, out.String(), want)
+		}
 	}
 }

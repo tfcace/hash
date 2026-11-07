@@ -19,6 +19,8 @@ func TestAgentStateLabel(t *testing.T) {
 		// why the label uses "·" instead of wrapping the name in [ ].
 		{"name with brackets", AgentStateThinking, "Sonnet (1M context)", "agent · thinking · Sonnet (1M context)"},
 		{"only whitespace model", AgentStateThinking, "   ", "agent · thinking"},
+		// The name is the agent's: drawn inert, it cannot drive the terminal.
+		{"escape in model", AgentStateThinking, "Evil\x1b[2J\x1b]0;x\x07", "agent · thinking · Evil^[[2J^[]0;x^G"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -30,7 +32,7 @@ func TestAgentStateLabel(t *testing.T) {
 }
 
 func TestSetAgentModelAffectsLabel(t *testing.T) {
-	u := NewResponseUI(nil)
+	u := NewAgentOutputCoordinator(nil)
 	u.SetAgentModel("Opus")
 	if u.agentModel != "Opus" {
 		t.Fatalf("agentModel = %q, want Opus", u.agentModel)

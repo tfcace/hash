@@ -28,7 +28,7 @@ hash/
 ├── internal/
 │   ├── agent/         # ACP client, StdioTransport, HTTPTransport
 │   ├── clipboard/     # Copy command/output buffer
-│   ├── completion/    # Three-tier completion router
+│   ├── completion/    # Priority-ordered completion router
 │   ├── config/        # TOML configuration parsing
 │   ├── context/       # Context picker TUI
 │   ├── executor/      # POSIX interpreter (mvdan/sh), PTY-on-demand
@@ -37,7 +37,6 @@ hash/
 │   ├── parser/        # ?? detection and command parsing
 │   ├── progress/      # OSC 9;4 progress bar support
 │   ├── prompt/        # Starship + built-in prompt engines
-│   ├── readline/      # Input, Emacs/Vim/Helix keybindings
 │   └── shell/         # REPL, builtins, agent integration
 └── go.mod
 ```
@@ -57,7 +56,7 @@ Use `??` to invoke the agent:
 
 **Transport abstraction**: `AgentTransport` interface with `StdioTransport` (Claude Code, Gemini CLI) and `HTTPTransport` (Ollama, local models).
 
-**Completion tiers**: 1) Filesystem (<10ms), 2) Tool-native via Cobra `__complete` (10-200ms), 3) Agent fallback (200-800ms).
+**Completion tiers**: completers run in priority order (`internal/completion/types.go`), plugins and Cobra `__complete` first, filesystem last; slow sources report pending and refill the menu. No agent tier: Tab on an inline `??` line submits it to the agent.
 
 **Completion plugins**: Declarative TOML specs map subcommands to a candidate-producing command (`internal/completion/plugin.go`). Built-in docker spec uses the same format; users extend via `~/.config/hash/completions/*.toml` or generate specs with the agent via the `completions generate <tool>` builtin. See `docs/completion-plugins.md`.
 

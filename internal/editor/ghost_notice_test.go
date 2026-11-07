@@ -12,12 +12,11 @@ import (
 // agent ghost stream attached.
 func newInlineEditor(t *testing.T, out *bytes.Buffer, gutter bool) *Editor {
 	t.Helper()
-	ed := New(Config{Keybindings: "emacs", Gutter: gutter}, strings.NewReader(""), out)
+	ed := New(Config{Gutter: gutter}, strings.NewReader(""), out)
 	ed.SetInitialText("date +")
 	updates := make(chan GhostStreamUpdate)
 	errCh := make(chan error, 1)
-	ed.SetGhostTextStreaming(updates, errCh)
-	ed.ghost.FromAgent = true
+	ed.SetGhostTextStreaming(updates, errCh, nil)
 	return ed
 }
 
@@ -27,6 +26,7 @@ func TestHandleGhostTextError_ShowsNoticeAndKeepsLine(t *testing.T) {
 	out.Reset()
 
 	ed.handleGhostTextError(errors.New("rpc error -32603: model missing"), true)
+	ed.redraw()
 
 	if got := ed.state.Buffer.Content(); got != "date +" {
 		t.Fatalf("buffer = %q, want the typed prefix kept", got)
@@ -34,7 +34,7 @@ func TestHandleGhostTextError_ShowsNoticeAndKeepsLine(t *testing.T) {
 	if !strings.Contains(out.String(), "model missing") {
 		t.Errorf("expected the agent error on screen, got:\n%q", out.String())
 	}
-	if ed.ghost.Streaming {
+	if ed.ghost.streaming() {
 		t.Error("ghost should no longer be streaming after an error")
 	}
 }
@@ -45,6 +45,7 @@ func TestHandleGhostTextError_ShowsNoticeInGutterMode(t *testing.T) {
 	out.Reset()
 
 	ed.handleGhostTextError(errors.New("model missing"), true)
+	ed.redraw()
 
 	if !strings.Contains(out.String(), "model missing") {
 		t.Errorf("expected the agent error on screen in gutter mode, got:\n%q", out.String())
@@ -55,9 +56,11 @@ func TestHandleGhostTextError_NoticeClearsOnNextKey(t *testing.T) {
 	var out bytes.Buffer
 	ed := newInlineEditor(t, &out, false)
 	ed.handleGhostTextError(errors.New("model missing"), true)
+	ed.redraw()
 	out.Reset()
 
 	ed.handleKeyEvent(Key{Rune: '%'})
+	ed.redraw()
 
 	if strings.Contains(out.String(), "model missing") {
 		t.Errorf("notice should disappear on the next keypress, got:\n%q", out.String())
@@ -73,6 +76,7 @@ func TestHandleGhostTextError_TimeoutReadsAsTimedOut(t *testing.T) {
 	out.Reset()
 
 	ed.handleGhostTextError(context.DeadlineExceeded, true)
+	ed.redraw()
 
 	if !strings.Contains(out.String(), "agent request timed out") {
 		t.Errorf("expected a plain timeout notice, got:\n%q", out.String())
@@ -83,6 +87,7 @@ func TestHandleGhostTextError_EnterSubmitsTypedLine(t *testing.T) {
 	var out bytes.Buffer
 	ed := newInlineEditor(t, &out, false)
 	ed.handleGhostTextError(errors.New("model missing"), true)
+	ed.redraw()
 
 	result, done := ed.handleKeyEvent(Key{Special: KeyEnter})
 

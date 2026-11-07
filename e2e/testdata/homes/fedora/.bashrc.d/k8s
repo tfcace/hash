@@ -1,0 +1,1 @@
+alias k=kubectl; export FROM_D=1

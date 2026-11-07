@@ -2,62 +2,64 @@ package shell
 
 import (
 	"fmt"
-	"github.com/mattn/go-runewidth"
 	"io"
+	"math/rand"
 	"os"
 	"regexp"
 	"strings"
 	"sync"
+	"time"
 	"unicode"
+
+	"github.com/mattn/go-runewidth"
 
 	"github.com/tfcace/hash/internal/agent"
 )
 
-// AgentOutputState represents the current mode of the agent output coordinator.
-type AgentOutputState int
-
-const (
-	AgentOutputStateIdle       AgentOutputState = iota // No active agent output
-	AgentOutputStateStreaming                          // Streaming agent response
-	AgentOutputStatePermission                         // Permission prompt active (streaming paused)
-	AgentOutputStateConfirming                         // Waiting for confirmation input
-)
-
-func (s AgentOutputState) String() string {
-	switch s {
-	case AgentOutputStateIdle:
-		return "IDLE"
-	case AgentOutputStateStreaming:
-		return "STREAMING"
-	case AgentOutputStatePermission:
-		return "PERMISSION"
-	case AgentOutputStateConfirming:
-		return "CONFIRMING"
-	default:
-		return "UNKNOWN"
-	}
-}
-
-// AgentOutputCoordinator serializes all agent-related terminal output.
-// It ensures permission prompts don't interleave with streaming text.
-//
-// This coordinator is specifically for agent interactions:
-// - ?? streaming responses
-// - Tool permission prompts
-// - Response confirmation hints
+// AgentOutputCoordinator draws a ?? turn's output: the spinner, the
+// streamed reply, tool rows, the permission prompt and the confirmation
+// hints. The turn's phase decides what is drawn when; the coordinator owns
+// what the cursor's row holds (replyRow), so every status or error row
+// starts on a row of its own (TakeRow). Its other switch is the hold the
+// permission prompt puts on the reply: while a prompt is up, reply text and
+// tool rows wait behind it and show once it clears.
 //
 // Other TUI components (ContextPicker, History search) are not managed here.
 type AgentOutputCoordinator struct {
-	mu             sync.Mutex
-	out            io.Writer
-	state          AgentOutputState
-	streamBuffer   strings.Builder // Buffers text when permission is active
-	midRow         bool            // the last streamed text drawn left the row unfinished
-	wasStreaming   bool            // Track if we were streaming before permission
-	pendingCommand string          // Command currently being prompted for permission
-	accentColorFn  func() string   // Callback to get current accent color
-	tools          map[string]toolDisplayState
-	toolSeq        int
+	mu            sync.Mutex
+	out           io.Writer
+	row           replyRow                    // what the cursor's row holds
+	spinner       *spinnerRun                 // the spinner drawing the row, set only while row is rowSpinner
+	spinnerRand   agentStatusRandom           // the spinner's motion
+	agentModel    string                      // active model shown in spinner labels, "" hides it
+	prompt        *permissionPrompt           // the prompt on screen, nil when there is none
+	accentColorFn func() string               // Callback to get current accent color
+	tools         map[string]toolDisplayState // this request's tools, by ACP tool ID
+	toolSeq       int
+}
+
+// replyRow is what the cursor's row holds while a turn draws.
+type replyRow int
+
+const (
+	rowFree     replyRow = iota // nothing yet: the next row starts here
+	rowSpinner                  // the spinner, redrawn every frame
+	rowMidReply                 // reply text that stopped partway through the row
+)
+
+// spinnerRun is one run of the spinner's goroutine: closing stop ends it.
+// It draws text, under the coordinator's lock, only while it is the
+// coordinator's spinner, so a stopped run never draws again.
+type spinnerRun struct {
+	stop chan struct{}
+	text string
+}
+
+// permissionPrompt is a prompt on screen and what arrived behind it
+// meanwhile.
+type permissionPrompt struct {
+	held strings.Builder // reply text and tool rows that arrived behind the prompt
+	bar  string          // the accent bar its rows start with
 }
 
 type toolDisplayState struct {
@@ -68,8 +70,8 @@ type toolDisplayState struct {
 // NewAgentOutputCoordinator creates a new agent output coordinator.
 func NewAgentOutputCoordinator(out io.Writer) *AgentOutputCoordinator {
 	return &AgentOutputCoordinator{
-		out:   out,
-		state: AgentOutputStateIdle,
+		out:         out,
+		spinnerRand: rand.New(rand.NewSource(time.Now().UnixNano())), //nolint:gosec // UI animation jitter does not require crypto randomness.
 	}
 }
 
@@ -81,9 +83,106 @@ func (aoc *AgentOutputCoordinator) SetAccentColorFunc(fn func() string) {
 	aoc.accentColorFn = fn
 }
 
-// BeginToolTurn clears per-turn lifecycle state. The coordinator is reused for
-// the shell lifetime, while ACP tool IDs are only unique within a session turn.
-func (aoc *AgentOutputCoordinator) BeginToolTurn() {
+// BeginTurn starts a ?? turn's output on the fresh row the user's line left:
+// no reply row of its own yet. A turn may fail before its first request (a
+// pipe command that could not run), and must not end the row of the turn
+// before.
+func (aoc *AgentOutputCoordinator) BeginTurn() {
+	aoc.mu.Lock()
+	defer aoc.mu.Unlock()
+	if aoc.row == rowSpinner {
+		aoc.takeRowLocked()
+	}
+	aoc.row = rowFree
+}
+
+// SetAgentModel sets the model name shown in spinner labels. Pass "" to
+// hide it.
+func (aoc *AgentOutputCoordinator) SetAgentModel(name string) {
+	aoc.mu.Lock()
+	defer aoc.mu.Unlock()
+	aoc.agentModel = name
+}
+
+// ShowState shows the agent's state on the spinner: a running spinner
+// changes its text, else the spinner starts on a row of its own.
+func (aoc *AgentOutputCoordinator) ShowState(state AgentState) {
+	aoc.mu.Lock()
+	defer aoc.mu.Unlock()
+	aoc.showSpinnerLocked(agentStateLabel(state, aoc.agentModel))
+}
+
+// ShowActivity shows structured agent activity on the spinner, as
+// ShowState does.
+func (aoc *AgentOutputCoordinator) ShowActivity(label string) {
+	if strings.TrimSpace(label) == "" {
+		label = "agent · working"
+	}
+	aoc.mu.Lock()
+	defer aoc.mu.Unlock()
+	aoc.showSpinnerLocked(label)
+}
+
+func (aoc *AgentOutputCoordinator) showSpinnerLocked(text string) {
+	if aoc.spinner != nil {
+		aoc.spinner.text = text // its next frame draws it
+		return
+	}
+	aoc.takeRowLocked()
+	aoc.spinner = &spinnerRun{stop: make(chan struct{}), text: text}
+	aoc.row = rowSpinner
+	go aoc.runSpinner(aoc.spinner)
+}
+
+// runSpinner animates run until it is stopped.
+func (aoc *AgentOutputCoordinator) runSpinner(run *spinnerRun) {
+	ticker := time.NewTicker(80 * time.Millisecond)
+	defer ticker.Stop()
+	for frame := 0; ; frame++ {
+		select {
+		case <-run.stop:
+			return
+		case <-ticker.C:
+		}
+		aoc.mu.Lock()
+		if aoc.spinner != run {
+			aoc.mu.Unlock()
+			return
+		}
+		motion := selectAgentStatusMotion(frame, aoc.spinnerRand)
+		fmt.Fprintf(aoc.out, "\r\033[K%s", spinnerFrame(run.text, motion))
+		aoc.mu.Unlock()
+	}
+}
+
+// TakeRow frees the cursor's row for a status or error row: the spinner's
+// row is erased, an unfinished reply row is ended, and a free row is left
+// as it is. Every row that is not reply text starts here.
+func (aoc *AgentOutputCoordinator) TakeRow() {
+	aoc.mu.Lock()
+	defer aoc.mu.Unlock()
+	aoc.takeRowLocked()
+}
+
+// takeRowLocked is TakeRow, reporting what the row held. Must be called
+// with mu held.
+func (aoc *AgentOutputCoordinator) takeRowLocked() (was replyRow) {
+	was = aoc.row
+	switch was {
+	case rowSpinner:
+		close(aoc.spinner.stop)
+		aoc.spinner = nil
+		fmt.Fprint(aoc.out, "\r\033[K")
+	case rowMidReply:
+		fmt.Fprint(aoc.out, "\n")
+	}
+	aoc.row = rowFree
+	return was
+}
+
+// BeginRequest starts a request's tools afresh: ACP tool IDs are only unique
+// within one prompt, and a turn's retry is a new one.
+func (aoc *AgentOutputCoordinator) BeginRequest() {
 	aoc.mu.Lock()
 	defer aoc.mu.Unlock()
 	aoc.tools = make(map[string]toolDisplayState)
@@ -180,9 +279,15 @@ func (aoc *AgentOutputCoordinator) RenderToolResult(update agent.ToolCallUpdate,
 		title = fitText(title, max(budget-used, 1))
 	}
 
+	row := fmt.Sprintf("%s  %s%s\x1b[0m \x1b[90m%s · %s\x1b[0m\n", prefix, color, icon, label, title)
 	aoc.mu.Lock()
 	defer aoc.mu.Unlock()
-	fmt.Fprintf(aoc.out, "%s  %s%s\x1b[0m \x1b[90m%s · %s\x1b[0m\n", prefix, color, icon, label, title)
+	if aoc.prompt != nil {
+		aoc.prompt.held.WriteString(row) // shown once the prompt clears
+		return
+	}
+	aoc.takeRowLocked()
+	fmt.Fprint(aoc.out, row)
 }
 
 var toolMarkupRe = regexp.MustCompile(`</?[a-z_]+>`)
@@ -214,142 +319,47 @@ func truncateTerminalText(text string, limit int) string {
 	return string(runes[:limit-1]) + "…"
 }
 
-// State returns the current output state.
-func (aoc *AgentOutputCoordinator) State() AgentOutputState {
-	aoc.mu.Lock()
-	defer aoc.mu.Unlock()
-	return aoc.state
-}
-
-// StartStreaming transitions to streaming state.
-// If a permission prompt is active, the prompt keeps ownership of the
-// terminal: the state stays PERMISSION (so chunks buffer) and streaming
-// resumes when the prompt is cleared.
-func (aoc *AgentOutputCoordinator) StartStreaming() {
-	aoc.mu.Lock()
-	defer aoc.mu.Unlock()
-	if aoc.state == AgentOutputStatePermission {
-		aoc.wasStreaming = true
-		return
-	}
-	aoc.state = AgentOutputStateStreaming
-	aoc.streamBuffer.Reset()
-	aoc.midRow = false
-}
-
-// WriteStream writes streaming text, or buffers it if permission is active.
+// WriteStream draws reply text, or holds it behind a permission prompt.
 func (aoc *AgentOutputCoordinator) WriteStream(text string) {
 	aoc.mu.Lock()
 	defer aoc.mu.Unlock()
-
-	switch aoc.state {
-	case AgentOutputStateStreaming:
-		aoc.drawStreamLocked(text)
-	case AgentOutputStatePermission:
-		// Buffer for later
-		aoc.streamBuffer.WriteString(text)
-	default:
-		// Ignore writes in other states (shouldn't happen, but be safe)
-	}
-}
-
-// EndStreaming transitions back to idle state.
-func (aoc *AgentOutputCoordinator) EndStreaming() {
-	aoc.mu.Lock()
-	defer aoc.mu.Unlock()
-	aoc.state = AgentOutputStateIdle
-	aoc.streamBuffer.Reset()
-}
-
-// EnterPermission pauses streaming and prepares for permission prompt.
-// Returns true if streaming was active (caller should clear the line).
-func (aoc *AgentOutputCoordinator) EnterPermission() bool {
-	aoc.mu.Lock()
-	defer aoc.mu.Unlock()
-
-	aoc.wasStreaming = aoc.state == AgentOutputStateStreaming
-	aoc.state = AgentOutputStatePermission
-	return aoc.wasStreaming
-}
-
-// ExitPermission exits permission mode and resumes streaming if it was active.
-// Flushes any buffered text.
-func (aoc *AgentOutputCoordinator) ExitPermission() {
-	aoc.mu.Lock()
-	defer aoc.mu.Unlock()
-
-	if aoc.wasStreaming {
-		aoc.state = AgentOutputStateStreaming
-		// Flush buffered content
-		if aoc.streamBuffer.Len() > 0 {
-			aoc.drawStreamLocked(aoc.streamBuffer.String())
-			aoc.streamBuffer.Reset()
-		}
-	} else {
-		aoc.state = AgentOutputStateIdle
-	}
-	aoc.wasStreaming = false
-}
-
-// Write implements io.Writer for direct output (permission prompts, hints).
-// This bypasses buffering - caller is responsible for state management.
-func (aoc *AgentOutputCoordinator) Write(p []byte) (n int, err error) {
-	aoc.mu.Lock()
-	defer aoc.mu.Unlock()
-	return aoc.out.Write(p)
-}
-
-// ClearLine outputs ANSI escape to clear current line.
-func (aoc *AgentOutputCoordinator) ClearLine() {
-	aoc.mu.Lock()
-	defer aoc.mu.Unlock()
-	fmt.Fprint(aoc.out, "\r\x1b[K")
-}
-
-// ClearActiveLine clears the current terminal line unless a permission
-// prompt owns the screen, in which case clearing would erase the prompt's
-// last line. Checking the state and writing under one lock closes the race
-// against RenderPermissionPrompt.
-func (aoc *AgentOutputCoordinator) ClearActiveLine() {
-	aoc.mu.Lock()
-	defer aoc.mu.Unlock()
-	if aoc.state == AgentOutputStatePermission {
+	if aoc.prompt != nil {
+		aoc.prompt.held.WriteString(text)
 		return
 	}
-	fmt.Fprint(aoc.out, "\r\x1b[K")
+	aoc.drawStreamLocked(text)
 }
 
 // ANSI escape codes for permission prompt rendering.
 const (
 	ansiReset     = "\x1b[0m"
 	ansiBold      = "\x1b[1m"
+	ansiDim       = "\x1b[2m"
 	ansiClearLine = "\x1b[2K"
 	ansiCursorUp  = "\x1b[1A"
 	permissionPad = "  "
 )
 
-// RenderPermissionPrompt displays the permission request UI.
-// Automatically enters permission state and pauses streaming.
-// toolName is optional -- if non-empty, it's shown as context (e.g., "Bash", "Write").
+// RenderPermissionPrompt draws the permission request and holds the reply
+// behind it until it clears. toolName is optional: when set, it is shown as
+// context (e.g., "Bash", "Write"). The prompt takes the cursor's row: one
+// the spinner or an unfinished reply row held becomes the prompt's top
+// blank line, so clearing the prompt hands the row back instead of leaving
+// it behind in scrollback.
 func (aoc *AgentOutputCoordinator) RenderPermissionPrompt(command, toolName, accentColor string) {
-	aoc.RenderPermissionPromptOnRow(command, toolName, accentColor, false)
-}
-
-// RenderPermissionPromptOnRow is RenderPermissionPrompt for a caller that
-// knows whether the cursor's row is free (it held only the spinner, now
-// cleared). A free row becomes the prompt's top blank line, so clearing the
-// prompt hands the row back instead of leaving it behind in scrollback.
-func (aoc *AgentOutputCoordinator) RenderPermissionPromptOnRow(command, toolName, accentColor string, rowFree bool) {
-	aoc.EnterPermission()
-
 	aoc.mu.Lock()
 	defer aoc.mu.Unlock()
 
 	safeCommand := sanitizeTerminalText(command)
 	safeToolName := sanitizeTerminalText(toolName)
 
-	// Store command for feedback when cleared
-	aoc.pendingCommand = safeCommand
+	// One locked section puts the hold on and draws, so nothing streams in
+	// between. A second prompt while one is up keeps what the first holds.
+	takenRow := false // the cursor's row was the spinner's or the reply's: the prompt starts on it
+	if aoc.prompt == nil {
+		aoc.prompt = &permissionPrompt{}
+		takenRow = aoc.takeRowLocked() != rowFree
+	}
 
 	// The prompt is erased as five rows, so none of them may wrap. The bar
 	// and pad take four columns.
@@ -362,7 +372,7 @@ func (aoc *AgentOutputCoordinator) RenderPermissionPromptOnRow(command, toolName
 	if rowWidth > 0 {
 		safeToolName = fitText(safeToolName, max(rowWidth-len("Agent wants to run ():"), 1))
 	}
-	keys := fitHint("", "", []string{"y to allow", "n to deny", "a to always allow"}, max(width-4, 0))
+	keys := permissionKeysRow("", width)
 
 	// Use callback for accent color if available, otherwise use passed-in color
 	color := accentColor
@@ -389,17 +399,18 @@ func (aoc *AgentOutputCoordinator) RenderPermissionPromptOnRow(command, toolName
 
 	// Render the prompt box with colored bar
 	barStyle := accentCode + ansiBold
+	aoc.prompt.bar = barStyle + "│" + ansiReset + " " + permissionPad
 	lines := []string{
 		"",
 		barStyle + "│" + ansiReset + " " + permissionPad + header,
 		barStyle + "│" + ansiReset + " " + permissionPad + accentCode + ansiBold + safeCommand + ansiReset,
 		barStyle + "│" + ansiReset + " " + permissionPad,
-		barStyle + "│" + ansiReset + " " + permissionPad + keys,
+		aoc.prompt.bar + keys,
 	}
 
 	var sb strings.Builder
 	for i, line := range lines {
-		if i == 0 && rowFree {
+		if i == 0 && takenRow {
 			sb.WriteString("\r")
 		} else {
 			sb.WriteString("\r\n")
@@ -409,6 +420,32 @@ func (aoc *AgentOutputCoordinator) RenderPermissionPromptOnRow(command, toolName
 	}
 
 	aoc.out.Write([]byte(sb.String()))
+}
+
+// permissionKeysRow is the prompt's last row, the keys that answer it, fit
+// to width; a note, when set, comes first, dim, and stays when keys do not
+// fit.
+func permissionKeysRow(note string, width int) string {
+	hints := []string{"y to allow", "n or esc to deny", "a to always allow", "ctrl+c to cancel"}
+	if note == "" {
+		return fitHint("", "", hints, max(width-4, 0))
+	}
+	row := fitHint("", "", append([]string{note}, hints...), max(width-4, 0))
+	return ansiDim + note + ansiReset + strings.TrimPrefix(row, note)
+}
+
+// NoteTooQuick redraws the permission prompt's keys row with tooQuickNote
+// first: a key came before the keys settled and was dropped. No-op once
+// the prompt is gone. The cursor stays on that row, the prompt's last.
+func (aoc *AgentOutputCoordinator) NoteTooQuick() {
+	aoc.mu.Lock()
+	defer aoc.mu.Unlock()
+	if aoc.prompt == nil {
+		return
+	}
+	row := "\r" + ansiClearLine + aoc.prompt.bar + permissionKeysRow(tooQuickNote, terminalColumns())
+	aoc.out.Write([]byte(row))
+	aoc.flushLocked()
 }
 
 func sanitizeTerminalText(text string) string {
@@ -439,74 +476,43 @@ func sanitizeTerminalText(text string) string {
 	return b.String()
 }
 
-// ClearPermissionPrompt removes the permission prompt and resumes streaming.
-// Shows feedback with the command that was allowed/denied.
-// No-op when the prompt no longer owns the screen (e.g. the turn was
-// canceled and Cancel already cleared it): clearing lines here would erase
-// unrelated output.
-func (aoc *AgentOutputCoordinator) ClearPermissionPrompt(allowed bool) {
-	aoc.clearPermissionPrompt(allowed, true)
-}
-
-// ClearPermissionPromptSilently removes the temporary permission box without
-// adding a second durable row. Tool lifecycle rendering owns the final result.
-func (aoc *AgentOutputCoordinator) ClearPermissionPromptSilently(allowed bool) {
-	aoc.clearPermissionPrompt(allowed, false)
-}
-
-func (aoc *AgentOutputCoordinator) clearPermissionPrompt(allowed, showFeedback bool) {
+// ClearPermissionPrompt takes an answered prompt off the screen and draws
+// what it held. It adds no row of its own: the tool's lifecycle row says
+// what happened. No-op once the prompt is gone (dismissed when its request
+// ended): clearing rows then would erase unrelated output.
+func (aoc *AgentOutputCoordinator) ClearPermissionPrompt() {
 	aoc.mu.Lock()
-
-	if aoc.state != AgentOutputStatePermission {
-		aoc.pendingCommand = ""
-		aoc.mu.Unlock()
+	defer aoc.mu.Unlock()
+	if aoc.prompt == nil {
 		return
 	}
-
-	// Truncate command if too long
-	cmd := aoc.pendingCommand
-	if len(cmd) > 60 {
-		cmd = cmd[:57] + "..."
-	}
-
-	// First clear the current line (line 5 - keybindings), then move up and clear the rest
-	var sb strings.Builder
-	sb.WriteString("\r")
-	sb.WriteString(ansiClearLine)
-	for i := 0; i < 4; i++ {
-		sb.WriteString(ansiCursorUp)
-		sb.WriteString("\r")
-		sb.WriteString(ansiClearLine)
-	}
-	if showFeedback {
-		if allowed {
-			fmt.Fprintf(&sb, "%s\x1b[32m✓\x1b[0m \x1b[90m%s\x1b[0m\n", permissionPad, cmd)
-		} else {
-			fmt.Fprintf(&sb, "%s\x1b[31m✗\x1b[0m \x1b[90m%s\x1b[0m\n", permissionPad, cmd)
-		}
-	}
-	aoc.out.Write([]byte(sb.String()))
-
-	aoc.pendingCommand = "" // Clear for next prompt
-
-	// Flush output to ensure clear sequences are sent immediately
-	aoc.flushLocked()
-
-	// Resume streaming inline (instead of releasing lock and calling ExitPermission,
-	// which would create a TOCTOU race on permission state)
-	if aoc.wasStreaming {
-		aoc.state = AgentOutputStateStreaming
-		if aoc.streamBuffer.Len() > 0 {
-			aoc.drawStreamLocked(aoc.streamBuffer.String())
-			aoc.streamBuffer.Reset()
-		}
-	} else {
-		aoc.state = AgentOutputStateIdle
-	}
-	aoc.wasStreaming = false
-
-	aoc.mu.Unlock()
+	aoc.out.Write([]byte(clearPermissionRows))
+	aoc.flushLocked() // the clear goes out before what follows
+	held := aoc.prompt.held.String()
+	aoc.prompt = nil
+	aoc.row = rowFree // the cursor is on the prompt's top row, now blank
+	aoc.drawStreamLocked(held)
 }
+
+// DismissPermissionPrompt takes a permission prompt off the screen when the
+// request it asked for ended under it (a timeout, a cancel): its rows are
+// cleared and what it held is dropped with the rest of the reply. The
+// prompt's own clear, when its key read gives up later, is then a no-op.
+func (aoc *AgentOutputCoordinator) DismissPermissionPrompt() {
+	aoc.mu.Lock()
+	defer aoc.mu.Unlock()
+	if aoc.prompt == nil {
+		return
+	}
+	aoc.out.Write([]byte(clearPermissionRows))
+	aoc.prompt = nil
+	aoc.row = rowFree // the cursor is on the prompt's top row, now blank
+	aoc.flushLocked()
+}
+
+// clearPermissionRows erases the five rows of a permission prompt, the
+// cursor on its last: that row, then four up.
+var clearPermissionRows = "\r" + ansiClearLine + strings.Repeat(ansiCursorUp+"\r"+ansiClearLine, 4)
 
 // flushLocked flushes the output if it supports syncing.
 // Must be called with mu held.
@@ -516,82 +522,29 @@ func (aoc *AgentOutputCoordinator) flushLocked() {
 	}
 }
 
-// EnterConfirming transitions to confirming state (after streaming completes).
-func (aoc *AgentOutputCoordinator) EnterConfirming() {
-	aoc.mu.Lock()
-	defer aoc.mu.Unlock()
-	aoc.state = AgentOutputStateConfirming
-}
-
 // ShowHints displays confirmation keybindings.
-// Only works in CONFIRMING state to prevent hint overlap.
 func (aoc *AgentOutputCoordinator) ShowHints(ct ConfirmationType) {
 	aoc.mu.Lock()
 	defer aoc.mu.Unlock()
-
-	if aoc.state != AgentOutputStateConfirming {
-		return // Don't show hints unless in confirming state
-	}
 
 	// Fitted to the pane: the hint is erased as one row when the user acts.
 	scope, hints := confirmationHints(ct)
 	fmt.Fprintf(aoc.out, "\x1b[90m%s\x1b[0m\n", fitHint("  ", scope, hints, terminalColumns()))
 }
 
-// ExitConfirming returns to idle state.
-func (aoc *AgentOutputCoordinator) ExitConfirming() {
-	aoc.mu.Lock()
-	defer aoc.mu.Unlock()
-	aoc.state = AgentOutputStateIdle
-}
-
-// Cancel aborts current operation and returns to idle state.
-// Clears any buffered content without writing it.
-// If a permission prompt was visible, clears all 5 lines.
-func (aoc *AgentOutputCoordinator) Cancel() {
-	aoc.mu.Lock()
-	defer aoc.mu.Unlock()
-
-	wasPermission := aoc.state == AgentOutputStatePermission
-	wasStreaming := aoc.state == AgentOutputStateStreaming
-
-	aoc.state = AgentOutputStateIdle
-	aoc.streamBuffer.Reset()
-	aoc.wasStreaming = false
-
-	if wasPermission {
-		// Clear all 5 lines of the permission prompt
-		var sb strings.Builder
-		sb.WriteString("\r")
-		sb.WriteString(ansiClearLine) // Clear current line first
-		for i := 0; i < 4; i++ {      // Then move up 4 times (not 5)
-			sb.WriteString(ansiCursorUp)
-			sb.WriteString("\r")
-			sb.WriteString(ansiClearLine)
-		}
-		aoc.out.Write([]byte(sb.String()))
-	} else if !wasStreaming {
-		// Clear the spinner's row. A streaming row is the reply itself:
-		// what the user already read stays.
-		fmt.Fprint(aoc.out, "\r\x1b[K")
-	}
-
-	aoc.flushLocked()
-}
-
-// drawStreamLocked writes reply text and remembers whether it left the row
-// unfinished. Must be called with mu held.
+// drawStreamLocked writes reply text, taking the row back from the
+// spinner first, and remembers whether it left the row unfinished. Must be
+// called with mu held.
 func (aoc *AgentOutputCoordinator) drawStreamLocked(text string) {
-	fmt.Fprint(aoc.out, text)
-	if text != "" {
-		aoc.midRow = !strings.HasSuffix(text, "\n")
+	if text == "" {
+		return
 	}
-}
-
-// EndsMidRow reports whether the reply drawn so far stopped partway through
-// a row, so whatever follows must start a new one.
-func (aoc *AgentOutputCoordinator) EndsMidRow() bool {
-	aoc.mu.Lock()
-	defer aoc.mu.Unlock()
-	return aoc.midRow
+	if aoc.row == rowSpinner {
+		aoc.takeRowLocked()
+	}
+	fmt.Fprint(aoc.out, text)
+	aoc.row = rowFree
+	if !strings.HasSuffix(text, "\n") {
+		aoc.row = rowMidReply
+	}
 }

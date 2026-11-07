@@ -4,6 +4,8 @@ package editor
 import (
 	"strings"
 	"unicode"
+
+	"github.com/tfcace/hash/internal/parser"
 )
 
 // InsertMode is the default text entry mode.
@@ -28,13 +30,9 @@ func (m *InsertMode) HandleKey(key Key, state *EditorState) ModeResult {
 		return ModeResult{Action: ActionPaste}
 	}
 
-	// Alt+Enter or Shift+Enter: insert newline (with optional shell continuation)
+	// Alt+Enter or Shift+Enter: a new line, without running the line
 	if key.Special == KeyEnter && (key.Shift || key.Alt) {
-		if state.LineContinuation {
-			m.insertNewlineWithContinuation(state)
-		} else {
-			m.insertNewline(state)
-		}
+		insertTypedNewline(state)
 		return ModeResult{Action: ActionInsert}
 	}
 
@@ -43,7 +41,7 @@ func (m *InsertMode) HandleKey(key Key, state *EditorState) ModeResult {
 		return m.handleCtrl(key, state)
 	}
 	if key.Alt {
-		return m.handleAlt(key, state)
+		return insertAltKeys.handle(key, state)
 	}
 
 	// Special keys
@@ -56,7 +54,7 @@ func (m *InsertMode) HandleKey(key Key, state *EditorState) ModeResult {
 		m.deleteSelection(state)
 		m.insertChar(state, key.Rune)
 		if key.Rune == ' ' {
-			return ModeResult{Action: ActionInsert, Prefetch: true}
+			return ModeResult{Action: ActionInsert, Command: CommandPrefetch}
 		}
 		return ModeResult{Action: ActionInsert}
 	}
@@ -74,11 +72,15 @@ func (m *InsertMode) handleSpecialKey(key Key, state *EditorState) (ModeResult, 
 		if state.Buffer.Content() == "" {
 			return ModeResult{}, true
 		}
-		return ModeResult{NewMode: NewNormalMode(), Action: ActionModeChange}, true
+		return ModeResult{NewMode: NewNormalMode()}, true
 	case KeyEnter:
-		return ModeResult{Submit: true}, true
+		if state.incomplete(state.Buffer.Content()) {
+			continueLine(state)
+			return ModeResult{Action: ActionInsert}, true
+		}
+		return ModeResult{Command: CommandSubmit}, true
 	case KeyTab:
-		return ModeResult{Complete: true}, true
+		return ModeResult{Command: CommandComplete}, true
 	case KeyBackspace:
 		if state.Cursor.HasSelection() {
 			m.deleteSelection(state)
@@ -116,9 +118,9 @@ func (m *InsertMode) handleArrowKey(key Key, state *EditorState) (ModeResult, bo
 		if !moved {
 			state.Cursor.ClearSelection()
 			if key.Special == KeyUp {
-				return ModeResult{HistoryPrev: true}, true
+				return ModeResult{Command: CommandHistoryPrev}, true
 			}
-			return ModeResult{HistoryNext: true}, true
+			return ModeResult{Command: CommandHistoryNext}, true
 		}
 		return ModeResult{}, true
 	}
@@ -162,7 +164,7 @@ func (m *InsertMode) handleCtrl(key Key, state *EditorState) ModeResult {
 		m.moveRight(state)
 	case 'p': // Ctrl+P: context picker
 		if state.AllowContextPicker {
-			return ModeResult{ContextPicker: true}
+			return ModeResult{Command: CommandContextPicker}
 		}
 	case 'w': // Ctrl+W: delete whitespace-delimited word back (bash werase)
 		if state.Cursor.HasSelection() {
@@ -187,53 +189,46 @@ func (m *InsertMode) handleCtrl(key Key, state *EditorState) ModeResult {
 		return ModeResult{Action: ActionDelete}
 	case 'r': // Ctrl+R: history search
 		if state.AllowHistorySearch {
-			return ModeResult{HistorySearch: true}
+			return ModeResult{Command: CommandHistorySearch}
 		}
 	}
 	return ModeResult{}
 }
 
-func (m *InsertMode) handleAlt(key Key, state *EditorState) ModeResult {
-	switch key.Special {
-	case KeyLeft: // Alt+Left: word back
-		if key.Shift {
-			m.startOrExtendSelection(state)
-		} else {
-			state.Cursor.ClearSelection()
+// insertAltKeys are insert mode's Alt keys: word motion (Alt+Shift+arrows
+// select), and Alt+Backspace deleting a whole token.
+var insertAltKeys = func() altKeys {
+	m := &InsertMode{}
+	wordMotion := func(move func(*EditorState)) func(Key, *EditorState) ModeResult {
+		return func(key Key, state *EditorState) ModeResult {
+			m.updateSelectionForShift(key.Shift && key.Special != KeyNone, state) // Alt+b, Alt+f never select
+			move(state)
+			return ModeResult{}
 		}
-		m.moveWordBack(state)
-	case KeyRight: // Alt+Right: word forward
-		if key.Shift {
-			m.startOrExtendSelection(state)
-		} else {
-			state.Cursor.ClearSelection()
-		}
-		m.moveWordForward(state)
-	case KeyBackspace: // Alt+Backspace: delete whole token
-		if state.Cursor.HasSelection() {
-			m.deleteSelection(state)
-		} else {
-			m.deleteTokenBack(state)
-		}
-		return ModeResult{Action: ActionDelete}
 	}
-	switch key.Rune {
-	case 'b': // Alt+B: word back
-		state.Cursor.ClearSelection()
-		m.moveWordBack(state)
-	case 'f': // Alt+F: word forward
-		state.Cursor.ClearSelection()
-		m.moveWordForward(state)
+	back, forward := wordMotion(m.moveWordBack), wordMotion(m.moveWordForward)
+	return altKeys{
+		{Special: KeyLeft}:  back,
+		{Special: KeyRight}: forward,
+		{Rune: 'b'}:         back,
+		{Rune: 'f'}:         forward,
+		{Special: KeyBackspace}: func(_ Key, state *EditorState) ModeResult {
+			if state.Cursor.HasSelection() {
+				m.deleteSelection(state)
+			} else {
+				m.deleteTokenBack(state)
+			}
+			return ModeResult{Action: ActionDelete}
+		},
 	}
-	return ModeResult{}
-}
+}()
 
 // deleteSelection deletes the selected text and moves the cursor to the start of the selection.
 func (m *InsertMode) deleteSelection(state *EditorState) {
 	if !state.Cursor.HasSelection() {
 		return
 	}
-	start, end := state.Cursor.SelectionRange()
+	start, end := state.Cursor.SelectionRange(state.Buffer)
 	state.Buffer.Delete(start, end)
 	state.Cursor.MoveTo(start.Row, start.Col)
 	state.Cursor.ClearSelection()
@@ -260,7 +255,7 @@ func (m *InsertMode) insertChar(state *EditorState, r rune) {
 func (m *InsertMode) deleteBack(state *EditorState) {
 	row, col := state.Cursor.Pos.Row, state.Cursor.Pos.Col
 	if col > 0 {
-		prevCol := previousRuneBoundary(state.Buffer.Line(row), col)
+		prevCol := previousClusterBoundary(state.Buffer.Line(row), col)
 		state.Buffer.Delete(Position{row, prevCol}, Position{row, col})
 		state.Cursor.Pos.Col = prevCol
 	} else if row > 0 {
@@ -276,7 +271,7 @@ func (m *InsertMode) deleteForward(state *EditorState) {
 	row, col := state.Cursor.Pos.Row, state.Cursor.Pos.Col
 	lineLen := len(state.Buffer.Line(row))
 	if col < lineLen {
-		nextCol := nextRuneBoundary(state.Buffer.Line(row), col)
+		nextCol := nextClusterBoundary(state.Buffer.Line(row), col)
 		state.Buffer.Delete(Position{row, col}, Position{row, nextCol})
 	} else if row < state.Buffer.LineCount()-1 {
 		// Join with next line
@@ -286,7 +281,7 @@ func (m *InsertMode) deleteForward(state *EditorState) {
 
 func (m *InsertMode) moveLeft(state *EditorState) {
 	if state.Cursor.Pos.Col > 0 {
-		state.Cursor.Pos.Col = previousRuneBoundary(state.Buffer.Line(state.Cursor.Pos.Row), state.Cursor.Pos.Col)
+		state.Cursor.Pos.Col = previousClusterBoundary(state.Buffer.Line(state.Cursor.Pos.Row), state.Cursor.Pos.Col)
 	} else if state.Cursor.Pos.Row > 0 {
 		state.Cursor.Pos.Row--
 		state.Cursor.Pos.Col = len(state.Buffer.Line(state.Cursor.Pos.Row))
@@ -296,7 +291,7 @@ func (m *InsertMode) moveLeft(state *EditorState) {
 func (m *InsertMode) moveRight(state *EditorState) {
 	lineLen := len(state.Buffer.Line(state.Cursor.Pos.Row))
 	if state.Cursor.Pos.Col < lineLen {
-		state.Cursor.Pos.Col = nextRuneBoundary(state.Buffer.Line(state.Cursor.Pos.Row), state.Cursor.Pos.Col)
+		state.Cursor.Pos.Col = nextClusterBoundary(state.Buffer.Line(state.Cursor.Pos.Row), state.Cursor.Pos.Col)
 	} else if state.Cursor.Pos.Row < state.Buffer.LineCount()-1 {
 		state.Cursor.Pos.Row++
 		state.Cursor.Pos.Col = 0
@@ -348,28 +343,32 @@ func (m *InsertMode) deleteToLineEnd(state *EditorState) {
 	state.Buffer.Delete(Position{row, col}, Position{row, lineLen})
 }
 
-// insertNewlineWithContinuation inserts a newline with shell line continuation.
-// Adds " \" before the newline if the line doesn't already end with "\".
-func (m *InsertMode) insertNewlineWithContinuation(state *EditorState) {
-	row, col := state.Cursor.Pos.Row, state.Cursor.Pos.Col
-	line := state.Buffer.Line(row)
-
-	// Check if we need to add continuation
-	// Get the text before cursor on this line
-	textBeforeCursor := line[:col]
-	needsContinuation := !endsWithBackslash(textBeforeCursor)
-
-	if needsContinuation {
-		// Insert " \" before the newline
-		state.Buffer.Insert(row, col, " \\\n")
-		state.Cursor.Pos.Row++
-		state.Cursor.Pos.Col = 0
-	} else {
-		// Already has backslash, just insert newline
-		state.Buffer.Insert(row, col, "\n")
-		state.Cursor.Pos.Row++
-		state.Cursor.Pos.Col = 0
+// insertTypedNewline is Shift+Enter's new line. Where the text before the
+// cursor is a finished shell command it ends the row with " \", a line
+// continuation, so the command goes on on the next row instead of the row
+// running as a command of its own. Inside a quote, a heredoc or a compound
+// command (the text before is incomplete), or after a backslash already
+// there, the newline is plain: a continuation there would change the text
+// (in double quotes " \" newline is a space) or end the compound early.
+// In an agent request (??) it is plain too: the prompt is prose.
+func insertTypedNewline(state *EditorState) {
+	before := state.textBeforeCursor()
+	if !state.LineContinuation || state.incomplete(before) || endsWithBackslash(before) ||
+		agentRequest(state.Buffer.Content()) {
+		insertNewline(state)
+		return
 	}
+	row, col := state.Cursor.Pos.Row, state.Cursor.Pos.Col
+	state.Buffer.Insert(row, col, " \\\n")
+	state.Cursor.Pos.Row++
+	state.Cursor.Pos.Col = 0
+}
+
+// agentRequest reports whether text is an agent request: ?? at the start,
+// after a pipe or inline.
+func agentRequest(text string) bool {
+	t := parser.Parse(text).Type
+	return t != parser.CommandTypeRegular && t != parser.CommandTypeEmpty
 }
 
 // insertPasteContent inserts pasted text literally. Only line endings are
@@ -393,8 +392,18 @@ func normalizePastedText(text string) string {
 	return strings.ReplaceAll(text, "\r", "\n")
 }
 
-// insertNewline inserts a plain newline without continuation.
-func (m *InsertMode) insertNewline(state *EditorState) {
+// continueLine is Enter on a buffer the shell reads as unfinished: the
+// shell reads on, as at bash's PS2, so a new line goes at the buffer's
+// end, to type, wherever the cursor was. It never splits the line at the
+// cursor, as neither bash nor zsh does.
+func continueLine(state *EditorState) {
+	last := state.Buffer.LineCount() - 1
+	state.Cursor.Pos = Position{Row: last, Col: len(state.Buffer.Line(last))}
+	insertNewline(state)
+}
+
+// insertNewline inserts a plain newline at the cursor.
+func insertNewline(state *EditorState) {
 	row, col := state.Cursor.Pos.Row, state.Cursor.Pos.Col
 	state.Buffer.Insert(row, col, "\n")
 	state.Cursor.Pos.Row++

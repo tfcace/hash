@@ -183,3 +183,16 @@ func FuzzWrapper(f *testing.F) {
 func wrapWords(row string) []string {
 	return strings.FieldsFunc(row, func(r rune) bool { return r == ' ' || r == '\t' })
 }
+
+// A Flush at a line start (a tool row between two parts of a reply) holds
+// nothing, so it must not decide the next line: a code line that follows
+// still has to be recognized and left unwrapped.
+func TestWrapper_FlushAtLineStartKeepsCodeDetection(t *testing.T) {
+	w := NewWrapper(12)
+	w.Write("text\n")
+	w.Flush()
+	code := codeLinePrefix + "a long code line" + reset + "\n"
+	if got := w.Write(code); got != code {
+		t.Fatalf("code line after Flush = %q, want it unwrapped %q", got, code)
+	}
+}

@@ -69,7 +69,7 @@ func TestInsertMode_Enter_Submits(t *testing.T) {
 	mode := NewInsertMode()
 	result := mode.HandleKey(Key{Special: KeyEnter}, state)
 
-	if !result.Submit {
+	if result.Command != CommandSubmit {
 		t.Error("Enter should submit")
 	}
 }
@@ -82,7 +82,7 @@ func TestInsertMode_ShiftEnter_InsertsNewline(t *testing.T) {
 	mode := NewInsertMode()
 	result := mode.HandleKey(Key{Special: KeyEnter, Shift: true}, state)
 
-	if result.Submit {
+	if result.Command == CommandSubmit {
 		t.Error("Shift+Enter should not submit")
 	}
 	if state.Buffer.LineCount() != 2 {
@@ -155,7 +155,7 @@ func TestInsertMode_CtrlP_ContextPicker(t *testing.T) {
 	key := Key{Ctrl: true, Rune: 'p'}
 	result := mode.HandleKey(key, state)
 
-	if !result.ContextPicker {
+	if result.Command != CommandContextPicker {
 		t.Error("Ctrl+P should set ContextPicker=true")
 	}
 	// Cursor should not move
@@ -222,7 +222,7 @@ func TestInsertMode_ShiftRight_StartsSelection(t *testing.T) {
 	if state.Cursor.Pos.Col != 1 {
 		t.Errorf("Cursor col = %d, want 1", state.Cursor.Pos.Col)
 	}
-	start, end := state.Cursor.SelectionRange()
+	start, end := state.Cursor.SelectionRange(state.Buffer)
 	if start.Col != 0 || end.Col != 1 {
 		t.Errorf("SelectionRange = (%d,%d), want (0,1)", start.Col, end.Col)
 	}
@@ -238,7 +238,7 @@ func TestInsertMode_ShiftRight_ExtendsSelection(t *testing.T) {
 	mode.HandleKey(Key{Special: KeyRight, Shift: true}, state)
 	mode.HandleKey(Key{Special: KeyRight, Shift: true}, state)
 
-	start, end := state.Cursor.SelectionRange()
+	start, end := state.Cursor.SelectionRange(state.Buffer)
 	if start.Col != 0 || end.Col != 3 {
 		t.Errorf("SelectionRange = (%d,%d), want (0,3)", start.Col, end.Col)
 	}
@@ -255,7 +255,7 @@ func TestInsertMode_ShiftLeft_StartsSelection(t *testing.T) {
 	if !state.Cursor.HasSelection() {
 		t.Fatal("Shift+Left should start selection")
 	}
-	start, end := state.Cursor.SelectionRange()
+	start, end := state.Cursor.SelectionRange(state.Buffer)
 	if start.Col != 2 || end.Col != 3 {
 		t.Errorf("SelectionRange = (%d,%d), want (2,3)", start.Col, end.Col)
 	}
@@ -304,7 +304,7 @@ func TestInsertMode_ShiftHome_SelectsToLineStart(t *testing.T) {
 	if !state.Cursor.HasSelection() {
 		t.Fatal("Shift+Home should start selection")
 	}
-	start, end := state.Cursor.SelectionRange()
+	start, end := state.Cursor.SelectionRange(state.Buffer)
 	if start.Col != 0 || end.Col != 3 {
 		t.Errorf("SelectionRange = (%d,%d), want (0,3)", start.Col, end.Col)
 	}
@@ -321,7 +321,7 @@ func TestInsertMode_ShiftEnd_SelectsToLineEnd(t *testing.T) {
 	if !state.Cursor.HasSelection() {
 		t.Fatal("Shift+End should start selection")
 	}
-	start, end := state.Cursor.SelectionRange()
+	start, end := state.Cursor.SelectionRange(state.Buffer)
 	if start.Col != 1 || end.Col != 5 {
 		t.Errorf("SelectionRange = (%d,%d), want (1,5)", start.Col, end.Col)
 	}
@@ -338,7 +338,7 @@ func TestInsertMode_ShiftAltRight_SelectsWord(t *testing.T) {
 	if !state.Cursor.HasSelection() {
 		t.Fatal("Shift+Alt+Right should start selection")
 	}
-	start, end := state.Cursor.SelectionRange()
+	start, end := state.Cursor.SelectionRange(state.Buffer)
 	if start.Col != 0 || end.Col != 6 {
 		t.Errorf("SelectionRange = (%d,%d), want (0,6)", start.Col, end.Col)
 	}
@@ -355,7 +355,7 @@ func TestInsertMode_ShiftAltLeft_SelectsWordBack(t *testing.T) {
 	if !state.Cursor.HasSelection() {
 		t.Fatal("Shift+Alt+Left should start selection")
 	}
-	start, end := state.Cursor.SelectionRange()
+	start, end := state.Cursor.SelectionRange(state.Buffer)
 	if start.Col != 6 || end.Col != 11 {
 		t.Errorf("SelectionRange = (%d,%d), want (6,11)", start.Col, end.Col)
 	}
@@ -400,7 +400,7 @@ func TestInsertMode_ShiftAltLeft_SelectsLastPathSegment(t *testing.T) {
 	if !state.Cursor.HasSelection() {
 		t.Fatal("Shift+Alt+Left should start selection")
 	}
-	start, end := state.Cursor.SelectionRange()
+	start, end := state.Cursor.SelectionRange(state.Buffer)
 	if start.Col != len("cd /tmp/my/") || end.Col != len("cd /tmp/my/file") {
 		t.Fatalf("SelectionRange = (%d,%d), want (%d,%d)", start.Col, end.Col, len("cd /tmp/my/"), len("cd /tmp/my/file"))
 	}
@@ -581,7 +581,7 @@ func TestInsertMode_HistoryNav_ClearsSelection(t *testing.T) {
 	// Up arrow at row 0 triggers history and clears selection
 	result := mode.HandleKey(Key{Special: KeyUp}, state)
 
-	if result.HistoryPrev != true {
+	if result.Command == CommandHistoryPrev != true {
 		t.Error("Up at row 0 should trigger HistoryPrev")
 	}
 	if state.Cursor.HasSelection() {

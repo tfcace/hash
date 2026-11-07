@@ -5,8 +5,16 @@ import (
 	"strings"
 )
 
-// FuzzyFilter filters and sorts items by fuzzy match score.
+// FuzzyFilter filters and sorts items by fuzzy match score, keeping the
+// best completionItemLimit.
 func FuzzyFilter(items []Item, query string) []Item {
+	items, _ = fuzzyFilter(items, query)
+	return items
+}
+
+// fuzzyFilter is FuzzyFilter, also reporting how many more items matched
+// than it kept.
+func fuzzyFilter(items []Item, query string) (kept []Item, cut int) {
 	if query == "" {
 		return limitCompletionItems(items)
 	}
@@ -14,9 +22,11 @@ func FuzzyFilter(items []Item, query string) []Item {
 	query = strings.ToLower(query)
 	scored := make([]scoredFuzzyItem, 0, min(len(items), completionItemLimit))
 
+	matched := 0
 	for i, item := range items {
 		score := fuzzyScore(strings.ToLower(item.Value), query)
 		if score > 0 {
+			matched++
 			item.Score = score
 			candidate := scoredFuzzyItem{item: item, index: i}
 			if len(scored) < completionItemLimit {
@@ -38,7 +48,7 @@ func FuzzyFilter(items []Item, query string) []Item {
 	for i := range scored {
 		result[i] = scored[i].item
 	}
-	return result
+	return result, matched - len(result)
 }
 
 type scoredFuzzyItem struct {

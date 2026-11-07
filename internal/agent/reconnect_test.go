@@ -56,6 +56,26 @@ func (p *mockPipe) IsBroken() bool {
 	return p.broken
 }
 
+// newPipeTransport returns a transport connected to an in-memory agent:
+// requests land in the returned pipe and the test feeds agent lines through
+// conn.messages. sessionID "" leaves the connection without a session.
+func newPipeTransport(sessionID string) (*ACPTransport, *acpConn, *mockPipe) {
+	stdin := newMockPipe()
+	transport := NewACPTransport(ACPConfig{Command: "test"})
+	conn := newACPConn(stdin)
+	if sessionID != "" {
+		conn.session = &acpSession{id: sessionID}
+	}
+	transport.link = link{state: linkConnected, conn: conn}
+	return transport, conn, stdin
+}
+
+func (t *ACPTransport) connected() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.link.state == linkConnected
+}
+
 // TestACPTransport_ReconnectAfterBrokenPipe tests that the transport
 // recovers after the pipe breaks (e.g., after context cancellation).
 //
@@ -65,18 +85,10 @@ func (p *mockPipe) IsBroken() bool {
 func TestACPTransport_ReconnectAfterBrokenPipe(t *testing.T) {
 	// We can't fully integration-test reconnect here without a real ACP process,
 	// but we can assert the scenario no longer depends on caller retries.
-	transport := &ACPTransport{
-		config:   ACPConfig{Command: "test"},
-		messages: make(chan []byte, 1024),
-		done:     make(chan struct{}),
-	}
-
 	// Simulate a connected state with a broken pipe and no session (typical
-	// state after sendCancel during Ctrl+C).
-	mockStdin := newMockPipe()
+	// state after the agent exited).
+	transport, _, mockStdin := newPipeTransport("")
 	mockStdin.Break()
-	transport.stdin = mockStdin
-	transport.sessionID = ""
 
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
@@ -87,9 +99,7 @@ func TestACPTransport_ReconnectAfterBrokenPipe(t *testing.T) {
 	for range errCh {
 	}
 
-	transport.mu.Lock()
-	defer transport.mu.Unlock()
-	if transport.stdin != nil {
+	if transport.connected() {
 		t.Fatal("expected broken connection to be reset for reconnect")
 	}
 }
@@ -101,16 +111,8 @@ func TestACPTransport_WriteErrorResetsConnection(t *testing.T) {
 	// When stdin.Write fails, the connection should be reset so that
 	// the next SendStreaming() call will trigger a reconnect via lazy connect.
 
-	transport := &ACPTransport{
-		config:   ACPConfig{Command: "test"},
-		messages: make(chan []byte, 1024),
-		done:     make(chan struct{}),
-	}
-
 	// Simulate a connected state with a broken pipe
-	mockStdin := newMockPipe()
-	transport.stdin = mockStdin
-	transport.sessionID = "test-session"
+	transport, _, mockStdin := newPipeTransport("test-session")
 
 	// Break the pipe (simulates agent process exiting after cancel)
 	mockStdin.Break()
@@ -141,11 +143,7 @@ func TestACPTransport_WriteErrorResetsConnection(t *testing.T) {
 
 	// After a write error, stdin should be reset to nil
 	// so the next SendStreaming() will trigger lazy reconnect.
-	transport.mu.Lock()
-	stdinAfterError := transport.stdin
-	transport.mu.Unlock()
-
-	if stdinAfterError != nil {
+	if transport.connected() {
 		t.Errorf("After write error, stdin should be nil to trigger reconnect, but it's not nil")
 	}
 }
@@ -158,9 +156,7 @@ SCENARIO: User cancels request, next request fails with broken pipe
 
 1. User runs: ?? move jj pointer to master
 2. User presses Ctrl+C (context canceled)
-3. sendCancel() is called:
-   - sessionID is cleared
-   - cancel notification sent to agent
+3. The turn sends session/cancel to the agent
 4. Agent process may exit after receiving cancel
 5. User runs: ?? jj move pointer to master bookmark
 6. SendStreaming() is called:

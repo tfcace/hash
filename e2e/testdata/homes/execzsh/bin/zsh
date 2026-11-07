@@ -1,0 +1,3 @@
+#!/bin/sh
+# Stands in for zsh: hash must never exec it.
+echo REPLACED-BY-ZSH

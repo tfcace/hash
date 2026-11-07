@@ -12,10 +12,8 @@ import (
 // SSHHandler provides completions for ssh, scp, and sftp commands.
 type SSHHandler struct {
 	readFile func(path string) ([]string, error) // injectable for testing
-	reader   contextLinesReader
-	cache    stringListCache
 	cacheTTL time.Duration
-	now      func() time.Time
+	hosts    flightCache[[]string]
 }
 
 // NewSSHHandler creates an SSH completion handler.
@@ -23,9 +21,10 @@ func NewSSHHandler() *SSHHandler {
 	return &SSHHandler{
 		readFile: readLines,
 		cacheTTL: 30 * time.Second,
-		now:      time.Now,
 	}
 }
+
+func (h *SSHHandler) setReady(n *readyNotifier) { h.hosts.ready = n }
 
 // Commands returns the commands this handler supports.
 func (h *SSHHandler) Commands() []string {
@@ -39,71 +38,32 @@ func (h *SSHHandler) Complete(ctx context.Context, args []string, current string
 		return Result{}
 	}
 
-	hosts := h.collectHosts(ctx)
-	return prefixFilterItems(hosts, current)
+	hosts, status := h.collectHosts(ctx)
+	return sourceResult(hosts, status, current)
 }
 
-func (h *SSHHandler) collectHosts(ctx context.Context) []string {
-	if h.cacheTTL > 0 {
-		if hosts, ok := h.cache.get("hosts", h.timeNow()); ok {
-			return hosts
+// collectHosts returns the hosts named in ~/.ssh/config and known_hosts.
+// Missing files are normal and contribute nothing.
+func (h *SSHHandler) collectHosts(ctx context.Context) ([]string, lookupStatus) {
+	policy := flightPolicy{ttl: h.cacheTTL, timeout: fileSourceTimeout, wait: sourceWait}
+	return h.hosts.get(ctx, "hosts", policy, func(context.Context) ([]string, error) {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return nil, err
 		}
-	}
-
-	seen := make(map[string]bool)
-	var hosts []string
-
-	// Parse ~/.ssh/config
-	home, err := os.UserHomeDir()
-	if err == nil {
-		configHosts := h.parseSSHConfigWithContext(ctx, filepath.Join(home, ".ssh", "config"))
-		for _, host := range configHosts {
+		seen := make(map[string]bool)
+		var hosts []string
+		for _, host := range append(
+			h.parseSSHConfig(filepath.Join(home, ".ssh", "config")),
+			h.parseKnownHosts(filepath.Join(home, ".ssh", "known_hosts"))...,
+		) {
 			if !seen[host] {
 				seen[host] = true
 				hosts = append(hosts, host)
 			}
 		}
-
-		// Parse ~/.ssh/known_hosts
-		knownHosts := h.parseKnownHostsWithContext(ctx, filepath.Join(home, ".ssh", "known_hosts"))
-		for _, host := range knownHosts {
-			if !seen[host] {
-				seen[host] = true
-				hosts = append(hosts, host)
-			}
-		}
-	}
-
-	if ctx.Err() != nil {
-		return hosts
-	}
-	if h.cacheTTL > 0 {
-		h.cache.set("hosts", hosts, h.timeNow().Add(h.cacheTTL))
-	}
-	return hosts
-}
-
-func (h *SSHHandler) parseSSHConfigWithContext(ctx context.Context, path string) []string {
-	lines, err := h.reader.read(ctx, h.readFile, path)
-	if err != nil {
-		return nil
-	}
-	return parseSSHConfigLines(lines)
-}
-
-func (h *SSHHandler) parseKnownHostsWithContext(ctx context.Context, path string) []string {
-	lines, err := h.reader.read(ctx, h.readFile, path)
-	if err != nil {
-		return nil
-	}
-	return parseKnownHostsLines(lines)
-}
-
-func (h *SSHHandler) timeNow() time.Time {
-	if h.now != nil {
-		return h.now()
-	}
-	return time.Now()
+		return hosts, nil
+	})
 }
 
 func (h *SSHHandler) parseSSHConfig(path string) []string {

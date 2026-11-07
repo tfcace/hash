@@ -163,6 +163,7 @@ The search interface is responsive to rapid keypresses:
 - Multiple characters per keystroke are processed correctly
 - Backspace and delete work as expected
 - Navigation keys (arrows) work smoothly
+- Ctrl+R typed ahead while a `??` request runs opens the search at the next prompt, empty: keys typed after it are dropped, so they never land on (or submit) the command you pick
 
 ## Performance
 

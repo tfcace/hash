@@ -1,40 +1,72 @@
 package context
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/tfcace/hash/internal/termtext"
+)
+
+// ErrPickerCanceled is returned by Run when the user leaves with Esc or
+// Ctrl+C. The collection's marks are put back as they were when it opened.
+var ErrPickerCanceled = errors.New("context picker canceled")
+
+// pickerOutcome is how the picker ended.
+type pickerOutcome int
+
+const (
+	pickerOpen      pickerOutcome = iota // still running
+	pickerConfirmed                      // Enter: use the selection
+	pickerDefaults                       // d: back to the auto-detected defaults
+	pickerCanceled                       // Esc / Ctrl+C: keep what the caller had
 )
 
 // PickerUI provides an interactive context picker TUI.
 type PickerUI struct {
-	picker *Picker
-	width  int
-	height int
+	picker  *Picker
+	opened  Selection // the marks the picker opened on, restored on cancel
+	width   int
+	height  int
+	outcome pickerOutcome
 }
 
-// NewPickerUI creates a new picker UI.
+// NewPickerUI creates a new picker UI. It opens on collection's marks: give
+// it the current picks (Selection.Apply) so Enter keeps what was chosen
+// before.
 func NewPickerUI(collection *Collection) *PickerUI {
 	return &PickerUI{
 		picker: NewPicker(collection),
+		opened: SelectionOf(collection),
 		width:  80,
 		height: 20,
 	}
 }
 
-// Run starts the interactive picker and returns the serialized context.
-// Returns empty string if canceled.
-func (ui *PickerUI) Run() (string, error) {
-	p := tea.NewProgram(ui)
+// Run starts the interactive picker and returns what was picked.
+// Returns ErrPickerCanceled if the user canceled, and an error when ctx
+// ends (the shell ending).
+func (ui *PickerUI) Run(ctx context.Context) (Selection, error) {
+	p := tea.NewProgram(ui, tea.WithContext(ctx))
 	model, err := p.Run()
 	if err != nil {
-		return "", err
+		return Selection{}, err
 	}
+	return model.(*PickerUI).result()
+}
 
-	finalUI := model.(*PickerUI)
-	return finalUI.picker.Serialize(), nil
+// result is the picker's answer once it has ended.
+func (ui *PickerUI) result() (Selection, error) {
+	switch ui.outcome {
+	case pickerConfirmed:
+		return SelectionOf(ui.picker.Collection()), nil
+	case pickerDefaults:
+		return Selection{}, nil
+	}
+	return Selection{}, ErrPickerCanceled
 }
 
 // Init implements tea.Model.
@@ -48,11 +80,18 @@ func (ui *PickerUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyPressMsg:
 		switch msg.String() {
 		case "ctrl+c", "esc":
-			// Cancel - deselect all and quit
-			ui.picker.DeselectAll()
+			ui.outcome = pickerCanceled
+			ui.opened.Apply(ui.picker.Collection())
 			return ui, tea.Quit
 
 		case "enter":
+			ui.outcome = pickerConfirmed
+			return ui, tea.Quit
+
+		case "d":
+			// A confirmed choice is fixed: items detected later (a git
+			// branch after cd) are never picked. The defaults pick them.
+			ui.outcome = pickerDefaults
 			return ui, tea.Quit
 
 		case "up", "k":
@@ -108,51 +147,42 @@ func (ui *PickerUI) View() tea.View {
 	// Header
 	fmt.Fprintf(&b, "%s\n\n", headerStyle.Render("Select context to include with agent request:"))
 
-	// Group items by category
+	// Render items grouped by category, in the picker's display order
 	collection := ui.picker.Collection()
-	categories := make(map[Category][]int) // category -> item indices
-	for i, item := range collection.Items {
-		categories[item.Category] = append(categories[item.Category], i)
+	order := collection.displayOrder()
+	for row, idx := range order {
+		item := collection.Items[idx]
+		if row == 0 || collection.Items[order[row-1]].Category != item.Category {
+			if row > 0 {
+				fmt.Fprintln(&b)
+			}
+			fmt.Fprintf(&b, "%s\n", categoryStyle.Render(item.Category.String()))
+		}
+
+		// Checkbox
+		check := "[ ]"
+		if item.Selected {
+			check = checkStyle.Render("[x]")
+		}
+
+		// Size indicator
+		size := fmt.Sprintf("(%d B)", item.SizeBytes)
+
+		// Item display, truncated to fit the row in terminal columns
+		display := termtext.OneLine(item.Key)
+		if maxWidth := ui.width - 10 - len(size) - 1; maxWidth > 3 {
+			display = termtext.Truncate(display, maxWidth, "...")
+		}
+
+		line := fmt.Sprintf("%s %s %s", check, display, dimStyle.Render(size))
+
+		if row == ui.picker.Cursor() {
+			fmt.Fprintf(&b, "> %s\n", selectedStyle.Render(line))
+		} else {
+			fmt.Fprintf(&b, "  %s\n", normalStyle.Render(line))
+		}
 	}
-
-	// Render items grouped by category
-	itemIndex := 0
-	for _, cat := range []Category{CategoryAutoDetect, CategoryHistory, CategoryEnv, CategoryCustom} {
-		indices := categories[cat]
-		if len(indices) == 0 {
-			continue
-		}
-
-		fmt.Fprintf(&b, "%s\n", categoryStyle.Render(cat.String()))
-
-		for _, idx := range indices {
-			item := collection.Items[idx]
-
-			// Checkbox
-			check := "[ ]"
-			if item.Selected {
-				check = checkStyle.Render("[x]")
-			}
-
-			// Item display
-			display := item.Key
-			if len(display) > ui.width-10 {
-				display = display[:ui.width-13] + "..."
-			}
-
-			// Size indicator
-			size := fmt.Sprintf("(%d B)", item.SizeBytes)
-
-			line := fmt.Sprintf("%s %s %s", check, display, dimStyle.Render(size))
-
-			if itemIndex == ui.picker.Cursor() {
-				fmt.Fprintf(&b, "> %s\n", selectedStyle.Render(line))
-			} else {
-				fmt.Fprintf(&b, "  %s\n", normalStyle.Render(line))
-			}
-
-			itemIndex++
-		}
+	if len(order) > 0 {
 		fmt.Fprintln(&b)
 	}
 
@@ -175,7 +205,7 @@ func (ui *PickerUI) View() tea.View {
 	fmt.Fprintf(&b, "%s\n", statusStyle.Render(sizeInfo))
 
 	// Footer
-	fmt.Fprintf(&b, "\n%s", dimStyle.Render("space to toggle · a for all · n for none · enter to confirm · esc to skip"))
+	fmt.Fprintf(&b, "\n%s", dimStyle.Render("space to toggle · a all · n none · d defaults · enter to confirm · esc to skip"))
 
 	v := tea.NewView(b.String())
 	v.AltScreen = true

@@ -1,8 +1,11 @@
 package editor
 
 import (
+	"slices"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/tfcace/hash/internal/termtext"
 )
 
 // Position represents a row/column position in the buffer.
@@ -10,9 +13,12 @@ type Position struct {
 	Row, Col int
 }
 
-// Buffer holds the text content as a slice of lines.
+// Buffer holds the text content as a slice of lines. A clone shares the
+// lines until either side writes (copy on write), so an undo snapshot of an
+// unchanged buffer costs nothing.
 type Buffer struct {
-	lines []string
+	lines  []string
+	shared bool // lines may be shared with a clone: copy before writing in place
 }
 
 // NewBuffer creates an empty buffer with one empty line.
@@ -58,6 +64,7 @@ func (b *Buffer) Insert(row, col int, text string) {
 	// Handle newlines in inserted text
 	parts := strings.Split(text, "\n")
 	if len(parts) == 1 {
+		b.own()
 		b.lines[row] = line[:col] + text + line[col:]
 		return
 	}
@@ -88,6 +95,7 @@ func (b *Buffer) Delete(from, to Position) {
 		line := b.lines[from.Row]
 		from.Col = clampByteIndexToRuneBoundary(line, from.Col)
 		to.Col = clampByteIndexToRuneBoundary(line, to.Col)
+		b.own()
 		b.lines[from.Row] = line[:from.Col] + line[to.Col:]
 		return
 	}
@@ -107,11 +115,35 @@ func (b *Buffer) Delete(from, to Position) {
 	b.lines = newLines
 }
 
-// Clone creates a deep copy of the buffer.
+// Clone returns a copy of the buffer that later writes to either do not
+// reach. The lines are shared until then.
 func (b *Buffer) Clone() *Buffer {
-	lines := make([]string, len(b.lines))
-	copy(lines, b.lines)
-	return &Buffer{lines: lines}
+	b.shared = true
+	return &Buffer{lines: b.lines, shared: true}
+}
+
+// own gives the buffer lines of its own before a write in place. (Writes
+// that build new lines leave the shared ones alone.)
+func (b *Buffer) own() {
+	if b.shared {
+		b.lines = slices.Clone(b.lines)
+		b.shared = false
+	}
+}
+
+// sameText reports whether b and o hold the same text, without joining
+// either: lines shared with a clone compare by pointer.
+func (b *Buffer) sameText(o *Buffer) bool {
+	return slices.Equal(b.lines, o.lines)
+}
+
+// size is the bytes of text the buffer holds.
+func (b *Buffer) size() int {
+	n := len(b.lines) // the newlines
+	for _, l := range b.lines {
+		n += len(l)
+	}
+	return n
 }
 
 // ReplaceLine replaces the content of a line (0-indexed).
@@ -119,6 +151,7 @@ func (b *Buffer) ReplaceLine(row int, content string) {
 	if row < 0 || row >= len(b.lines) {
 		return
 	}
+	b.own()
 	b.lines[row] = content
 }
 
@@ -135,26 +168,40 @@ func clampByteIndexToRuneBoundary(s string, col int) int {
 	return col
 }
 
-func previousRuneBoundary(s string, col int) int {
+// previousClusterBoundary is where the grapheme cluster (a character with
+// its combining marks, a ZWJ emoji, a flag) before byte col starts: Left
+// and Backspace step over whole clusters, as widths count them.
+func previousClusterBoundary(s string, col int) int {
 	col = clampByteIndexToRuneBoundary(s, col)
-	if col <= 0 {
-		return 0
+	start := clusterBoundaryBefore(s, col)
+	for start < col {
+		end := termtext.ClusterEnd(s, start)
+		if end >= col {
+			return start
+		}
+		start = end
 	}
-	_, size := utf8.DecodeLastRuneInString(s[:col])
-	if size <= 0 {
-		return col - 1
-	}
-	return col - size
+	return 0
 }
 
-func nextRuneBoundary(s string, col int) int {
+// clusterBoundaryBefore is a grapheme cluster boundary before byte col, as
+// near it as a cheap look back finds: between two ASCII bytes (other than
+// CR LF) clusters always break, since no ASCII character extends or joins
+// another. Else 0, the line's start.
+func clusterBoundaryBefore(s string, col int) int {
+	for p := col - 1; p > 0; p-- {
+		if s[p-1] < 0x80 && s[p] < 0x80 && (s[p-1] != '\r' || s[p] != '\n') {
+			return p
+		}
+	}
+	return 0
+}
+
+// nextClusterBoundary is where the grapheme cluster at byte col ends.
+func nextClusterBoundary(s string, col int) int {
 	col = clampByteIndexToRuneBoundary(s, col)
 	if col >= len(s) {
 		return len(s)
 	}
-	_, size := utf8.DecodeRuneInString(s[col:])
-	if size <= 0 {
-		return col + 1
-	}
-	return col + size
+	return termtext.ClusterEnd(s, col)
 }

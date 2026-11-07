@@ -45,12 +45,16 @@ func TestEnterOnAgentSelectsIt(t *testing.T) {
 
 func TestSkipKeyChoosesNothing(t *testing.T) {
 	m := New(two(), "0.6.2")
-	m = press(m, "s")
+	next, cmd := m.Update(keyMsg("s"))
+	m = next.(*Model)
 	if _, chosen := m.Result(); chosen {
 		t.Fatal("Result chosen=true after pressing s (skip)")
 	}
-	if !m.done {
-		t.Error("model not done after skip")
+	if cmd == nil {
+		t.Fatal("skip did not quit the panel")
+	}
+	if _, quit := cmd().(tea.QuitMsg); !quit {
+		t.Error("skip did not quit the panel")
 	}
 }
 
@@ -105,5 +109,17 @@ func TestEmptyStateViewMentionsNoAgent(t *testing.T) {
 	view := New(nil, "0.6.2").render()
 	if !strings.Contains(strings.ToLower(view), "no agent") {
 		t.Errorf("empty-state view should say no agent found:\n%s", view)
+	}
+}
+
+// Ctrl+Y and Ctrl+O copy in the Ctrl+R picker; the prompt binds neither.
+// The first-run panel offered them as prompt keys that did nothing.
+func TestViewScopesTheCopyKeysToThePicker(t *testing.T) {
+	for _, m := range []*Model{New(nil, "0.6.2"), New(two(), "0.6.2")} {
+		for _, line := range strings.Split(m.render(), "\n") {
+			if (strings.Contains(line, "Ctrl+Y") || strings.Contains(line, "Ctrl+O")) && !strings.Contains(line, "Ctrl+R") {
+				t.Errorf("the panel offers a picker key at the prompt: %q", line)
+			}
+		}
 	}
 }

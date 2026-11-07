@@ -89,7 +89,7 @@ func newTestEditorWithRealCompletion(t *testing.T, bufContent string, cursorCol 
 	e := &Editor{
 		display: newTestDisplay(),
 		state:   NewEditorState(),
-		config:  Config{CompleteFunc: completeFunc},
+		config:  Config{CompleteOutcomeFunc: itemsOnly(completeFunc)},
 		ghost:   NewGhostText(),
 	}
 	e.state.Buffer = NewBufferFromString(bufContent)
@@ -124,17 +124,17 @@ func TestIntegration_DrillDown(t *testing.T) {
 
 	// Trigger completion to get root items
 	e.triggerCompletion()
-	if !e.completionActive {
+	if e.menu == nil {
 		t.Fatal("expected completion to be active after trigger")
 	}
 
 	// Find src/ item
-	srcItem, srcIdx := findCompletionItem(t, e.completionItems, "src/")
+	srcItem, srcIdx := findCompletionItem(t, e.menu.items, "src/")
 	_ = srcIdx
 
-	// Verify completionCol is at word start (3, after "ls ")
-	if e.completionCol != 3 {
-		t.Errorf("completionCol = %d, want 3", e.completionCol)
+	// Verify menu.from is at word start (3, after "ls ")
+	if e.menu.from != 3 {
+		t.Errorf("menu.from = %d, want 3", e.menu.from)
 	}
 
 	// Drill into src/. Since src/ has only one child (main/), auto-drill
@@ -146,13 +146,13 @@ func TestIntegration_DrillDown(t *testing.T) {
 	}
 
 	// Items should include src/main/app.go and src/main/util.go
-	itemTexts := completionTextList(e.completionItems)
+	itemTexts := completionTextList(e.menu.items)
 	assertContains(t, itemTexts, "src/main/app.go")
 	assertContains(t, itemTexts, "src/main/util.go")
 
-	// completionCol should still be 3 (word start, not end of "src/main/")
-	if e.completionCol != 3 {
-		t.Errorf("completionCol after drill = %d, want 3", e.completionCol)
+	// menu.from should still be 3 (word start, not end of "src/main/")
+	if e.menu.from != 3 {
+		t.Errorf("menu.from after drill = %d, want 3", e.menu.from)
 	}
 }
 
@@ -174,11 +174,11 @@ func TestIntegration_DrillDownThenAcceptFile(t *testing.T) {
 
 	// Trigger and drill into src/ (auto-drills through main/)
 	e.triggerCompletion()
-	if !e.completionActive {
+	if e.menu == nil {
 		t.Fatal("expected completion active")
 	}
 
-	srcItem, _ := findCompletionItem(t, e.completionItems, "src/")
+	srcItem, _ := findCompletionItem(t, e.menu.items, "src/")
 	e.drillIntoDirectory(srcItem)
 
 	// Should be at src/main/ after auto-drill
@@ -187,7 +187,7 @@ func TestIntegration_DrillDownThenAcceptFile(t *testing.T) {
 	}
 
 	// Find app.go and accept it
-	appItem, _ := findCompletionItem(t, e.completionItems, "src/main/app.go")
+	appItem, _ := findCompletionItem(t, e.menu.items, "src/main/app.go")
 	e.acceptCompletion(appItem)
 
 	// Verify buffer
@@ -196,7 +196,7 @@ func TestIntegration_DrillDownThenAcceptFile(t *testing.T) {
 	}
 
 	// Completion should be dismissed
-	if e.completionActive {
+	if e.menu != nil {
 		t.Error("expected completion dismissed after accepting file")
 	}
 }
@@ -222,7 +222,7 @@ func TestIntegration_AcceptFileWithSpacesEscapesPath(t *testing.T) {
 	if got := e.state.Buffer.Content(); got != `ls My\ File.txt` {
 		t.Fatalf("buffer after single completion = %q, want %q", got, `ls My\ File.txt`)
 	}
-	if e.completionActive {
+	if e.menu != nil {
 		t.Fatal("single file completion should be accepted immediately")
 	}
 }
@@ -252,7 +252,7 @@ func TestIntegration_DrillIntoDirectoryWithSpaces(t *testing.T) {
 	e.triggerCompletion()
 
 	// The lone directory completes in place, escaped; the next Tab lists it.
-	if e.completionActive {
+	if e.menu != nil {
 		t.Fatal("a lone directory must complete inline, not open a menu")
 	}
 	if got := e.state.Buffer.Content(); got != `ls My\ Dir/` {
@@ -260,11 +260,11 @@ func TestIntegration_DrillIntoDirectoryWithSpaces(t *testing.T) {
 	}
 
 	e.triggerCompletion()
-	if !e.completionActive {
+	if e.menu == nil {
 		t.Fatal("expected the second Tab to list the directory's children")
 	}
 
-	childItem, _ := findCompletionItem(t, e.completionItems, `My\ Dir/Child\ File.txt`)
+	childItem, _ := findCompletionItem(t, e.menu.items, `My\ Dir/Child\ File.txt`)
 	e.acceptCompletion(childItem)
 
 	if got := e.state.Buffer.Content(); got != `ls My\ Dir/Child\ File.txt` {
@@ -290,29 +290,29 @@ func TestIntegration_DrillUp(t *testing.T) {
 
 	// Trigger and drill into src/ -> auto-drill to src/main/
 	e.triggerCompletion()
-	if !e.completionActive {
+	if e.menu == nil {
 		t.Fatal("expected completion active")
 	}
 
-	srcItem, _ := findCompletionItem(t, e.completionItems, "src/")
+	srcItem, _ := findCompletionItem(t, e.menu.items, "src/")
 	e.drillIntoDirectory(srcItem)
 
 	// After auto-drill we should be in src/main/ with a drill stack
-	if len(e.completionDrillStack) == 0 {
+	if len(e.menu.drill) == 0 {
 		t.Fatal("expected non-empty drill stack after drill-down")
 	}
-	drillDepth := len(e.completionDrillStack)
+	drillDepth := len(e.menu.drill)
 
 	// Drill up once
 	e.drillUp()
 
 	// Drill stack should have decreased
-	if len(e.completionDrillStack) != drillDepth-1 {
-		t.Errorf("drill stack = %d, want %d", len(e.completionDrillStack), drillDepth-1)
+	if len(e.menu.drill) != drillDepth-1 {
+		t.Errorf("drill stack = %d, want %d", len(e.menu.drill), drillDepth-1)
 	}
 
 	// Keep drilling up until we reach the root
-	for len(e.completionDrillStack) > 0 {
+	for len(e.menu.drill) > 0 {
 		e.drillUp()
 	}
 
@@ -322,10 +322,10 @@ func TestIntegration_DrillUp(t *testing.T) {
 	}
 
 	// Items should be root-level entries again
-	if len(e.completionItems) == 0 {
+	if len(e.menu.items) == 0 {
 		t.Fatal("expected items after drill-up, got none")
 	}
-	itemTexts := completionTextList(e.completionItems)
+	itemTexts := completionTextList(e.menu.items)
 	assertContains(t, itemTexts, "src/")
 	assertContains(t, itemTexts, "docs/")
 	assertContains(t, itemTexts, "go.mod")
@@ -351,37 +351,37 @@ func TestIntegration_HandleCompletionKeyRoundTrip(t *testing.T) {
 
 	// Step 1: Trigger completion
 	e.triggerCompletion()
-	if !e.completionActive {
+	if e.menu == nil {
 		t.Fatal("expected completion active after trigger")
 	}
-	initialItems := len(e.filteredCompletionItems())
+	initialItems := len(e.menu.items)
 	if initialItems == 0 {
 		t.Fatal("expected initial items")
 	}
 
 	// Step 2: Navigate to a file with Tab (cycle until we find go.mod)
 	goModIdx := -1
-	for i, item := range e.filteredCompletionItems() {
+	for i, item := range e.menu.items {
 		if item.Text == "go.mod" {
 			goModIdx = i
 			break
 		}
 	}
 	if goModIdx == -1 {
-		t.Fatalf("go.mod not found in items: %v", completionTextList(e.filteredCompletionItems()))
+		t.Fatalf("go.mod not found in items: %v", completionTextList(e.menu.items))
 	}
 
 	// Cycle to go.mod using Tab keys
-	for e.completionIndex != goModIdx {
+	for e.menu.index != goModIdx {
 		e.handleCompletionKey(Key{Special: KeyTab})
 	}
 
 	// Step 3: Press Enter to accept go.mod
-	handled := e.handleCompletionKey(Key{Special: KeyEnter})
+	handled, _ := e.handleCompletionKey(Key{Special: KeyEnter})
 	if !handled {
 		t.Fatal("expected Enter to be handled")
 	}
-	if e.completionActive {
+	if e.menu != nil {
 		t.Error("expected completion dismissed after accepting file")
 	}
 	if got := e.state.Buffer.Content(); got != "ls go.mod" {
@@ -392,28 +392,28 @@ func TestIntegration_HandleCompletionKeyRoundTrip(t *testing.T) {
 	e.state.Buffer = NewBufferFromString("cd ")
 	e.state.Cursor.MoveTo(0, 3)
 	e.triggerCompletion()
-	if !e.completionActive {
+	if e.menu == nil {
 		t.Fatal("expected completion active for directory test")
 	}
 
 	// Find src/
 	srcIdx := -1
-	for i, item := range e.filteredCompletionItems() {
+	for i, item := range e.menu.items {
 		if item.Text == "src/" {
 			srcIdx = i
 			break
 		}
 	}
 	if srcIdx == -1 {
-		t.Fatalf("src/ not found in items: %v", completionTextList(e.filteredCompletionItems()))
+		t.Fatalf("src/ not found in items: %v", completionTextList(e.menu.items))
 	}
 
-	e.completionIndex = srcIdx
-	handled = e.handleCompletionKey(Key{Special: KeyEnter})
+	e.menu.index = srcIdx
+	handled, _ = e.handleCompletionKey(Key{Special: KeyEnter})
 	if !handled {
 		t.Fatal("expected Enter to be handled for directory accept")
 	}
-	if e.completionActive {
+	if e.menu != nil {
 		t.Error("expected completion dismissed after Enter on directory")
 	}
 	if got := e.state.Buffer.Content(); got != "cd src/" {
@@ -436,11 +436,11 @@ func TestIntegration_TabCycling(t *testing.T) {
 
 	e := newTestEditorWithRealCompletion(t, "ls ", 3)
 	e.triggerCompletion()
-	if !e.completionActive {
+	if e.menu == nil {
 		t.Fatal("expected completion active")
 	}
 
-	nItems := len(e.filteredCompletionItems())
+	nItems := len(e.menu.items)
 	if nItems < 2 {
 		t.Fatalf("expected at least 2 items for cycling test, got %d", nItems)
 	}
@@ -453,11 +453,11 @@ func TestIntegration_TabCycling(t *testing.T) {
 	// After nItems+1 tabs, we should be at index 1 (wrapped past 0)
 	// Tab starts at index 0, each tab moves to (index+1) % nItems
 	expectedIdx := (nItems + 1) % nItems
-	if e.completionIndex != expectedIdx {
-		t.Errorf("after %d tabs on %d items: index = %d, want %d", nItems+1, nItems, e.completionIndex, expectedIdx)
+	if e.menu.index != expectedIdx {
+		t.Errorf("after %d tabs on %d items: index = %d, want %d", nItems+1, nItems, e.menu.index, expectedIdx)
 	}
 
-	if !e.completionActive {
+	if e.menu == nil {
 		t.Error("expected completion still active after cycling")
 	}
 }
@@ -479,7 +479,7 @@ func TestIntegration_NoDotPrefix(t *testing.T) {
 	e := newTestEditorWithRealCompletion(t, "ls ", 3)
 	e.triggerCompletion()
 
-	for _, item := range e.completionItems {
+	for _, item := range e.menu.items {
 		if strings.HasPrefix(item.Text, ".") {
 			t.Errorf("item %q starts with '.'; prefix bug has regressed", item.Text)
 		}

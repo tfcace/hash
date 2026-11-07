@@ -3,7 +3,6 @@ package prompt
 import (
 	"strings"
 	"testing"
-	"time"
 )
 
 func TestFallbackPrompt(t *testing.T) {
@@ -142,29 +141,22 @@ func TestStripCursorPositioning(t *testing.T) {
 	}
 }
 
-// The cached prompt's clock must be today's time. Starship merges the time
-// segment's colors with its neighbor's in the full prompt, so the bytes
-// `starship module time` prints alone never appear in it: patching by those
-// bytes left the clock frozen at precompute time.
-func TestTryPrecomputed_PatchesClockInMergedSegment(t *testing.T) {
-	stale := time.Now().Add(-90 * time.Minute).Format("15:04")
-	p := New(Config{Mode: "none"})
-	p.precomputed = &precomputeResult{
-		cwd:     "/repo",
-		output:  "\x1b[48;2;26;31;27;38;2;31;46;43m\x1b[38;2;224;240;239m  " + stale + " \x1b[0m\n",
-		timeStr: stale,
-	}
-
-	before := time.Now().Format("15:04")
-	got, ok := p.TryPrecomputed(PromptContext{Cwd: "/repo"})
-	after := time.Now().Format("15:04")
-	if !ok {
-		t.Fatal("TryPrecomputed() missed a matching precompute")
-	}
-	if strings.Contains(got, stale) {
-		t.Errorf("prompt still shows the precompute time %s: %q", stale, got)
-	}
-	if !strings.Contains(got, before) && !strings.Contains(got, after) {
-		t.Errorf("prompt does not show the current time: %q", got)
+// Only HOME and the paths inside it, by whole components, are written with ~.
+func TestBuiltinPrompt_HomeAbbreviation(t *testing.T) {
+	t.Setenv("HOME", "/Users/assaf")
+	p := New(Config{Mode: "built-in"})
+	for cwd, want := range map[string]string{
+		"/Users/assaf":      "~",
+		"/Users/assaf/src":  "~/src",
+		"/Users":            "/Users",
+		"/":                 "/",
+		"/Users/assafx/src": "/Users/assafx/src",
+		"/tmp":              "/tmp",
+		"/Users/assaf/src/": "~/src/",
+	} {
+		got := p.Generate(PromptContext{Cwd: cwd})
+		if dir, _, _ := strings.Cut(got, " "); dir != want {
+			t.Errorf("cwd %q: prompt %q, want it to start with %q", cwd, got, want)
+		}
 	}
 }

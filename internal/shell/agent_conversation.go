@@ -3,9 +3,7 @@ package shell
 import (
 	"strings"
 
-	"github.com/tfcace/hash/internal/agent"
 	"github.com/tfcace/hash/internal/editor"
-	"github.com/tfcace/hash/internal/parser"
 )
 
 type agentConversationMessage struct {
@@ -51,7 +49,8 @@ func agentConversationInputFrame(openRail bool) *editor.InputFrame {
 func agentConversationEditorConfig(base editor.Config, openRail bool) editor.Config {
 	cfg := base
 	cfg.Prompt = agentConversationReplyPrompt
-	cfg.CompleteFunc = nil
+	cfg.CompleteOutcomeFunc = nil
+	cfg.AgentCompleteLine = nil
 	cfg.PrefetchFunc = nil
 	cfg.SuggestionFunc = nil
 	cfg.Gutter = false
@@ -59,8 +58,8 @@ func agentConversationEditorConfig(base editor.Config, openRail bool) editor.Con
 	cfg.DisableHistorySearch = true
 	cfg.DisableContextPicker = true
 	cfg.DisableLineContinuation = true
-	cfg.CancelOnEscape = true
-	cfg.ClearOnCancel = true // leaving takes the reply box with it
+	cfg.Incomplete = nil                 // a reply is prose, not a shell line
+	cfg.Decline = editor.DeclineEraseRow // Esc leaves, and takes the reply box with it
 	return cfg
 }
 
@@ -193,33 +192,6 @@ func agentResponseWantsReply(text string) bool {
 	}
 
 	return false
-}
-
-func agentTurnAllowsReply(commandType parser.CommandType, resp agent.Response) bool {
-	return commandType == parser.CommandTypeAgent && resp.Type == agent.ResponseTypeExplanation
-}
-
-func agentTurnShouldPromptForReply(commandType parser.CommandType, resp agent.Response, responseText string) bool {
-	if commandType != parser.CommandTypeAgent || !agentResponseWantsReply(responseText) {
-		return false
-	}
-	if resp.Type == agent.ResponseTypeExplanation {
-		return true
-	}
-	return resp.Type == agent.ResponseTypeCommand && agentConversationLooksLikeQuestion(responseText)
-}
-
-func agentTurnResponseForConfirmation(commandType parser.CommandType, resp agent.Response, responseText string) agent.Response {
-	if commandType == parser.CommandTypeAgent &&
-		resp.Type == agent.ResponseTypeCommand &&
-		agentResponseWantsReply(responseText) &&
-		agentConversationLooksLikeQuestion(responseText) {
-		return agent.Response{
-			Type:        agent.ResponseTypeExplanation,
-			Explanation: responseText,
-		}
-	}
-	return resp
 }
 
 func agentConversationLooksLikeQuestion(text string) bool {

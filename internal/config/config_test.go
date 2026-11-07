@@ -1,10 +1,8 @@
 package config
 
 import (
-	"bytes"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
@@ -12,15 +10,13 @@ func TestLoadConfig_DefaultValues(t *testing.T) {
 	// Create temp dir with no config file
 	tmpDir := t.TempDir()
 
-	cfg, err := Load(tmpDir)
+	cfg := Load(tmpDir)
+	err := cfg.LoadIssue
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
 
 	// Check defaults
-	if cfg.Shell.Keybindings != "emacs" {
-		t.Errorf("Keybindings = %q, want %q", cfg.Shell.Keybindings, "emacs")
-	}
 	if cfg.Shell.Dialect != "bash" {
 		t.Errorf("Dialect = %q, want %q", cfg.Shell.Dialect, "bash")
 	}
@@ -35,7 +31,6 @@ func TestLoadConfig_FromFile(t *testing.T) {
 
 	content := []byte(`
 [shell]
-keybindings = "vim"
 editor = "nvim"
 dialect = "zsh"
 
@@ -46,14 +41,12 @@ mode = "built-in"
 		t.Fatal(err)
 	}
 
-	cfg, err := Load(tmpDir)
+	cfg := Load(tmpDir)
+	err := cfg.LoadIssue
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
 
-	if cfg.Shell.Keybindings != "vim" {
-		t.Errorf("Keybindings = %q, want %q", cfg.Shell.Keybindings, "vim")
-	}
 	if cfg.Shell.Editor != "nvim" {
 		t.Errorf("Editor = %q, want %q", cfg.Shell.Editor, "nvim")
 	}
@@ -84,7 +77,8 @@ headers = { Authorization = "Bearer token" }
 		t.Fatal(err)
 	}
 
-	cfg, err := Load(tmpDir)
+	cfg := Load(tmpDir)
+	err := cfg.LoadIssue
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
@@ -147,7 +141,8 @@ interactive = [
 		t.Fatalf("failed to write config: %v", err)
 	}
 
-	cfg, err := Load(tmpDir)
+	cfg := Load(tmpDir)
+	err := cfg.LoadIssue
 	if err != nil {
 		t.Fatalf("failed to load config: %v", err)
 	}
@@ -225,59 +220,23 @@ func TestLoadConfig_ParseError_ReturnsDefaultsWithError(t *testing.T) {
 	// Write invalid TOML
 	invalidContent := []byte(`
 [shell
-keybindings = "vim"
+dialect = "zsh"
 `)
 	if err := os.WriteFile(configPath, invalidContent, 0o644); err != nil { //nolint:gosec // G306: test file
 		t.Fatal(err)
 	}
 
-	cfg, err := Load(tmpDir)
-
-	// Should return an error
-	if err == nil {
-		t.Error("Load() should return error for invalid TOML")
-	}
-
-	// But should also return usable defaults
-	if cfg == nil {
-		t.Fatal("Load() should return defaults even on parse error")
-		return
+	cfg := Load(tmpDir)
+	if cfg.LoadIssue == nil {
+		t.Error("Load() should report the invalid TOML in LoadIssue")
 	}
 
 	// Check that defaults are applied
-	if cfg.Shell.Keybindings != "emacs" {
-		t.Errorf("Keybindings = %q, want default %q", cfg.Shell.Keybindings, "emacs")
+	if cfg.Shell.Dialect != "bash" {
+		t.Errorf("Dialect = %q, want default %q", cfg.Shell.Dialect, "bash")
 	}
 	if cfg.Prompt.Mode != "starship" {
 		t.Errorf("Prompt.Mode = %q, want default %q", cfg.Prompt.Mode, "starship")
-	}
-}
-
-func TestLoadWithWarnings_WritesWarning(t *testing.T) {
-	tmpDir := t.TempDir()
-	configPath := filepath.Join(tmpDir, "config.toml")
-
-	// Write invalid TOML
-	invalidContent := []byte(`invalid toml [[[`)
-	if err := os.WriteFile(configPath, invalidContent, 0o644); err != nil { //nolint:gosec // G306: test file
-		t.Fatal(err)
-	}
-
-	var buf bytes.Buffer
-	cfg := LoadWithWarnings(tmpDir, &buf)
-
-	// Should return usable config
-	if cfg == nil {
-		t.Fatal("LoadWithWarnings() should return config")
-	}
-
-	// Should have written a warning
-	warning := buf.String()
-	if warning == "" {
-		t.Error("LoadWithWarnings() should write warning for invalid config")
-	}
-	if !strings.Contains(warning, "Warning") {
-		t.Errorf("Warning should contain 'Warning', got: %q", warning)
 	}
 }
 
@@ -293,7 +252,8 @@ chpwd = ["zoxide add -- \"$PWD\"", "echo changed"]
 		t.Fatal(err)
 	}
 
-	cfg, err := Load(tmpDir)
+	cfg := Load(tmpDir)
+	err := cfg.LoadIssue
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
@@ -320,7 +280,8 @@ func TestLoadConfig_HooksChpwd_Default(t *testing.T) {
 
 func TestConfig_AgentAutoUpdate(t *testing.T) {
 	tmpDir := t.TempDir()
-	cfg, err := Load(tmpDir)
+	cfg := Load(tmpDir)
+	err := cfg.LoadIssue
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
@@ -332,7 +293,8 @@ func TestConfig_AgentAutoUpdate(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(tmpDir, "config.toml"), content, 0o644); err != nil { //nolint:gosec // G306: test file
 		t.Fatal(err)
 	}
-	cfg, err = Load(tmpDir)
+	cfg = Load(tmpDir)
+	err = cfg.LoadIssue
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}

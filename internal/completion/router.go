@@ -2,23 +2,36 @@ package completion
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/tfcace/hash/internal/shlex"
 	"github.com/tfcace/hash/internal/trace"
+	"mvdan.cc/sh/v3/syntax"
 )
 
 // Router dispatches completion requests to registered completers.
 type Router struct {
-	completers        []registeredCompleter
-	nextCompleterID   uint64
-	fuzzy             bool
-	completerMu       sync.Mutex
-	completerInFlight map[uint64]completerInFlightCall
-	prefetchMu        sync.Mutex
-	prefetchInFlight  map[uint64]prefetchInFlightCall
+	completers      []registeredCompleter
+	nextCompleterID uint64
+	fuzzy           bool
+	// lang is the dialect hash parses a line in, which each completed line
+	// is read back in: bash until SetDialect says otherwise.
+	lang syntax.LangVariant
+	// ready is the one "background data landed" callback. Every completer
+	// that loads in the background forwards to it (see Register), so
+	// SetOnReady can change it at any time and reaches them all.
+	ready readyNotifier
+
+	// calls are the completers with a Complete call running, prefetching
+	// those with a Prefetch running. A busy one is skipped, never launched
+	// again until its work returns, so goroutines cannot pile up behind one
+	// that ignores its context.
+	calls       busySet
+	prefetching busySet
 }
 
 type registeredCompleter struct {
@@ -27,27 +40,35 @@ type registeredCompleter struct {
 	id        uint64
 }
 
-type boundedCompletionResult struct {
-	result Result
-	err    error
+// busySet is the completers (by registration id) with work running.
+type busySet struct {
+	mu  sync.Mutex
+	ids map[uint64]bool
 }
 
-type completerCallResult struct {
-	result Result
-	err    error
+// take marks id busy, reporting false when it already was.
+func (b *busySet) take(id uint64) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.ids[id] {
+		return false
+	}
+	if b.ids == nil {
+		b.ids = make(map[uint64]bool)
+	}
+	b.ids[id] = true
+	return true
 }
 
-type completerInFlightCall struct {
-	started time.Time
-}
-
-type prefetchInFlightCall struct {
-	started time.Time
+func (b *busySet) release(id uint64) {
+	b.mu.Lock()
+	delete(b.ids, id)
+	b.mu.Unlock()
 }
 
 // NewRouter creates a new completion router.
 func NewRouter() *Router {
-	return &Router{}
+	return &Router{lang: syntax.LangBash}
 }
 
 // SetFuzzy enables or disables fuzzy filtering of results.
@@ -55,14 +76,48 @@ func (r *Router) SetFuzzy(enabled bool) {
 	r.fuzzy = enabled
 }
 
+// SetDialect sets the shell dialect ("bash" or "zsh") hash's executor
+// parses a line in, which each completed line is read back in before it is
+// offered.
+func (r *Router) SetDialect(dialect string) error {
+	var lang syntax.LangVariant
+	if err := lang.Set(dialect); err != nil {
+		return err
+	}
+	if lang != syntax.LangBash && lang != syntax.LangZsh {
+		return fmt.Errorf("unsupported shell dialect %q (supported: bash, zsh)", dialect)
+	}
+	r.lang = lang
+	return nil
+}
+
 // Fuzzy returns whether fuzzy filtering is enabled.
 func (r *Router) Fuzzy() bool {
 	return r.fuzzy
 }
 
+// readyNotifiable is implemented by completers whose data loads in the
+// background and that can therefore report OutcomePending.
+type readyNotifiable interface {
+	SetOnReady(fn func())
+}
+
+// SetOnReady registers a callback fired whenever any completer's background
+// data lands, success or failure, so a UI showing "fetching" can retry
+// without another keystroke. It applies to completers registered before
+// and after the call.
+func (r *Router) SetOnReady(fn func()) {
+	r.ready.set(fn)
+}
+
 // Register adds a completer with the given priority.
-// Lower priority values are tried first.
+// Lower priority values are tried first. A completer that loads data in the
+// background is wired to the router's ready callback; calling its own
+// SetOnReady afterwards would unwire it.
 func (r *Router) Register(c Completer, priority Priority) {
+	if n, ok := c.(readyNotifiable); ok {
+		n.SetOnReady(r.ready.notify)
+	}
 	r.nextCompleterID++
 	r.completers = append(r.completers, registeredCompleter{
 		completer: c,
@@ -84,8 +139,9 @@ func (r *Router) Complete(ctx context.Context, line string, pos int) (Result, er
 	start := time.Now()
 	traceEnabled := trace.Enabled("completion")
 
-	// Extract the query (word being completed) for fuzzy filtering
-	query := extractCompletionQuery(line, pos)
+	pos = clampCursor(line, pos)
+	word := parseCommandWords(line, pos)
+	query := word.current
 	if traceEnabled {
 		trace.Emit("completion", "router_start", trace.LevelDetailed, map[string]any{
 			"line":       line,
@@ -132,23 +188,27 @@ func (r *Router) Complete(ctx context.Context, line string, pos int) (Result, er
 			continue // Try next completer on error
 		}
 
-		// A completer that matched but is still fetching, or matched and
-		// answered "no matches", owns this argument even without items.
-		if owned, ok := ownedEmptyResult(result, rc, traceEnabled, start); ok {
-			return owned, nil
-		}
-
-		if len(result.Items) > 0 {
-			result = r.finalizeResult(result, query)
-			if traceEnabled {
-				trace.Emit("completion", "router_done", trace.LevelDetailed, map[string]any{
-					"winner":      rc.completer.Name(),
-					"items":       len(result.Items),
-					"duration_ms": float64(time.Since(start).Microseconds()) / 1000.0,
-				})
+		switch result.Outcome() {
+		case OutcomeNotMine:
+			continue
+		case OutcomeAnswer:
+			if result, err = r.finalizeResult(ctx, result, word, line, pos); err != nil {
+				return Result{}, err // the deadline passed before any item was checked
 			}
-			return result, nil
 		}
+		if traceEnabled {
+			event := "router_done"
+			if result.Outcome() == OutcomePending {
+				event = "router_pending"
+			}
+			trace.Emit("completion", event, trace.LevelDetailed, map[string]any{
+				"winner":      rc.completer.Name(),
+				"outcome":     result.Outcome().String(),
+				"items":       len(result.Items),
+				"duration_ms": float64(time.Since(start).Microseconds()) / 1000.0,
+			})
+		}
+		return result, nil
 	}
 
 	if traceEnabled {
@@ -161,150 +221,106 @@ func (r *Router) Complete(ctx context.Context, line string, pos int) (Result, er
 	return Result{}, nil
 }
 
-// ownedEmptyResult reports whether an item-less result still owns the
-// argument: the completer matched but its data is on its way (Pending), or it
-// answered authoritatively that nothing matches (Handled). Falling through
-// would answer the argument with something unrelated, like filenames for a
-// container name.
-func ownedEmptyResult(result Result, rc registeredCompleter, traceEnabled bool, start time.Time) (Result, bool) {
-	if len(result.Items) > 0 || (!result.Pending && !result.Handled) {
-		return Result{}, false
+// finalizeResult settles an answer for word, the word being completed at
+// pos: where its replacement starts, which items fuzzy mode keeps, and the
+// shell text each one inserts, checked until ctx's deadline.
+func (r *Router) finalizeResult(ctx context.Context, result Result, word commandWords, line string, pos int) (Result, error) {
+	query := word.current
+	result.ReplaceFrom = min(result.ReplaceFrom, pos) // a completer bug; the slice below must not panic
+	if result.ReplaceFrom <= word.currentStart {
+		result.ReplaceFrom = word.currentStart
+	} else {
+		// The items complete only the end of the word ("$HO" of "$((1 + $HO").
+		query = shlex.Unquote(line[result.ReplaceFrom:pos])
 	}
-	if traceEnabled {
-		event := "router_done"
-		if result.Pending {
-			event = "router_pending"
-		}
-		trace.Emit("completion", event, trace.LevelDetailed, map[string]any{
-			"name":        rc.completer.Name(),
-			"duration_ms": float64(time.Since(start).Microseconds()) / 1000.0,
-		})
-	}
-	return Result{Pending: result.Pending}, true
-}
-
-func (r *Router) finalizeResult(result Result, query string) Result {
+	var filterCut, limitCut int
 	if r.fuzzy && query != "" && !strings.HasSuffix(query, "/") {
-		filterQuery := basenameCompletionQuery(query)
-		if filterQuery != "" {
-			result.Items = FuzzyFilter(result.Items, filterQuery)
+		if filterQuery := itemQuery(query, result.Prefix); filterQuery != "" {
+			result.Items, filterCut = fuzzyFilter(result.Items, filterQuery)
 		}
 	}
-	result.Items = limitCompletionItems(result.Items)
-	return result
+	result.Items, limitCut = limitCompletionItems(result.Items)
+	result.hidden.More += filterCut + limitCut
+	// Every candidate filtered out is still this completer's answer.
+	result.empty = OutcomeNoMatches
+	return writeShellText(ctx, result, line, pos, r.lang)
 }
 
-func basenameCompletionQuery(query string) string {
+// itemQuery returns the part of the replaced text that the items themselves
+// complete: the text minus the result's shared prefix (a directory), or
+// else its last path element.
+func itemQuery(query, prefix string) string {
+	if prefix != "" && strings.HasPrefix(query, prefix) {
+		return query[len(prefix):]
+	}
 	if lastSlash := strings.LastIndex(query, "/"); lastSlash >= 0 {
 		return query[lastSlash+1:]
 	}
 	return query
 }
 
+// completeWithBoundary runs one completer behind the caller's context: the
+// call runs on its own goroutine, so a completer that ignores its context
+// cannot hold the caller past its deadline, and a panic in it is an error,
+// not the end of the user's login shell.
+//
+// A completer whose last call is still running (its caller gave up, and it
+// has not noticed) is skipped, not reported pending: nothing says it owns
+// this input, no ready notification would follow, and launching another
+// call would pile goroutines up behind it. Every built-in completer honors
+// its context and every source times out (flightCache), so a call outlives
+// its caller only by the moment it takes to notice, or for a buggy
+// completer. The editor calls synchronously, so no two lookups wait on one
+// call.
 func (r *Router) completeWithBoundary(ctx context.Context, rc registeredCompleter, line string, pos int) (Result, error) {
-	key := completerInFlightKey(rc)
-	if !r.beginCompleterCall(key) {
+	if !r.calls.take(rc.id) {
 		return Result{}, nil
 	}
-
-	done := make(chan completerCallResult, 1)
+	type answer struct {
+		result Result
+		err    error
+	}
+	done := make(chan answer, 1)
 	go func() {
-		defer r.endCompleterCall(key)
-		result, err := rc.completer.Complete(ctx, line, pos)
-		done <- completerCallResult{result: result, err: err}
+		result, err := completeGuarded(ctx, rc.completer, line, pos)
+		// Free the slot before answering: the caller's next lookup may come
+		// right after it receives this one.
+		r.calls.release(rc.id)
+		done <- answer{result, err}
 	}()
-
 	select {
+	case a := <-done:
+		return a.result, a.err
 	case <-ctx.Done():
 		return Result{}, ctx.Err()
-	case result := <-done:
-		return result.result, result.err
 	}
 }
 
-func completerInFlightKey(rc registeredCompleter) uint64 {
-	return rc.id
-}
-
-func (r *Router) beginCompleterCall(key uint64) bool {
-	r.completerMu.Lock()
-	defer r.completerMu.Unlock()
-	if r.completerInFlight == nil {
-		r.completerInFlight = make(map[uint64]completerInFlightCall)
-	}
-	now := time.Now()
-	if call, ok := r.completerInFlight[key]; ok {
-		if !contextReadCallIsStale(call.started, now, 0) {
-			return false
+// completeGuarded runs one Complete call, turning a panic into an error:
+// calls run on router goroutines inside the user's login shell, where an
+// unrecovered panic would kill the shell and close their terminal tab.
+func completeGuarded(ctx context.Context, c Completer, line string, pos int) (result Result, err error) {
+	defer func() {
+		if p := recover(); p != nil {
+			result, err = Result{}, fmt.Errorf("completion: %s completer panicked: %v", c.Name(), p)
 		}
-	}
-	r.completerInFlight[key] = completerInFlightCall{started: now}
-	return true
+	}()
+	return c.Complete(ctx, line, pos)
 }
 
-func (r *Router) endCompleterCall(key uint64) {
-	r.completerMu.Lock()
-	delete(r.completerInFlight, key)
-	r.completerMu.Unlock()
-}
-
-// CompleteBounded runs completion behind the provided context boundary.
-// This protects UI callers from completers that ignore context cancellation.
+// CompleteBounded is Complete for UI callers: it reports the caller's
+// context error when the deadline cut completion short with nothing to
+// show. Every completer already runs behind the context
+// (completeWithBoundary), so one that ignores it cannot block the caller.
 func (r *Router) CompleteBounded(ctx context.Context, line string, pos int) (Result, error) {
 	if err := ctx.Err(); err != nil {
 		return Result{}, err
 	}
-
-	done := make(chan boundedCompletionResult, 1)
-	go func() {
-		result, err := r.Complete(ctx, line, pos)
-		done <- boundedCompletionResult{result: result, err: err}
-	}()
-
-	select {
-	case <-ctx.Done():
+	result, err := r.Complete(ctx, line, pos)
+	if err == nil && result.Outcome() == OutcomeNotMine && ctx.Err() != nil {
 		return Result{}, ctx.Err()
-	case result := <-done:
-		return result.result, result.err
 	}
-}
-
-// extractCompletionQuery extracts the word being completed.
-func extractCompletionQuery(line string, pos int) string {
-	return shellUnescapeWord(shellWordAt(line, pos))
-}
-
-// ExtractPipeContext extracts the command context after the last pipe.
-// For "cat file | pb", returns ("pb", 3) where 3 is the new position.
-// For "ls -la", returns ("ls -la", 5) unchanged.
-// This allows completers to work correctly with piped commands.
-func ExtractPipeContext(line string, pos int) (extracted string, newPos int) {
-	pos = clampCursor(line, pos)
-
-	// Find the last pipe character before pos
-	lastPipe := -1
-	for i := pos - 1; i >= 0; i-- {
-		if line[i] == '|' {
-			lastPipe = i
-			break
-		}
-	}
-
-	if lastPipe < 0 {
-		// No pipe, return original
-		return line, pos
-	}
-
-	// Skip the pipe and any leading whitespace
-	start := lastPipe + 1
-	for start < pos && (line[start] == ' ' || line[start] == '\t') {
-		start++
-	}
-
-	// Return the segment after the pipe with adjusted position
-	extracted = line[start:pos]
-	newPos = pos - start
-	return extracted, newPos
+	return result, err
 }
 
 // Completers returns the registered completers for inspection.
@@ -321,51 +337,23 @@ type Prefetcher interface {
 	Prefetch(line string, pos int)
 }
 
-// Prefetch triggers background prefetching for all completers that support it.
-// Call this when the user types a space after a command.
-func (r *Router) Prefetch(line string, pos int) {
-	for _, rc := range r.completers {
-		if p, ok := rc.completer.(Prefetcher); ok {
-			p.Prefetch(line, pos)
-		}
-	}
-}
-
-// PrefetchBounded runs prefetch work in the background and coalesces stuck prefetchers.
+// PrefetchBounded runs prefetch work in the background. A prefetcher whose
+// previous Prefetch has not returned is skipped rather than stacked up.
 func (r *Router) PrefetchBounded(line string, pos int) {
 	for _, rc := range r.completers {
 		p, ok := rc.completer.(Prefetcher)
 		if !ok {
 			continue
 		}
-		if !r.beginPrefetch(rc.id) {
+		if !r.prefetching.take(rc.id) {
 			continue
 		}
 		go func(id uint64, prefetcher Prefetcher) {
-			defer r.endPrefetch(id)
+			defer r.prefetching.release(id)
+			// A prefetch bug must not kill the shell; prefetching is
+			// best-effort, so the panic is simply dropped.
+			defer func() { _ = recover() }()
 			prefetcher.Prefetch(line, pos)
 		}(rc.id, p)
 	}
-}
-
-func (r *Router) beginPrefetch(key uint64) bool {
-	r.prefetchMu.Lock()
-	defer r.prefetchMu.Unlock()
-	if r.prefetchInFlight == nil {
-		r.prefetchInFlight = make(map[uint64]prefetchInFlightCall)
-	}
-	now := time.Now()
-	if call, ok := r.prefetchInFlight[key]; ok {
-		if !contextReadCallIsStale(call.started, now, 0) {
-			return false
-		}
-	}
-	r.prefetchInFlight[key] = prefetchInFlightCall{started: now}
-	return true
-}
-
-func (r *Router) endPrefetch(key uint64) {
-	r.prefetchMu.Lock()
-	delete(r.prefetchInFlight, key)
-	r.prefetchMu.Unlock()
 }

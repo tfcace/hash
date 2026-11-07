@@ -38,50 +38,20 @@ func (t namedTestTransport) AvailableModels() []agent.ModelOption   { return nil
 func (t namedTestTransport) SetModel(context.Context, string) error { return nil }
 func (t namedTestTransport) EnsureModelInfo(context.Context) error  { return nil }
 
-func TestAgentHandler_HandleRequest(t *testing.T) {
-	mockResp := agent.Response{
-		Type:    agent.ResponseTypeCommand,
-		Command: "find . -size +100M",
-	}
-	mock := agent.NewMockTransport(mockResp)
-	client := agent.NewClient(mock)
-
-	handler := NewAgentHandler(client)
-
-	ctx := context.Background()
-	if err := mock.Connect(ctx); err != nil {
-		t.Fatalf("Connect() error = %v", err)
-	}
-
-	parseResult := parser.ParseResult{
-		Type:        parser.CommandTypeAgent,
-		AgentPrompt: "find large files",
-	}
-
-	resp, err := handler.HandleRequest(ctx, parseResult)
-	if err != nil {
-		t.Fatalf("HandleRequest() error = %v", err)
-	}
-
-	if resp.Command != "find . -size +100M" {
-		t.Errorf("Command = %q, want %q", resp.Command, "find . -size +100M")
-	}
-}
-
 func TestBuildRequest_BareAgentAfterError(t *testing.T) {
 	handler := &AgentHandler{}
-	handler.SetLastError(&LastError{
+	facts := requestFacts{lastError: &LastError{
 		Command:  "hash-upgrrade",
 		Stderr:   "hash-upgrrade: command not found",
 		ExitCode: 127,
-	})
+	}}
 
 	parsed := parser.ParseResult{
 		Type:        parser.CommandTypeAgent,
 		AgentPrompt: "", // bare ??
 	}
 
-	req, err := handler.buildRequest(parsed)
+	req, err := handler.buildRequest(parsed, facts)
 	if err != nil {
 		t.Fatalf("buildRequest() error = %v", err)
 	}
@@ -112,7 +82,7 @@ func TestBuildRequest_BareAgentNoError(t *testing.T) {
 		AgentPrompt: "", // bare ??
 	}
 
-	req, err := handler.buildRequest(parsed)
+	req, err := handler.buildRequest(parsed, requestFacts{})
 	if err != nil {
 		t.Fatalf("buildRequest() error = %v", err)
 	}
@@ -128,18 +98,18 @@ func TestBuildRequest_BareAgentNoError(t *testing.T) {
 
 func TestBuildRequest_AgentWithPromptAfterError(t *testing.T) {
 	handler := &AgentHandler{}
-	handler.SetLastError(&LastError{
+	facts := requestFacts{lastError: &LastError{
 		Command:  "make build",
 		Stderr:   "undefined reference to main",
 		ExitCode: 2,
-	})
+	}}
 
 	parsed := parser.ParseResult{
 		Type:        parser.CommandTypeAgent,
 		AgentPrompt: "how do I fix this",
 	}
 
-	req, err := handler.buildRequest(parsed)
+	req, err := handler.buildRequest(parsed, facts)
 	if err != nil {
 		t.Fatalf("buildRequest() error = %v", err)
 	}
@@ -158,42 +128,13 @@ func TestBuildRequest_AgentWithPromptAfterError(t *testing.T) {
 	}
 }
 
-func TestBuildRequest_LastErrorCleared(t *testing.T) {
-	handler := &AgentHandler{}
-
-	// Set error, then clear it
-	handler.SetLastError(&LastError{
-		Command:  "bad-cmd",
-		Stderr:   "not found",
-		ExitCode: 127,
-	})
-	handler.SetLastError(nil)
-
-	parsed := parser.ParseResult{
-		Type:        parser.CommandTypeAgent,
-		AgentPrompt: "",
-	}
-
-	req, err := handler.buildRequest(parsed)
-	if err != nil {
-		t.Fatalf("buildRequest() error = %v", err)
-	}
-
-	if req.Prompt != "" {
-		t.Errorf("prompt should be empty after error cleared, got %q", req.Prompt)
-	}
-	if req.Context.LastError != "" {
-		t.Errorf("Context.LastError should be empty after cleared, got %q", req.Context.LastError)
-	}
-}
-
 func TestBuildRequest_PipeModeIgnoresLastError(t *testing.T) {
 	handler := &AgentHandler{}
-	handler.SetLastError(&LastError{
+	facts := requestFacts{lastError: &LastError{
 		Command:  "bad-cmd",
 		Stderr:   "not found",
 		ExitCode: 127,
-	})
+	}}
 
 	parsed := parser.ParseResult{
 		Type:        parser.CommandTypeAgentPipe,
@@ -201,7 +142,7 @@ func TestBuildRequest_PipeModeIgnoresLastError(t *testing.T) {
 		AgentPrompt: "filter hidden files",
 	}
 
-	req, err := handler.buildRequest(parsed)
+	req, err := handler.buildRequest(parsed, facts)
 	if err != nil {
 		t.Fatalf("buildRequest() error = %v", err)
 	}
@@ -227,7 +168,7 @@ func TestBuildFollowUpRequest_ACPFramesSideRequestsWithoutTranscript(t *testing.
 		{Role: "assistant", Text: "Is it in the repository?"},
 	}
 
-	req, err := handler.buildFollowUpRequest("let's pause the game and list my kubernetes contexts", transcript)
+	req, err := handler.buildFollowUpRequest("let's pause the game and list my kubernetes contexts", transcript, requestFacts{})
 	if err != nil {
 		t.Fatalf("buildFollowUpRequest() error = %v", err)
 	}
@@ -255,7 +196,7 @@ func TestBuildFollowUpRequest_StatelessTransportIncludesTranscript(t *testing.T)
 		{Role: "assistant", Text: "Which directory should I inspect?"},
 	}
 
-	req, err := handler.buildFollowUpRequest("internal/shell", transcript)
+	req, err := handler.buildFollowUpRequest("internal/shell", transcript, requestFacts{})
 	if err != nil {
 		t.Fatalf("buildFollowUpRequest() error = %v", err)
 	}
@@ -284,7 +225,7 @@ func TestBuildRequest_InlineIsMarkedInline(t *testing.T) {
 		AgentPrompt: "oneline with hash",
 	}
 
-	req, err := handler.buildRequest(parsed)
+	req, err := handler.buildRequest(parsed, requestFacts{})
 	if err != nil {
 		t.Fatalf("buildRequest() error = %v", err)
 	}
@@ -297,7 +238,7 @@ func TestBuildRequest_FullAndPipeAreNotInline(t *testing.T) {
 	handler := &AgentHandler{}
 	for _, typ := range []parser.CommandType{parser.CommandTypeAgent, parser.CommandTypeAgentPipe} {
 		parsed := parser.ParseResult{Type: typ, Command: "cat go.mod", AgentPrompt: "list deps"}
-		req, err := handler.buildRequest(parsed)
+		req, err := handler.buildRequest(parsed, requestFacts{})
 		if err != nil {
 			t.Fatalf("buildRequest(%v) error = %v", typ, err)
 		}
@@ -357,5 +298,61 @@ func TestAgentHandler_RestartWithoutAgent(t *testing.T) {
 	var h *AgentHandler
 	if err := h.Restart(context.Background()); err == nil {
 		t.Error("Restart() on nil handler = nil error, want an error")
+	}
+}
+
+// replyTestTransport streams one fixed reply.
+type replyTestTransport struct {
+	namedTestTransport
+	reply string
+}
+
+func (t replyTestTransport) SendStreaming(context.Context, agent.Request) (<-chan string, <-chan error) {
+	textCh := make(chan string, 1)
+	errCh := make(chan error)
+	textCh <- t.reply
+	close(textCh)
+	close(errCh)
+	return textCh, errCh
+}
+
+// An inline reply is the text to append to the partial command, exactly as
+// the ghost text shows it. It is not a command on its own, so it must not be
+// filed as an explanation and come back as an empty fill.
+func TestAgentHandler_HandleRequestInlineReplyIsTheFill(t *testing.T) {
+	h := NewAgentHandler(agent.NewClient(replyTestTransport{reply: "%h %s"}))
+	parsed := parser.Parse("git log --format=?? oneline with hash")
+
+	resp, err := h.HandleRequest(context.Background(), parsed)
+	if err != nil {
+		t.Fatalf("HandleRequest() error = %v", err)
+	}
+	if resp.Type != agent.ResponseTypeCommand || resp.Command != "%h %s" {
+		t.Fatalf("HandleRequest() = %+v, want the command fill %q", resp, "%h %s")
+	}
+}
+
+// The e2e suites read the fill through HandleRequest: it must be the same
+// fill the ghost text shows, without the backticks the model wraps it in.
+func TestAgentHandler_HandleRequestInlineFillIsUnwrapped(t *testing.T) {
+	h := NewAgentHandler(agent.NewClient(replyTestTransport{reply: "`internal/shell/*.go`"}))
+	parsed := parser.Parse("ls ?? only the go files in internal/shell")
+
+	resp, err := h.HandleRequest(context.Background(), parsed)
+	if err != nil {
+		t.Fatalf("HandleRequest() error = %v", err)
+	}
+	if resp.Command != "internal/shell/*.go" {
+		t.Fatalf("HandleRequest() = %+v, want the unwrapped fill", resp)
+	}
+}
+
+func TestBuildRequest_InlineAsksForNoMarkdown(t *testing.T) {
+	req, err := (&AgentHandler{}).buildRequest(parser.Parse("ls ?? go files"), requestFacts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(req.Prompt, "no backticks") {
+		t.Errorf("inline prompt does not rule out backticks:\n%s", req.Prompt)
 	}
 }

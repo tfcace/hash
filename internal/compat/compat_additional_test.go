@@ -127,7 +127,7 @@ func TestFormatChangeNotice(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		got := FormatChangeNotice(tt.rcFile, tt.skipped)
+		got := FormatChangeNotice([]string{tt.rcFile}, tt.skipped)
 		for _, want := range tt.wantContains {
 			if !strings.Contains(got, want) {
 				t.Errorf("FormatChangeNotice(%q, %d) = %q, want containing %q", tt.rcFile, tt.skipped, got, want)
@@ -407,7 +407,7 @@ func TestFormatImportSummary_Contents(t *testing.T) {
 	r.AddImported(ItemExport, "EDITOR", "vim")
 	r.AddSkipped(10, "bindkey '^R' history", "zsh-specific")
 
-	summary := FormatImportSummary(r)
+	summary := FormatImportSummary(r, false)
 
 	// Should contain source file
 	if !strings.Contains(summary, ".zshrc") {
@@ -433,10 +433,21 @@ func TestFormatImportSummary_ManySkipped(t *testing.T) {
 		r.AddSkipped(i+1, "skipped line", "reason")
 	}
 
-	summary := FormatImportSummary(r)
+	summary := FormatImportSummary(r, false)
 
 	// Should mention "more"
 	if !strings.Contains(summary, "more") {
 		t.Error("Summary with many skipped items should mention 'more'")
+	}
+}
+
+// The notice is printed for bash migrations too, and what is skipped is not
+// always zsh-specific (starship init, bindkey in a .bashrc).
+func TestFormatChangeNotice_IsShellNeutral(t *testing.T) {
+	if got := FormatChangeNotice([]string{"/home/user/.bashrc"}, 2); strings.Contains(got, "zsh") {
+		t.Errorf("bash change notice = %q, mentions zsh", got)
+	}
+	if got := FormatChangeNotice([]string{"/home/user/.bashrc"}, 1); !strings.Contains(got, "1 item skipped") {
+		t.Errorf("notice = %q, want \"1 item skipped\"", got)
 	}
 }

@@ -164,14 +164,14 @@ func TestMakeHandler_TriesReadFileWithoutPreStat(t *testing.T) {
 	h := &MakeHandler{
 		readFile: func(path string) ([]string, error) {
 			calls++
-			if path != "Makefile" {
-				t.Fatalf("readFile path = %q, want Makefile", path)
+			if filepath.Base(path) != "Makefile" || !filepath.IsAbs(path) {
+				t.Fatalf("readFile path = %q, want an absolute path to Makefile", path)
 			}
 			return []string{"build:"}, nil
 		},
 	}
 
-	targets := h.parseTargets(context.Background())
+	targets, _ := h.parseTargets(context.Background())
 	if calls != 1 {
 		t.Fatalf("expected readFile to be called once without pre-stat, got %d", calls)
 	}

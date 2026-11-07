@@ -104,15 +104,17 @@ interactive = []
 	}()
 
 	transcript := newPTYTranscript(terminal)
-	transcript.waitFor(t, "hash", 5*time.Second)
+	// The built-in prompt need not contain "hash": it shows the working
+	// directory, whose name depends on where the repository was checked out.
+	transcript.waitFor(t, "❯ ", 5*time.Second)
 	if _, err := io.WriteString(terminal, "?? deterministic ACP UX test\r"); err != nil {
 		t.Fatal(err)
 	}
 	transcript.waitFor(t, "Agent wants to run", 5*time.Second)
-	// The permission reader deliberately drains the command submission's
-	// trailing newline before it accepts an answer. Give it time to enter raw
-	// mode so this approval is not classified as stale input.
-	time.Sleep(50 * time.Millisecond)
+	// A question takes only a key typed once the keys settled: one typed
+	// sooner (the submission's keys still arriving) is "too quick". Answer
+	// as a person would, after the question showed and the keys settled.
+	time.Sleep(400 * time.Millisecond)
 	if _, err := io.WriteString(terminal, "y\r"); err != nil {
 		t.Fatal(err)
 	}

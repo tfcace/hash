@@ -6,7 +6,9 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -14,54 +16,61 @@ import (
 	"github.com/tfcace/hash/internal/trace"
 )
 
-const vcsQueryTimeout = 150 * time.Millisecond
+// vcsQueryTimeout bounds one git/jj query. Queries run in the background,
+// detached from the Tab that asked, so a large repository whose
+// for-each-ref outlasts the editor's completion budget still fills the cache
+// and the menu fills itself in through the ready notification.
+const vcsQueryTimeout = 2 * time.Second
+
+// vcsLister lists candidates by running a VCS command in dir. The directory
+// is explicit because queries run detached: by the time one starts, the
+// shell may have cd'd elsewhere.
+type vcsLister func(ctx context.Context, dir string) ([]string, error)
 
 // VCSCompleter provides context-aware completions for common VCS commands.
 // It focuses on branch/revision-like arguments where filesystem completion is
 // usually not what users want (e.g. "git checkout <TAB>").
 type VCSCompleter struct {
-	listGitRefs     func(context.Context) ([]string, error)
-	listJJRevs      func(context.Context) ([]string, error)
-	listGitModified func(context.Context) ([]string, error)
-	listGitStashes  func(context.Context) ([]string, error)
-	listGitRemotes  func(context.Context) ([]string, error)
-	listJJChangeIDs func(context.Context) ([]string, error)
+	listGitRefs     vcsLister
+	listJJRevs      vcsLister
+	listGitModified vcsLister
+	listGitStashes  vcsLister
+	listGitRemotes  vcsLister
+	listJJChangeIDs vcsLister
 
-	cache    map[string]cachedStringList
-	cacheMu  sync.Mutex
-	cacheTTL time.Duration
-	now      func() time.Time
-
-	inflightMu         sync.Mutex
-	inflight           map[string]*vcsLookupCall
-	inflightMaxWaitAge time.Duration
-}
-
-type cachedStringList struct {
-	values    []string
-	expiresAt time.Time
-}
-
-type vcsLookupCall struct {
-	done    chan struct{}
-	started time.Time
-	values  []string
-	err     error
+	policy  flightPolicy
+	lookups flightCache[[]string] // keyed by kind and directory
+	ready   readyNotifier
+	getwd   func() string
 }
 
 // NewVCSCompleter creates a new VCS completer.
 func NewVCSCompleter() *VCSCompleter {
-	return &VCSCompleter{
+	c := &VCSCompleter{
 		listGitRefs:     defaultListGitRefs,
 		listJJRevs:      defaultListJJRevs,
 		listGitModified: defaultListGitModified,
 		listGitStashes:  defaultListGitStashes,
 		listGitRemotes:  defaultListGitRemotes,
 		listJJChangeIDs: defaultListJJChangeIDs,
-		cache:           make(map[string]cachedStringList),
-		cacheTTL:        2 * time.Second,
-		now:             time.Now,
+		policy: flightPolicy{
+			ttl: 2 * time.Second,
+			// Outside a repository every query fails; don't rerun it on
+			// every Tab.
+			failureTTL: 2 * time.Second,
+			timeout:    vcsQueryTimeout,
+			wait:       sourceWait,
+		},
+		getwd: defaultGetwd,
 	}
+	c.lookups.ready = &c.ready
+	return c
+}
+
+// SetOnReady registers a callback fired whenever a background query lands,
+// so a "fetching" menu can fill itself in without another Tab.
+func (c *VCSCompleter) SetOnReady(fn func()) {
+	c.ready.set(fn)
 }
 
 // Name returns the completer name.
@@ -71,31 +80,24 @@ func (c *VCSCompleter) Name() string {
 
 // Complete returns VCS-aware completions for git/jj contexts.
 func (c *VCSCompleter) Complete(ctx context.Context, line string, pos int) (Result, error) {
-	pipeLine, pipePos := ExtractPipeContext(line, pos)
-	segment := pipeLine[:pipePos]
-	trailingSpace := strings.HasSuffix(segment, " ")
-	parts := strings.Fields(segment)
-	if len(parts) < 2 {
+	cw := parseCommandWords(line, pos)
+	// Needs a complete subcommand: "git chec<TAB>" is not ours.
+	args := cw.args()
+	if len(args) == 0 || !cw.inArgumentPosition() {
 		return Result{}, nil
 	}
 
-	switch parts[0] {
+	switch cw.command() {
 	case "git":
-		return c.completeGit(ctx, parts, trailingSpace), nil
+		return c.completeGit(ctx, args[0], args[1:], cw.current), nil
 	case "jj":
-		return c.completeJJ(ctx, parts, trailingSpace), nil
+		return c.completeJJ(ctx, args[0], args[1:], cw.current), nil
 	default:
 		return Result{}, nil
 	}
 }
 
-func (c *VCSCompleter) completeGit(ctx context.Context, parts []string, trailingSpace bool) Result {
-	if len(parts) < 2 {
-		return Result{}
-	}
-
-	subcommand := parts[1]
-	current, before := splitCurrentArg(parts[2:], trailingSpace)
+func (c *VCSCompleter) completeGit(ctx context.Context, subcommand string, before []string, current string) Result {
 
 	switch subcommand {
 	case "checkout", "switch", "log", "diff", "rebase", "cherry-pick", "revert", "merge":
@@ -155,8 +157,9 @@ func (c *VCSCompleter) completeGitRemote(ctx context.Context, current string, be
 	}
 }
 
-// lookupAndFilter calls a list function and prefix-filters the results.
-func (c *VCSCompleter) lookupAndFilter(ctx context.Context, kind string, listFn func(context.Context) ([]string, error), prefix string) Result {
+// lookupAndFilter runs a list function (through the cache) and
+// prefix-filters the results.
+func (c *VCSCompleter) lookupAndFilter(ctx context.Context, kind string, listFn vcsLister, prefix string) Result {
 	start := time.Now()
 	traceEnabled := trace.Enabled("completion")
 	if traceEnabled {
@@ -166,153 +169,31 @@ func (c *VCSCompleter) lookupAndFilter(ctx context.Context, kind string, listFn 
 		})
 	}
 
-	values, cached, err := c.lookupValues(ctx, kind, listFn)
-	result := Result{}
-	if err == nil {
-		result = prefixFilterItems(values, prefix)
-	}
+	values, status := c.lookupValues(ctx, kind, listFn)
+	result := sourceResult(values, status, prefix)
 	if traceEnabled {
-		errText := ""
-		if err != nil {
-			errText = err.Error()
-		}
 		trace.Emit("completion", "vcs_lookup_done", trace.LevelDetailed, map[string]any{
 			"kind":        kind,
 			"prefix":      prefix,
 			"values":      len(values),
 			"items":       len(result.Items),
-			"cached":      cached,
-			"error":       errText,
+			"status":      status.String(),
 			"duration_ms": float64(time.Since(start).Microseconds()) / 1000.0,
 		})
-	}
-	if err != nil {
-		return Result{}
 	}
 	return result
 }
 
-func (c *VCSCompleter) lookupValues(ctx context.Context, kind string, listFn func(context.Context) ([]string, error)) (values []string, fresh bool, err error) {
-	cacheKey := c.cacheKey(kind)
-	if c.cacheTTL > 0 {
-		now := c.timeNow()
-		c.cacheMu.Lock()
-		if c.cache != nil {
-			if cached, ok := c.cache[cacheKey]; ok && now.Before(cached.expiresAt) {
-				cachedValues := append([]string(nil), cached.values...)
-				c.cacheMu.Unlock()
-				return cachedValues, true, nil
-			}
-		}
-		c.cacheMu.Unlock()
-	}
-
-	values, err = c.lookupStringValues(ctx, cacheKey, listFn)
-	if err != nil {
-		if ctx.Err() == nil {
-			c.storeCachedValues(cacheKey, nil)
-		}
-		return values, false, err
-	}
-	c.storeCachedValues(cacheKey, values)
-	return values, false, err
+// lookupValues returns the candidates of one kind for the working directory.
+// The returned slice is shared with the cache and must not be modified.
+func (c *VCSCompleter) lookupValues(ctx context.Context, kind string, listFn vcsLister) ([]string, lookupStatus) {
+	dir := c.getwd()
+	return c.lookups.get(ctx, kind+"\x00"+dir, c.policy, func(ctx context.Context) ([]string, error) {
+		return listFn(ctx, dir)
+	})
 }
 
-func (c *VCSCompleter) lookupStringValues(
-	ctx context.Context,
-	cacheKey string,
-	listFn func(context.Context) ([]string, error),
-) ([]string, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-
-	now := time.Now()
-	c.inflightMu.Lock()
-	if call, ok := c.inflight[cacheKey]; ok {
-		if !contextReadCallIsStale(call.started, now, c.inflightMaxWaitAge) {
-			c.inflightMu.Unlock()
-			return waitForVCSLookup(ctx, call)
-		}
-		delete(c.inflight, cacheKey)
-	}
-
-	call := &vcsLookupCall{done: make(chan struct{}), started: now}
-	if c.inflight == nil {
-		c.inflight = make(map[string]*vcsLookupCall)
-	}
-	c.inflight[cacheKey] = call
-	c.inflightMu.Unlock()
-
-	go c.finishStringLookup(ctx, cacheKey, listFn, call)
-	return waitForVCSLookup(ctx, call)
-}
-
-func (c *VCSCompleter) finishStringLookup(
-	ctx context.Context,
-	cacheKey string,
-	listFn func(context.Context) ([]string, error),
-	call *vcsLookupCall,
-) {
-	values, err := listFn(ctx)
-
-	c.inflightMu.Lock()
-	call.values = values
-	call.err = err
-	if c.inflight[cacheKey] == call {
-		delete(c.inflight, cacheKey)
-	}
-	c.inflightMu.Unlock()
-	close(call.done)
-}
-
-func waitForVCSLookup(ctx context.Context, call *vcsLookupCall) ([]string, error) {
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case <-call.done:
-		return append([]string(nil), call.values...), call.err
-	}
-}
-
-func (c *VCSCompleter) storeCachedValues(cacheKey string, values []string) {
-	if c.cacheTTL <= 0 {
-		return
-	}
-
-	c.cacheMu.Lock()
-	defer c.cacheMu.Unlock()
-	if c.cache == nil {
-		c.cache = make(map[string]cachedStringList)
-	}
-	c.cache[cacheKey] = cachedStringList{
-		values:    append([]string(nil), values...),
-		expiresAt: c.timeNow().Add(c.cacheTTL),
-	}
-}
-
-func (c *VCSCompleter) cacheKey(kind string) string {
-	cwd, err := os.Getwd()
-	if err != nil {
-		cwd = ""
-	}
-	return kind + "\x00" + cwd
-}
-
-func (c *VCSCompleter) timeNow() time.Time {
-	if c.now != nil {
-		return c.now()
-	}
-	return time.Now()
-}
-
-func (c *VCSCompleter) completeJJ(ctx context.Context, parts []string, trailingSpace bool) Result {
-	if len(parts) < 2 {
-		return Result{}
-	}
-
-	subcommand := parts[1]
-	current, before := splitCurrentArg(parts[2:], trailingSpace)
+func (c *VCSCompleter) completeJJ(ctx context.Context, subcommand string, before []string, current string) Result {
 
 	switch subcommand {
 	case "edit", "new", "show":
@@ -338,19 +219,20 @@ func (c *VCSCompleter) completeJJ(ctx context.Context, parts []string, trailingS
 func (c *VCSCompleter) completeJJRevision(ctx context.Context, current string) Result {
 	// Run both jj queries in parallel
 	var revs, ids []string
+	var revsStatus, idsStatus lookupStatus
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		revs, _, _ = c.lookupValues(ctx, "jj_revs", c.listJJRevs)
+		revs, revsStatus = c.lookupValues(ctx, "jj_revs", c.listJJRevs)
 	}()
 	go func() {
 		defer wg.Done()
-		ids, _, _ = c.lookupValues(ctx, "jj_change_ids", c.listJJChangeIDs)
+		ids, idsStatus = c.lookupValues(ctx, "jj_change_ids", c.listJJChangeIDs)
 	}()
 	wg.Wait()
-	if ctx.Err() != nil {
-		return Result{}
+	if revsStatus == lookupPending || idsStatus == lookupPending {
+		return pendingResult()
 	}
 
 	seen := make(map[string]bool)
@@ -384,9 +266,9 @@ func (c *VCSCompleter) completeJJBookmark(ctx context.Context, current string, b
 		return Result{}
 	}
 
-	revs, _, err := c.lookupValues(ctx, "jj_revs", c.listJJRevs)
-	if err != nil {
-		return Result{}
+	revs, status := c.lookupValues(ctx, "jj_revs", c.listJJRevs)
+	if status == lookupPending || status == lookupFailed {
+		return sourceResult(nil, status, current)
 	}
 	var bookmarks []string
 	for _, r := range revs {
@@ -395,13 +277,6 @@ func (c *VCSCompleter) completeJJBookmark(ctx context.Context, current string, b
 		}
 	}
 	return prefixFilterItems(bookmarks, current)
-}
-
-func splitCurrentArg(args []string, trailingSpace bool) (current string, before []string) {
-	if trailingSpace || len(args) == 0 {
-		return "", args
-	}
-	return args[len(args)-1], args[:len(args)-1]
 }
 
 func shouldCompleteGitRef(subcommand, current string, before []string) bool {
@@ -468,34 +343,45 @@ func containsToken(tokens []string, target string) bool {
 }
 
 func prefixFilterItems(values []string, prefix string) Result {
-	items := make([]Item, 0, min(len(values), completionItemLimit))
+	result := Result{Items: make([]Item, 0, min(len(values), completionItemLimit))}
 	for _, value := range values {
 		if prefix == "" || strings.HasPrefix(value, prefix) {
-			items = append(items, Item{
-				Value:   value,
-				Display: value,
-			})
-			if len(items) >= completionItemLimit {
+			if !result.add(Item{Value: value, Display: value}) {
 				break
 			}
 		}
 	}
-	return Result{Items: items}
+	return result
 }
 
-func defaultListGitRefs(ctx context.Context) ([]string, error) {
-	queryCtx, cancel := context.WithTimeout(ctx, vcsQueryTimeout)
-	defer cancel()
+// runGit runs a git query in dir.
+func runGit(ctx context.Context, dir string, args ...string) ([]string, error) {
+	return runIsolatedCommandIn(ctx, dir, "git", gitArgs(args...)...)
+}
 
-	lines, err := runIsolatedCommand(
-		queryCtx,
-		"git",
-		"for-each-ref",
-		"--format=%(refname:short)",
-		"refs/heads",
-		"refs/remotes",
-		"refs/tags",
-	)
+// gitArgs prefixes a git query's arguments with the options every
+// completion query runs with. It must not write to the repository:
+// completion runs while the user's own git commands do and is killed at its
+// deadline, so it must not take the index lock to refresh the index as git
+// status would (--no-optional-locks). And a Tab must not run programs the
+// repository's own config names: core.fsmonitor is off. Clean and
+// textconv filters a repository configures can still run when git status
+// compares a modified file; that is git's own trust model, the same
+// exposure as a prompt that shows git status.
+func gitArgs(args ...string) []string {
+	return append([]string{"--no-optional-locks", "-c", "core.fsmonitor=false"}, args...)
+}
+
+// runJJ runs a jj query in dir without recording an operation: every jj
+// command snapshots the working copy (and imports a colocated git repo's
+// refs) unless told to ignore it, and merges divergent operation heads
+// unless loaded at one; while heads diverge, the query fails instead.
+func runJJ(ctx context.Context, dir string, args ...string) ([]string, error) {
+	return runIsolatedCommandIn(ctx, dir, "jj", append([]string{"--ignore-working-copy", "--at-op", "@", "--color", "never"}, args...)...)
+}
+
+func defaultListGitRefs(ctx context.Context, dir string) ([]string, error) {
+	lines, err := runGit(ctx, dir, "for-each-ref", "--format=%(refname:short)", "refs/heads", "refs/remotes", "refs/tags")
 	if err != nil {
 		return nil, err
 	}
@@ -521,20 +407,8 @@ func defaultListGitRefs(ctx context.Context) ([]string, error) {
 	return refs, nil
 }
 
-func defaultListJJRevs(ctx context.Context) ([]string, error) {
-	queryCtx, cancel := context.WithTimeout(ctx, vcsQueryTimeout)
-	defer cancel()
-
-	lines, err := runIsolatedCommand(
-		queryCtx,
-		"jj",
-		"bookmark",
-		"list",
-		"-T",
-		`name ++ "\n"`,
-		"--color",
-		"never",
-	)
+func defaultListJJRevs(ctx context.Context, dir string) ([]string, error) {
+	lines, err := runJJ(ctx, dir, "bookmark", "list", "-T", `name ++ "\n"`)
 	if err != nil {
 		return nil, err
 	}
@@ -559,52 +433,54 @@ func defaultListJJRevs(ctx context.Context) ([]string, error) {
 	return revs, nil
 }
 
-func defaultListGitModified(ctx context.Context) ([]string, error) {
-	queryCtx, cancel := context.WithTimeout(ctx, vcsQueryTimeout)
-	defer cancel()
-
-	// Run all three git queries in parallel so they share the timeout fairly
-	type result struct {
-		lines []string
+// defaultListGitModified lists the changed, staged and untracked files of
+// the repository, relative to dir, where git add will run. git status
+// (porcelain, -z) reports paths from the repository root and, without the
+// index lock, refreshes stat data in memory only; git diff would write the
+// refreshed index.
+func defaultListGitModified(ctx context.Context, dir string) ([]string, error) {
+	prefix, err := runGit(ctx, dir, "rev-parse", "--show-prefix")
+	if err != nil {
+		return nil, err
 	}
-	var wg sync.WaitGroup
-	results := make([]result, 3)
-
-	cmds := [3][]string{
-		{"git", "diff", "--name-only"},
-		{"git", "diff", "--name-only", "--cached"},
-		{"git", "ls-files", "--others", "--exclude-standard"},
+	out, err := isolatedCommandOutput(ctx, dir, "git", gitArgs("status", "-z", "--untracked-files=all")...)
+	if err != nil {
+		return nil, err
 	}
-	for i, args := range cmds {
-		wg.Add(1)
-		go func(idx int, cmdArgs []string) {
-			defer wg.Done()
-			lines, _ := runIsolatedCommand(queryCtx, cmdArgs[0], cmdArgs[1:]...)
-			results[idx] = result{lines: lines}
-		}(i, args)
+	base := ""
+	if len(prefix) > 0 {
+		base = prefix[0]
 	}
-	wg.Wait()
-
-	seen := make(map[string]bool)
-	var files []string
-	for _, r := range results {
-		for _, f := range r.lines {
-			f = strings.TrimSpace(f)
-			if f != "" && !seen[f] {
-				seen[f] = true
-				files = append(files, f)
-			}
-		}
-	}
-	sort.Strings(files)
-	return files, nil
+	return statusPaths(out, base), nil
 }
 
-func defaultListGitStashes(ctx context.Context) ([]string, error) {
-	queryCtx, cancel := context.WithTimeout(ctx, vcsQueryTimeout)
-	defer cancel()
+// statusPaths returns the paths of git status -z output, relative to base,
+// the directory's path from the repository root: each record is "XY path",
+// and a rename or copy, in the index (X) or the work tree (Y), is followed
+// by a record with its source, which is gone.
+func statusPaths(out, base string) []string {
+	var files []string
+	records := strings.Split(out, "\x00")
+	for i := 0; i < len(records); i++ {
+		record := records[i]
+		if len(record) < 4 {
+			continue
+		}
+		if strings.ContainsAny(record[:2], "RC") {
+			i++ // the source path
+		}
+		path, err := filepath.Rel(filepath.FromSlash(base), filepath.FromSlash(record[3:]))
+		if err != nil {
+			continue
+		}
+		files = append(files, path)
+	}
+	sort.Strings(files)
+	return files
+}
 
-	lines, err := runIsolatedCommand(queryCtx, "git", "stash", "list", "--format=%gd")
+func defaultListGitStashes(ctx context.Context, dir string) ([]string, error) {
+	lines, err := runGit(ctx, dir, "stash", "list", "--format=%gd")
 	if err != nil {
 		return nil, err
 	}
@@ -619,11 +495,8 @@ func defaultListGitStashes(ctx context.Context) ([]string, error) {
 	return stashes, nil
 }
 
-func defaultListGitRemotes(ctx context.Context) ([]string, error) {
-	queryCtx, cancel := context.WithTimeout(ctx, vcsQueryTimeout)
-	defer cancel()
-
-	lines, err := runIsolatedCommand(queryCtx, "git", "remote")
+func defaultListGitRemotes(ctx context.Context, dir string) ([]string, error) {
+	lines, err := runGit(ctx, dir, "remote")
 	if err != nil {
 		return nil, err
 	}
@@ -638,22 +511,13 @@ func defaultListGitRemotes(ctx context.Context) ([]string, error) {
 	return remotes, nil
 }
 
-func defaultListJJChangeIDs(ctx context.Context) ([]string, error) {
-	queryCtx, cancel := context.WithTimeout(ctx, vcsQueryTimeout)
-	defer cancel()
+// jjChangeIDLimit bounds the change ids listed, newest first: all() in a
+// large repository is far more than a menu shows and would outlast the
+// query's timeout.
+const jjChangeIDLimit = 1000
 
-	lines, err := runIsolatedCommand(
-		queryCtx,
-		"jj",
-		"log",
-		"-T",
-		`change_id.short() ++ "\n"`,
-		"--color",
-		"never",
-		"--no-graph",
-		"-r",
-		"all()",
-	)
+func defaultListJJChangeIDs(ctx context.Context, dir string) ([]string, error) {
+	lines, err := runJJ(ctx, dir, "log", "-T", `change_id.short() ++ "\n"`, "--no-graph", "-r", "all()", "--limit", strconv.Itoa(jjChangeIDLimit))
 	if err != nil {
 		return nil, err
 	}
@@ -675,8 +539,22 @@ func runIsolatedCommand(ctx context.Context, command string, args ...string) ([]
 }
 
 // runIsolatedCommandIn runs the command in dir ("" = inherit the process
-// working directory).
+// working directory) and returns its output lines.
 func runIsolatedCommandIn(ctx context.Context, dir, command string, args ...string) ([]string, error) {
+	out, err := isolatedCommandOutput(ctx, dir, command, args...)
+	if err != nil {
+		return nil, err
+	}
+	raw := strings.TrimRight(out, "\n")
+	if raw == "" {
+		return nil, nil
+	}
+	return strings.Split(raw, "\n"), nil
+}
+
+// isolatedCommandOutput runs the command in dir with no input and returns
+// its standard output.
+func isolatedCommandOutput(ctx context.Context, dir, command string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, command, args...)
 	cmd.Dir = dir
 	var stdout bytes.Buffer
@@ -691,12 +569,7 @@ func runIsolatedCommandIn(ctx context.Context, dir, command string, args ...stri
 	}
 
 	if err := cmd.Run(); err != nil {
-		return nil, err
+		return "", err
 	}
-
-	raw := strings.TrimRight(stdout.String(), "\n")
-	if raw == "" {
-		return nil, nil
-	}
-	return strings.Split(raw, "\n"), nil
+	return stdout.String(), nil
 }

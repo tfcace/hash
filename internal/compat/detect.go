@@ -4,6 +4,7 @@ package compat
 import (
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // shellFromEnv extracts the shell name from a SHELL environment value.
@@ -11,15 +12,7 @@ func shellFromEnv(shellEnv string) string {
 	if shellEnv == "" {
 		return ""
 	}
-	// Get basename (e.g., /bin/zsh -> zsh)
-	name := filepath.Base(shellEnv)
-	// Handle common shells
-	switch name {
-	case "zsh", "bash", "sh", "fish", "ksh":
-		return name
-	default:
-		return name
-	}
+	return filepath.Base(shellEnv) // /bin/zsh -> zsh
 }
 
 // detectRCFile returns the path to the rc file for a given shell.
@@ -134,4 +127,61 @@ func DetectPreviousShellFiles() ShellFiles {
 	}
 
 	return ShellFiles{}
+}
+
+// ShellForPath returns the shell a startup file at path is written for,
+// from its extension (.zsh, .bash, .sh: zsh-compat.sh is bash), or else its
+// name, or "" for one of hash's own (.hashrc) or an unknown one. zsh's files
+// go by other names too: /etc/zshrc, .zshrc.local, .zsh_aliases.
+func ShellForPath(path string) string {
+	switch filepath.Ext(path) {
+	case ".zsh":
+		return "zsh"
+	case ".bash", ".sh":
+		return "bash"
+	}
+	return startupFileShell(path)
+}
+
+// startupFileShell returns the shell whose startup file the file at path
+// is, by its name (.bashrc, .profile, .zshrc, /etc/zshrc, .zshrc.local), or
+// "": a script of the shell's (nvm.sh) is not one.
+func startupFileShell(path string) string {
+	base := filepath.Base(path)
+	name := strings.TrimPrefix(base, ".")
+	stem, _, _ := strings.Cut(name, ".")
+	switch {
+	case strings.HasPrefix(name, "zsh"), stem == "zprofile", stem == "zlogin", stem == "zlogout":
+		return "zsh"
+	}
+	switch base {
+	case ".bashrc", ".bash_profile", ".bash_login", ".profile":
+		return "bash"
+	}
+	return ""
+}
+
+// ReadBy is which shells read a startup file.
+type ReadBy int
+
+const (
+	// ReadByEvery: every shell, as zsh reads ~/.zshenv.
+	ReadByEvery ReadBy = iota
+	// ReadByLogin: a login shell (~/.zprofile, ~/.bash_profile, ~/.profile).
+	ReadByLogin
+	// ReadByInteractive: an interactive shell (~/.zshrc, ~/.bashrc, and a
+	// file of any other name).
+	ReadByInteractive
+)
+
+// ReadByPath returns which shells read the startup file at path, from its
+// name.
+func ReadByPath(path string) ReadBy {
+	switch filepath.Base(path) {
+	case ".zshenv":
+		return ReadByEvery
+	case ".zprofile", ".zlogin", ".bash_profile", ".bash_login", ".profile":
+		return ReadByLogin
+	}
+	return ReadByInteractive
 }

@@ -3,8 +3,11 @@ package compat
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/tfcace/hash/internal/executor"
 )
 
 func TestReport_AddImported(t *testing.T) {
@@ -47,17 +50,15 @@ func TestState_SaveAndLoad(t *testing.T) {
 	statePath := filepath.Join(tmpDir, "migration.json")
 
 	// Create and save state
+	mtime := time.Now().Truncate(time.Second)
 	state := &State{
-		SourceFile:  "~/.zshrc",
+		Status:      StatusImported,
 		SourceShell: "zsh",
-		SourceMtime: time.Now().Truncate(time.Second),
-		LastImport:  time.Now().Truncate(time.Second),
-		Declined:    false,
-		Summary: Summary{
-			Aliases:   5,
-			Exports:   3,
-			Functions: 2,
-			Skipped:   10,
+		Paths:       []string{"/home/u/.zshrc"},
+		Import: &ImportRecord{
+			Time:    time.Now().Truncate(time.Second),
+			Summary: Summary{Aliases: 5, Exports: 3, Functions: 2, Skipped: 10},
+			Mtimes:  map[string]time.Time{"/home/u/.zshrc": mtime},
 		},
 	}
 
@@ -71,11 +72,11 @@ func TestState_SaveAndLoad(t *testing.T) {
 		t.Fatalf("LoadState() error = %v", err)
 	}
 
-	if loaded.SourceFile != state.SourceFile {
-		t.Errorf("SourceFile = %q, want %q", loaded.SourceFile, state.SourceFile)
+	if len(loaded.Paths) != 1 || loaded.Paths[0] != "/home/u/.zshrc" || !loaded.Import.Mtimes["/home/u/.zshrc"].Equal(mtime) {
+		t.Errorf("Paths = %v, Mtimes = %v, want %v and %v", loaded.Paths, loaded.Import.Mtimes, state.Paths, mtime)
 	}
-	if loaded.Summary.Aliases != 5 {
-		t.Errorf("Summary.Aliases = %d, want 5", loaded.Summary.Aliases)
+	if loaded.Import.Summary.Aliases != 5 {
+		t.Errorf("Summary.Aliases = %d, want 5", loaded.Import.Summary.Aliases)
 	}
 }
 
@@ -83,5 +84,33 @@ func TestState_LoadNonExistent(t *testing.T) {
 	_, err := LoadState("/nonexistent/path/migration.json")
 	if err == nil {
 		t.Error("expected error for non-existent file")
+	}
+}
+
+// A file the filter stops in at a statement that does not parse is not
+// loaded, or not from that statement on: the report says so, and does not
+// count it a skipped item. The migration said "1 item skipped" of a
+// .bashrc nothing in ran.
+func TestFilter_AFileThatDoesNotParseIsNotLoaded(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	path := filepath.Join(home, ".bashrc")
+	writeFile(t, path, "export A=1\nalias k=kubectl\n}\n")
+	_, report, err := FilterWithDialect(path, "bash", "bash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.NotLoaded) != 1 || report.Summary.Skipped != 0 {
+		t.Fatalf("not loaded %+v, skipped %d, want the file not loaded and nothing skipped", report.NotLoaded, report.Summary.Skipped)
+	}
+	n := report.NotLoaded[0]
+	if want := "~/.bashrc: not loaded: line 3: " + n.Reason; n.File != path || n.Line != 3 || n.Load != executor.LoadedNone || n.Reason == "" || n.String() != want {
+		t.Errorf("not loaded %+v (%q), want line 3 of %s, nothing run: %q", n, n.String(), path, want)
+	}
+
+	_, report = filterRC("echo a\necho b\nif true; then\n", "", "bash", func() *Report { return NewReport("", "") })
+	if len(report.NotLoaded) != 1 || report.NotLoaded[0].Load != executor.LoadedBefore || report.NotLoaded[0].Line != 3 ||
+		!strings.Contains(report.NotLoaded[0].String(), "not loaded from line 3") {
+		t.Errorf("a statement that never ends: not loaded %+v, want the lines before it run", report.NotLoaded)
 	}
 }

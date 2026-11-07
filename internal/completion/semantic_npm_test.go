@@ -76,6 +76,9 @@ func TestNPMHandler_LimitsLargeScriptList(t *testing.T) {
 	if len(result.Items) != completionItemLimit {
 		t.Fatalf("npm completion returned %d items, want %d", len(result.Items), completionItemLimit)
 	}
+	if !result.Hidden().NotShown() {
+		t.Fatalf("npm completion stopped at its limit without saying more were not shown")
+	}
 }
 
 func TestNPMHandler_OnlyRunSubcommand(t *testing.T) {

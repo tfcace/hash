@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/mattn/go-runewidth"
+	"github.com/tfcace/hash/internal/termtext"
 	"github.com/tfcace/hash/internal/trace"
 )
 
@@ -16,9 +17,6 @@ const (
 	ansiCursorUp      = "\x1b[%dA"
 	ansiCursorDown    = "\x1b[%dB"
 	ansiCursorForward = "\x1b[%dC"
-	ansiCursorBack    = "\x1b[%dD"
-	ansiCursorPos     = "\x1b[%d;%dH"
-	ansiCursorCol     = "\x1b[%dG"
 	ansiReverse       = "\x1b[7m"
 	ansiReset         = "\x1b[0m"
 	ansiHideCursor    = "\x1b[?25l"
@@ -29,20 +27,63 @@ const (
 
 // Display handles terminal rendering.
 type Display struct {
-	out            io.Writer
-	width          int
-	height         int
-	gutter         bool
-	mode           string // Current editor mode ("insert", "normal")
-	prompt         string // Prompt to display before first line
-	promptWidth    int
-	lastLines      int    // Number of lines rendered last time
-	lastCursorRow  int    // Row where cursor was left (0-indexed from our content start)
-	inputBgCode    string // ANSI code for input background color
-	finalizedLines int    // Lines rendered by last Finalize call
-	scrollbarCode  string // ANSI code for scrollbar foreground color
-	lastMenuItems  int    // Number of items in last rendered completion menu
-	frame          *InputFrame
+	out           io.Writer
+	width         int
+	view          viewport
+	gutter        bool
+	normalMode    bool   // Editor is in normal mode (gutter shows "n")
+	prompt        string // Prompt to display before first line
+	promptWidth   int
+	drawn         drawnFrame
+	inputBgCode   string // ANSI code for input background color
+	scrollbarCode string // ANSI code for scrollbar foreground color
+	frame         *InputFrame
+}
+
+// drawnFrame is what the last draw left on the terminal. The next draw and
+// every clear work from it, not from editor state that has moved on since
+// (a clear after an edit sees the new cursor and the new menu items).
+type drawnFrame struct {
+	cursorRow int // the cursor's visual row, counted from the first input row
+	cursorCol int // the cursor's column in cells, as positioned after a \r
+	rows      int // the input's visual rows; a menu or notice goes below them
+	below     int // rows drawn under the input: a completion menu or notice
+}
+
+// viewport is the part of the input's visual rows a frame draws: at most
+// the pane's height of rows less the ones the frame draws under the input,
+// from top. An input taller than that scrolls inside it, following the
+// cursor, instead of every frame running its top rows into scrollback and
+// moving up more rows than the screen has; one that fits is drawn whole,
+// from its first row.
+type viewport struct {
+	top    int // the first visual row of the input drawn
+	height int // the pane's rows; 0 when unknown: the input is drawn whole
+	under  int // rows the frame draws under the input (a menu or notice)
+}
+
+// shown is how many input rows the viewport holds: the pane's rows less
+// the ones under the input, at least one.
+func (v *viewport) shown() int {
+	return max(v.height-v.under, 1)
+}
+
+// follow moves the viewport the least that keeps row, the cursor's visual
+// row of an input rows tall, on screen. It reports whether the input is
+// cut: taller than the rows the pane leaves it.
+func (v *viewport) follow(row, rows int) bool {
+	if v.height <= 0 || rows <= v.shown() {
+		v.top = 0
+		return false
+	}
+	v.top = min(max(v.top, row-v.shown()+1), row, rows-v.shown())
+	v.top = max(v.top, 0)
+	return true
+}
+
+// rowsBelowCursor is how many input rows were drawn under the cursor's row.
+func (f drawnFrame) rowsBelowCursor() int {
+	return max(f.rows-1-f.cursorRow, 0)
 }
 
 // InputFrame customizes how the input area is rendered.
@@ -63,9 +104,9 @@ type InputFrame struct {
 // NewDisplay creates a new display.
 func NewDisplay(out io.Writer, width, height int) *Display {
 	return &Display{
-		out:    out,
-		width:  width,
-		height: height,
+		out:   out,
+		width: width,
+		view:  viewport{height: height},
 	}
 }
 
@@ -74,14 +115,23 @@ func (d *Display) SetGutter(enabled bool) {
 	d.gutter = enabled
 }
 
-// SetMode sets the current editor mode for gutter display.
-func (d *Display) SetMode(mode string) {
-	d.mode = mode
+// SetNormalMode sets whether the gutter shows normal (true) or insert mode.
+func (d *Display) SetNormalMode(normal bool) {
+	d.normalMode = normal
 }
 
-// SetPromptWidth sets the prompt width for cursor positioning.
-func (d *Display) SetPromptWidth(w int) {
-	d.promptWidth = w
+// modeBar returns the gutter's mode indicator, or "" without a gutter.
+// Insert mode: dim "i│" (unobtrusive, normal typing)
+// Normal mode: bold yellow "n│" (attention, command mode)
+func (d *Display) modeBar() string {
+	switch {
+	case !d.gutter:
+		return ""
+	case d.normalMode:
+		return "\x1b[33;1mn│\x1b[0m"
+	default:
+		return "\x1b[2mi│\x1b[0m"
+	}
 }
 
 // SetPrompt sets the prompt string to display before the first line.
@@ -120,6 +170,12 @@ func (d *Display) SetScrollbarColor(hexColor string) {
 	fmt.Sscanf(hexColor[1:], "%02x%02x%02x", &r, &g, &b) //nolint:errcheck // hex format already validated
 	// Generate ANSI true color foreground code
 	d.scrollbarCode = fmt.Sprintf("\x1b[38;2;%d;%d;%dm", r, g, b)
+}
+
+// lineCells is where byte col of the logical line row ends, in wrapped
+// cells after its prefix (see wrapCells).
+func (d *Display) lineCells(row int, line string, col int) int {
+	return lineCells(d, row, line, col)
 }
 
 // WrapWidth implements LineLayout: the width used for soft wrapping.
@@ -242,46 +298,76 @@ func clampCursorToBuffer(buf *Buffer, cur *Cursor) (row, col int) {
 	return row, col
 }
 
+// visibleWidthAtByteIndex is how many cells the text of s before byte col
+// takes when drawn.
 func visibleWidthAtByteIndex(s string, col int) int {
 	col = clampByteIndexToRuneBoundary(s, col)
-	return visibleWidth(s[:col])
+	return termtext.Width(s[:col])
 }
 
 // inlineAcceptHint follows a finished inline ?? suggestion, in the key
 // vocabulary hash uses for every hint.
 const inlineAcceptHint = "   enter to run · tab to edit · esc to cancel"
 
-// renderedGhostSuffixWidth returns the visible width added by ghost rendering.
-func renderedGhostSuffixWidth(ghostText string, streaming, fromAgent bool, notice string) int {
+// inlineReviewHint follows a finished fill with lines not drawn: Enter puts
+// it in the buffer to read before it can run.
+const inlineReviewHint = " · enter to review · esc to cancel"
+
+// ghostSuffix is what is drawn after the cursor's line: the ghost text's
+// first line with its hint or streaming mark, the agent's status while
+// nothing has arrived, or why the agent fill failed. It returns the suffix
+// as drawn and the text it shows (ANSI excluded), which layout wraps after
+// the line as the terminal does, so both come from one place.
+func ghostSuffix(ghostText string, state GhostRenderState) (drawn, shown string) {
+	const dimItalic, dim = "\x1b[90;3m", "\x1b[90m"
 	if ghostText == "" {
-		if streaming {
-			return visibleWidth(" Agent thinking...")
+		switch {
+		case !state.Streaming && state.Notice != "":
+			// The agent ghost ended with an error: say why, where the fill would have been
+			shown = " " + termtext.Inert(state.Notice)
+		case !state.Streaming:
+			return "", ""
+		case state.Status != "":
+			shown = " " + termtext.Inert(state.Status)
+		default:
+			// Waiting for the first chunk, in the same words as the response UI
+			shown = " Agent thinking..."
 		}
-		if notice != "" {
-			return visibleWidth(" " + notice)
-		}
-		return 0
+		return dimItalic + shown + ansiReset, shown
 	}
 
-	ghostFirstLine := ghostText
-	if newlineIdx := strings.Index(ghostText, "\n"); newlineIdx >= 0 {
-		ghostFirstLine = ghostText[:newlineIdx]
+	// Only the ghost's first line shows (single-line display); an agent
+	// fill says how many lines follow it.
+	first, hidden := ghostShown(ghostText)
+	first = termtext.Inert(first)
+	if !state.FromAgent {
+		// Predictions: fish-shell style, just dim gray, no hints
+		return "\x1b[38;5;242m" + first + ansiReset, first
 	}
-
-	width := visibleWidth(ghostFirstLine)
-	if fromAgent {
-		if streaming {
-			width += visibleWidth("▌")
-		} else {
-			width += visibleWidth(inlineAcceptHint)
+	// Agent suggestions: dim + italic, then the streaming mark or the hint
+	more := ""
+	if hidden > 0 {
+		more = fmt.Sprintf("  +%d lines", hidden)
+		if hidden == 1 {
+			more = "  +1 line"
 		}
 	}
-
-	return width
+	var tail string
+	switch {
+	case state.Streaming:
+		tail = more + "▌"
+	case hidden > 0:
+		tail = more + inlineReviewHint
+	default:
+		tail = inlineAcceptHint
+	}
+	return dimItalic + first + ansiReset + dim + tail + ansiReset, first + tail
 }
 
 // layoutForStandardRender computes visual cursor/line positions for wrapped input.
-func (d *Display) layoutForStandardRender(buf *Buffer, cur *Cursor, cursorLineExtraWidth int) (totalRows, cursorVisualRow, cursorVisualCol int) {
+// suffix is the text drawn after the cursor's line (a ghost), wrapped after
+// it as the terminal wraps it.
+func (d *Display) layoutForStandardRender(buf *Buffer, cur *Cursor, suffix string) (totalRows, cursorVisualRow, cursorVisualCol int) {
 	lineCount := buf.LineCount()
 	if lineCount <= 0 {
 		return 1, 0, 0
@@ -295,14 +381,14 @@ func (d *Display) layoutForStandardRender(buf *Buffer, cur *Cursor, cursorLineEx
 	for i := 0; i < lineCount; i++ {
 		prefixWidth := d.calcPrefixWidth(i)
 		line := buf.Line(i)
-		lineWidth := prefixWidth + visibleWidth(line)
+		lineWidth := wrapCells(d.wrapWidth(), prefixWidth, line, len(line))
 
 		if i == cursorRow {
-			cursorChars := prefixWidth + visibleWidthAtByteIndex(line, cursorCol)
+			cursorChars := wrapCells(d.wrapWidth(), prefixWidth, line, cursorCol)
 			rowOffset, col := d.wrappedCursorForChars(cursorChars)
 			cursorVisualRow = totalRows + rowOffset
 			cursorVisualCol = col
-			lineWidth += cursorLineExtraWidth
+			lineWidth = wrapCells(d.wrapWidth(), lineWidth, suffix, len(suffix))
 		}
 
 		totalRows += d.visualRowsForChars(lineWidth)
@@ -333,10 +419,10 @@ func (d *Display) layoutForFrameRender(buf *Buffer, cur *Cursor, frame *InputFra
 
 	for i := 0; i < lineCount; i++ {
 		line := buf.Line(i)
-		lineWidth := frame.PrefixWidth + visibleWidth(line)
+		lineWidth := wrapCells(d.wrapWidth(), frame.PrefixWidth, line, len(line))
 
 		if i == cursorRow {
-			cursorChars := frame.PrefixWidth + visibleWidthAtByteIndex(line, cursorCol)
+			cursorChars := wrapCells(d.wrapWidth(), frame.PrefixWidth, line, cursorCol)
 			rowOffset, col := d.wrappedCursorForChars(cursorChars)
 			cursorVisualRow = totalRows + rowOffset
 			cursorVisualCol = col
@@ -357,94 +443,13 @@ func (d *Display) layoutForFrameRender(buf *Buffer, cur *Cursor, frame *InputFra
 
 // Render draws the buffer content with cursor.
 func (d *Display) Render(buf *Buffer, cur *Cursor, hasSelection bool) {
-	if d.frame != nil {
-		d.renderWithFrame(buf, cur, hasSelection, "", false, false, "")
-		return
-	}
-	var sb strings.Builder
-
-	// Hide cursor during render for flicker-free updates
-	sb.WriteString(ansiHideCursor)
-
-	// Move up from where cursor was left to first line of our content
-	if d.lastCursorRow > 0 {
-		fmt.Fprintf(&sb, ansiCursorUp, d.lastCursorRow)
-	}
-	sb.WriteString("\r")
-
-	// Mode indicator: letter + vertical bar with color
-	// Insert mode: dim "i│" (unobtrusive, normal typing)
-	// Normal mode: bold yellow "n│" (attention, command mode)
-	modeBar := ""
-	if d.gutter {
-		switch d.mode {
-		case "normal":
-			modeBar = "\x1b[33;1mn│\x1b[0m" // Bold yellow "n│"
-		default: // "insert" or empty
-			modeBar = "\x1b[2mi│\x1b[0m" // Dim "i│"
-		}
-	}
-
-	for i := 0; i < buf.LineCount(); i++ {
-		if i > 0 {
-			sb.WriteString("\r\n")
-		}
-		sb.WriteString(ansiClearLine)
-
-		line := buf.Line(i)
-
-		// Show mode bar on all lines, then prompt on first line
-		if d.gutter {
-			sb.WriteString(modeBar)
-		}
-		if i == 0 {
-			if d.prompt != "" {
-				sb.WriteString(d.prompt)
-			} else {
-				sb.WriteString(" ") // Space after bar if no prompt
-			}
-		} else {
-			sb.WriteString(" ") // Space after bar for continuation
-		}
-
-		// Render line content with optional selection highlighting
-		if hasSelection && cur.HasSelection() {
-			d.renderLineWithSelection(&sb, line, i, cur)
-		} else {
-			sb.WriteString(line)
-		}
-	}
-
-	// Clear everything below the buffer (including any old menu)
-	sb.WriteString(ansiClearToEnd)
-
-	// Position cursor using wrapped visual layout rather than logical rows.
-	totalRows, cursorVisualRow, cursorVisualCol := d.layoutForStandardRender(buf, cur, 0)
-	linesBelowCursor := totalRows - 1 - cursorVisualRow
-	if linesBelowCursor > 0 {
-		fmt.Fprintf(&sb, ansiCursorUp, linesBelowCursor)
-	}
-
-	sb.WriteString("\r")
-	if cursorVisualCol > 0 {
-		fmt.Fprintf(&sb, ansiCursorForward, cursorVisualCol)
-	}
-
-	// Show cursor
-	sb.WriteString(ansiShowCursor)
-
-	// Remember where we left the cursor for next render
-	d.lastCursorRow = cursorVisualRow
-	d.lastLines = totalRows
-
-	d.out.Write([]byte(sb.String()))
+	d.RenderWithGhost(buf, cur, hasSelection, "", GhostRenderState{})
 }
 
 // GhostRenderState groups the transient values that belong to one ghost frame.
 type GhostRenderState struct {
 	Streaming bool
 	FromAgent bool
-	ModelName string
 	Status    string
 	Notice    string // shown after the cursor when an agent ghost ended with an error
 }
@@ -456,7 +461,15 @@ type GhostRenderState struct {
 //nolint:gocyclo // terminal rendering requires many conditional escape sequences
 func (d *Display) RenderWithGhost(buf *Buffer, cur *Cursor, hasSelection bool, ghostText string, state GhostRenderState) {
 	if d.frame != nil {
-		d.renderWithFrame(buf, cur, hasSelection, ghostText, state.Streaming, state.FromAgent, state.ModelName)
+		// The framed reply box has no ghost source (no predictions, no
+		// inline agent stream), so it renders no ghost text or notices.
+		d.renderWithFrame(buf, cur, hasSelection)
+		return
+	}
+	suffix, shown := ghostSuffix(ghostText, state)
+	totalRows, cursorVisualRow, cursorVisualCol := d.layoutForStandardRender(buf, cur, shown)
+	if d.view.follow(cursorVisualRow, totalRows) {
+		d.renderViewport(buf, cur, hasSelection, suffix, cursorVisualRow, cursorVisualCol)
 		return
 	}
 	var sb strings.Builder
@@ -465,102 +478,22 @@ func (d *Display) RenderWithGhost(buf *Buffer, cur *Cursor, hasSelection bool, g
 	sb.WriteString(ansiHideCursor)
 
 	// Move up from where cursor was left to first line of our content
-	if d.lastCursorRow > 0 {
-		fmt.Fprintf(&sb, ansiCursorUp, d.lastCursorRow)
+	if d.drawn.cursorRow > 0 {
+		fmt.Fprintf(&sb, ansiCursorUp, d.drawn.cursorRow)
 	}
 	sb.WriteString("\r")
-
-	// Mode indicator: letter + vertical bar with color
-	modeBar := ""
-	if d.gutter {
-		switch d.mode {
-		case "normal":
-			modeBar = "\x1b[33;1mn│\x1b[0m" // Bold yellow "n│"
-		default: // "insert" or empty
-			modeBar = "\x1b[2mi│\x1b[0m" // Dim "i│"
-		}
-	}
-
-	cursorRow := cur.Pos.Row
 
 	for i := 0; i < buf.LineCount(); i++ {
 		if i > 0 {
 			sb.WriteString("\r\n")
 		}
 		sb.WriteString(ansiClearLine)
-
-		line := buf.Line(i)
-
-		// Show mode bar on all lines, then prompt on first line
-		if d.gutter {
-			sb.WriteString(modeBar)
-		}
-		if i == 0 {
-			if d.prompt != "" {
-				sb.WriteString(d.prompt)
-			} else {
-				sb.WriteString(" ")
-			}
-		} else {
-			sb.WriteString(" ")
-		}
-
-		// Render line content
-		if hasSelection && cur.HasSelection() {
-			d.renderLineWithSelection(&sb, line, i, cur)
-		} else {
-			sb.WriteString(line)
-		}
-
-		// Render ghost text on the cursor's line, after the cursor position
-		if i == cursorRow && (ghostText != "" || state.Streaming || state.Notice != "") {
-			switch {
-			case ghostText == "" && !state.Streaming:
-				// The agent ghost ended with an error: say why, where the fill would have been
-				sb.WriteString("\x1b[90;3m " + state.Notice + "\x1b[0m")
-			case ghostText == "":
-				// Show thinking indicator while waiting for first chunk (agent only)
-				// Use consistent text with response_ui states
-				if state.Status != "" {
-					sb.WriteString("\x1b[90;3m " + state.Status + "\x1b[0m")
-				} else {
-					sb.WriteString("\x1b[90;3m Agent thinking...\x1b[0m")
-				}
-			default:
-				// Get the first line of ghost text (for single-line display)
-				ghostFirstLine := ghostText
-				newlineIdx := strings.Index(ghostText, "\n")
-				if newlineIdx >= 0 {
-					ghostFirstLine = ghostText[:newlineIdx]
-				}
-
-				if state.FromAgent {
-					// Agent suggestions: dim + italic with hints
-					sb.WriteString("\x1b[90;3m") // Dim + italic
-					sb.WriteString(ghostFirstLine)
-					sb.WriteString(ansiReset)
-
-					// Show streaming indicator if still receiving, otherwise show accept hint
-					if state.Streaming {
-						sb.WriteString("\x1b[90m▌\x1b[0m")
-					} else {
-						sb.WriteString("\x1b[90m" + inlineAcceptHint + "\x1b[0m")
-					}
-				} else {
-					// Predictions: fish-shell style - just dim gray, no hints
-					sb.WriteString("\x1b[38;5;242m") // Gray (brighter than 90)
-					sb.WriteString(ghostFirstLine)
-					sb.WriteString(ansiReset)
-				}
-			}
-		}
+		d.drawLine(&sb, buf, cur, i, hasSelection, suffix)
 	}
 
 	// Clear everything below the buffer
 	sb.WriteString(ansiClearToEnd)
 
-	ghostWidth := renderedGhostSuffixWidth(ghostText, state.Streaming, state.FromAgent, state.Notice)
-	totalRows, cursorVisualRow, cursorVisualCol := d.layoutForStandardRender(buf, cur, ghostWidth)
 	linesBelowCursor := totalRows - 1 - cursorVisualRow
 	if linesBelowCursor > 0 {
 		fmt.Fprintf(&sb, ansiCursorUp, linesBelowCursor)
@@ -574,15 +507,114 @@ func (d *Display) RenderWithGhost(buf *Buffer, cur *Cursor, hasSelection bool, g
 	// Show cursor
 	sb.WriteString(ansiShowCursor)
 
-	// Remember where we left the cursor for next render
-	d.lastCursorRow = cursorVisualRow
-	d.lastLines = totalRows
+	// Remember what is on screen for the next draw (the clear to end took any menu)
+	d.drawn = drawnFrame{cursorRow: cursorVisualRow, cursorCol: cursorVisualCol, rows: totalRows}
 
 	d.out.Write([]byte(sb.String()))
 }
 
+// drawLine draws logical line i as the terminal wraps it: the mode bar,
+// the prompt (line 0) or a space, the text (its selection reversed), and
+// suffix, the ghost, after the cursor's line.
+func (d *Display) drawLine(sb *strings.Builder, buf *Buffer, cur *Cursor, i int, hasSelection bool, suffix string) {
+	sb.WriteString(d.modeBar())
+	if i == 0 && d.prompt != "" {
+		sb.WriteString(d.prompt)
+	} else {
+		sb.WriteString(" ")
+	}
+	if hasSelection && cur.HasSelection() {
+		d.renderLineWithSelection(sb, buf, i, cur)
+	} else {
+		sb.WriteString(termtext.Inert(buf.Line(i)))
+	}
+	if i == cur.Pos.Row {
+		sb.WriteString(suffix)
+	}
+}
+
+// renderViewport draws the rows of an input taller than the pane that the
+// viewport shows (follow placed it around the cursor's visual row): each
+// line is cut into the rows the terminal would wrap it into, and only the
+// viewport's are written, so the frame never scrolls the screen.
+func (d *Display) renderViewport(buf *Buffer, cur *Cursor, hasSelection bool, suffix string, cursorRow, cursorCol int) {
+	var rows []string
+	for i := 0; i < buf.LineCount(); i++ {
+		var line strings.Builder
+		d.drawLine(&line, buf, cur, i, hasSelection, suffix)
+		rows = append(rows, wrapRows(line.String(), d.wrapWidth())...)
+	}
+	top := min(d.view.top, len(rows))
+	shown := rows[top:min(top+d.view.shown(), len(rows))]
+
+	var sb strings.Builder
+	sb.WriteString(ansiHideCursor)
+	if d.drawn.cursorRow > 0 {
+		fmt.Fprintf(&sb, ansiCursorUp, d.drawn.cursorRow)
+	}
+	// Clear first: an ED written after a full last row would take its last
+	// cell (the cursor waits there to wrap).
+	sb.WriteString("\r" + ansiClearToEnd)
+	for k, row := range shown {
+		if k > 0 {
+			sb.WriteString(ansiReset + "\r\n")
+		}
+		sb.WriteString(row)
+	}
+	sb.WriteString(ansiReset)
+
+	row := cursorRow - top
+	if below := len(shown) - 1 - row; below > 0 {
+		fmt.Fprintf(&sb, ansiCursorUp, below)
+	}
+	sb.WriteString("\r")
+	if cursorCol > 0 {
+		fmt.Fprintf(&sb, ansiCursorForward, cursorCol)
+	}
+	sb.WriteString(ansiShowCursor)
+	d.drawn = drawnFrame{cursorRow: row, cursorCol: cursorCol, rows: len(shown)}
+	d.out.Write([]byte(sb.String()))
+}
+
+// wrapRows cuts s, a drawn line, into the rows the terminal wraps it into
+// at width cells (a wide character that does not fit goes whole to the
+// next row, as nextCell lays it out). Each row starts with the colors in
+// effect where it starts, so any row can be drawn without the ones before.
+func wrapRows(s string, width int) []string {
+	var rows []string
+	var row, colors strings.Builder
+	cells := 0
+	for i := 0; i < len(s); {
+		if n := termtext.EscapeLen(s[i:]); n > 0 {
+			seq := s[i : i+n]
+			row.WriteString(seq)
+			switch {
+			case seq == ansiReset || seq == "\x1b[m":
+				colors.Reset()
+			case strings.HasPrefix(seq, "\x1b[") && strings.HasSuffix(seq, "m"):
+				colors.WriteString(seq)
+			}
+			i += n
+			continue
+		}
+		end := termtext.ClusterEnd(s, i)
+		c := s[i:end]
+		w := termtext.Width(c)
+		if w > 0 && cells > 0 && cells+w > width {
+			rows = append(rows, row.String())
+			row.Reset()
+			row.WriteString(colors.String())
+			cells = 0
+		}
+		cells += w
+		row.WriteString(c)
+		i = end
+	}
+	return append(rows, row.String())
+}
+
 //nolint:gocyclo // frame rendering requires handling many layout cases sequentially
-func (d *Display) renderWithFrame(buf *Buffer, cur *Cursor, hasSelection bool, ghostText string, streaming, fromAgent bool, modelName string) {
+func (d *Display) renderWithFrame(buf *Buffer, cur *Cursor, hasSelection bool) {
 	frame := d.frame
 	var sb strings.Builder
 	traceEnabled := trace.Enabled("editor")
@@ -591,8 +623,8 @@ func (d *Display) renderWithFrame(buf *Buffer, cur *Cursor, hasSelection bool, g
 	sb.WriteString(ansiHideCursor)
 
 	// Move up from where cursor was left to first line of our content
-	if d.lastCursorRow > 0 {
-		fmt.Fprintf(&sb, ansiCursorUp, d.lastCursorRow)
+	if d.drawn.cursorRow > 0 {
+		fmt.Fprintf(&sb, ansiCursorUp, d.drawn.cursorRow)
 	}
 	sb.WriteString("\r")
 
@@ -610,7 +642,7 @@ func (d *Display) renderWithFrame(buf *Buffer, cur *Cursor, hasSelection bool, g
 	if traceEnabled {
 		trace.EditorHigh("frame_render", map[string]any{
 			"width":        d.width,
-			"height":       d.height,
+			"height":       d.view.height,
 			"lines":        buf.LineCount(),
 			"cursor_row":   cursorRow,
 			"cursor_col":   cursorCol,
@@ -630,16 +662,16 @@ func (d *Display) renderWithFrame(buf *Buffer, cur *Cursor, hasSelection bool, g
 
 		line := buf.Line(i)
 		if hasSelection && cur.HasSelection() {
-			d.renderLineWithSelection(&sb, line, i, cur)
+			d.renderLineWithSelection(&sb, buf, i, cur)
 		} else {
-			sb.WriteString(line)
+			sb.WriteString(termtext.Inert(line))
 		}
 
 		if traceEnabled {
 			trace.EditorDetailed("frame_render_line", map[string]any{
 				"index":          i,
-				"line_width":     visibleWidth(line),
-				"content_width":  frame.PrefixWidth + visibleWidth(line),
+				"line_width":     termtext.Width(line),
+				"content_width":  frame.PrefixWidth + termtext.Width(line),
 				"display_width":  d.width,
 				"line_bg_active": frame.LineBg != "",
 			})
@@ -710,9 +742,8 @@ func (d *Display) renderWithFrame(buf *Buffer, cur *Cursor, hasSelection bool, g
 	// Show cursor
 	sb.WriteString(ansiShowCursor)
 
-	// Remember where we left the cursor for next render
-	d.lastCursorRow = cursorVisualRow
-	d.lastLines = totalRows
+	// Remember what is on screen for the next draw (the clear to end took any menu)
+	d.drawn = drawnFrame{cursorRow: cursorVisualRow, cursorCol: cursorVisualCol, rows: totalRows}
 
 	d.out.Write([]byte(sb.String()))
 }
@@ -724,12 +755,13 @@ func frameRenderPrefix(frame *InputFrame) string {
 	return frame.Prefix
 }
 
-func (d *Display) renderLineWithSelection(sb *strings.Builder, line string, row int, cur *Cursor) {
-	start, end := cur.SelectionRange()
+func (d *Display) renderLineWithSelection(sb *strings.Builder, buf *Buffer, row int, cur *Cursor) {
+	line := buf.Line(row)
+	start, end := cur.SelectionRange(buf)
 
 	// Check if this line has any selection
 	if row < start.Row || row > end.Row {
-		sb.WriteString(line)
+		sb.WriteString(termtext.Inert(line))
 		return
 	}
 
@@ -752,22 +784,31 @@ func (d *Display) renderLineWithSelection(sb *strings.Builder, line string, row 
 	}
 
 	// Render: before | selected | after
-	sb.WriteString(line[:startCol])
+	sb.WriteString(termtext.Inert(line[:startCol]))
 	sb.WriteString(ansiReverse)
-	sb.WriteString(line[startCol:endCol])
+	sb.WriteString(termtext.Inert(line[startCol:endCol]))
 	sb.WriteString(ansiReset)
-	sb.WriteString(line[endCol:])
+	sb.WriteString(termtext.Inert(line[endCol:]))
 }
 
 // Clear clears the display area.
 func (d *Display) Clear() {
-	if d.lastCursorRow > 0 {
-		fmt.Fprintf(d.out, ansiCursorUp, d.lastCursorRow)
+	if d.drawn.cursorRow > 0 {
+		fmt.Fprintf(d.out, ansiCursorUp, d.drawn.cursorRow)
 	}
 	fmt.Fprint(d.out, "\r")
 	fmt.Fprint(d.out, ansiClearToEnd)
-	d.lastLines = 0
-	d.lastCursorRow = 0
+	d.drawn = drawnFrame{}
+}
+
+// Leave moves from the cursor past the input's last row to the start of a
+// new row, leaving the input as drawn.
+func (d *Display) Leave() {
+	var sb strings.Builder
+	d.belowInput(&sb)
+	sb.WriteString("\r\n")
+	d.drawn = drawnFrame{}
+	d.out.Write([]byte(sb.String()))
 }
 
 // Finalize leaves the content on screen and moves to a new line.
@@ -782,13 +823,12 @@ func (d *Display) Finalize(buf *Buffer) {
 	// Move cursor to beginning of the displayed content and clear every row
 	// the live render used: the redraw's prefix differs, so a wrapped line
 	// lands on different columns and per-line clears would leave old tails.
-	if d.lastCursorRow > 0 {
-		fmt.Fprintf(&sb, ansiCursorUp, d.lastCursorRow)
+	if d.drawn.cursorRow > 0 {
+		fmt.Fprintf(&sb, ansiCursorUp, d.drawn.cursorRow)
 	}
 	sb.WriteString("\r")
 	sb.WriteString(ansiClearToEnd)
 
-	rows := 0
 	// Re-render each line with background highlight
 	for i := 0; i < buf.LineCount(); i++ {
 		sb.WriteString(ansiClearLine)
@@ -821,9 +861,9 @@ func (d *Display) Finalize(buf *Buffer) {
 
 		// Bold the command text
 		sb.WriteString(ansiBold)
-		sb.WriteString(buf.Line(i))
+		sb.WriteString(termtext.Inert(buf.Line(i)))
 		sb.WriteString(ansiReset)
-		contentWidth += visibleWidth(buf.Line(i))
+		contentWidth += termtext.Width(buf.Line(i))
 
 		// Pad to full terminal width for clean block look
 		if d.inputBgCode != "" && d.width > contentWidth {
@@ -836,13 +876,10 @@ func (d *Display) Finalize(buf *Buffer) {
 		}
 
 		sb.WriteString("\r\n")
-		rows += d.visualRowsForChars(contentWidth)
 	}
 
 	d.out.Write([]byte(sb.String()))
-	d.finalizedLines = rows
-	d.lastLines = 0
-	d.lastCursorRow = 0
+	d.drawn = drawnFrame{}
 }
 
 func (d *Display) finalizeWithFrame(buf *Buffer) {
@@ -852,30 +889,27 @@ func (d *Display) finalizeWithFrame(buf *Buffer) {
 	// Move cursor to beginning of the displayed content and clear every row
 	// the live render used (its live top line and prefix differ from the
 	// committed ones, so rows shift).
-	if d.lastCursorRow > 0 {
-		fmt.Fprintf(&sb, ansiCursorUp, d.lastCursorRow)
+	if d.drawn.cursorRow > 0 {
+		fmt.Fprintf(&sb, ansiCursorUp, d.drawn.cursorRow)
 	}
 	sb.WriteString("\r")
 	sb.WriteString(ansiClearToEnd)
 
-	rows := 0
 	if frame.TopLine != "" {
 		d.renderFrameLine(&sb, frame.TopLine, frame.LineBg)
 		sb.WriteString("\r\n")
-		rows += d.visualRowsForChars(visibleWidth(frame.TopLine))
 	}
 
 	for i := 0; i < buf.LineCount(); i++ {
 		sb.WriteString(ansiClearLine)
 		sb.WriteString(frame.Prefix)
-		sb.WriteString(buf.Line(i))
+		sb.WriteString(termtext.Inert(buf.Line(i)))
 
 		if frame.LineBg != "" {
 			fillLineBg(&sb, frame.LineBg)
 		}
 
 		sb.WriteString("\r\n")
-		rows += d.visualRowsForChars(frame.PrefixWidth + visibleWidth(buf.Line(i)))
 	}
 
 	if frame.BottomLine != "" {
@@ -885,7 +919,6 @@ func (d *Display) finalizeWithFrame(buf *Buffer) {
 		}
 		d.renderFrameLine(&sb, frame.BottomLine, bottomLineBg)
 		sb.WriteString("\r\n")
-		rows += d.visualRowsForChars(visibleWidth(frame.BottomLine))
 	}
 	if frame.BottomExtraLine != "" {
 		extraLineBg := frame.LineBg
@@ -894,13 +927,10 @@ func (d *Display) finalizeWithFrame(buf *Buffer) {
 		}
 		d.renderFrameLine(&sb, frame.BottomExtraLine, extraLineBg)
 		sb.WriteString("\r\n")
-		rows += d.visualRowsForChars(visibleWidth(frame.BottomExtraLine))
 	}
 
 	d.out.Write([]byte(sb.String()))
-	d.finalizedLines = rows
-	d.lastLines = 0
-	d.lastCursorRow = 0
+	d.drawn = drawnFrame{}
 }
 
 func (d *Display) renderFrameLine(sb *strings.Builder, line, lineBg string) {
@@ -921,67 +951,18 @@ func fillLineBg(sb *strings.Builder, lineBg string) {
 	sb.WriteString(ansiReset)
 }
 
-// FinalizedLines returns how many lines were rendered by Finalize.
-// Used to position cursor for post-execution annotations.
-func (d *Display) FinalizedLines() int {
-	return d.finalizedLines
-}
-
-// AnnotateDuration adds execution duration to the right side of the command line.
-// Must be called after command execution, with outputLines = lines of command output.
-func (d *Display) AnnotateDuration(outputLines int, durationMs int64) {
-	if durationMs < 100 { // Don't show for very fast commands
-		return
-	}
-
-	// Format duration
-	var text string
-	switch {
-	case durationMs < 1000:
-		text = fmt.Sprintf(" %dms ", durationMs)
-	case durationMs < 60000:
-		text = fmt.Sprintf(" %.1fs ", float64(durationMs)/1000)
-	default:
-		mins := durationMs / 60000
-		secs := (durationMs % 60000) / 1000
-		text = fmt.Sprintf(" %dm%ds ", mins, secs)
-	}
-
-	// Calculate how many lines to go back (output + command lines)
-	linesToGoBack := outputLines + d.finalizedLines
-
-	var sb strings.Builder
-
-	// Save cursor, move up, position at right edge
-	sb.WriteString("\x1b[s") // Save cursor position
-	if linesToGoBack > 0 {
-		fmt.Fprintf(&sb, ansiCursorUp, linesToGoBack)
-	}
-
-	// Position at right side (column = width - text length)
-	col := d.width - visibleWidth(text)
-	if col > 0 {
-		fmt.Fprintf(&sb, ansiCursorCol, col)
-	}
-
-	// Print duration with dim styling and background
-	sb.WriteString("\x1b[2m") // Dim
-	if d.inputBgCode != "" {
-		sb.WriteString(d.inputBgCode)
-	}
-	sb.WriteString(text)
-	sb.WriteString(ansiReset)
-
-	// Restore cursor position
-	sb.WriteString("\x1b[u")
-
-	d.out.Write([]byte(sb.String()))
+// SetRowsUnder says how many rows the next frame draws under the input (a
+// completion menu or notice, 0 for none), so the input's viewport leaves
+// them room in the pane: written past its bottom, they would scroll the
+// input into scrollback and the cursor's row off the screen.
+func (d *Display) SetRowsUnder(rows int) {
+	d.view.under = rows
 }
 
 // Resize updates the terminal dimensions.
 func (d *Display) Resize(width, height int) {
 	d.width = width
-	d.height = height
+	d.view.height = height
 }
 
 // CompletionItem is passed to display for rendering.
@@ -991,8 +972,8 @@ type CompletionItem struct {
 }
 
 // truncateToWidth shortens s to at most maxWidth terminal columns, appending
-// "..." when something was cut. Width is measured in display cells, not
-// runes: CJK characters occupy two columns each.
+// "..." when something was cut. Width is measured in display cells by
+// grapheme cluster, never splitting one.
 func truncateToWidth(s string, maxWidth int) string {
 	if visibleWidth(s) <= maxWidth {
 		return s
@@ -1000,19 +981,16 @@ func truncateToWidth(s string, maxWidth int) string {
 	if maxWidth <= 3 {
 		return strings.Repeat(".", maxWidth)
 	}
-	budget := maxWidth - 3
-	width := 0
-	var b strings.Builder
-	for _, r := range s {
-		rw := runewidth.RuneWidth(r)
-		if width+rw > budget {
-			break
-		}
-		width += rw
-		b.WriteRune(r)
+	return termtext.Truncate(s, maxWidth, "...")
+}
+
+// displayItems is items as drawn (see termtext.Inert).
+func displayItems(items []CompletionItem) []CompletionItem {
+	out := make([]CompletionItem, len(items))
+	for i, item := range items {
+		out[i] = CompletionItem{Text: termtext.Inert(item.Text), Description: termtext.Inert(item.Description)}
 	}
-	b.WriteString("...")
-	return b.String()
+	return out
 }
 
 // descFixedCols is how many columns a menu row spends on everything except
@@ -1026,43 +1004,56 @@ func descFixedCols(hasScrollbar bool) int {
 	return cols
 }
 
-// RenderCompletionMenu draws the completion dropdown below the cursor.
+// menuRows is how many completion items show at once.
+const menuRows = 6
+
+// completionMenuRows is how many rows RenderCompletionMenu draws under the
+// input for items items and a note.
+func completionMenuRows(items int, note string) int {
+	rows := min(items, menuRows)
+	if note != "" {
+		rows++
+	}
+	return rows
+}
+
+// RenderCompletionMenu draws the completion dropdown below the input.
+//
+// The menu opens under the completed word: wordCell is where it starts in
+// its line (row), in wrapped cells after the prefix (lineCells). A note, if
+// any, says on a dim row under the items what the menu left out. The cursor
+// goes back to where the last input render left it.
 //
 //nolint:gocyclo // completion menu rendering requires layout and scroll calculations
-func (d *Display) RenderCompletionMenu(items []CompletionItem, selected, startCol, cursorRow, cursorCol int) {
+func (d *Display) RenderCompletionMenu(items []CompletionItem, selected, row, wordCell int, note string) {
 	if len(items) == 0 {
 		return
 	}
 
 	var sb strings.Builder
+	d.belowInput(&sb)
 
-	// Add prefix width to startCol for proper positioning.
-	prefixWidth := d.calcPrefixWidth(cursorRow)
-	_, menuCol := d.wrappedCursorForChars(startCol + prefixWidth)
-
-	// Calculate max width for alignment. Values are capped to the row budget:
-	// a row wider than the terminal wraps onto an extra physical row that the
-	// cursor-up below does not account for, corrupting the prompt.
-	maxValueWidth := d.width - menuCol - descFixedCols(d.scrollbarCode != "")
-	if maxValueWidth < 1 {
-		maxValueWidth = 1
-	}
-	maxTextWidth := 0
+	// Candidates come from filenames and other tools: draw them inert.
+	items = displayItems(items)
+	longest := 0
 	for _, item := range items {
-		itemWidth := visibleWidth(item.Text)
-		if itemWidth > maxValueWidth {
-			itemWidth = maxValueWidth
-		}
-		if itemWidth > maxTextWidth {
-			maxTextWidth = itemWidth
-		}
+		longest = max(longest, visibleWidth(item.Text))
 	}
 
-	// Limit visible items (show max 6, scrolling needed for 7+)
-	maxVisible := 6
-	if len(items) < maxVisible {
-		maxVisible = len(items)
-	}
+	// The menu opens under the word: its cell in the word's wrapped row
+	// (a word at a row's first cell is at 0). Rows are capped to the
+	// terminal: a row wider than it wraps onto an extra physical row that
+	// the cursor-up below does not account for, corrupting the prompt. A
+	// word too near the right edge for its items moves the menu left, so
+	// they show in full while the terminal is wide enough.
+	fixed := descFixedCols(d.scrollbarCode != "")
+	menuCol := (wordCell + d.calcPrefixWidth(row)) % d.wrapWidth()
+	menuCol = max(min(menuCol, d.width-fixed-min(longest, d.width-fixed)), 0)
+	maxValueWidth := max(d.width-menuCol-fixed, 1)
+	maxTextWidth := min(longest, maxValueWidth)
+
+	// Limit visible items (scrolling past menuRows)
+	maxVisible := min(len(items), menuRows)
 
 	// Calculate scroll offset to keep selected visible
 	scrollOffset := 0
@@ -1160,142 +1151,59 @@ func (d *Display) RenderCompletionMenu(items []CompletionItem, selected, startCo
 		}
 	}
 
-	// Return to the original input cursor position explicitly instead of relying
-	// on terminal-specific cursor save/restore behavior.
-	fmt.Fprintf(&sb, ansiCursorUp, maxVisible)
-	sb.WriteString("\r")
-	_, restoreCol := d.wrappedCursorForChars(cursorCol + prefixWidth)
-	if restoreCol > 0 {
-		fmt.Fprintf(&sb, ansiCursorForward, restoreCol)
+	if note != "" {
+		// One row, or backToCursor would come back short of the input.
+		sb.WriteString("\r\n")
+		sb.WriteString(ansiClearLine)
+		if menuCol > 0 {
+			fmt.Fprintf(&sb, ansiCursorForward, menuCol)
+		}
+		sb.WriteString("\x1b[2m") // Dim
+		sb.WriteString(termtext.Truncate("  "+note, max(d.width-menuCol-1, 0), "…"))
+		sb.WriteString(ansiReset)
 	}
-
+	d.drawn.below = completionMenuRows(len(items), note)
+	d.backToCursor(&sb)
 	d.out.Write([]byte(sb.String()))
+}
 
-	// Track menu size for clearing on next render
-	d.lastMenuItems = len(items)
+// belowInput moves from the cursor to the input's last row, where rows
+// drawn under the input start (each with a \r\n). The rows passed exist, so
+// moving over them never scrolls.
+func (d *Display) belowInput(sb *strings.Builder) {
+	if below := d.drawn.rowsBelowCursor(); below > 0 {
+		fmt.Fprintf(sb, ansiCursorDown, below)
+	}
+}
+
+// backToCursor returns from the rows drawn under the input to the cursor,
+// explicitly rather than with terminal-specific save/restore. The next input
+// render clears them with everything below the input.
+func (d *Display) backToCursor(sb *strings.Builder) {
+	fmt.Fprintf(sb, ansiCursorUp, d.drawn.below+d.drawn.rowsBelowCursor())
+	sb.WriteString("\r")
+	if d.drawn.cursorCol > 0 {
+		fmt.Fprintf(sb, ansiCursorForward, d.drawn.cursorCol)
+	}
 }
 
 // RenderCompletionNotice draws a one-line dim notice below the input where the
 // completion menu would appear ("no matches", "completion timed out").
-// It reuses the menu clearing contract via lastMenuItems.
-func (d *Display) RenderCompletionNotice(notice string, cursorRow, cursorCol int) {
+func (d *Display) RenderCompletionNotice(notice string) {
 	if notice == "" {
 		return
 	}
 
 	var sb strings.Builder
-
-	prefixWidth := d.calcPrefixWidth(cursorRow)
-
+	d.belowInput(&sb)
 	sb.WriteString("\r\n")
 	sb.WriteString(ansiClearLine)
 	sb.WriteString("\x1b[2m") // Dim
-	sb.WriteString("  ")
-	sb.WriteString(notice)
+	// One row, or backToCursor would come back short of the input.
+	sb.WriteString(termtext.Truncate("  "+notice, max(d.wrapWidth()-1, 0), "…"))
 	sb.WriteString(ansiReset)
 
-	// Return to the original input cursor position.
-	fmt.Fprintf(&sb, ansiCursorUp, 1)
-	sb.WriteString("\r")
-	_, restoreCol := d.wrappedCursorForChars(cursorCol + prefixWidth)
-	if restoreCol > 0 {
-		fmt.Fprintf(&sb, ansiCursorForward, restoreCol)
-	}
-
-	d.out.Write([]byte(sb.String()))
-
-	// Track as one menu row so the next render clears it
-	d.lastMenuItems = 1
-}
-
-// ClearCompletionMenu removes the completion menu from display.
-func (d *Display) ClearCompletionMenu(numItems, cursorRow, cursorCol int) {
-	if numItems == 0 {
-		return
-	}
-
-	var sb strings.Builder
-
-	// Move through the already-rendered menu rows and clear them. Do not emit
-	// CRLF here: when the prompt is near the terminal bottom, newlines can
-	// scroll the viewport and leave the editor cursor out of sync after Esc.
-	maxVisible := 6
-	if numItems < maxVisible {
-		maxVisible = numItems
-	}
-
-	for i := 0; i < maxVisible; i++ {
-		fmt.Fprintf(&sb, ansiCursorDown, 1)
-		sb.WriteString("\r")
-		sb.WriteString(ansiClearLine)
-	}
-
-	// Move back to where the input cursor was before clearing.
-	fmt.Fprintf(&sb, ansiCursorUp, maxVisible)
-	sb.WriteString("\r")
-	prefixWidth := d.calcPrefixWidth(cursorRow)
-	_, restoreCol := d.wrappedCursorForChars(cursorCol + prefixWidth)
-	if restoreCol > 0 {
-		fmt.Fprintf(&sb, ansiCursorForward, restoreCol)
-	}
-
-	d.out.Write([]byte(sb.String()))
-
-	// Reset tracked menu size
-	d.lastMenuItems = 0
-}
-
-// RenderPermissionPrompt draws the permission request UI.
-// Returns after drawing - caller should handle input and then call ClearPermissionPrompt.
-//
-// Deprecated: Use AgentOutputCoordinator.RenderPermissionPrompt instead for
-// proper coordination with streaming output.
-func (d *Display) RenderPermissionPrompt(command, accentColor string) {
-	var sb strings.Builder
-
-	// Build accent color ANSI code
-	accentCode := ""
-	if accentColor != "" && len(accentColor) == 7 && accentColor[0] == '#' {
-		var r, g, b int
-		fmt.Sscanf(accentColor[1:], "%02x%02x%02x", &r, &g, &b) //nolint:errcheck
-		accentCode = fmt.Sprintf("\x1b[38;2;%d;%d;%dm", r, g, b)
-	} else {
-		accentCode = "\x1b[36m" // Fallback to cyan
-	}
-
-	// Render the prompt box with colored bar and background
-	// Use bold + color for high visibility
-	barStyle := accentCode + ansiBold
-	lines := []string{
-		"",
-		barStyle + "│" + ansiReset + " " + ansiBold + "Agent wants to run:" + ansiReset,
-		barStyle + "│" + ansiReset + " " + accentCode + ansiBold + command + ansiReset,
-		barStyle + "│" + ansiReset,
-		barStyle + "│" + ansiReset + " y to allow · n to deny · a to always allow",
-	}
-
-	for _, line := range lines {
-		sb.WriteString("\r\n")
-		sb.WriteString(ansiClearLine)
-		sb.WriteString(line)
-	}
-
-	d.out.Write([]byte(sb.String()))
-}
-
-// ClearPermissionPrompt removes the permission prompt from display.
-//
-// Deprecated: Use AgentOutputCoordinator.ClearPermissionPrompt instead for
-// proper coordination with streaming output.
-func (d *Display) ClearPermissionPrompt() {
-	var sb strings.Builder
-
-	// Move up 5 lines and clear each
-	for i := 0; i < 5; i++ {
-		fmt.Fprintf(&sb, ansiCursorUp, 1)
-		sb.WriteString("\r")
-		sb.WriteString(ansiClearLine)
-	}
-
+	d.drawn.below = 1
+	d.backToCursor(&sb)
 	d.out.Write([]byte(sb.String()))
 }

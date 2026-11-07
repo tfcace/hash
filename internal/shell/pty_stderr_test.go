@@ -23,14 +23,14 @@ func TestPTYStderr_FallbackForFailedPTYCommand(t *testing.T) {
 		CapturedOutput: merged,
 	})
 
-	if !strings.Contains(s.lastStderr, "cat: missing.txt: No such file or directory") {
-		t.Errorf("lastStderr = %q, want the error text from merged PTY output", s.lastStderr)
+	if !strings.Contains(s.last.stderr, "cat: missing.txt: No such file or directory") {
+		t.Errorf("lastStderr = %q, want the error text from merged PTY output", s.last.stderr)
 	}
-	if strings.Contains(s.lastStderr, "\x1b") {
-		t.Errorf("lastStderr should have ANSI sequences stripped, got %q", s.lastStderr)
+	if strings.Contains(s.last.stderr, "\x1b") {
+		t.Errorf("lastStderr should have ANSI sequences stripped, got %q", s.last.stderr)
 	}
-	if strings.Contains(s.lastStderr, "\r") {
-		t.Errorf("lastStderr should have CR normalized away, got %q", s.lastStderr)
+	if strings.Contains(s.last.stderr, "\r") {
+		t.Errorf("lastStderr should have CR normalized away, got %q", s.last.stderr)
 	}
 }
 
@@ -42,8 +42,8 @@ func TestPTYStderr_NoFallbackOnSuccess(t *testing.T) {
 		CapturedOutput: "file1\r\nfile2\r\n",
 	})
 
-	if s.lastStderr != "" {
-		t.Errorf("lastStderr = %q, want empty for a successful command", s.lastStderr)
+	if s.last.stderr != "" {
+		t.Errorf("lastStderr = %q, want empty for a successful command", s.last.stderr)
 	}
 }
 
@@ -55,8 +55,8 @@ func TestPTYStderr_NoFallbackWithoutPTY(t *testing.T) {
 		CapturedOutput: "this is stdout, not stderr",
 	})
 
-	if s.lastStderr != "" {
-		t.Errorf("lastStderr = %q, want empty when stderr capture works normally", s.lastStderr)
+	if s.last.stderr != "" {
+		t.Errorf("lastStderr = %q, want empty when stderr capture works normally", s.last.stderr)
 	}
 }
 
@@ -70,8 +70,8 @@ func TestPTYStderr_RealStderrWins(t *testing.T) {
 		CapturedOutput: "merged output",
 	}, nil, cap)
 
-	if s.lastStderr != "real stderr line" {
-		t.Errorf("lastStderr = %q, want the directly captured stderr", s.lastStderr)
+	if s.last.stderr != "real stderr line" {
+		t.Errorf("lastStderr = %q, want the directly captured stderr", s.last.stderr)
 	}
 }
 
@@ -84,11 +84,11 @@ func TestPTYStderr_KeepsTailOfLongOutput(t *testing.T) {
 		CapturedOutput: long,
 	})
 
-	if !strings.Contains(s.lastStderr, "final error: it broke") {
+	if !strings.Contains(s.last.stderr, "final error: it broke") {
 		t.Error("the tail (where errors print) must be kept")
 	}
-	if len(s.lastStderr) > maxStderrCapture {
-		t.Errorf("lastStderr length %d exceeds cap %d", len(s.lastStderr), maxStderrCapture)
+	if len(s.last.stderr) > maxStderrCapture {
+		t.Errorf("lastStderr length %d exceeds cap %d", len(s.last.stderr), maxStderrCapture)
 	}
 }
 

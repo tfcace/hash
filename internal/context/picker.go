@@ -1,6 +1,7 @@
 package context
 
-// Picker provides an interactive context picker.
+// Picker provides an interactive context picker. The cursor is a row in
+// display order (grouped by category), not an index into Items.
 type Picker struct {
 	collection *Collection
 	cursor     int
@@ -14,7 +15,7 @@ func NewPicker(collection *Collection) *Picker {
 	}
 }
 
-// Cursor returns the current cursor position.
+// Cursor returns the current cursor row.
 func (p *Picker) Cursor() int {
 	return p.cursor
 }
@@ -38,19 +39,29 @@ func (p *Picker) MoveDown() {
 	}
 }
 
+// current returns the Items index under the cursor, or -1 if empty.
+func (p *Picker) current() int {
+	order := p.collection.displayOrder()
+	if p.cursor >= len(order) {
+		return -1
+	}
+	return order[p.cursor]
+}
+
 // ToggleCurrent toggles selection of the current item.
 func (p *Picker) ToggleCurrent() {
-	if len(p.collection.Items) > 0 && p.cursor < len(p.collection.Items) {
-		p.collection.Toggle(p.cursor)
+	if i := p.current(); i >= 0 {
+		p.collection.Toggle(i)
 	}
 }
 
 // CurrentItem returns the currently selected item, or nil if empty.
 func (p *Picker) CurrentItem() *Item {
-	if len(p.collection.Items) == 0 || p.cursor >= len(p.collection.Items) {
+	i := p.current()
+	if i < 0 {
 		return nil
 	}
-	return &p.collection.Items[p.cursor]
+	return &p.collection.Items[i]
 }
 
 // ItemCount returns the number of items in the collection.
@@ -81,9 +92,4 @@ func (p *Picker) SelectedSize() int {
 // SizeStatus returns the size status indicator.
 func (p *Picker) SizeStatus() string {
 	return p.collection.SizeStatus()
-}
-
-// Serialize returns the serialized context.
-func (p *Picker) Serialize() string {
-	return p.collection.Serialize()
 }

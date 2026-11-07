@@ -45,6 +45,12 @@ func (e *Emitter) CommandFinished(exitCode int) {
 	e.emitf("133;D;%d", exitCode)
 }
 
+// CommandAbandoned closes a prompt whose line never ran, an empty line or
+// Ctrl+C (OSC 133;D with no exit status).
+func (e *Emitter) CommandAbandoned() {
+	e.emit("133;D")
+}
+
 // Working directory (OSC 7)
 
 // ReportDirectory reports the current working directory to the terminal (OSC 7).

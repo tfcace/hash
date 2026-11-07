@@ -14,9 +14,9 @@ func TestPredictor_PredictCommand(t *testing.T) {
 
 	// Build up history using predictor.Record for proper normalization
 	for i := 0; i < 5; i++ {
-		predictor.Record("git pull", "npm test", "/project", nil)
+		predictor.Record("git pull", "npm test", "/project")
 	}
-	predictor.Record("git pull", "npm install", "/project", nil)
+	predictor.Record("git pull", "npm install", "/project")
 
 	prediction := predictor.PredictCommand("git pull", "/project")
 
@@ -25,29 +25,6 @@ func TestPredictor_PredictCommand(t *testing.T) {
 	}
 	if prediction != "npm test" {
 		t.Errorf("Prediction = %q, want %q", prediction, "npm test")
-	}
-}
-
-func TestPredictor_PredictPath(t *testing.T) {
-	tmpDir := t.TempDir()
-	store, _ := NewStore(filepath.Join(tmpDir, "prediction.db"))
-	defer store.Close()
-
-	// Build up history
-	for i := 0; i < 5; i++ {
-		store.RecordPathUsage("vim", "src/main.go", "/project")
-	}
-	store.RecordPathUsage("vim", "README.md", "/project")
-
-	predictor := NewPredictor(store, DefaultConfig())
-
-	paths := predictor.PredictPaths("vim", "", "/project", "")
-
-	if len(paths) == 0 {
-		t.Fatal("Should return path predictions")
-	}
-	if paths[0].Text != "src/main.go" {
-		t.Errorf("Top path = %q, want %q", paths[0].Text, "src/main.go")
 	}
 }
 
@@ -69,7 +46,7 @@ func TestPredictor_Disabled(t *testing.T) {
 	// Use a temporary predictor to record data
 	tempPredictor := NewPredictor(store, DefaultConfig())
 	for i := 0; i < 5; i++ {
-		tempPredictor.Record("git pull", "npm test", "/project", nil)
+		tempPredictor.Record("git pull", "npm test", "/project")
 	}
 
 	cfg := DefaultConfig()

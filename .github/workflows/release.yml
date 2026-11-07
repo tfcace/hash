@@ -15,6 +15,7 @@ concurrency:
 jobs:
   test:
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
@@ -34,11 +35,11 @@ jobs:
 
       - name: Run tests (Linux)
         if: runner.os == 'Linux'
-        run: xvfb-run -a go test -coverprofile=coverage.txt ./...
+        run: xvfb-run -a go test -tags=e2e -coverprofile=coverage.txt ./...
 
       - name: Run tests (macOS)
         if: runner.os == 'macOS'
-        run: go test -coverprofile=coverage.txt ./...
+        run: go test -tags=e2e -coverprofile=coverage.txt ./...
 
       - name: Upload coverage reports to Codecov
         uses: codecov/codecov-action@v7

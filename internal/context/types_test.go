@@ -1,9 +1,6 @@
 package context
 
-import (
-	"strings"
-	"testing"
-)
+import "testing"
 
 func TestContextItem_Fields(t *testing.T) {
 	item := Item{
@@ -34,26 +31,6 @@ func TestContextCollection_TotalSize(t *testing.T) {
 	size := collection.SelectedSize()
 	if size != 300 {
 		t.Errorf("SelectedSize = %d, want 300", size)
-	}
-}
-
-func TestContextCollection_Serialize(t *testing.T) {
-	collection := &Collection{
-		Items: []Item{
-			{Category: CategoryHistory, Key: "ls", Value: "ls -la", Selected: true},
-			{Category: CategoryEnv, Key: "HOME", Value: "/home/user", Selected: true},
-		},
-	}
-
-	output := collection.Serialize()
-	if output == "" {
-		t.Error("Serialize should not return empty")
-	}
-	if !strings.Contains(output, "ls -la") {
-		t.Error("Serialize should contain history item")
-	}
-	if !strings.Contains(output, "/home/user") {
-		t.Error("Serialize should contain env item")
 	}
 }
 

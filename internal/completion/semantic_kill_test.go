@@ -151,6 +151,9 @@ func TestKillHandler_LimitsLargeProcessList(t *testing.T) {
 	if len(result.Items) != completionItemLimit {
 		t.Fatalf("kill completion returned %d items, want %d", len(result.Items), completionItemLimit)
 	}
+	if !result.Hidden().NotShown() {
+		t.Fatalf("kill completion stopped at its limit without saying more were not shown")
+	}
 }
 
 func TestKillHandler_ReturnsWhenProcessListIgnoresContext(t *testing.T) {
@@ -186,7 +189,8 @@ func TestKillHandler_ReturnsWhenProcessListIgnoresContext(t *testing.T) {
 	}
 }
 
-func TestKillHandler_CoalescesFreshBlockedLookupAndRetriesWhenStale(t *testing.T) {
+// A blocked lookup is joined rather than duplicated.
+func TestKillHandler_CoalescesBlockedLookupAndRefetchesAfterItLands(t *testing.T) {
 	release := make(chan struct{})
 	defer close(release)
 	var calls atomic.Int32
@@ -214,12 +218,15 @@ func TestKillHandler_CoalescesFreshBlockedLookupAndRetriesWhenStale(t *testing.T
 		t.Fatalf("expected second blocked kill completion to coalesce, got %d process lookups", got)
 	}
 
-	time.Sleep(90 * time.Millisecond)
+	// The blocked lookup lands; with no cache TTL its answer went to its
+	// waiters only, so the next Tab queries again.
+	release <- struct{}{}
+	time.Sleep(20 * time.Millisecond)
 	result := h.Complete(context.Background(), nil, "1")
 	if got := calls.Load(); got != 2 {
-		t.Fatalf("expected stale process lookup to retry, got %d process lookups", got)
+		t.Fatalf("expected process lookup to run again after it landed, got %d process lookups", got)
 	}
 	if len(result.Items) != 1 || result.Items[0].Value != "123" {
-		t.Fatalf("expected fresh process completion after stale retry, got %#v", result.Items)
+		t.Fatalf("expected fresh process completion after the blocked lookup landed, got %#v", result.Items)
 	}
 }

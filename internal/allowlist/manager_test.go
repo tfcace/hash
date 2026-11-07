@@ -1,8 +1,10 @@
 package allowlist
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 )
 
@@ -51,9 +53,6 @@ func TestManager_ProjectScope(t *testing.T) {
 
 	// Create new manager, should load from file
 	m2 := New("project", projectDir, configDir)
-	if err := m2.Load(); err != nil {
-		t.Fatalf("Load() error: %v", err)
-	}
 	if !m2.IsAllowed("git status") {
 		t.Error("command should persist across manager instances")
 	}
@@ -146,5 +145,66 @@ func TestManager_SetProjectDirReloadsCommands(t *testing.T) {
 	}
 	if m.IsAllowed("npm test") {
 		t.Fatal("projectB commands should not remain allowed after switching back")
+	}
+}
+
+// A scope that persists but has nowhere to write says why instead of
+// silently keeping approvals in memory; session scope has no file by design.
+func TestManager_NoFileReason(t *testing.T) {
+	tests := []struct {
+		name    string
+		m       *Manager
+		wantErr error
+	}{
+		{"session", New(ScopeSession, "/p", "/cfg"), nil},
+		{"global without config dir", New(ScopeGlobal, "/p", ""), errNoConfigDir},
+		{"project without config dir", New(ScopeProject, "/p", ""), errNoConfigDir},
+		{"project without project dir", New(ScopeProject, "", t.TempDir()), errNoProjectDir},
+	}
+	for _, tt := range tests {
+		if err := tt.m.Allow("ls"); !errors.Is(err, tt.wantErr) {
+			t.Errorf("%s: Allow() = %v, want %v", tt.name, err, tt.wantErr)
+		}
+		if !tt.m.IsAllowed("ls") {
+			t.Errorf("%s: approval not kept for the session", tt.name)
+		}
+	}
+}
+
+// An approval moves: session scope keeps it in memory for good; a file scope
+// keeps it unsaved while saving fails, retries it with the next approval,
+// and forgets it on a project switch.
+func TestManager_ApprovalTransitions(t *testing.T) {
+	session := New(ScopeSession, "", t.TempDir())
+	if err := session.Allow("ls"); err != nil || !session.IsAllowed("ls") || len(session.unsaved) != 0 {
+		t.Fatalf("session: err = %v allowed = %v unsaved = %v", err, session.IsAllowed("ls"), session.unsaved)
+	}
+
+	cfg := t.TempDir()
+	m := New(ScopeProject, "/p1", cfg)
+	blocked := filepath.Join(cfg, "project_allowlists")
+	if err := os.WriteFile(blocked, []byte("not a directory"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Allow("make"); err == nil || !m.IsAllowed("make") || !m.unsaved["make"] {
+		t.Fatalf("failed save: err = %v allowed = %v unsaved = %v", err, m.IsAllowed("make"), m.unsaved)
+	}
+	if err := os.Remove(blocked); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Allow("go test"); err != nil || len(m.unsaved) != 0 {
+		t.Fatalf("retry: err = %v unsaved = %v", err, m.unsaved)
+	}
+	if cmds, _ := readFile(filepath.Join(blocked, projectScopeKey("/p1")+".json")); !slices.Contains(cmds, "make") {
+		t.Errorf("the failed approval was not saved with the next one: %v", cmds)
+	}
+
+	m2 := New(ScopeProject, "", cfg)
+	if err := m2.Allow("rm"); err == nil || !m2.unsaved["rm"] {
+		t.Fatalf("no project dir: err = %v unsaved = %v", err, m2.unsaved)
+	}
+	_ = m2.SetProjectDir("/p2")
+	if m2.IsAllowed("rm") || len(m2.unsaved) != 0 {
+		t.Errorf("project switch kept the old project's unsaved approval")
 	}
 }

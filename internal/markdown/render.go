@@ -40,16 +40,13 @@ func Render(text string) string {
 	lines := strings.Split(text, "\n")
 	var result []string
 	inCodeBlock := false
-	codeBlockLang := ""
 
 	for _, line := range lines {
 		// Handle code blocks
 		if strings.HasPrefix(line, "```") {
 			if !inCodeBlock {
 				inCodeBlock = true
-				codeBlockLang = strings.TrimPrefix(line, "```")
-				_ = codeBlockLang // language tag available but not displayed
-				continue
+				continue // the language tag is not displayed
 			} else {
 				inCodeBlock = false
 				continue
@@ -63,11 +60,48 @@ func Render(text string) string {
 		}
 
 		// Process regular lines
-		processed := processLine(line)
-		result = append(result, processed)
+		result = append(result, reopenStyles(processLine(line)))
 	}
 
 	return strings.Join(result, "\n")
+}
+
+// sgrPattern matches one SGR escape sequence.
+var sgrPattern = regexp.MustCompile(`\x1b\[[0-9;]*m`)
+
+// reopenStyles makes nested spans compose. Every span closes with a full
+// reset, which also ends any span around it (bold around inline code), so
+// after each reset the styles still open are emitted again. Adjacent opening
+// sequences belong to one span (bold + color for a header). A span left open
+// at the end of the line is closed there.
+func reopenStyles(line string) string {
+	var out strings.Builder
+	var open []string // opening sequences of the spans still open, outermost first
+	last, prevEnd := 0, -1
+	for _, m := range sgrPattern.FindAllStringIndex(line, -1) {
+		out.WriteString(line[last:m[1]])
+		seq := line[m[0]:m[1]]
+		last = m[1]
+		switch {
+		case seq == reset:
+			if len(open) > 0 {
+				open = open[:len(open)-1]
+			}
+			out.WriteString(strings.Join(open, ""))
+			prevEnd = -1 // what follows a reset opens a new span
+			continue
+		case m[0] == prevEnd && len(open) > 0:
+			open[len(open)-1] += seq
+		default:
+			open = append(open, seq)
+		}
+		prevEnd = m[1]
+	}
+	out.WriteString(line[last:])
+	if len(open) > 0 {
+		out.WriteString(reset)
+	}
+	return out.String()
 }
 
 func processLine(line string) string {
@@ -119,7 +153,19 @@ func processLine(line string) string {
 func renderInline(text string) string {
 	result := text
 
-	// Process bold first (before italic to avoid conflicts)
+	// Process links first: [text](url) -> text (underlined) with url in gray.
+	// Later passes insert escape sequences, whose "[" the link pattern would
+	// otherwise take for a link.
+	result = linkPattern.ReplaceAllStringFunc(result, func(match string) string {
+		// Extract text and url
+		parts := linkPattern.FindStringSubmatch(match)
+		if len(parts) == 3 {
+			return underline + blue + parts[1] + reset + gray + " (" + parts[2] + ")" + reset
+		}
+		return match
+	})
+
+	// Process bold (before italic to avoid conflicts)
 	result = boldPattern.ReplaceAllStringFunc(result, func(match string) string {
 		// Extract the content between ** or __
 		inner := strings.TrimPrefix(match, "**")
@@ -140,16 +186,6 @@ func renderInline(text string) string {
 		inner := strings.Trim(match, "~")
 		// Use dim for strikethrough effect (no true strikethrough in most terminals)
 		return dim + gray + inner + reset
-	})
-
-	// Process links: [text](url) -> text (underlined) with url in gray
-	result = linkPattern.ReplaceAllStringFunc(result, func(match string) string {
-		// Extract text and url
-		parts := linkPattern.FindStringSubmatch(match)
-		if len(parts) == 3 {
-			return underline + blue + parts[1] + reset + gray + " (" + parts[2] + ")" + reset
-		}
-		return match
 	})
 
 	// Process italic last (single * or _)

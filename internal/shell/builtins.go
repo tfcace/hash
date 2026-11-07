@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
@@ -35,8 +34,11 @@ func isBuiltinEnabled(cfg *config.Config, name string) bool {
 }
 
 // completableBuiltins are the builtins offered by tab completion in command
-// position. The zsh-compat no-ops are deliberately absent: they exist to
-// swallow sourced zshrc lines, not to be typed.
+// position. zsh's setup builtins, no-ops the interpreter runs (see the
+// executor's zshSetupBuiltins), are deliberately absent: they exist to
+// swallow sourced zshrc lines, not to be typed. source is the interpreter's
+// (a sourced file is the line: its jobs, status, arguments and exit), not
+// one hash runs itself (isBuiltin).
 var completableBuiltins = []string{
 	"cd", "completions", "copy", "exit", "history", "issue", "model",
 	"quit", "setup", "setup-zoxide", "source", "status", "tips",
@@ -57,13 +59,7 @@ func enabledCompletableBuiltins(cfg *config.Config) []string {
 // isBuiltin returns true if the command is a shell builtin.
 func isBuiltin(cmd string) bool {
 	switch cmd {
-	case "cd", "exit", "quit", "history", "copy", "issue", "status", "tips", "setup", "setup-zoxide", "model", "completions":
-		return true
-	// Source builtin with executor dialect support
-	case "source", ".":
-		return true
-	// No-op builtins for zsh compatibility
-	case "bindkey", "setopt", "unsetopt", "autoload", "compdef", "zstyle", "zmodload", "zle", "compinit", "promptinit":
+	case "exit", "quit", "history", "copy", "issue", "status", "tips", "setup", "setup-zoxide", "model", "completions":
 		return true
 	default:
 		return false
@@ -94,19 +90,14 @@ func (s *Shell) executeBuiltin(ctx context.Context, line string) (bool, error) {
 		return false, nil // Fall through to external command
 	}
 
+	// Builtins run in-process, some of them waiting on the agent or npm:
+	// Ctrl+C cancels the builtin, as it would a command.
+	ctx, done := s.interrupts.interruptible(ctx)
+	defer done()
+
 	switch cmd {
-	case "cd":
-		err := builtinCd(args)
-		if err == nil && s.executor != nil {
-			if cwd, cwdErr := os.Getwd(); cwdErr == nil {
-				s.executor.SetExportedEnv("PWD", cwd)
-			}
-			// Sync the persistent runner's directory with the process
-			s.executor.SyncRunnerDir()
-		}
-		return true, err
 	case "exit", "quit":
-		return true, errExit
+		return true, shellExit{status: s.exitArg(args)}
 	case "copy":
 		return true, s.builtinCopy(args)
 	case "issue":
@@ -124,46 +115,24 @@ func (s *Shell) executeBuiltin(ctx context.Context, line string) (bool, error) {
 		return true, s.builtinModel(ctx, args)
 	case "completions":
 		return true, s.builtinCompletions(ctx, args)
-	case "source", ".":
-		return true, s.builtinSource(ctx, args)
-	case "bindkey", "setopt", "unsetopt", "autoload", "compdef", "zstyle", "zmodload", "zle", "compinit", "promptinit":
-		// No-op for zsh compatibility - silently succeed
-		return true, nil
 	default:
 		return false, nil
 	}
 }
 
-var errExit = fmt.Errorf("exit")
-
-func builtinCd(args []string) error {
-	var target string
-
+// exitArg is the status `exit [N]` ends the shell with: N, or the last
+// line's status when there is none, as in bash. A status that is not a
+// number ends the shell with 2, after saying so.
+func (s *Shell) exitArg(args []string) int {
 	if len(args) == 0 {
-		target = os.Getenv("HOME")
-	} else {
-		target = args[0]
+		return s.status.exitCode
 	}
-
-	// Expand tilde
-	if strings.HasPrefix(target, "~") {
-		home := os.Getenv("HOME")
-		if home != "" {
-			target = filepath.Join(home, target[1:])
-		}
+	n, err := strconv.Atoi(args[0])
+	if err != nil {
+		fmt.Fprintf(s.errOut(), "hash: exit: %s: numeric argument required\n", args[0])
+		return 2
 	}
-
-	if err := os.Chdir(target); err != nil {
-		return err
-	}
-
-	// Update PWD environment variable - required for tools like Starship
-	// that read $PWD instead of calling getcwd()
-	if newCwd, err := os.Getwd(); err == nil {
-		os.Setenv("PWD", newCwd)
-	}
-
-	return nil
+	return n & 0xff
 }
 
 // builtinHistory handles the history command.
@@ -173,7 +142,10 @@ func (s *Shell) builtinHistory(w io.Writer, args []string) error {
 	}
 
 	if len(args) == 0 {
-		return s.listHistory(w)
+		return s.listHistory(w, -1)
+	}
+	if n, err := strconv.Atoi(args[0]); err == nil && n >= 0 && len(args) == 1 {
+		return s.listHistory(w, n) // history N: the last N, as in bash
 	}
 
 	subcommand := args[0]
@@ -207,15 +179,20 @@ func (s *Shell) builtinHistory(w io.Writer, args []string) error {
 	}
 }
 
-// listHistory prints every recorded command, oldest first, numbered from 1
-// like bash's history builtin.
-func (s *Shell) listHistory(w io.Writer) error {
+// listHistory prints the last n recorded commands (every one when n < 0),
+// oldest first, numbered from 1 in the whole list like bash's history
+// builtin.
+func (s *Shell) listHistory(w io.Writer, n int) error {
 	commands, err := s.history.All()
 	if err != nil {
 		return err
 	}
 
-	for i := range commands {
+	from := 0
+	if n >= 0 && n < len(commands) {
+		from = len(commands) - n
+	}
+	for i := from; i < len(commands); i++ {
 		fmt.Fprintf(w, "%5d  %s\n", i+1, commands[i].Command)
 	}
 	return nil
@@ -299,46 +276,13 @@ func (s *Shell) builtinCopy(args []string) error {
 		return fmt.Errorf("usage: copy <cmd|out|all> [N]")
 	}
 
-	subcommand := args[0]
-
-	// Parse optional index
-	index := 0
-	if len(args) >= 2 {
-		var err error
-		index, err = strconv.Atoi(args[1])
-		if err != nil {
-			return fmt.Errorf("invalid index: %s", args[1])
-		}
-		// Convert from 1-indexed user input to 0-indexed internal
-		if index > 0 {
-			index--
-		}
+	n, err := copyIndex(args[1:])
+	if err != nil {
+		return err
 	}
-
-	var content string
-
-	switch subcommand {
-	case "cmd":
-		content = s.clipboard.GetCommand(index)
-		if content == "" {
-			return fmt.Errorf("no command at index %d", index)
-		}
-
-	case "out":
-		content = s.clipboard.GetOutput(index)
-		if content == "" {
-			return fmt.Errorf("no output at index %d", index)
-		}
-
-	case "all":
-		cmd, out := s.clipboard.GetBoth(index)
-		if cmd == "" {
-			return fmt.Errorf("no entry at index %d", index)
-		}
-		content = fmt.Sprintf("$ %s\n%s", cmd, out)
-
-	default:
-		return fmt.Errorf("unknown subcommand: %s (use cmd, out, or all)", subcommand)
+	content, err := s.copyContent(args[0], n)
+	if err != nil {
+		return err
 	}
 
 	// Copy to system clipboard
@@ -346,8 +290,72 @@ func (s *Shell) builtinCopy(args []string) error {
 		return fmt.Errorf("clipboard: %w", err)
 	}
 
-	fmt.Printf("Copied to clipboard (%d bytes)\n", len(content))
+	fmt.Fprintf(s.out(), "Copied to clipboard (%d bytes)\n", len(content))
 	return nil
+}
+
+// copyIndex is the entry copy's arguments after the subcommand name,
+// counted from 1 (the last line), as the user names it: 1 when they name
+// none.
+func copyIndex(args []string) (int, error) {
+	if len(args) == 0 {
+		return 1, nil
+	}
+	n, err := strconv.Atoi(args[0])
+	if err != nil {
+		return 0, fmt.Errorf("invalid index: %s", args[0])
+	}
+	if n < 1 {
+		return 0, fmt.Errorf("invalid index: %d (the last line is 1)", n)
+	}
+	return n, nil
+}
+
+// copyContent is what `copy sub n` puts on the clipboard.
+func (s *Shell) copyContent(sub string, n int) (string, error) {
+	index := n - 1 // the buffer counts from 0
+	switch sub {
+	case "cmd":
+		if cmd := s.clipboard.GetCommand(index); cmd != "" {
+			return cmd, nil
+		}
+		return "", fmt.Errorf("no command at index %d", n)
+	case "out":
+		if s.clipboard.GetCommand(index) == "" {
+			return "", fmt.Errorf("no command at index %d", n)
+		}
+		switch s.clipboard.OutputState(index) {
+		case clipboard.OutputCaptured:
+			return s.clipboard.GetOutput(index), nil
+		case clipboard.OutputUncaptured:
+			return "", errWroteToTerminal(n)
+		}
+		return "", fmt.Errorf("%s printed nothing", copyEntryName(n))
+	case "all":
+		cmd, out := s.clipboard.GetBoth(index)
+		if cmd == "" {
+			return "", fmt.Errorf("no entry at index %d", n)
+		}
+		if s.clipboard.OutputState(index) == clipboard.OutputUncaptured {
+			return "", errWroteToTerminal(n)
+		}
+		return fmt.Sprintf("$ %s\n%s", cmd, out), nil
+	}
+	return "", fmt.Errorf("unknown subcommand: %s (use cmd, out, or all)", sub)
+}
+
+// copyEntryName names copy's entry n (counted from 1) in a message.
+func copyEntryName(n int) string {
+	if n == 1 {
+		return "the last command"
+	}
+	return fmt.Sprintf("command %d", n)
+}
+
+// errWroteToTerminal is why copy has no output for entry n: its command
+// wrote straight to the terminal (a pipeline's tail), which hash never sees.
+func errWroteToTerminal(n int) error {
+	return fmt.Errorf("%s wrote straight to the terminal: hash kept none of its output", copyEntryName(n))
 }
 
 // copyToSystemClipboard copies text to the system clipboard.
@@ -373,7 +381,7 @@ func (s *Shell) builtinModel(ctx context.Context, args []string) error {
 
 	// `model update`: refresh the adapter so the list below is current.
 	if len(args) > 0 && args[0] == "update" {
-		return s.runModelUpdate(ctx, os.Stdout)
+		return s.runModelUpdate(ctx, s.out())
 	}
 
 	// Establish a session if needed so the agent reports its model options.
@@ -383,7 +391,7 @@ func (s *Shell) builtinModel(ctx context.Context, args []string) error {
 
 	models := s.agentHandler.AvailableModels()
 	if len(models) == 0 {
-		fmt.Println("this agent doesn't expose model selection")
+		fmt.Fprintln(s.out(), "this agent doesn't expose model selection")
 		return nil
 	}
 
@@ -391,7 +399,7 @@ func (s *Shell) builtinModel(ctx context.Context, args []string) error {
 
 	// `model --list` / `model list`: print non-interactively.
 	if len(args) > 0 && isListArg(args[0]) {
-		printModelList(models, current)
+		printModelList(s.out(), models, current)
 		return nil
 	}
 
@@ -406,7 +414,7 @@ func (s *Shell) builtinModel(ctx context.Context, args []string) error {
 	}
 
 	// No args: open the picker.
-	value, ok, err := modelpicker.NewPickerUI(models, current).Run()
+	value, ok, err := modelpicker.NewPickerUI(models, current).Run(ctx)
 	if err != nil {
 		return fmt.Errorf("model picker: %w", err)
 	}
@@ -421,7 +429,7 @@ func (s *Shell) applyModel(ctx context.Context, models []agent.ModelOption, valu
 	if err := s.agentHandler.SetModel(ctx, value); err != nil {
 		return err
 	}
-	fmt.Printf("agent model set to %s\n", modelDisplayName(models, value))
+	fmt.Fprintf(s.out(), "agent model set to %s\n", modelDisplayName(models, value))
 	return nil
 }
 
@@ -459,7 +467,7 @@ func modelDisplayName(models []agent.ModelOption, value string) string {
 	return value
 }
 
-func printModelList(models []agent.ModelOption, current string) {
+func printModelList(w io.Writer, models []agent.ModelOption, current string) {
 	for _, m := range models {
 		marker := "  "
 		if m.Value == current || m.Name == current {
@@ -470,9 +478,9 @@ func printModelList(models []agent.ModelOption, current string) {
 			name = m.Value
 		}
 		if m.Description != "" {
-			fmt.Printf("%s%s  (%s)\n", marker, name, m.Description)
+			fmt.Fprintf(w, "%s%s  (%s)\n", marker, name, m.Description)
 		} else {
-			fmt.Printf("%s%s\n", marker, name)
+			fmt.Fprintf(w, "%s%s\n", marker, name)
 		}
 	}
 }
@@ -480,14 +488,14 @@ func printModelList(models []agent.ModelOption, current string) {
 // builtinStatus shows the current system status.
 func (s *Shell) builtinStatus() error {
 	status := s.collectStatus()
-	fmt.Print(status.Format())
+	fmt.Fprint(s.out(), status.Format())
 	return nil
 }
 
 // builtinTips shows helpful tips about Hash features.
 func (s *Shell) builtinTips(args []string) error {
 	if len(args) > 0 && (args[0] == "off" || args[0] == "on") {
-		fmt.Println("Startup tips are shown only once. Run 'tips' anytime to view them.")
+		fmt.Fprintln(s.out(), "Startup tips are shown only once. Run 'tips' anytime to view them.")
 		return nil
 	}
 
@@ -505,28 +513,29 @@ func (s *Shell) builtinTips(args []string) error {
 	dimStyle := lipgloss.NewStyle().
 		Foreground(lipgloss.Color(dim))
 
-	fmt.Println(headerStyle.Render("Hash Tips:"))
-	fmt.Println()
+	fmt.Fprintln(s.out(), headerStyle.Render("Hash Tips:"))
+	fmt.Fprintln(s.out())
 
-	fmt.Println(headerStyle.Render("Navigation:"))
-	fmt.Printf("  %s  %s\n", keyStyle.Render("Ctrl+R"), dimStyle.Render("Search command history"))
-	fmt.Printf("  %s  %s\n", keyStyle.Render("Ctrl+P"), dimStyle.Render("Context picker for AI requests"))
-	fmt.Printf("  %s %s\n", keyStyle.Render("Up/Down"), dimStyle.Render("Browse history"))
-	fmt.Println()
+	fmt.Fprintln(s.out(), headerStyle.Render("Navigation:"))
+	fmt.Fprintf(s.out(), "  %s  %s\n", keyStyle.Render("Ctrl+R"), dimStyle.Render("Search command history"))
+	fmt.Fprintf(s.out(), "  %s  %s\n", keyStyle.Render("Ctrl+P"), dimStyle.Render("Context picker for AI requests"))
+	fmt.Fprintf(s.out(), "  %s %s\n", keyStyle.Render("Up/Down"), dimStyle.Render("Browse history"))
+	fmt.Fprintln(s.out())
 
-	fmt.Println(headerStyle.Render("AI features:"))
-	fmt.Printf("  %s      %s\n", keyStyle.Render("??"), dimStyle.Render("Full command generation"))
-	fmt.Printf("  %s  %s\n", keyStyle.Render("cmd | ??"), dimStyle.Render("Pipe to AI for transformation"))
-	fmt.Printf("  %s    %s\n", keyStyle.Render("cmd ??"), dimStyle.Render("Inline completion"))
-	fmt.Printf("  %s  %s\n", keyStyle.Render("completions generate <tool>"), dimStyle.Render("AI-generated tab completion plugin"))
-	fmt.Println()
+	fmt.Fprintln(s.out(), headerStyle.Render("AI features:"))
+	fmt.Fprintf(s.out(), "  %s      %s\n", keyStyle.Render("??"), dimStyle.Render("Full command generation"))
+	fmt.Fprintf(s.out(), "  %s  %s\n", keyStyle.Render("cmd | ??"), dimStyle.Render("Pipe to AI for transformation"))
+	fmt.Fprintf(s.out(), "  %s    %s\n", keyStyle.Render("cmd ??"), dimStyle.Render("Inline completion"))
+	fmt.Fprintf(s.out(), "  %s  %s\n", keyStyle.Render("completions generate <tool>"), dimStyle.Render("AI-generated tab completion plugin"))
+	fmt.Fprintln(s.out())
 
-	fmt.Println(headerStyle.Render("Clipboard:"))
-	fmt.Printf("  %s  %s\n", keyStyle.Render("Ctrl+Y"), dimStyle.Render("Copy last command"))
-	fmt.Printf("  %s  %s\n", keyStyle.Render("Ctrl+O"), dimStyle.Render("Copy last output"))
-	fmt.Println()
+	fmt.Fprintln(s.out(), headerStyle.Render("Clipboard:"))
+	fmt.Fprintf(s.out(), "  %s  %s\n", keyStyle.Render("copy cmd"), dimStyle.Render("Copy the last command"))
+	fmt.Fprintf(s.out(), "  %s  %s\n", keyStyle.Render("copy out"), dimStyle.Render("Copy the last output"))
+	fmt.Fprintf(s.out(), "  %s  %s\n", keyStyle.Render("Ctrl+Y / Ctrl+O in Ctrl+R"), dimStyle.Render("Copy the selected command / its output"))
+	fmt.Fprintln(s.out())
 
-	fmt.Println(dimStyle.Render("Startup tips are shown once; run 'tips' anytime to view this list."))
+	fmt.Fprintln(s.out(), dimStyle.Render("Startup tips are shown once; run 'tips' anytime to view this list."))
 	return nil
 }
 
@@ -542,10 +551,13 @@ func (s *Shell) collectStatus() *SystemStatus {
 	if s.config != nil && s.config.LoadIssue != nil {
 		issue := s.config.LoadIssue
 		status.ConfigPath = issue.Path
-		if len(issue.BadSections) == 0 {
-			status.ConfigErr = "parse error, all settings on defaults (" + issue.Detail + ")"
-		} else {
+		switch issue.Kind {
+		case config.LoadReadFailed:
+			status.ConfigErr = "could not be read, all settings on defaults (" + issue.Detail + ")"
+		case config.LoadPartial:
 			status.ConfigErr = "defaults used for [" + strings.Join(issue.BadSections, "], [") + "] (" + issue.Detail + ")"
+		default:
+			status.ConfigErr = "parse error, all settings on defaults (" + issue.Detail + ")"
 		}
 	} else {
 		status.ConfigOK = true
@@ -623,47 +635,6 @@ func (s *Shell) adapterVersions(agentCfg config.AgentConfig) (installed, latest 
 		latest = known
 	}
 	return inst.Version, latest
-}
-
-// builtinSource sources a shell script file using the executor parser dialect.
-func (s *Shell) builtinSource(ctx context.Context, args []string) error {
-	if len(args) < 1 {
-		return fmt.Errorf("source: need filename")
-	}
-
-	path := args[0]
-
-	// Expand tilde
-	if strings.HasPrefix(path, "~") {
-		home := os.Getenv("HOME")
-		if home != "" {
-			path = filepath.Join(home, path[1:])
-		}
-	}
-
-	// Check if file exists. Reading a caller-supplied path is the whole point
-	// of `source`, so the path-traversal warning here is expected.
-	info, err := os.Stat(path) //nolint:gosec // G703: source intentionally reads a user-specified file
-	if err != nil {
-		return fmt.Errorf("source: %w", err)
-	}
-	if info.IsDir() {
-		return fmt.Errorf("source: %s: is a directory", path)
-	}
-
-	// Read file content
-	content, err := os.ReadFile(path) //nolint:gosec // G703: source intentionally reads a user-specified file
-	if err != nil {
-		return fmt.Errorf("source: %w", err)
-	}
-
-	// Execute through the executor (which parses with the configured dialect)
-	if s.executor != nil {
-		_, err = s.executor.Execute(ctx, string(content), os.Stdout, os.Stderr)
-		return err
-	}
-
-	return fmt.Errorf("source: executor not available")
 }
 
 // registerExecutorBuiltins exposes the builtins that produce output inside

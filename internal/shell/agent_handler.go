@@ -22,10 +22,16 @@ type LastError struct {
 
 // AgentHandler handles agent requests.
 type AgentHandler struct {
-	client          *agent.Client
-	clipboardBuf    *clipboard.Buffer
-	selectedContext *hashcontext.Collection
-	lastError       *LastError
+	client       *agent.Client
+	clipboardBuf *clipboard.Buffer
+}
+
+// requestFacts is what a ?? turn's requests tell the agent about the shell
+// beside the prompt. They are fixed when the turn starts and passed with
+// each request, the first and its follow-ups alike.
+type requestFacts struct {
+	selection *hashcontext.Collection // what Ctrl+P picked, nil = auto-detect
+	lastError *LastError              // the failed line a bare ?? explains, nil when the last line did not fail
 }
 
 // NewAgentHandler creates a new agent handler.
@@ -36,16 +42,6 @@ func NewAgentHandler(client *agent.Client) *AgentHandler {
 // SetClipboard sets the clipboard buffer for context.
 func (h *AgentHandler) SetClipboard(buf *clipboard.Buffer) {
 	h.clipboardBuf = buf
-}
-
-// SetSelectedContext sets the user-selected context.
-func (h *AgentHandler) SetSelectedContext(ctx *hashcontext.Collection) {
-	h.selectedContext = ctx
-}
-
-// SetLastError records the last failed command for agent context.
-func (h *AgentHandler) SetLastError(le *LastError) {
-	h.lastError = le
 }
 
 // CurrentModel returns the active agent model's display name, or "" if none.
@@ -88,8 +84,15 @@ func (h *AgentHandler) Restart(ctx context.Context) error {
 	if h == nil || h.client == nil {
 		return fmt.Errorf("no agent configured")
 	}
-	_ = h.client.Close()
-	return h.client.EnsureModelInfo(ctx)
+	return h.client.Restart(ctx)
+}
+
+// Close ends the agent session and stops its process, if any.
+func (h *AgentHandler) Close() error {
+	if h == nil || h.client == nil {
+		return nil
+	}
+	return h.client.Close()
 }
 
 // AskText sends a raw prompt to the agent and returns its reply as plain
@@ -103,7 +106,7 @@ func (h *AgentHandler) AskText(ctx context.Context, prompt string) (string, erro
 
 	resp, err := h.client.Ask(ctx, agent.Request{Prompt: prompt})
 	if err != nil {
-		return "", err
+		return "", readableAgentErr(err)
 	}
 	if resp.Type == agent.ResponseTypeError {
 		return "", fmt.Errorf("%s", resp.Error)
@@ -114,110 +117,28 @@ func (h *AgentHandler) AskText(ctx context.Context, prompt string) (string, erro
 	return resp.Command, nil
 }
 
-// HandleRequest processes a parsed agent request and returns the response.
+// HandleRequest sends a parsed request and returns the agent's whole
+// response. The e2e suites drive the agent through it. An inline reply is the
+// fill appended to the partial command, as the ghost text shows it (markdown
+// wrapper stripped), so it is returned as the command whatever it looks like
+// on its own.
 func (h *AgentHandler) HandleRequest(ctx context.Context, parsed parser.ParseResult) (agent.Response, error) {
-	if h.client == nil {
+	if h == nil || h.client == nil {
 		return agent.Response{}, fmt.Errorf("no agent configured")
 	}
-
-	req, err := h.buildRequest(parsed)
+	req, err := h.buildRequest(parsed, requestFacts{})
 	if err != nil {
 		return agent.Response{}, err
 	}
-
-	return h.client.Ask(ctx, req)
-}
-
-// StreamRequest processes a parsed agent request and returns streaming channels.
-// Text chunks arrive on the text channel, errors on the error channel.
-//
-//nolint:gocritic // unnamedResult: can't name receive-only channel returns
-func (h *AgentHandler) StreamRequest(ctx context.Context, parsed parser.ParseResult) (<-chan string, <-chan error) {
-	trace.AgentHigh("ghost_start", map[string]any{
-		"type":   parsed.Type.String(),
-		"prompt": parsed.AgentPrompt,
-	})
-
-	if h.client == nil {
-		errCh := make(chan error, 1)
-		errCh <- fmt.Errorf("no agent configured")
-		close(errCh)
-		trace.AgentHigh("ghost_state", map[string]any{
-			"from":   "init",
-			"to":     "error",
-			"reason": "no_client",
-		})
-		return nil, errCh
+	resp, err := h.client.Ask(ctx, req)
+	if err != nil || !req.Inline || resp.Type == agent.ResponseTypeError {
+		return resp, err
 	}
-
-	req, err := h.buildRequest(parsed)
-	if err != nil {
-		errCh := make(chan error, 1)
-		errCh <- err
-		close(errCh)
-		return nil, errCh
+	reply := resp.Command
+	if resp.Type == agent.ResponseTypeExplanation {
+		reply = resp.Explanation
 	}
-
-	textCh, errCh := h.client.StreamRequest(ctx, req)
-
-	// Wrap channels to add tracing - single goroutine to avoid race between
-	// "complete" and "error" state transitions
-	tracedTextCh := make(chan string, 1)
-	tracedErrCh := make(chan error, 1)
-
-	go func() {
-		defer close(tracedTextCh)
-		defer close(tracedErrCh)
-
-		totalLen := 0
-		var streamErr error
-		textDone := false
-		errDone := false
-
-		for !textDone || !errDone {
-			select {
-			case text, ok := <-textCh:
-				if !ok {
-					textDone = true
-					textCh = nil // Stop selecting on this channel
-					continue
-				}
-				totalLen += len(text)
-				trace.Agent("ghost_chunk", map[string]any{
-					"text":      text,
-					"total_len": totalLen,
-				})
-				tracedTextCh <- text
-
-			case err, ok := <-errCh:
-				if !ok {
-					errDone = true
-					errCh = nil // Stop selecting on this channel
-					continue
-				}
-				if err != nil {
-					streamErr = err
-					trace.AgentHigh("ghost_state", map[string]any{
-						"from":   "streaming",
-						"to":     "error",
-						"reason": err.Error(),
-					})
-				}
-				tracedErrCh <- err
-			}
-		}
-
-		// Only log complete if there was no error
-		if streamErr == nil {
-			trace.AgentDetailed("ghost_state", map[string]any{
-				"from":      "streaming",
-				"to":        "complete",
-				"total_len": totalLen,
-			})
-		}
-	}()
-
-	return tracedTextCh, tracedErrCh
+	return agent.Response{Type: agent.ResponseTypeCommand, Command: unwrapInlineFill(reply)}, nil
 }
 
 // StreamEvents processes a parsed request and exposes typed lifecycle events
@@ -225,7 +146,7 @@ func (h *AgentHandler) StreamRequest(ctx context.Context, parsed parser.ParseRes
 // agent.Client, so callers do not need vendor-specific branches.
 //
 //nolint:gocritic // unnamedResult: can't name receive-only channel returns
-func (h *AgentHandler) StreamEvents(ctx context.Context, parsed parser.ParseResult) (<-chan agent.StreamEvent, <-chan error) {
+func (h *AgentHandler) StreamEvents(ctx context.Context, parsed parser.ParseResult, facts requestFacts) (<-chan agent.StreamEvent, <-chan error) {
 	if h.client == nil {
 		errCh := make(chan error, 1)
 		errCh <- fmt.Errorf("no agent configured")
@@ -233,7 +154,7 @@ func (h *AgentHandler) StreamEvents(ctx context.Context, parsed parser.ParseResu
 		return nil, errCh
 	}
 
-	req, err := h.buildRequest(parsed)
+	req, err := h.buildRequest(parsed, facts)
 	if err != nil {
 		errCh := make(chan error, 1)
 		errCh <- err
@@ -261,14 +182,22 @@ func (h *AgentHandler) StreamEvents(ctx context.Context, parsed parser.ParseResu
 						"status": event.ToolCall.Status,
 					})
 				}
-				traced <- event
+				select {
+				case traced <- event:
+				case <-ctx.Done():
+					return // the request ended: no one reads on
+				}
 			case err, ok := <-errCh:
 				if !ok {
 					errCh = nil
 					continue
 				}
 				if err != nil {
-					tracedErrs <- err
+					select {
+					case tracedErrs <- err:
+					case <-ctx.Done():
+						return
+					}
 				}
 			}
 		}
@@ -276,37 +205,15 @@ func (h *AgentHandler) StreamEvents(ctx context.Context, parsed parser.ParseResu
 	return traced, tracedErrs
 }
 
-// StreamFollowUp sends a conversation follow-up turn to the agent.
-//
-//nolint:gocritic // unnamedResult: receive-only channels match Transport style
-func (h *AgentHandler) StreamFollowUp(ctx context.Context, reply string, transcript []agentConversationMessage) (<-chan string, <-chan error) {
-	if h.client == nil {
-		errCh := make(chan error, 1)
-		errCh <- fmt.Errorf("no agent configured")
-		close(errCh)
-		return nil, errCh
-	}
-
-	req, err := h.buildFollowUpRequest(reply, transcript)
-	if err != nil {
-		errCh := make(chan error, 1)
-		errCh <- err
-		close(errCh)
-		return nil, errCh
-	}
-
-	return h.client.StreamRequest(ctx, req)
-}
-
 //nolint:gocritic // unnamedResult: can't name receive-only channel returns
-func (h *AgentHandler) StreamFollowUpEvents(ctx context.Context, reply string, transcript []agentConversationMessage) (<-chan agent.StreamEvent, <-chan error) {
+func (h *AgentHandler) StreamFollowUpEvents(ctx context.Context, reply string, transcript []agentConversationMessage, facts requestFacts) (<-chan agent.StreamEvent, <-chan error) {
 	if h.client == nil {
 		errCh := make(chan error, 1)
 		errCh <- fmt.Errorf("no agent configured")
 		close(errCh)
 		return nil, errCh
 	}
-	req, err := h.buildFollowUpRequest(reply, transcript)
+	req, err := h.buildFollowUpRequest(reply, transcript, facts)
 	if err != nil {
 		errCh := make(chan error, 1)
 		errCh <- err
@@ -317,8 +224,8 @@ func (h *AgentHandler) StreamFollowUpEvents(ctx context.Context, reply string, t
 }
 
 // buildRequest constructs an agent.Request from a parsed result.
-func (h *AgentHandler) buildRequest(parsed parser.ParseResult) (agent.Request, error) {
-	agentCtx := h.buildAgentContext()
+func (h *AgentHandler) buildRequest(parsed parser.ParseResult, facts requestFacts) (agent.Request, error) {
+	agentCtx := h.buildAgentContext(facts)
 
 	// Build the prompt based on parse type
 	var prompt string
@@ -326,9 +233,9 @@ func (h *AgentHandler) buildRequest(parsed parser.ParseResult) (agent.Request, e
 	case parser.CommandTypeAgent:
 		prompt = parsed.AgentPrompt
 		// Bare ?? after a failed command: auto-inject error context
-		if prompt == "" && h.lastError != nil {
+		if le := facts.lastError; prompt == "" && le != nil {
 			prompt = fmt.Sprintf("Explain this error and suggest a fix:\n$ %s\n%s\nExit code: %d",
-				h.lastError.Command, h.lastError.Stderr, h.lastError.ExitCode)
+				le.Command, le.Stderr, le.ExitCode)
 		}
 	case parser.CommandTypeAgentPipe:
 		if h.clipboardBuf != nil && h.clipboardBuf.LastOutput() == "" {
@@ -343,6 +250,7 @@ Partial command: %s
 What the user wants: %s
 
 Respond with ONLY the completion to append (single line).
+- Plain text: no markdown, no backticks, no code fences
 - No explanations or multiple lines
 - Quote values with spaces (e.g., '%%h %%s' not %%h %%s)
 - Shell-safe output only
@@ -359,7 +267,7 @@ Respond with ONLY the completion to append (single line).
 	}, nil
 }
 
-func (h *AgentHandler) buildFollowUpRequest(reply string, transcript []agentConversationMessage) (agent.Request, error) {
+func (h *AgentHandler) buildFollowUpRequest(reply string, transcript []agentConversationMessage, facts requestFacts) (agent.Request, error) {
 	reply = strings.TrimSpace(reply)
 	if reply == "" {
 		return agent.Request{}, fmt.Errorf("empty follow-up reply")
@@ -371,7 +279,7 @@ func (h *AgentHandler) buildFollowUpRequest(reply string, transcript []agentConv
 
 	return agent.Request{
 		Prompt:  buildStatelessFollowUpPrompt(reply, transcript),
-		Context: h.buildAgentContext(),
+		Context: h.buildAgentContext(facts),
 	}, nil
 }
 
@@ -423,11 +331,12 @@ func roleTitle(role string) string {
 	}
 }
 
-func (h *AgentHandler) buildAgentContext() agent.Context {
-	// Build context - use selected context if available, otherwise auto-detect
+func (h *AgentHandler) buildAgentContext(facts requestFacts) agent.Context {
+	// Build context: what the user picked with Ctrl+P (even nothing), or
+	// else the auto-detected defaults
 	var agentCtx agent.Context
-	if h.selectedContext != nil && len(h.selectedContext.SelectedItems()) > 0 {
-		agentCtx = h.buildContextFromSelection()
+	if facts.selection != nil {
+		agentCtx = buildContextFromSelection(facts.selection)
 	} else {
 		ctxBuilder := agent.NewContextBuilder().
 			DetectGitBranch().
@@ -442,44 +351,50 @@ func (h *AgentHandler) buildAgentContext() agent.Context {
 	}
 
 	// Populate last error context if available
-	if h.lastError != nil {
+	if le := facts.lastError; le != nil {
 		agentCtx.LastError = fmt.Sprintf("Command '%s' failed (exit %d):\n%s",
-			h.lastError.Command, h.lastError.ExitCode, h.lastError.Stderr)
+			le.Command, le.ExitCode, le.Stderr)
 	}
 
 	return agentCtx
 }
 
 // buildContextFromSelection converts user-selected context to agent.Context.
-func (h *AgentHandler) buildContextFromSelection() agent.Context {
+func buildContextFromSelection(selection *hashcontext.Collection) agent.Context {
 	cwd, _ := os.Getwd()
 	agentCtx := agent.Context{
 		Cwd:     cwd,
 		EnvVars: make(map[string]string),
 	}
 
-	for _, item := range h.selectedContext.SelectedItems() {
-		switch item.Key {
-		case "cwd":
-			agentCtx.Cwd = item.Value
-		case "git branch":
-			agentCtx.GitBranch = item.Value
-		case "kube context":
-			agentCtx.KubeContext = item.Value
-		case "last output":
-			agentCtx.LastOutput = item.Value
-		case "last error":
-			agentCtx.LastError = item.Value
-		default:
-			// History or env items go to appropriate fields
-			switch item.Category {
-			case hashcontext.CategoryHistory:
-				agentCtx.History = append(agentCtx.History, item.Value)
-			case hashcontext.CategoryEnv:
-				agentCtx.EnvVars[item.Key] = item.Value
-			}
+	// Category first: a history item's Key is the whole command, which can
+	// read like a fact's name ("git branch").
+	for _, item := range selection.SelectedItems() {
+		switch item.Category {
+		case hashcontext.CategoryHistory:
+			agentCtx.History = append(agentCtx.History, item.Value)
+		case hashcontext.CategoryEnv:
+			agentCtx.EnvVars[item.Key] = item.Value
+		case hashcontext.CategoryAutoDetect:
+			applyContextFact(&agentCtx, item)
 		}
 	}
 
 	return agentCtx
+}
+
+// applyContextFact sets the field an auto-detected item stands for.
+func applyContextFact(agentCtx *agent.Context, item hashcontext.Item) {
+	switch item.Key {
+	case "cwd":
+		agentCtx.Cwd = item.Value
+	case "git branch":
+		agentCtx.GitBranch = item.Value
+	case "kube context":
+		agentCtx.KubeContext = item.Value
+	case "last output":
+		agentCtx.LastOutput = item.Value
+	case "last error":
+		agentCtx.LastError = item.Value
+	}
 }

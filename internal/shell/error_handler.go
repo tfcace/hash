@@ -35,7 +35,7 @@ func NewErrorHandler() *ErrorHandler {
 // HandleCommandNotFound displays a command-not-found error with suggestions.
 // offerAccept says the first suggestion will be waiting as ghost text at the
 // next prompt, so the footer may teach the accept key.
-func (h *ErrorHandler) HandleCommandNotFound(cmd string, suggestions []string, installHint string, offerAccept bool) {
+func (h *ErrorHandler) HandleCommandNotFound(cmd string, suggestions []string, installHint string) {
 	out := h.out
 	if out == nil {
 		out = os.Stderr
@@ -54,7 +54,18 @@ func (h *ErrorHandler) HandleCommandNotFound(cmd string, suggestions []string, i
 		fmt.Fprintf(out, "  \033[90m│\033[0m install: \033[33m%s\033[0m\n", installHint)
 	}
 
-	// Footer
+}
+
+// RefusalFooter closes the command-not-found banners of a line the user ran,
+// once the line is over: it teaches the accept key when the next prompt
+// offers the corrected line, else that ?? explains the failure. A refusal
+// outside the user's line (a hook, a background job) gets no footer: there
+// is nothing to accept, and ?? explains the user's line, not it.
+func (h *ErrorHandler) RefusalFooter(offerAccept bool) {
+	out := h.out
+	if out == nil {
+		out = os.Stderr
+	}
 	if offerAccept {
 		fmt.Fprint(out, acceptFooter())
 		return

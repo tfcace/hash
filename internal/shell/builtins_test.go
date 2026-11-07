@@ -1,72 +1,14 @@
 package shell
 
 import (
-	"os"
-	"path/filepath"
+	"bytes"
+	"context"
 	"testing"
 
 	"github.com/tfcace/hash/internal/clipboard"
 	"github.com/tfcace/hash/internal/config"
+	"github.com/tfcace/hash/internal/executor"
 )
-
-func TestBuiltinCd(t *testing.T) {
-	original, _ := os.Getwd()
-	defer os.Chdir(original)
-
-	tmpDir := t.TempDir()
-	// Resolve symlinks (macOS /var -> /private/var)
-	tmpDir, _ = filepath.EvalSymlinks(tmpDir)
-
-	err := builtinCd([]string{tmpDir})
-	if err != nil {
-		t.Fatalf("builtinCd() error = %v", err)
-	}
-
-	cwd, _ := os.Getwd()
-	if cwd != tmpDir {
-		t.Errorf("cwd = %q, want %q", cwd, tmpDir)
-	}
-}
-
-func TestBuiltinCd_Home(t *testing.T) {
-	original, _ := os.Getwd()
-	defer os.Chdir(original)
-
-	home := os.Getenv("HOME")
-	if home == "" {
-		t.Skip("HOME not set")
-	}
-
-	err := builtinCd([]string{})
-	if err != nil {
-		t.Fatalf("builtinCd() error = %v", err)
-	}
-
-	cwd, _ := os.Getwd()
-	if cwd != home {
-		t.Errorf("cwd = %q, want %q", cwd, home)
-	}
-}
-
-func TestBuiltinCd_Tilde(t *testing.T) {
-	original, _ := os.Getwd()
-	defer os.Chdir(original)
-
-	home := os.Getenv("HOME")
-	if home == "" {
-		t.Skip("HOME not set")
-	}
-
-	err := builtinCd([]string{"~"})
-	if err != nil {
-		t.Fatalf("builtinCd() error = %v", err)
-	}
-
-	cwd, _ := os.Getwd()
-	if cwd != home {
-		t.Errorf("cwd = %q, want %q", cwd, home)
-	}
-}
 
 func TestBuiltinCd_Disabled(t *testing.T) {
 	cfg := &config.Config{
@@ -180,16 +122,23 @@ func TestBuiltinCopy_All(t *testing.T) {
 	}
 }
 
-func TestNoopBuiltin_Bindkey(t *testing.T) {
-	// bindkey should be recognized as a builtin
-	if !isBuiltin("bindkey") {
-		t.Error("bindkey should be a builtin")
+// zsh's setup builtins typed at the prompt are the interpreter's no-ops,
+// not builtins of the shell's own.
+func TestNoopBuiltin_RunsInTheInterpreter(t *testing.T) {
+	for _, name := range []string{"bindkey", "setopt"} {
+		if isBuiltin(name) {
+			t.Errorf("%s is a shell builtin", name)
+		}
 	}
-}
-
-func TestNoopBuiltin_Setopt(t *testing.T) {
-	// setopt should be recognized as a builtin
-	if !isBuiltin("setopt") {
-		t.Error("setopt should be a builtin")
+	sh := &Shell{executor: executor.New()}
+	if handled, _ := sh.executeBuiltin(context.Background(), "setopt autocd"); handled {
+		t.Error("the shell ran setopt itself")
+	}
+	var out, errOut bytes.Buffer
+	if _, err := sh.executor.Execute(context.Background(), "bindkey -e; setopt autocd && echo ok", &out, &errOut); err != nil {
+		t.Fatal(err)
+	}
+	if out.String() != "ok\n" || errOut.Len() != 0 {
+		t.Errorf("stdout %q stderr %q, want ok", out.String(), errOut.String())
 	}
 }

@@ -5,17 +5,17 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 	"sync"
-	"time"
+
+	"github.com/tfcace/hash/internal/tilde"
 )
 
 // Config configures the prompt behavior.
 type Config struct {
-	Mode         string // "starship", "built-in", "none"
+	Mode         string // "starship" (default), "built-in", "none"
 	StarshipPath string // Optional explicit path
 	Alignment    string // "left" or "right"
 }
@@ -28,62 +28,79 @@ type PromptContext struct {
 	Jobs       int
 }
 
-// precomputeResult holds a precomputed prompt output for fast reuse.
-type precomputeResult struct {
-	cwd     string
-	output  string
-	timeStr string // HH:MM the time module showed, patched to now at render
+// engine is the configured prompt engine.
+type engine int
+
+const (
+	// engineStarship runs starship once starshipLookup finds it; meanwhile,
+	// and when starship fails, the built-in prompt is shown.
+	engineStarship engine = iota
+	engineBuiltin         // cwd and a colored prompt character
+	engineNone            // a bare prompt character, no cwd or colors
+)
+
+func engineForMode(mode string) engine {
+	switch mode {
+	case "starship", "":
+		return engineStarship
+	case "none":
+		return engineNone
+	default: // "built-in", and unknown modes
+		return engineBuiltin
+	}
+}
+
+// starshipLookup finds the starship binary. It has two states: found (path
+// set, final) and not found yet, in which every use looks again, since
+// startup files may still extend PATH. The first prompt and the palette are
+// drawn concurrently, so the lookup is locked.
+type starshipLookup struct {
+	explicit string // configured path, tried before PATH
+
+	mu   sync.Mutex
+	path string // "" until found
+}
+
+// find returns the starship binary, looking it up again if it was not found
+// yet.
+func (l *starshipLookup) find() (string, bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.path == "" {
+		l.path = findStarship(l.explicit)
+	}
+	return l.path, l.path != ""
 }
 
 // Prompt generates shell prompts.
 type Prompt struct {
-	config       Config
-	starshipPath string
-
-	mu          sync.Mutex
-	precomputed *precomputeResult
+	config   Config
+	engine   engine
+	starship starshipLookup
 }
 
-// New creates a new Prompt generator.
+// New creates a new Prompt generator. The starship lookup is deferred to the
+// first prompt so startup files can set up PATH first.
 func New(cfg Config) *Prompt {
-	p := &Prompt{config: cfg}
-
-	// If explicit path is provided, use it immediately
-	if cfg.Mode == "starship" && cfg.StarshipPath != "" {
-		p.starshipPath = p.findStarship(cfg.StarshipPath)
-	}
-	// Otherwise, defer starship lookup until first prompt generation
-	// This allows PATH to be set up by startup files first
-
-	return p
-}
-
-// StarshipPath returns the path to the starship binary, if configured.
-func (p *Prompt) StarshipPath() string {
-	return p.starshipPath
+	return &Prompt{config: cfg, engine: engineForMode(cfg.Mode), starship: starshipLookup{explicit: cfg.StarshipPath}}
 }
 
 // Generate returns the prompt string.
 func (p *Prompt) Generate(ctx PromptContext) string {
-	switch p.config.Mode {
-	case "starship":
-		// Lazy lookup: retry finding starship until found (allows PATH to be set up by startup files)
-		if p.starshipPath == "" {
-			p.starshipPath = p.findStarship(p.config.StarshipPath)
+	switch p.engine {
+	case engineStarship:
+		if path, ok := p.starship.find(); ok {
+			return p.starshipPrompt(path, ctx)
 		}
-		if p.starshipPath != "" {
-			return p.starshipPrompt(ctx)
-		}
-		// Fall through to built-in if starship not found
-		fallthrough
-	case "built-in":
 		return p.builtinPrompt(ctx)
+	case engineNone:
+		return "❯ "
 	default:
-		return p.fallbackPrompt(ctx)
+		return p.builtinPrompt(ctx)
 	}
 }
 
-func (p *Prompt) findStarship(explicit string) string {
+func findStarship(explicit string) string {
 	if explicit != "" {
 		if _, err := os.Stat(explicit); err == nil {
 			return explicit
@@ -98,8 +115,8 @@ func (p *Prompt) findStarship(explicit string) string {
 	return ""
 }
 
-func (p *Prompt) starshipPrompt(ctx PromptContext) string {
-	cmd := exec.Command(p.starshipPath, "prompt",
+func (p *Prompt) starshipPrompt(path string, ctx PromptContext) string {
+	cmd := exec.Command(path, "prompt",
 		"--status", strconv.Itoa(ctx.ExitCode),
 		"--cmd-duration", strconv.FormatInt(ctx.DurationMs, 10),
 		"--jobs", strconv.Itoa(ctx.Jobs),
@@ -110,7 +127,7 @@ func (p *Prompt) starshipPrompt(ctx PromptContext) string {
 	cmd.Stdout = &out
 
 	if err := cmd.Run(); err != nil {
-		return p.fallbackPrompt(ctx)
+		return p.builtinPrompt(ctx)
 	}
 
 	prompt := out.String()
@@ -120,9 +137,9 @@ func (p *Prompt) starshipPrompt(ctx PromptContext) string {
 	return prompt
 }
 
-// GenerateMultiLine returns the prompt split into prefix (printed before readline)
-// and the actual prompt (given to readline). This is needed because chzyer/readline
-// doesn't support multi-line prompts properly.
+// GenerateMultiLine returns the prompt split into prefix (printed before the
+// line editor starts) and the last line (given to the line editor), which is
+// the part it redraws.
 func (p *Prompt) GenerateMultiLine(ctx PromptContext) (prefix, prompt string) {
 	full := p.Generate(ctx)
 
@@ -138,12 +155,7 @@ func (p *Prompt) GenerateMultiLine(ctx PromptContext) (prefix, prompt string) {
 }
 
 func (p *Prompt) builtinPrompt(ctx PromptContext) string {
-	cwd := ctx.Cwd
-	if home := os.Getenv("HOME"); home != "" {
-		if rel, err := filepath.Rel(home, cwd); err == nil && len(rel) < len(cwd) {
-			cwd = "~/" + rel
-		}
-	}
+	cwd := tilde.Abbrev(ctx.Cwd)
 
 	char := "❯"
 	color := "\033[32m" // green
@@ -155,123 +167,17 @@ func (p *Prompt) builtinPrompt(ctx PromptContext) string {
 	return fmt.Sprintf("%s %s%s%s ", cwd, color, char, reset)
 }
 
-func (p *Prompt) fallbackPrompt(ctx PromptContext) string {
-	return p.builtinPrompt(ctx)
-}
-
-// ResolveStarship forces the lazy starship binary lookup.
-// Call before concurrent Generate/GenerateForPalette to avoid races.
-func (p *Prompt) ResolveStarship() {
-	if p.config.Mode == "starship" && p.starshipPath == "" {
-		p.starshipPath = p.findStarship(p.config.StarshipPath)
-	}
-}
-
-// hhmmRe matches HH:MM time strings (used to patch cached time output).
-var hhmmRe = regexp.MustCompile(`\d{2}:\d{2}`)
-
-// StartPrecompute begins generating the next prompt in the background,
-// assuming exit code 0, zero duration, and the given cwd. The result is
-// stored and can be retrieved via TryPrecomputed. The time module output
-// is captured separately so it can be patched with the current time at
-// render without spawning a subprocess.
-func (p *Prompt) StartPrecompute(cwd string) {
-	if p.starshipPath == "" {
-		return
-	}
-	go func() {
-		ctx := PromptContext{Cwd: cwd, ExitCode: 0}
-		var output, timeOutput string
-		var wg sync.WaitGroup
-		wg.Add(2)
-		go func() {
-			defer wg.Done()
-			output = p.Generate(ctx)
-		}()
-		go func() {
-			defer wg.Done()
-			timeOutput = p.renderModule("time")
-		}()
-		wg.Wait()
-
-		var timeStr string
-		if timeOutput != "" {
-			timeStr = hhmmRe.FindString(timeOutput)
-		}
-
-		p.mu.Lock()
-		p.precomputed = &precomputeResult{
-			cwd: cwd, output: output, timeStr: timeStr,
-		}
-		p.mu.Unlock()
-	}()
-}
-
-// TryPrecomputed returns a precomputed prompt if one is available and the
-// context matches. The time module is patched inline with the current time
-// (no subprocess). Returns ("", false) on miss — caller should Generate
-// synchronously.
-func (p *Prompt) TryPrecomputed(ctx PromptContext) (string, bool) {
-	// Only valid when the precomputed assumptions hold:
-	// exit=0, duration below cmd_duration threshold, same cwd.
-	if ctx.ExitCode != 0 || ctx.DurationMs >= 100 {
-		p.mu.Lock()
-		p.precomputed = nil
-		p.mu.Unlock()
-		return "", false
-	}
-	p.mu.Lock()
-	pc := p.precomputed
-	p.precomputed = nil
-	p.mu.Unlock()
-
-	if pc == nil || pc.cwd != ctx.Cwd {
-		return "", false
-	}
-
-	result := pc.output
-	// Patch the clock if it moved since the precompute. Replace the time
-	// itself, not the module's bytes: in the full prompt starship merges the
-	// segment's colors with its neighbor's, so those bytes never match. The
-	// time sits at the right of the prompt, so its last occurrence is the
-	// clock.
-	if pc.timeStr != "" {
-		now := time.Now().Format("15:04")
-		if i := strings.LastIndex(result, pc.timeStr); i >= 0 && now != pc.timeStr {
-			result = result[:i] + now + result[i+len(pc.timeStr):]
-		}
-	}
-	return result, true
-}
-
-// renderModule runs a single starship module and returns its output.
-func (p *Prompt) renderModule(name string) string {
-	cmd := exec.Command(p.starshipPath, "module", name)
-	cmd.Env = append(os.Environ(), "STARSHIP_SHELL=hash")
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	if err := cmd.Run(); err != nil {
-		return ""
-	}
-	return out.String()
-}
-
 // GenerateForPalette runs starship with the given exit code and returns raw output
 // suitable for palette extraction. Returns "" if starship is not available.
 func (p *Prompt) GenerateForPalette(exitCode int) string {
-	if p.starshipPath == "" {
+	if p.engine != engineStarship {
 		return ""
 	}
-	return runStarship(p.starshipPath, exitCode)
-}
-
-// RightPrompt returns the right-side prompt (if supported).
-// Note: Right prompts are not currently used with chzyer/readline
-// because it doesn't support them properly.
-func (p *Prompt) RightPrompt(ctx PromptContext) string {
-	// Disabled: chzyer/readline doesn't support right prompts.
-	// The cursor positioning sequences break line editing.
-	return ""
+	path, ok := p.starship.find()
+	if !ok {
+		return ""
+	}
+	return runStarship(path, exitCode)
 }
 
 // cursorPosRegex matches cursor positioning escape sequences.

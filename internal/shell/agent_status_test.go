@@ -34,43 +34,32 @@ func newStatusShell(mock *agent.MockTransport) (*Shell, *bytes.Buffer) {
 func TestAgentStatus_NilIsSafe(t *testing.T) {
 	var s *agentStatus
 	s.working("x")
-	s.resume()
 	s.blocked(programstatus.Question, "x")
 	s.done("x")
 	s.failed("x")
 	s.idle()
-	s.finish()
 }
 
-func TestAgentStatus_FinishEndsAnOpenTurnWithIdle(t *testing.T) {
-	var buf bytes.Buffer
-	s := newAgentStatus(programstatus.NewReporter(&buf))
-	s.working("find big files")
-	s.finish()
+// Ending a turn that is still working reports idle; a done answer is meant
+// to outlive the turn, so ending it adds nothing.
+func TestTurn_EndReportsAnOpenTurnIdleAndKeepsADoneOne(t *testing.T) {
+	sh, buf := newStatusShell(agent.NewMockTransport())
+
+	open := sh.beginTurn(context.Background())
+	open.requestInline("find big files")
+	open.end()
 	want := rootReport(programstatus.Working, "", "find big files") + rootReport(programstatus.Idle, "", "")
 	if buf.String() != want {
 		t.Errorf("wrote %q\nwant  %q", buf.String(), want)
 	}
 
+	answered := sh.beginTurn(context.Background())
+	answered.requestInline("q")
+	answered.answered(agent.Response{Type: agent.ResponseTypeExplanation, Explanation: "answer"}, "answer", replyStands, 0)
 	buf.Reset()
-	s.done("answer")
-	s.finish()
-	if want := rootReport(programstatus.Done, "", "answer"); buf.String() != want {
-		t.Errorf("finish after done wrote %q, want only the done", buf.String())
-	}
-}
-
-func TestAgentStatus_ResumeRepeatsTheTurnsPrompt(t *testing.T) {
-	var buf bytes.Buffer
-	s := newAgentStatus(programstatus.NewReporter(&buf))
-	s.working("explain this")
-	s.blocked(programstatus.Permission, "kubectl get pods")
-	s.resume()
-	want := rootReport(programstatus.Working, "", "explain this") +
-		rootReport(programstatus.Blocked, programstatus.Permission, "kubectl get pods") +
-		rootReport(programstatus.Working, "", "explain this")
-	if buf.String() != want {
-		t.Errorf("wrote %q\nwant  %q", buf.String(), want)
+	answered.end()
+	if buf.String() != "" {
+		t.Errorf("ending a done turn wrote %q, want nothing", buf.String())
 	}
 }
 
@@ -79,7 +68,7 @@ func TestHandleAgentFullStreaming_ProseAnswerReportsWorkingThenDone(t *testing.T
 	mock := agent.NewMockTransport(agent.Response{Type: agent.ResponseTypeExplanation, Explanation: "Two files changed.\nBoth in docs."})
 	sh, buf := newStatusShell(mock)
 
-	sh.handleAgentFullStreaming(context.Background(), parser.ParseResult{Type: parser.CommandTypeAgentPipe, Command: "git diff", AgentPrompt: "summarize"}, "m")
+	sh.handleAgentFullStreaming(startTurn(t, sh), parser.ParseResult{Type: parser.CommandTypeAgentPipe, Command: "git diff", AgentPrompt: "summarize"})
 
 	want := rootReport(programstatus.Working, "", "summarize") + rootReport(programstatus.Done, "", "Two files changed.")
 	if buf.String() != want {
@@ -93,7 +82,7 @@ func TestHandleAgentFullStreaming_CommandReplyBlocksOnPermission(t *testing.T) {
 	mock := agent.NewMockTransport(agent.Response{Type: agent.ResponseTypeCommand, Command: "find / -size +100M"})
 	sh, buf := newStatusShell(mock)
 
-	sh.handleAgentFullStreaming(context.Background(), parser.ParseResult{Type: parser.CommandTypeAgent, AgentPrompt: "find big files"}, "m")
+	sh.handleAgentFullStreaming(startTurn(t, sh), parser.ParseResult{Type: parser.CommandTypeAgent, AgentPrompt: "find big files"})
 
 	want := rootReport(programstatus.Working, "", "find big files") +
 		rootReport(programstatus.Blocked, programstatus.Permission, "find / -size +100M") +
@@ -106,11 +95,13 @@ func TestHandleAgentFullStreaming_CommandReplyBlocksOnPermission(t *testing.T) {
 func TestRunAgentConversationLoop_ReplyBlocksOnQuestion(t *testing.T) {
 	mock := agent.NewMockTransport(agent.Response{Type: agent.ResponseTypeExplanation, Explanation: "Thanks, done."})
 	sh, buf := newStatusShell(mock)
-	sh.agentReplyInputHook = func(ctx context.Context) (string, error) { return "internal/shell", nil }
+	typeAhead(t, sh, "internal/shell\r\x04") // the reply, then leave
 
-	sh.runAgentConversationLoop(context.Background(), "m", []agentConversationMessage{
-		{Role: "user", Text: "Find my config files"},
-		{Role: "assistant", Text: "Sure.\nWhich directory should I inspect?"},
+	captureStdout(t, sh, func() {
+		sh.runAgentConversationLoop(startTurn(t, sh), []agentConversationMessage{
+			{Role: "user", Text: "Find my config files"},
+			{Role: "assistant", Text: "Sure.\nWhich directory should I inspect?"},
+		})
 	})
 
 	want := rootReport(programstatus.Blocked, programstatus.Question, "Which directory should I inspect?") +
@@ -122,8 +113,13 @@ func TestRunAgentConversationLoop_ReplyBlocksOnQuestion(t *testing.T) {
 
 func TestHandleToolPermission_BlocksThenResumes(t *testing.T) {
 	sh, buf := newStatusShell(agent.NewMockTransport())
-	sh.readKey = func(ctx context.Context) byte { return 'y' }
-	sh.agentStatus.working("list pods")
+	screen := &lockedBuffer{}
+	sh.agentOutput = NewAgentOutputCoordinator(screen)
+	tt := newTestTerminal(t, sh)
+	tt.answerPermissions("y")
+	tt.answerHints(screen)
+	t.Cleanup(func() { sh.agentOutput.TakeRow() }) // an allowed tool shows activity until the turn ends
+	startTurn(t, sh).request("list pods")
 	buf.Reset()
 
 	sh.handleToolPermission(context.Background(), agent.ToolPermissionRequest{Command: "kubectl get pods", ToolName: "bash"})
@@ -137,7 +133,7 @@ func TestHandleToolPermission_BlocksThenResumes(t *testing.T) {
 func TestHandleAgentStreamError_ReportsError(t *testing.T) {
 	sh, buf := newStatusShell(agent.NewMockTransport())
 
-	sh.handleAgentStreamError(context.Background(), parser.ParseResult{}, "m", errors.New("adapter crashed"), 0)
+	sh.handleAgentStreamError(startTurn(t, sh), errors.New("adapter crashed"), 0)
 
 	if want := rootReport(programstatus.Error, "", "adapter crashed"); !strings.HasPrefix(buf.String(), want) {
 		t.Errorf("wrote %q\nwant it to start with %q", buf.String(), want)
@@ -147,16 +143,18 @@ func TestHandleAgentStreamError_ReportsError(t *testing.T) {
 // The activity spinner's row must not survive a permission prompt: its last
 // frame ("agent · running · ...") used to stay in scrollback above the tool.
 func TestHandleToolPermission_ClearsSpinnerRow(t *testing.T) {
+	t.Parallel()
 	sh, _ := newStatusShell(agent.NewMockTransport())
-	var ui bytes.Buffer
-	sh.responseUI = NewResponseUI(&ui)
-	sh.agentOutput = NewAgentOutputCoordinator(&ui)
-	sh.readKey = func(ctx context.Context) byte { return 'n' }
+	ui := &lockedBuffer{}
+	sh.responseUI = NewResponseUI(ui)
+	sh.agentOutput = NewAgentOutputCoordinator(ui)
+	newTestTerminal(t, sh).answerHints(ui) // n at the prompt
 
-	sh.responseUI.ShowActivity("agent · running · ls")
+	startTurn(t, sh).request("ls")
+	sh.agentOutput.ShowActivity("agent · running · ls")
 	time.Sleep(200 * time.Millisecond) // let a frame draw
 	sh.handleToolPermission(context.Background(), agent.ToolPermissionRequest{Command: "ls", ToolName: "bash"})
-	sh.responseUI.StopSpinner()
+	sh.agentOutput.TakeRow()
 
 	out := ui.String()
 	prompt := strings.Index(out, "Agent wants to run")
@@ -174,5 +172,56 @@ func TestHandleToolPermission_ClearsSpinnerRow(t *testing.T) {
 	after := out[strings.LastIndex(before, "\r\x1b[K"):]
 	if down, up := strings.Count(after, "\n"), strings.Count(after, ansiCursorUp); down != up {
 		t.Errorf("moved down %d rows and up %d: the spinner's row is left behind", down, up)
+	}
+}
+
+// Off a terminal (stdin a pipe) no key can answer a full turn's permission
+// prompt: drawing it only to deny it at once shows a question nobody can
+// answer. The tool is denied with a row that says why, and the turn never
+// reports itself blocked on a permission.
+func TestTurn_OffATerminalAToolIsDeniedWithoutAPrompt(t *testing.T) {
+	sh, screen, status := newTurnShell(t, &scriptedTransport{})
+	sh.editorCfg.Input, _ = typedKeys(t) // the shell's key reader, on a pipe: the watcher finds no terminal
+	turn := startTurn(t, sh)
+	turn.request("clean up")
+	if full := turn.req.(*fullRequest); full.keys != nil {
+		t.Fatal("a key watcher started on a pipe")
+	}
+	turn.tool(agent.ToolCallUpdate{ID: "t1", Title: "rm -rf build", Kind: "execute", Status: agent.ToolCallInProgress}, "")
+
+	allow, always := sh.handleToolPermission(context.Background(), agent.ToolPermissionRequest{Command: "rm -rf build", ToolName: "Bash", ToolCallID: "t1"})
+	turn.streamEnded()
+	if allow || always {
+		t.Errorf("permission = %v, %v; want denied", allow, always)
+	}
+	out := screen.String()
+	if strings.Contains(out, "Agent wants to run") {
+		t.Errorf("drew a permission prompt nobody can answer: %q", out)
+	}
+	if !strings.Contains(out, "denied") || !strings.Contains(out, "no terminal") {
+		t.Errorf("no row says the tool was denied and why: %q", out)
+	}
+	if strings.Contains(status.String(), rootReport(programstatus.Blocked, programstatus.Permission, "rm -rf build")) {
+		t.Errorf("reported blocked on a permission nobody can give: %q", status.String())
+	}
+	if got := turn.demoteDenied(agent.Response{Type: agent.ResponseTypeCommand, Command: "rm -rf build"}); got.Type != agent.ResponseTypeExplanation {
+		t.Error("the denied command comes back one Enter away")
+	}
+}
+
+// An inline request has no key to answer with either (the editor owns
+// stdin): its fill stops, saying why, with no prompt drawn.
+func TestTurn_AnInlineToolIsDeniedWithoutAPrompt(t *testing.T) {
+	sh, screen, status := newTurnShell(t, &scriptedTransport{})
+	turn := startTurn(t, sh)
+	turn.requestInline("long listing")
+	if allow, _ := sh.handleToolPermission(context.Background(), agent.ToolPermissionRequest{Command: "ls", ToolName: "Bash"}); allow {
+		t.Error("an inline request's tool was allowed")
+	}
+	if strings.Contains(screen.String(), "Agent wants to run") || turn.Phase() != turnFailed {
+		t.Errorf("phase %v, screen %q; want failed with no prompt", turn.Phase(), screen.String())
+	}
+	if want := rootReport(programstatus.Error, "", inlineToolDenied("ls").Error()); lastStatus(status) != want {
+		t.Errorf("status = %q, want %q", lastStatus(status), want)
 	}
 }

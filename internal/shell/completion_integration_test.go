@@ -98,6 +98,7 @@ func createTestDirStructure(t *testing.T) string {
 }
 
 func TestCompletionIntegration_AdapterCutsOffSlowCompleter(t *testing.T) {
+	t.Parallel()
 	router := completion.NewRouter()
 	router.Register(slowCompletionProvider{delay: 300 * time.Millisecond}, completion.PriorityFilesystem)
 	completeFunc := makeEditorCompleteOutcomeFunc(router)
@@ -109,15 +110,16 @@ func TestCompletionIntegration_AdapterCutsOffSlowCompleter(t *testing.T) {
 	if elapsed > 250*time.Millisecond {
 		t.Fatalf("completion adapter took %s, want under 250ms", elapsed)
 	}
-	if len(outcome.Items) != 0 {
-		t.Fatalf("slow completion should be cut off, got %#v", outcome.Items)
+	if len(outcome.Items()) != 0 {
+		t.Fatalf("slow completion should be cut off, got %#v", outcome.Items())
 	}
-	if !outcome.TimedOut {
+	if outcome.Status() != editor.CompletionTimedOut {
 		t.Fatal("cut-off completion should report TimedOut")
 	}
 }
 
 func TestCompletionIntegration_AdapterCutsOffContextIgnoringCompleter(t *testing.T) {
+	t.Parallel()
 	release := make(chan struct{})
 	var releaseOnce sync.Once
 	defer releaseOnce.Do(func() { close(release) })
@@ -145,8 +147,8 @@ func TestCompletionIntegration_AdapterCutsOffContextIgnoringCompleter(t *testing
 	if elapsed > 250*time.Millisecond {
 		t.Fatalf("completion adapter took %s, want under 250ms", elapsed)
 	}
-	if len(outcome.Items) != 0 {
-		t.Fatalf("context-ignoring completion should be cut off, got %#v", outcome.Items)
+	if len(outcome.Items()) != 0 {
+		t.Fatalf("context-ignoring completion should be cut off, got %#v", outcome.Items())
 	}
 }
 

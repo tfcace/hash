@@ -85,7 +85,7 @@ func wordEnd(line string, col int) int {
 		col += size
 	}
 	if col > 0 {
-		col = previousRuneBoundary(line, col)
+		col = previousClusterBoundary(line, col)
 	}
 	return col
 }

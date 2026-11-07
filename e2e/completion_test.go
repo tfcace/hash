@@ -182,8 +182,8 @@ func TestCompletion_TildeExpansion(t *testing.T) {
 	}
 }
 
-// TestCompletion_Router tests the three-tier completion router.
-// Website promise: Three-tier architecture - Tool-native, Filesystem, Agent fallback
+// TestCompletion_Router tests the completion router: tool-native and
+// filesystem completers answering in priority order.
 func TestCompletion_Router(t *testing.T) {
 	// Create test environment
 	tmpDir := t.TempDir()
@@ -339,7 +339,8 @@ func TestCompletion_RouterWithFuzzy(t *testing.T) {
 }
 
 // TestCompletion_Priorities tests that completers are called in priority order.
-// Website promise: Tier 1 (Cobra/Tool-native) 10-200ms, Tier 2 (Filesystem) <10ms, Tier 3 (Agent) 200-800ms
+// The agent tier is not a router completer: Tab on an inline ?? line submits
+// it to the streaming agent completion flow.
 func TestCompletion_Priorities(t *testing.T) {
 	// Verify the priority constants
 	priorities := []struct {
@@ -348,17 +349,6 @@ func TestCompletion_Priorities(t *testing.T) {
 	}{
 		{"ToolNative", completion.PriorityToolNative},
 		{"Filesystem", completion.PriorityFilesystem},
-		{"Agent", completion.PriorityAgent},
-	}
-
-	// ToolNative (Cobra) should be lower (tried first) than Agent
-	if completion.PriorityToolNative >= completion.PriorityAgent {
-		t.Error("ToolNative priority should be lower (tried first) than Agent")
-	}
-
-	// Filesystem should be lower than Agent
-	if completion.PriorityFilesystem >= completion.PriorityAgent {
-		t.Error("Filesystem priority should be lower than Agent")
 	}
 
 	// ToolNative should be tried before Filesystem

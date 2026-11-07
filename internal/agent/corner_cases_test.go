@@ -10,19 +10,11 @@ import (
 // channel closes (agent process exits), the connection state is reset so
 // the next SendStreaming() can reconnect.
 func TestACPTransport_ConnectionClosedResetsState(t *testing.T) {
-	transport := &ACPTransport{
-		config:   ACPConfig{Command: "test"},
-		messages: make(chan []byte, 1024),
-		done:     make(chan struct{}),
-	}
-
 	// Simulate a connected state
-	mockStdin := newMockPipe()
-	transport.stdin = mockStdin
-	transport.sessionID = "test-session"
+	transport, conn, _ := newPipeTransport("test-session")
 
 	// Close messages channel (simulates readLoop exiting when agent crashes)
-	close(transport.messages)
+	close(conn.messages)
 
 	// Attempt to send - this should detect connection closed
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
@@ -43,11 +35,7 @@ func TestACPTransport_ConnectionClosedResetsState(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 
 	// After "connection closed", stdin should be reset
-	transport.mu.Lock()
-	stdinAfterClose := transport.stdin
-	transport.mu.Unlock()
-
-	if stdinAfterClose != nil {
+	if transport.connected() {
 		t.Errorf("After connection closed, stdin should be nil to trigger reconnect")
 		t.Log("BUG: Connection closed doesn't reset connection state")
 	}
@@ -112,16 +100,8 @@ func TestACPTransport_DoubleClose(t *testing.T) {
 // TestACPTransport_ContextAlreadyCanceled tests behavior when context
 // is already canceled before SendStreaming is called.
 func TestACPTransport_ContextAlreadyCanceled(t *testing.T) {
-	transport := &ACPTransport{
-		config:   ACPConfig{Command: "test"},
-		messages: make(chan []byte, 1024),
-		done:     make(chan struct{}),
-	}
-
 	// Simulate connected state
-	mockStdin := newMockPipe()
-	transport.stdin = mockStdin
-	transport.sessionID = "test-session"
+	transport, _, _ := newPipeTransport("test-session")
 
 	// Create already-canceled context
 	ctx, cancel := context.WithCancel(context.Background())
@@ -161,25 +141,16 @@ SCENARIO: Agent becomes unresponsive (idle timeout)
 5. EXPECTED: Should reconnect to agent
 6. CURRENT: May or may not work depending on agent state
 
-The idle timeout handler calls sendCancel() which clears sessionID,
-but doesn't reset the connection. If the agent is truly hung,
-the next request may also hang or fail.
+The idle timeout handler notifies session/cancel and drops the process,
+keeping a resumable session (TestACPTransport_IdleTimeoutKeepsTheSessionForResume).
 	`)
 }
 
 // TestACPTransport_RapidCancelAndResend tests rapid cancel-and-resend cycles
 // don't corrupt state.
 func TestACPTransport_RapidCancelAndResend(t *testing.T) {
-	transport := &ACPTransport{
-		config:   ACPConfig{Command: "test"},
-		messages: make(chan []byte, 1024),
-		done:     make(chan struct{}),
-	}
-
 	// Simulate connected state
-	mockStdin := newMockPipe()
-	transport.stdin = mockStdin
-	transport.sessionID = "test-session"
+	transport, _, _ := newPipeTransport("test-session")
 
 	// Rapid cancel-and-send cycles
 	for i := 0; i < 10; i++ {
@@ -199,13 +170,8 @@ func TestACPTransport_RapidCancelAndResend(t *testing.T) {
 		}
 	}
 
-	// Transport should still be in a valid state (not corrupted)
-	transport.mu.Lock()
-	defer transport.mu.Unlock()
-
 	// Just verify we didn't panic and state is consistent
-	t.Logf("After 10 rapid cancel cycles: stdin=%v, sessionID=%q",
-		transport.stdin != nil, transport.sessionID)
+	t.Logf("After 10 rapid cancel cycles: connected=%v", transport.connected())
 }
 
 // TestACPTransport_ConnectLockedPartialFailure tests cleanup when

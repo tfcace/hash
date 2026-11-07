@@ -296,8 +296,13 @@ func looksLikeCommand(text string) bool {
 		return false
 	}
 
-	// Flag-based suggestions like "foo --bar baz" still look command-like.
+	// Flag-based suggestions like "foo --bar baz" still look command-like,
+	// and so does a lowercase command with a + argument ("date +%F",
+	// "set +x"); "Add +1 to it" is an instruction.
 	if len(fields) > 1 && strings.HasPrefix(fields[1], "-") {
+		return true
+	}
+	if len(fields) > 1 && strings.HasPrefix(fields[1], "+") && isLowerWord(fields[0]) {
 		return true
 	}
 
@@ -330,6 +335,19 @@ func unwrapMarkdownInline(text string) string {
 			return text
 		}
 	}
+}
+
+// isLowerWord reports whether word is lowercase letters, digits, - and _
+// only, as a command name typed at the prompt is.
+func isLowerWord(word string) bool {
+	for _, r := range word {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '-', r == '_':
+		default:
+			return false
+		}
+	}
+	return word != ""
 }
 
 func isEnvAssignment(field string) bool {

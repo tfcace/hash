@@ -37,6 +37,13 @@ round: you see the error and can steer the fix rather than the command giving
 up. Accepting writes the spec to `~/.config/hash/completions/<tool>.toml`,
 activates it immediately (no restart), and ends the conversation.
 
+Each answer is read once its prompt is on screen: anything typed while the
+agent drafts goes to your next shell prompt instead, so a stray `a` and
+Enter never accepts a draft you have not seen. The first key of an answer
+must also come a moment (300ms) after the prompt appears and after the key
+before it; one typed sooner is dropped, and the prompt says "too quick,
+answer again".
+
 A generated plugin is a normal file you own from then on. To change it later,
 edit it and run `completions reload`, re-run `completions generate <tool>` to
 replace it, or delete it.

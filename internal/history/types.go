@@ -40,6 +40,9 @@ type SearchOptions struct {
 	Cwd        string // Filter by working directory
 	Since      time.Time
 	Before     time.Time
+	// Unique lists each command once, at its most recent run (of all its
+	// runs, whatever the other options keep).
+	Unique bool
 }
 
 // Stats holds history statistics.

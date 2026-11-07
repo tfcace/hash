@@ -96,3 +96,33 @@ func TestChecker_OfflineKeepsPreviousAnswer(t *testing.T) {
 		t.Error("offline the next day should still remind from the stored answer")
 	}
 }
+
+// A failed request counts toward the day as a successful one: an offline
+// machine asks the registry once a day, not at every shell start. A check
+// cut short by the shell ending (its context canceled) does not count.
+func TestChecker_FailedCheckWaitsADay(t *testing.T) {
+	now := time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC)
+	fetch := &stubFetcher{err: errors.New("dial tcp: no route")}
+	c := newChecker(t, "0.42.0", fetch, &now)
+	c.Run(context.Background())
+	now = now.Add(time.Hour)
+	c.Run(context.Background())
+	if fetch.calls != 1 {
+		t.Fatalf("registry calls = %d after two starts an hour apart offline, want 1", fetch.calls)
+	}
+	now = now.Add(24 * time.Hour)
+	fetch.err, fetch.version = nil, "0.88.0"
+	if _, ok := c.Run(context.Background()); !ok || fetch.calls != 2 {
+		t.Fatalf("the next day: calls = %d, notice %v; want a second request and the notice", fetch.calls, ok)
+	}
+
+	canceled := &stubFetcher{err: context.Canceled}
+	c = newChecker(t, "0.42.0", canceled, &now)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	c.Run(ctx)
+	c.Run(context.Background())
+	if canceled.calls != 2 {
+		t.Fatalf("registry calls = %d, want a canceled check retried at the next start", canceled.calls)
+	}
+}
