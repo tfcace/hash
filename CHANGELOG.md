@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.0](https://github.com/tfcace/hash/compare/v0.9.1...v0.10.0) (2026-11-14)
+
+
+### Features
+
+* **shell:** add script execution and stabilize interactive state ([#130](https://github.com/tfcace/hash/issues/130)) ([5c8b9ac](https://github.com/tfcace/hash/commit/5c8b9ac9ce2f597dac77886d26f7096b5c0cd3f2))
+
 ## [0.9.1](https://github.com/tfcace/hash/compare/v0.9.0...v0.9.1) (2026-11-06)
 
 
