@@ -165,6 +165,35 @@ func TestExecute_ExitCode(t *testing.T) {
 	}
 }
 
+func TestExecHandler_StatusCommand(t *testing.T) {
+	handler := (&Executor{}).execHandler(nil)
+	for _, tc := range []struct {
+		code string
+		want interp.ExitStatus
+	}{
+		{"0", 0},
+		{"1", 1},
+		{"42", 42},
+		{"127", 127},
+		{"128", 128},
+		{"255", 255},
+		{"-1", 2},
+		{"256", 2},
+		{"257", 2},
+		{"", 2},
+		{"invalid", 2},
+		{"999999999999999999999999999999", 2},
+	} {
+		t.Run(tc.code, func(t *testing.T) {
+			err := handler(context.Background(), []string{statusCommand, tc.code})
+			var status interp.ExitStatus
+			if !errors.As(err, &status) || status != tc.want {
+				t.Fatalf("status command %q = %v, want %d", tc.code, err, tc.want)
+			}
+		})
+	}
+}
+
 // `hash` collides with the POSIX no-op builtin in mvdan/sh, which would
 // otherwise swallow these args and print nothing. Hash overrides the version
 // and help forms so they report Hash's own info from within the Hash shell.

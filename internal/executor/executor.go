@@ -1785,8 +1785,11 @@ func (e *Executor) execHandler(next interp.ExecHandlerFunc) interp.ExecHandlerFu
 	return func(ctx context.Context, args []string) error {
 		switch args[0] {
 		case statusCommand:
-			code, _ := strconv.Atoi(args[1])
-			return interp.ExitStatus(uint8(code)) //nolint:gosec // G115: statusCall codes are statuses, 0-255
+			code, err := strconv.Atoi(args[1])
+			if err != nil || code < 0 || code > 255 {
+				return interp.ExitStatus(2)
+			}
+			return interp.ExitStatus(uint8(code))
 		case execCommand:
 			return e.execReplacing(ctx, args[1:])
 		}
