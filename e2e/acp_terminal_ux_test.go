@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -101,15 +102,30 @@ interactive = []
 	if err != nil {
 		t.Fatal(err)
 	}
+	transcript := newPTYTranscript(terminal)
+	exited := make(chan struct{})
+	go func() {
+		_ = cmd.Wait()
+		close(exited)
+	}()
 	defer func() {
+		if t.Failed() {
+			_ = cmd.Process.Signal(syscall.SIGABRT)
+			select {
+			case <-exited:
+			case <-time.After(2 * time.Second):
+			}
+		}
 		_ = terminal.Close()
 		if cmd.Process != nil {
 			_ = cmd.Process.Kill()
 		}
-		_ = cmd.Wait()
+		<-exited
+		if t.Failed() {
+			t.Logf("terminal output at shutdown:\n%s", stripTerminalANSI(transcript.String()))
+		}
 	}()
 
-	transcript := newPTYTranscript(terminal)
 	// The built-in prompt need not contain "hash": it shows the working
 	// directory, whose name depends on where the repository was checked out.
 	transcript.waitFor(t, "❯ ", 5*time.Second)
@@ -142,6 +158,9 @@ interactive = []
 // failure identifies whether context collection, startup or a reply stalled.
 func acpTraceEnv(t *testing.T) []string {
 	t.Helper()
+	if os.Getenv("HASH_E2E_TRACE") == "" {
+		return nil
+	}
 	path := filepath.Join(t.TempDir(), "acp-trace.jsonl")
 	t.Cleanup(func() {
 		if t.Failed() {

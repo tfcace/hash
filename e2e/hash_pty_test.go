@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -288,6 +289,13 @@ func startHash(t testing.TB, home *testHome, size termSize, extraEnv ...string) 
 	}()
 	go ht.read()
 	t.Cleanup(func() {
+		if t.Failed() {
+			_ = cmd.Process.Signal(syscall.SIGABRT)
+			select {
+			case <-ht.exited:
+			case <-time.After(2 * time.Second):
+			}
+		}
 		close(ht.keys)
 		_ = f.Close()
 		if cmd.Process != nil {

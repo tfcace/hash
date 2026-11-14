@@ -174,7 +174,9 @@ func TestStartupHome_RealWorldLayouts(t *testing.T) {
 				if line == "" {
 					continue
 				}
-				matched := tt.also != "" && line == tt.also
+				// Suggestions depend on the runner's PATH (macOS may offer
+				// kinit or ncinit for zinit), beside the expected refusal.
+				matched := tt.also != "" && (line == tt.also || strings.HasPrefix(line, "│ did you mean: "))
 				for _, want := range tt.notLoaded {
 					if strings.HasPrefix(line, want) {
 						counts[want]++
