@@ -1,9 +1,12 @@
 package agent
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"strings"
+	"syscall"
+	"time"
 )
 
 // ContextBuilder builds agent context.
@@ -51,23 +54,46 @@ func (b *ContextBuilder) WithLastError(err string) *ContextBuilder {
 }
 
 // DetectGitBranch detects the current git branch.
-func (b *ContextBuilder) DetectGitBranch() *ContextBuilder {
-	cmd := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
-	out, err := cmd.Output()
-	if err == nil {
-		b.ctx.GitBranch = strings.TrimSpace(string(out))
-	}
+func (b *ContextBuilder) DetectGitBranch(ctx context.Context) *ContextBuilder {
+	b.ctx.GitBranch = detectContextValue(ctx, "git", "rev-parse", "--abbrev-ref", "HEAD")
 	return b
 }
 
 // DetectKubeContext detects the current kubectl context.
-func (b *ContextBuilder) DetectKubeContext() *ContextBuilder {
-	cmd := exec.Command("kubectl", "config", "current-context")
-	out, err := cmd.Output()
-	if err == nil {
-		b.ctx.KubeContext = strings.TrimSpace(string(out))
-	}
+func (b *ContextBuilder) DetectKubeContext(ctx context.Context) *ContextBuilder {
+	b.ctx.KubeContext = detectContextValue(ctx, "kubectl", "config", "current-context")
 	return b
+}
+
+// Context is optional: a slow tool (including a kubectl launcher fetching its
+// binary) must not hold up the agent request or prevent its cancellation.
+const contextProbeTimeout = 250 * time.Millisecond
+
+func detectContextValue(parent context.Context, name string, args ...string) string {
+	ctx, cancel := context.WithTimeout(parent, contextProbeTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.WaitDelay = 50 * time.Millisecond
+	cmd.Cancel = func() error {
+		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
+			if err == syscall.ESRCH {
+				return os.ErrProcessDone
+			}
+			return err
+		}
+		return nil
+	}
+	out, err := cmd.Output()
+	if err != nil {
+		// A launcher can exit while a descendant keeps its output open.
+		// WaitDelay bounds the pipe read; end that descendant too.
+		if cmd.Process != nil {
+			_ = cmd.Cancel()
+		}
+		return ""
+	}
+	return strings.TrimSpace(string(out))
 }
 
 // Build returns the built context.

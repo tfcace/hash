@@ -126,7 +126,7 @@ func (h *AgentHandler) HandleRequest(ctx context.Context, parsed parser.ParseRes
 	if h == nil || h.client == nil {
 		return agent.Response{}, fmt.Errorf("no agent configured")
 	}
-	req, err := h.buildRequest(parsed, requestFacts{})
+	req, err := h.buildRequest(ctx, parsed, requestFacts{})
 	if err != nil {
 		return agent.Response{}, err
 	}
@@ -154,9 +154,7 @@ func (h *AgentHandler) StreamEvents(ctx context.Context, parsed parser.ParseResu
 		return nil, errCh
 	}
 
-	trace.Agent("request_context_start", nil)
-	req, err := h.buildRequest(parsed, facts)
-	trace.Agent("request_context_ready", nil)
+	req, err := h.buildRequest(ctx, parsed, facts)
 	if err != nil {
 		errCh := make(chan error, 1)
 		errCh <- err
@@ -215,7 +213,7 @@ func (h *AgentHandler) StreamFollowUpEvents(ctx context.Context, reply string, t
 		close(errCh)
 		return nil, errCh
 	}
-	req, err := h.buildFollowUpRequest(reply, transcript, facts)
+	req, err := h.buildFollowUpRequest(ctx, reply, transcript, facts)
 	if err != nil {
 		errCh := make(chan error, 1)
 		errCh <- err
@@ -226,8 +224,11 @@ func (h *AgentHandler) StreamFollowUpEvents(ctx context.Context, reply string, t
 }
 
 // buildRequest constructs an agent.Request from a parsed result.
-func (h *AgentHandler) buildRequest(parsed parser.ParseResult, facts requestFacts) (agent.Request, error) {
-	agentCtx := h.buildAgentContext(facts)
+func (h *AgentHandler) buildRequest(ctx context.Context, parsed parser.ParseResult, facts requestFacts) (agent.Request, error) {
+	agentCtx := h.buildAgentContext(ctx, facts)
+	if err := ctx.Err(); err != nil {
+		return agent.Request{}, err
+	}
 
 	// Build the prompt based on parse type
 	var prompt string
@@ -269,7 +270,7 @@ Respond with ONLY the completion to append (single line).
 	}, nil
 }
 
-func (h *AgentHandler) buildFollowUpRequest(reply string, transcript []agentConversationMessage, facts requestFacts) (agent.Request, error) {
+func (h *AgentHandler) buildFollowUpRequest(ctx context.Context, reply string, transcript []agentConversationMessage, facts requestFacts) (agent.Request, error) {
 	reply = strings.TrimSpace(reply)
 	if reply == "" {
 		return agent.Request{}, fmt.Errorf("empty follow-up reply")
@@ -281,7 +282,7 @@ func (h *AgentHandler) buildFollowUpRequest(reply string, transcript []agentConv
 
 	return agent.Request{
 		Prompt:  buildStatelessFollowUpPrompt(reply, transcript),
-		Context: h.buildAgentContext(facts),
+		Context: h.buildAgentContext(ctx, facts),
 	}, nil
 }
 
@@ -333,7 +334,7 @@ func roleTitle(role string) string {
 	}
 }
 
-func (h *AgentHandler) buildAgentContext(facts requestFacts) agent.Context {
+func (h *AgentHandler) buildAgentContext(ctx context.Context, facts requestFacts) agent.Context {
 	// Build context: what the user picked with Ctrl+P (even nothing), or
 	// else the auto-detected defaults
 	var agentCtx agent.Context
@@ -341,8 +342,8 @@ func (h *AgentHandler) buildAgentContext(facts requestFacts) agent.Context {
 		agentCtx = buildContextFromSelection(facts.selection)
 	} else {
 		ctxBuilder := agent.NewContextBuilder().
-			DetectGitBranch().
-			DetectKubeContext()
+			DetectGitBranch(ctx).
+			DetectKubeContext(ctx)
 
 		if h.clipboardBuf != nil {
 			if lastOutput := h.clipboardBuf.LastOutput(); lastOutput != "" {

@@ -2,6 +2,7 @@ package shell
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -38,6 +39,15 @@ func (t namedTestTransport) AvailableModels() []agent.ModelOption   { return nil
 func (t namedTestTransport) SetModel(context.Context, string) error { return nil }
 func (t namedTestTransport) EnsureModelInfo(context.Context) error  { return nil }
 
+func TestBuildRequest_CanceledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := (&AgentHandler{}).buildRequest(ctx, parser.Parse("?? hello"), requestFacts{})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("buildRequest with canceled context = %v, want context.Canceled", err)
+	}
+}
+
 func TestBuildRequest_BareAgentAfterError(t *testing.T) {
 	handler := &AgentHandler{}
 	facts := requestFacts{lastError: &LastError{
@@ -51,7 +61,7 @@ func TestBuildRequest_BareAgentAfterError(t *testing.T) {
 		AgentPrompt: "", // bare ??
 	}
 
-	req, err := handler.buildRequest(parsed, facts)
+	req, err := handler.buildRequest(context.Background(), parsed, facts)
 	if err != nil {
 		t.Fatalf("buildRequest() error = %v", err)
 	}
@@ -82,7 +92,7 @@ func TestBuildRequest_BareAgentNoError(t *testing.T) {
 		AgentPrompt: "", // bare ??
 	}
 
-	req, err := handler.buildRequest(parsed, requestFacts{})
+	req, err := handler.buildRequest(context.Background(), parsed, requestFacts{})
 	if err != nil {
 		t.Fatalf("buildRequest() error = %v", err)
 	}
@@ -109,7 +119,7 @@ func TestBuildRequest_AgentWithPromptAfterError(t *testing.T) {
 		AgentPrompt: "how do I fix this",
 	}
 
-	req, err := handler.buildRequest(parsed, facts)
+	req, err := handler.buildRequest(context.Background(), parsed, facts)
 	if err != nil {
 		t.Fatalf("buildRequest() error = %v", err)
 	}
@@ -142,7 +152,7 @@ func TestBuildRequest_PipeModeIgnoresLastError(t *testing.T) {
 		AgentPrompt: "filter hidden files",
 	}
 
-	req, err := handler.buildRequest(parsed, facts)
+	req, err := handler.buildRequest(context.Background(), parsed, facts)
 	if err != nil {
 		t.Fatalf("buildRequest() error = %v", err)
 	}
@@ -168,7 +178,7 @@ func TestBuildFollowUpRequest_ACPFramesSideRequestsWithoutTranscript(t *testing.
 		{Role: "assistant", Text: "Is it in the repository?"},
 	}
 
-	req, err := handler.buildFollowUpRequest("let's pause the game and list my kubernetes contexts", transcript, requestFacts{})
+	req, err := handler.buildFollowUpRequest(context.Background(), "let's pause the game and list my kubernetes contexts", transcript, requestFacts{})
 	if err != nil {
 		t.Fatalf("buildFollowUpRequest() error = %v", err)
 	}
@@ -196,7 +206,7 @@ func TestBuildFollowUpRequest_StatelessTransportIncludesTranscript(t *testing.T)
 		{Role: "assistant", Text: "Which directory should I inspect?"},
 	}
 
-	req, err := handler.buildFollowUpRequest("internal/shell", transcript, requestFacts{})
+	req, err := handler.buildFollowUpRequest(context.Background(), "internal/shell", transcript, requestFacts{})
 	if err != nil {
 		t.Fatalf("buildFollowUpRequest() error = %v", err)
 	}
@@ -225,7 +235,7 @@ func TestBuildRequest_InlineIsMarkedInline(t *testing.T) {
 		AgentPrompt: "oneline with hash",
 	}
 
-	req, err := handler.buildRequest(parsed, requestFacts{})
+	req, err := handler.buildRequest(context.Background(), parsed, requestFacts{})
 	if err != nil {
 		t.Fatalf("buildRequest() error = %v", err)
 	}
@@ -238,7 +248,7 @@ func TestBuildRequest_FullAndPipeAreNotInline(t *testing.T) {
 	handler := &AgentHandler{}
 	for _, typ := range []parser.CommandType{parser.CommandTypeAgent, parser.CommandTypeAgentPipe} {
 		parsed := parser.ParseResult{Type: typ, Command: "cat go.mod", AgentPrompt: "list deps"}
-		req, err := handler.buildRequest(parsed, requestFacts{})
+		req, err := handler.buildRequest(context.Background(), parsed, requestFacts{})
 		if err != nil {
 			t.Fatalf("buildRequest(%v) error = %v", typ, err)
 		}
@@ -348,7 +358,7 @@ func TestAgentHandler_HandleRequestInlineFillIsUnwrapped(t *testing.T) {
 }
 
 func TestBuildRequest_InlineAsksForNoMarkdown(t *testing.T) {
-	req, err := (&AgentHandler{}).buildRequest(parser.Parse("ls ?? go files"), requestFacts{})
+	req, err := (&AgentHandler{}).buildRequest(context.Background(), parser.Parse("ls ?? go files"), requestFacts{})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1398,7 +1398,7 @@ func (s *Shell) handleAgentFullStreaming(t *liveTurn, parsed parser.ParseResult)
 	turn := agentTurn{prompt: parsed.AgentPrompt, response: responseText, latency: latency}
 
 	resp, next, confirmType := classifyReply(parsed.Type, false, responseText, t.demoteDenied)
-	transcript := s.initialAgentConversationTranscript(parsed, t.facts, responseText)
+	transcript := s.initialAgentConversationTranscript(t.ctx, parsed, t.facts, responseText)
 	t.answered(resp, responseText, next, confirmType)
 	if next != replyAwaitsKey {
 		s.recordAgentTurn(turn, true, 0)
@@ -1481,10 +1481,10 @@ func agentToolActivityLabel(update agent.ToolCallUpdate) string {
 	return "agent · running · " + truncateTerminalText(title, 72)
 }
 
-func (s *Shell) initialAgentConversationTranscript(parsed parser.ParseResult, facts requestFacts, responseText string) []agentConversationMessage {
+func (s *Shell) initialAgentConversationTranscript(ctx context.Context, parsed parser.ParseResult, facts requestFacts, responseText string) []agentConversationMessage {
 	userPrompt := strings.TrimSpace(parsed.AgentPrompt)
 	if s.agentHandler != nil {
-		if req, err := s.agentHandler.buildRequest(parsed, facts); err == nil {
+		if req, err := s.agentHandler.buildRequest(ctx, parsed, facts); err == nil {
 			userPrompt = strings.TrimSpace(req.Prompt)
 		}
 	}

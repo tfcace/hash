@@ -15,8 +15,6 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
-
-	"github.com/tfcace/hash/internal/trace"
 )
 
 // ACPConfig configures the ACP transport.
@@ -598,7 +596,6 @@ func (t *ACPTransport) lost(c *acpConn, cause error) error {
 // spawn starts the agent process and its read loop.
 func (t *ACPTransport) spawn() (*acpConn, error) {
 	program, args := t.config.ParsedCommand()
-	trace.Agent("acp_start", map[string]any{"program": program})
 	cmd := exec.Command(program, args...)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -617,7 +614,6 @@ func (t *ACPTransport) spawn() (*acpConn, error) {
 		_ = stdin.Close()
 		return nil, errors.Join(ErrACPStartFailed, fmt.Errorf("start agent: %w", err))
 	}
-	trace.Agent("acp_started", map[string]any{"pid": cmd.Process.Pid})
 	c := newACPConn(stdin)
 	c.cmd = cmd
 	// The end of its output loses the connection (a resumable session
@@ -715,7 +711,6 @@ func (t *ACPTransport) sendRequest(ctx context.Context, method string, params in
 		return nil, err
 	}
 	id := t.requestID.Add(1)
-	trace.Agent("acp_request", map[string]any{"id": id, "method": method})
 	data, err := json.Marshal(jsonRPCRequest{JSONRPC: "2.0", ID: id, Method: method, Params: params})
 	if err != nil {
 		return nil, fmt.Errorf("marshal request: %w", err)
@@ -746,7 +741,6 @@ func (t *ACPTransport) sendRequest(ctx context.Context, method string, params in
 				continue
 			}
 			if msg.isResponseTo(id) {
-				trace.Agent("acp_response", map[string]any{"id": id, "method": method})
 				if msg.Error != nil {
 					return nil, msg.Error.rpcError()
 				}
@@ -1547,7 +1541,6 @@ func (t *ACPTransport) sendEventStreamingAttempt(
 		// Write failed - a retry can lazily reconnect.
 		return false, t.lost(c, errors.Join(ErrACPConnectionClosed, fmt.Errorf("write prompt: %w", err)))
 	}
-	trace.Agent("acp_prompt_sent", map[string]any{"id": id})
 
 	// The turn's own context ends with the turn, releasing any permission
 	// prompt the agent left open (it answered the prompt without waiting).
