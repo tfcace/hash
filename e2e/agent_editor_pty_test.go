@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/tfcace/hash/internal/trace"
 )
 
 // TestInlineACPHelper is executed as a subprocess by hash: an ACP agent
@@ -20,6 +22,10 @@ func TestInlineACPHelper(t *testing.T) {
 	if os.Getenv("HASH_FAKE_ACP") != "inline" {
 		return
 	}
+	if err := trace.Init(); err != nil {
+		t.Fatal(err)
+	}
+	trace.Agent("acp_helper_started", nil)
 	runInlineACPHelper(os.Stdin, os.Stdout)
 	os.Exit(0)
 }
@@ -35,6 +41,7 @@ func runInlineACPHelper(in io.Reader, out io.Writer) {
 		if err := json.Unmarshal(scanner.Bytes(), &request); err != nil || request.ID == nil {
 			continue
 		}
+		trace.Agent("acp_helper_request", map[string]any{"method": request.Method})
 		switch request.Method {
 		case "initialize":
 			writeACP(out, map[string]any{"jsonrpc": "2.0", "id": request.ID, "result": map[string]any{"protocolVersion": 1, "agentCapabilities": map[string]any{}, "agentInfo": map[string]any{"name": "fake", "version": "1"}}})
@@ -68,7 +75,7 @@ allowed_commands_scope = "session"
 		h.write("~/work/"+name, "")
 	}
 
-	ht := startHash(t, h, termSize{}, "HASH_FAKE_ACP=inline")
+	ht := startHash(t, h, termSize{}, append(acpTraceEnv(t), "HASH_FAKE_ACP=inline")...)
 	ht.waitPrompts(1, startupBound)
 
 	ht.typeText("ls ?? long listing\r")

@@ -154,7 +154,9 @@ func (h *AgentHandler) StreamEvents(ctx context.Context, parsed parser.ParseResu
 		return nil, errCh
 	}
 
+	trace.Agent("request_context_start", nil)
 	req, err := h.buildRequest(parsed, facts)
+	trace.Agent("request_context_ready", nil)
 	if err != nil {
 		errCh := make(chan error, 1)
 		errCh <- err

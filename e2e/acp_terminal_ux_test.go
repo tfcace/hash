@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/creack/pty"
+	"github.com/tfcace/hash/internal/trace"
 )
 
 var terminalEscapeSequence = regexp.MustCompile(`\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\a]*(?:\a|\x1b\\))`)
@@ -28,6 +29,10 @@ func TestDeterministicACPHelper(t *testing.T) {
 	if os.Getenv("HASH_FAKE_ACP") != "1" {
 		return
 	}
+	if err := trace.Init(); err != nil {
+		t.Fatal(err)
+	}
+	trace.Agent("acp_helper_started", nil)
 	runDeterministicACPHelper(os.Stdin, os.Stdout)
 	os.Exit(0)
 }
@@ -91,6 +96,7 @@ interactive = []
 		"XDG_DATA_HOME="+dataDir,
 		"TERM=xterm-256color",
 	)
+	cmd.Env = append(cmd.Env, acpTraceEnv(t)...)
 	terminal, err := pty.Start(cmd)
 	if err != nil {
 		t.Fatal(err)
@@ -130,6 +136,20 @@ interactive = []
 	if strings.Count(plain, "✓") != 1 {
 		t.Fatalf("tool result should have one durable success row:\n%s", plain)
 	}
+}
+
+// acpTraceEnv keeps protocol progress when a terminal test times out, so a
+// failure identifies whether context collection, startup or a reply stalled.
+func acpTraceEnv(t *testing.T) []string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "acp-trace.jsonl")
+	t.Cleanup(func() {
+		if t.Failed() {
+			data, err := os.ReadFile(path)
+			t.Logf("ACP trace (read error: %v):\n%s", err, data)
+		}
+	})
+	return []string{"HASH_TRACE=agent", "HASH_TRACE_PATH=" + path}
 }
 
 type ptyTranscript struct {
@@ -193,6 +213,7 @@ func runDeterministicACPHelper(in io.Reader, out io.Writer) {
 		if err := json.Unmarshal(scanner.Bytes(), &request); err != nil {
 			continue
 		}
+		trace.Agent("acp_helper_request", map[string]any{"method": request.Method})
 		switch request.Method {
 		case "initialize":
 			writeACP(out, map[string]any{"jsonrpc": "2.0", "id": json.RawMessage(request.ID), "result": map[string]any{"protocolVersion": 1, "agentCapabilities": map[string]any{}, "agentInfo": map[string]any{"name": "fake", "version": "1"}}})
