@@ -2,11 +2,15 @@
 package editor
 
 import (
+	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"math"
 	"os"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -26,25 +30,144 @@ func safeUintToInt(u uint) int {
 // Prevents memory exhaustion from extremely large pastes.
 const DefaultMaxPasteSize uint = 10 * 1024 * 1024
 
-// InputReader reads keys from a terminal.
+// InputReader reads keys from a terminal. The shell keeps one for its whole
+// life and every reader of the terminal goes through it: keys one reader
+// read but did not take (UnreadKey) come first for the next one.
+//
+// Bytes come from one queue: bytes a key read past and gave back, then the
+// input itself. One tokenizer (readKey) turns them into keys, so every
+// reader of the terminal follows the same grammar. Nothing is read before
+// a reader asks for a key: typeahead stays on the terminal, where a
+// program the shell runs next reads it as its own input. Inside a sequence each byte is waited for at most
+// escTimeout: a terminal sends a sequence in one write, so a pause means the
+// key is complete (a bare ESC is Escape, ESC [ is Alt+[) and the next key is
+// not swallowed into it. For the same reason an ESC that came alone, then
+// a key or bytes no known sequence makes (Esc, then O and text in vi), is
+// Esc and those keys (typedAfterEsc): only ESC and a key in one write is
+// an Alt key.
 type InputReader struct {
 	in           io.Reader
-	buf          [64]byte // Buffer for escape sequences
+	file         *os.File // in, when it is a file whose readiness can be polled (a terminal or pipe); nil otherwise
+	fd           int      // file's descriptor
 	escTimeout   time.Duration
-	pending      byte // Byte to return on next read (0 = none)
-	hasPending   bool
-	pendingKeys  []Key  // Keys to return before reading new input
-	pasteBuffer  []byte // Buffer for paste content
-	maxPasteSize uint   // Maximum paste size in bytes
+	maxPasteSize uint // Maximum paste size in bytes
+
+	unreadKeys []Key  // keys read but not delivered, returned before any byte
+	queue      []byte // bytes read but not yet tokenized
+	err        error  // a read error met inside a key, returned in place of the next one
+	paste      pasteState
+	seq        []byte // scratch: the key being tokenized
+	one        [1]byte
+
+	now      func() time.Time // the clock LastRead and Now read
+	lastRead time.Time        // when a key's first byte last came from in; zero before the first
+
+	ownerMu sync.Mutex
+	owner   *claim // who reads the keys now (Claim); nil when no one does
+}
+
+// claim is one reader's hold on the keys. Its release frees the keys only
+// while the claim is still theirs: a claim Reset took back stays released
+// whatever its holder does later.
+type claim struct {
+	who string
+}
+
+// name is who holds c, or "" for no claim.
+func (c *claim) name() string {
+	if c == nil {
+		return ""
+	}
+	return c.who
+}
+
+// ErrInputBusy is a claim on a reader another reader holds.
+var ErrInputBusy = errors.New("key reader busy")
+
+// Claim makes who the reader's one reader until release is called. It
+// fails with ErrInputBusy while another holds it: two readers taking keys
+// from one terminal would split them between them. release frees this
+// claim only: repeating it, or calling it after Reset took the claim back,
+// leaves whoever holds the keys now alone.
+func (r *InputReader) Claim(who string) (release func(), err error) {
+	r.ownerMu.Lock()
+	defer r.ownerMu.Unlock()
+	if r.owner != nil {
+		return nil, fmt.Errorf("%w: %s asked while %s reads", ErrInputBusy, who, r.owner.name())
+	}
+	c := &claim{who: who}
+	r.owner = c
+	return func() {
+		r.ownerMu.Lock()
+		defer r.ownerMu.Unlock()
+		if r.owner == c {
+			r.owner = nil
+		}
+	}, nil
+}
+
+// Reset drops whatever claim the reader holds and reports whose it was
+// ("" when none); that claim's release does nothing from then on. It is
+// for the shell's top reader, the prompt: a claim still held when the
+// prompt starts can only be one that leaked. It is a safety net, not a
+// stop: a goroutine the leaked holder left reading keys is not stopped,
+// and may still take a key from the prompt.
+func (r *InputReader) Reset() (was string) {
+	r.ownerMu.Lock()
+	defer r.ownerMu.Unlock()
+	was, r.owner = r.owner.name(), nil
+	return was
+}
+
+// Owner is who reads the keys now, or "" when no one does.
+func (r *InputReader) Owner() string {
+	r.ownerMu.Lock()
+	defer r.ownerMu.Unlock()
+	return r.owner.name()
 }
 
 // NewInputReader creates a new input reader.
 func NewInputReader(in io.Reader) *InputReader {
-	return &InputReader{
+	r := &InputReader{
 		in:           in,
 		escTimeout:   50 * time.Millisecond,
 		maxPasteSize: DefaultMaxPasteSize,
+		now:          time.Now,
 	}
+	if f, ok := in.(*os.File); ok {
+		r.file, r.fd = f, int(f.Fd())
+	}
+	return r
+}
+
+// File is the file the reader reads (the terminal, for the shell's), or
+// nil when it reads something else.
+func (r *InputReader) File() *os.File {
+	return r.file
+}
+
+// LastRead is when the reader last read the first byte of a key from its
+// input: fresh bytes, typed then. Keys given back (UnreadKeys) and bytes a
+// key read past do not count: they were read with the key before them. It
+// is zero before the first key.
+func (r *InputReader) LastRead() time.Time {
+	return r.lastRead
+}
+
+// Now is the time on the clock LastRead reads.
+func (r *InputReader) Now() time.Time {
+	return r.now()
+}
+
+// SetClock makes now the clock LastRead and Now read, for tests that type
+// at a pace of their own. Set it before the first read.
+func (r *InputReader) SetClock(now func() time.Time) {
+	r.now = now
+}
+
+// timed reports whether the reader can wait for input with a timeout.
+func (r *InputReader) timed() bool {
+	return r.file != nil
 }
 
 // SetMaxPasteSize sets the maximum paste size in bytes.
@@ -54,135 +177,30 @@ func (r *InputReader) SetMaxPasteSize(size uint) {
 	}
 }
 
-// deadlineReader is an interface for readers that support deadlines.
-type deadlineReader interface {
-	SetReadDeadline(t time.Time) error
-}
-
-// supportsDeadlines returns true if the underlying reader supports deadlines.
-func (r *InputReader) supportsDeadlines() bool {
-	_, ok := r.in.(deadlineReader)
-	return ok
-}
-
-// readWithTimeout reads with a timeout using select().
-// Returns (n, err, timedOut).
-func (r *InputReader) readWithTimeout(buf []byte, timeout time.Duration) (int, error, bool) {
-	// For *os.File (TTYs), use select() with timeout since SetReadDeadline
-	// doesn't work on TTYs ("file type does not support deadline").
-	if f, ok := r.in.(*os.File); ok {
-		fd := int(f.Fd())
-		if hasDataAvailableWithTimeout(fd, timeout) {
-			n, err := r.in.Read(buf)
-			return n, err, false
-		}
-		// Timeout - no data available
-		return 0, nil, true
-	}
-
-	// For non-file readers (e.g., bytes.Reader in tests), just read immediately.
-	// These don't support timeouts, so we read whatever is available.
-	n, err := r.in.Read(buf)
-	return n, err, false
-}
-
-// DrainPending reads any immediately available input without blocking.
-// This captures characters that may have been typed during terminal mode transitions.
-// Call this right after enabling raw mode to recover any "lost" keystrokes.
-func (r *InputReader) DrainPending() {
-	// Get file descriptor - only works for *os.File
-	f, ok := r.in.(*os.File)
-	if !ok {
-		return
-	}
-	fd := int(f.Fd())
-
-	// Read any pending input using select() to check availability
-	for hasDataAvailable(fd) {
-		n, err := r.in.Read(r.buf[:1])
-		if err != nil || n == 0 {
-			break
-		}
-
-		// Parse and queue the key
-		var key Key
-		switch {
-		case r.buf[0] == 0x1b:
-			// Might be start of escape sequence - try to read more
-			key = r.drainEscapeSequence(fd)
-		case r.buf[0] >= utf8.RuneSelf:
-			key = r.drainUTF8Rune(fd)
-		default:
-			key = ParseKey(r.buf[:1])
-		}
-
-		// Skip no-op keys (terminal responses like DECRPM that were parsed and discarded)
-		if key.Special == KeyNone && key.Rune == 0 {
-			continue
-		}
-		r.pendingKeys = append(r.pendingKeys, key)
-	}
-}
-
-// hasDataAvailable checks if there's data ready to read on fd without blocking.
-func hasDataAvailable(fd int) bool {
-	return hasDataAvailableWithTimeout(fd, 0)
-}
-
 // hasDataAvailableWithTimeout checks if data is ready within the timeout duration.
-// A timeout of 0 means poll immediately without waiting.
+// A timeout of 0 means poll immediately without waiting. The end of the
+// input counts as ready: the read returns it. A signal (SIGWINCH) does not
+// cut the wait short.
 func hasDataAvailableWithTimeout(fd int, timeout time.Duration) bool {
-	var readSet unix.FdSet
-	readSet.Set(fd)
-
-	tv := unix.NsecToTimeval(timeout.Nanoseconds())
-
-	_, err := unix.Select(fd+1, &readSet, nil, nil, &tv)
-	if err != nil {
+	if fd < 0 || fd > math.MaxInt32 {
 		return false
 	}
-
-	return readSet.IsSet(fd)
-}
-
-// drainEscapeSequence reads an escape sequence during drain.
-// Uses a small timeout (2ms) between bytes to avoid splitting multi-byte
-// terminal responses (e.g., DECRPM \x1b[?2027;1$y) into partial reads.
-func (r *InputReader) drainEscapeSequence(fd int) Key {
-	total := 1 // Already have ESC in buf[0]
-
-	for total < len(r.buf) {
-		if !hasDataAvailableWithTimeout(fd, 2*time.Millisecond) {
-			break
+	deadline := time.Now().Add(timeout)
+	for {
+		fds := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}}
+		ms := int(time.Until(deadline).Milliseconds())
+		if ms < 0 || timeout == 0 {
+			ms = 0
 		}
-		n, err := r.in.Read(r.buf[total : total+1])
+		n, err := unix.Poll(fds, ms)
+		if err == unix.EINTR {
+			continue
+		}
 		if err != nil || n == 0 {
-			break
+			return false
 		}
-		total++
-		if isCompleteSequence(r.buf[:total]) {
-			break
-		}
+		return fds[0].Revents&(unix.POLLIN|unix.POLLHUP|unix.POLLERR) != 0
 	}
-
-	return ParseKey(r.buf[:total])
-}
-
-func (r *InputReader) drainUTF8Rune(fd int) Key {
-	total := 1
-
-	for total < len(r.buf) && !utf8.FullRune(r.buf[:total]) {
-		if !hasDataAvailableWithTimeout(fd, 2*time.Millisecond) {
-			break
-		}
-		n, err := r.in.Read(r.buf[total : total+1])
-		if err != nil || n == 0 {
-			break
-		}
-		total++
-	}
-
-	return ParseKey(r.buf[:total])
 }
 
 // ReadKey reads and parses the next key.
@@ -193,119 +211,361 @@ func (r *InputReader) ReadKey() (Key, error) {
 // ReadKeyInterruptible reads and parses the next key, checking done channel periodically.
 // If done is closed, returns context.Canceled error.
 // This prevents goroutines from blocking indefinitely on stdin when the editor exits.
+// Sequences that parse to no key (terminal reports, unbound keys) are skipped.
 func (r *InputReader) ReadKeyInterruptible(done <-chan struct{}) (Key, error) {
-	// Return any keys that were drained during mode transition
-	if len(r.pendingKeys) > 0 {
-		key := r.pendingKeys[0]
-		r.pendingKeys = r.pendingKeys[1:]
-		trace.Editor("key_read", map[string]any{
-			"source":  "pending",
-			"parsed":  keyString(key),
-			"pending": len(r.pendingKeys),
-		})
+	if len(r.unreadKeys) > 0 {
+		key := r.unreadKeys[0]
+		r.unreadKeys = r.unreadKeys[1:]
 		return key, nil
 	}
-
-	// Check for pending byte from previous escape sequence handling
-	if r.hasPending {
-		r.buf[0] = r.pending
-		r.hasPending = false
-		key := ParseKey(r.buf[:1])
-		trace.Editor("key_read", map[string]any{
-			"source": "pending_byte",
-			"raw":    []byte{r.pending},
-			"parsed": keyString(key),
-		})
-		return key, nil
-	}
-
-	// For TTY file descriptors, use polling to allow checking done channel
-	if f, ok := r.in.(*os.File); ok && done != nil {
-		fd := int(f.Fd())
-		pollInterval := 50 * time.Millisecond
-		for {
-			// Check done channel first
-			select {
-			case <-done:
-				return Key{}, context.Canceled
-			default:
-			}
-
-			// Poll for available data with timeout
-			if hasDataAvailableWithTimeout(fd, pollInterval) {
-				break // Data available, proceed to read
-			}
-			// No data, loop back to check done channel
-		}
-		// Re-check done after poll to avoid reading stdin when the
-		// editor is shutting down (e.g., for Ctrl+R → bubbletea handoff).
-		select {
-		case <-done:
-			return Key{}, context.Canceled
-		default:
+	for {
+		key, err := r.readKey(done)
+		if err != nil || key != (Key{}) {
+			return key, err
 		}
 	}
+}
 
-	// Read first byte
-	n, err := r.in.Read(r.buf[:1])
+// UnreadKeys gives back keys that were read but not used: the next reads
+// return them first, in order. The keys themselves go back, not their
+// bytes, so they are not tokenized (or a paste cut to size) a second time.
+func (r *InputReader) UnreadKeys(keys ...Key) {
+	if len(keys) > 0 {
+		r.unreadKeys = append(append([]Key(nil), keys...), r.unreadKeys...)
+	}
+}
+
+// DropHeld drops every key held for the next reader: keys given back, and
+// bytes read past a key. Input still waiting on the terminal stays there.
+func (r *InputReader) DropHeld() {
+	r.unreadKeys, r.queue = nil, nil
+}
+
+// Typeahead takes every key typed so far: keys given back, then those
+// whose bytes are already waiting. A reader that asks the user a question
+// sets them aside (and gives them back after), so no key typed before the
+// question was on screen answers it.
+func (r *InputReader) Typeahead() []Key {
+	keys := r.unreadKeys
+	r.unreadKeys = nil
+	for len(r.queue) > 0 || r.err == nil && r.timed() && hasDataAvailableWithTimeout(r.fd, 0) {
+		key, err := r.readKey(nil)
+		if err != nil {
+			break
+		}
+		if key != (Key{}) {
+			keys = append(keys, key)
+		}
+	}
+	return keys
+}
+
+// readKey tokenizes the next key: its first byte waits as long as it takes,
+// each later one at most escTimeout. A byte that cannot belong to the key
+// goes back to the queue and starts the next one.
+func (r *InputReader) readKey(done <-chan struct{}) (Key, error) {
+	if r.paste == pasteCut {
+		r.dropCutPaste()
+	}
+	b, err := r.first(done)
 	if err != nil {
-		trace.Editor("key_read", map[string]any{
-			"error": err.Error(),
-		})
+		trace.Editor("key_read", map[string]any{"error": err.Error()})
 		return Key{}, err
 	}
-	if n == 0 {
-		trace.Editor("key_read", map[string]any{
-			"error": "EOF",
-		})
-		return Key{}, io.EOF
-	}
-
-	// If it's an escape, try to read more for a sequence
-	if r.buf[0] == 0x1b {
-		key, err := r.readEscapeSequence()
-		trace.Editor("key_read", map[string]any{
-			"source": "escape_seq",
-			"raw":    r.buf[:1],
-			"parsed": keyString(key),
-		})
-		return key, err
-	}
-
-	total := 1
-	if r.buf[0] >= utf8.RuneSelf {
-		var err error
-		total, err = r.readUTF8Sequence()
-		if err != nil && err != io.EOF {
-			trace.Editor("key_read", map[string]any{
-				"error": err.Error(),
-			})
-			return Key{}, err
+	r.seq = append(r.seq[:0], b)
+	escAlone := b == 0x1b && !r.ready()
+	overlong := false
+	for state := start(b); state != tokDone; {
+		b, ok := r.more()
+		if !ok {
+			break // a pause, or the end of the input: the key is what came
+		}
+		var keep bool
+		if state, keep = state.accept(r.seq, b, r.timed()); !keep {
+			r.unread([]byte{b})
+			break
+		}
+		// Past the cap the sequence is still consumed to its end, in the
+		// same state, so its tail is not typed as keys; it is discarded.
+		if len(r.seq) < maxSequence {
+			r.seq = append(r.seq, b)
+		} else {
+			overlong = true
 		}
 	}
+	seq := r.seq
 
-	key := ParseKey(r.buf[:total])
+	if overlong {
+		trace.Editor("key_read", map[string]any{"discarded_overlong": len(seq)})
+		return Key{}, nil
+	}
+	if isPasteStart(seq) {
+		return r.readPaste(), nil
+	}
+	key := ParseKey(seq)
+	if escAlone && typedAfterEsc(seq, key) {
+		r.unread(seq[1:])
+		key = Key{Special: KeyEscape}
+	}
 	trace.Editor("key_read", map[string]any{
-		"source": "direct",
-		"raw":    r.buf[:total],
+		"raw":    seq,
 		"parsed": keyString(key),
 	})
 	return key, nil
 }
 
-func (r *InputReader) readUTF8Sequence() (int, error) {
-	total := 1
-	for total < len(r.buf) && !utf8.FullRune(r.buf[:total]) {
-		n, err := r.in.Read(r.buf[total : total+1])
-		if err != nil {
-			return total, err
-		}
-		if n == 0 {
-			return total, io.EOF
-		}
-		total++
+// typedAfterEsc reports whether seq, read as key, is Esc and keys typed
+// after it rather than one key: its ESC came alone, the rest after it, not
+// with it as a terminal sends a sequence. One key after the ESC is that
+// (a character, Enter, Backspace: what one write makes an Alt chord), and
+// so is a sequence nothing knows. A key the terminal sends as a sequence
+// (Up) stays that key, and a terminal's report stays a report, whatever
+// pause split its bytes.
+func typedAfterEsc(seq []byte, key Key) bool {
+	switch {
+	case len(seq) < 2:
+		return false // the ESC alone: Escape
+	case len(seq) == 2 || seq[1] >= utf8.RuneSelf: // ESC and one character (a multibyte one too)
+		return true
+	case key == (Key{}) && len(seq) > 2:
+		return seq[1] == '[' && !isReport(seq[2:]) || seq[1] == 'O'
 	}
-	return total, nil
+	return false
+}
+
+// tokenState is where the tokenizer is inside a key's bytes.
+type tokenState int
+
+const (
+	tokDone      tokenState = iota // the key is complete
+	tokEsc                         // after ESC: a sequence or an Alt key may follow
+	tokCSI                         // after ESC [: parameters up to a final byte
+	tokSS3                         // after ESC O: one code byte
+	tokUTF8                        // inside a multibyte character, alone or after ESC
+	tokOSC                         // after ESC ]: a digit makes it a reply, else it was Alt+]
+	tokDCS                         // after ESC P: a reply's first byte makes it one, else it was Alt+P
+	tokAPC                         // after ESC _: a kitty graphics reply (G), else it was Alt+_
+	tokString                      // inside a terminal's reply string, up to BEL or ESC \
+	tokStringEsc                   // an ESC inside a string: \ ends it
+)
+
+// maxSequence bounds the bytes a key keeps. A longer sequence (an OSC 52
+// clipboard reply) is read to its end and discarded.
+const maxSequence = 256
+
+// start is the state after a key's first byte.
+func start(b byte) tokenState {
+	switch {
+	case b == 0x1b:
+		return tokEsc
+	case utf8Len(b) > 1:
+		return tokUTF8
+	}
+	return tokDone // ASCII, or a byte no character starts with (discarded)
+}
+
+// accept feeds b to a key whose bytes so far are seq. It returns the state
+// after b, and whether b belongs to this key at all; one that does not is
+// given back to start the next key.
+func (s tokenState) accept(seq []byte, b byte, timed bool) (tokenState, bool) {
+	switch s {
+	case tokEsc:
+		return acceptAfterEsc(b, timed)
+	case tokCSI:
+		return acceptCSI(seq, b)
+	case tokSS3:
+		return tokDone, b >= 0x20
+	case tokUTF8:
+		return acceptUTF8(seq, b)
+	case tokOSC:
+		// OSC replies start with their number: 11;rgb:..., 52;c;...
+		return tokString, b >= '0' && b <= '9'
+	case tokDCS:
+		// DCS replies: XTVERSION (>|), DECRPTUI (!|), DECRQSS (1$r, 0$r),
+		// XTGETTCAP (1+r).
+		return tokString, strings.IndexByte(">!$01", b) >= 0
+	case tokAPC:
+		return tokString, b == 'G'
+	case tokString:
+		switch b {
+		case 0x07:
+			return tokDone, true
+		case 0x1b:
+			return tokStringEsc, true
+		}
+		return tokString, true
+	case tokStringEsc:
+		// ESC \ ends the string; anything else after ESC cuts it short.
+		return tokDone, b == '\\'
+	}
+	return tokDone, false
+}
+
+func acceptAfterEsc(b byte, timed bool) (tokenState, bool) {
+	switch {
+	case b == '[':
+		return tokCSI, true
+	case b == 'O':
+		return tokSS3, true
+	case b == ']':
+		// OSC, DCS or APC may start a reply to a terminal query (background
+		// color, version) that arrived late, which is discarded; the next
+		// byte tells it from Alt+], Alt+P or Alt+_ typed before more text.
+		return tokOSC, true
+	case b == 'P':
+		return tokDCS, true
+	case b == '_':
+		return tokAPC, true
+	case b == '\r' || b == '\n' || b == 0x08:
+		// Alt+Enter (some terminals send it for Shift+Enter) or
+		// Alt+Backspace where Backspace sends ^H, when the reader can tell
+		// the two arrived together; else Escape, then the key.
+		return tokDone, timed
+	case b < 0x20:
+		return tokDone, false // Escape, then that control key (another ESC included)
+	case b >= utf8.RuneSelf && utf8Len(b) == 0:
+		return tokDone, false // Escape, then a stray byte (discarded)
+	case utf8Len(b) > 1:
+		return tokUTF8, true // Alt + a multibyte character
+	}
+	return tokDone, true // Alt + a character
+}
+
+func acceptCSI(seq []byte, b byte) (tokenState, bool) {
+	switch {
+	case b < 0x20:
+		return tokDone, false // a control (a new ESC) cuts the sequence short
+	case len(seq) == 2 && b == '[':
+		return tokCSI, true // ESC [ [: the Linux console's F-key prefix
+	case b >= 0x40 && b <= 0x7e:
+		return tokDone, true // the final byte
+	}
+	return tokCSI, true
+}
+
+func acceptUTF8(seq []byte, b byte) (tokenState, bool) {
+	if b&0xc0 != 0x80 {
+		return tokDone, false // not a continuation: the character was cut
+	}
+	lead := 0
+	if seq[0] == 0x1b {
+		lead = 1
+	}
+	if len(seq)+1-lead == utf8Len(seq[lead]) {
+		return tokDone, true
+	}
+	return tokUTF8, true
+}
+
+// utf8Len is how many bytes a UTF-8 character starting with lead has: 1 for
+// ASCII, 2-4 for a lead byte, 0 for a byte no character starts with.
+func utf8Len(lead byte) int {
+	switch {
+	case lead < 0x80:
+		return 1
+	case lead >= 0xc2 && lead <= 0xdf:
+		return 2
+	case lead >= 0xe0 && lead <= 0xef:
+		return 3
+	case lead >= 0xf0 && lead <= 0xf4:
+		return 4
+	}
+	return 0
+}
+
+// first returns the first byte of the next key, waiting as long as it takes.
+func (r *InputReader) first(done <-chan struct{}) (byte, error) {
+	if b, ok := r.dequeue(); ok {
+		return b, nil
+	}
+	if r.err != nil {
+		return 0, r.err
+	}
+	if err := r.waitReadable(done); err != nil {
+		return 0, err
+	}
+	n, err := r.in.Read(r.one[:])
+	if n == 1 {
+		r.err = err
+		r.lastRead = r.now()
+		return r.one[0], nil
+	}
+	if err == nil {
+		err = io.EOF
+	}
+	return 0, err
+}
+
+// ready reports whether the next byte is already here: queued, or waiting
+// on the input. A reader that cannot be polled counts as ready, so its
+// bytes keep forming sequences as they always did.
+func (r *InputReader) ready() bool {
+	return len(r.queue) > 0 || r.err != nil || !r.timed() || hasDataAvailableWithTimeout(r.fd, 0)
+}
+
+// more returns the next byte inside a key, or false when none came within
+// escTimeout (or the input ended; the error is kept for the next key).
+// Readers that cannot be polled are read directly.
+func (r *InputReader) more() (byte, bool) {
+	if b, ok := r.dequeue(); ok {
+		return b, true
+	}
+	if r.err != nil {
+		return 0, false
+	}
+	if r.timed() && !hasDataAvailableWithTimeout(r.fd, r.escTimeout) {
+		return 0, false
+	}
+	n, err := r.in.Read(r.one[:])
+	if err == nil && n == 0 {
+		err = io.EOF
+	}
+	r.err = err
+	return r.one[0], n == 1
+}
+
+func (r *InputReader) dequeue() (byte, bool) {
+	if len(r.queue) == 0 {
+		return 0, false
+	}
+	b := r.queue[0]
+	r.queue = r.queue[1:]
+	return b, true
+}
+
+// unread puts bytes back at the front of the queue.
+func (r *InputReader) unread(b []byte) {
+	if len(b) > 0 {
+		r.queue = append(append([]byte(nil), b...), r.queue...)
+	}
+}
+
+// waitReadable blocks until a TTY has input, polling so a closed done
+// returns context.Canceled instead of leaving the read stuck on stdin. Other
+// readers are read directly.
+func (r *InputReader) waitReadable(done <-chan struct{}) error {
+	if !r.timed() || done == nil {
+		return nil
+	}
+	const pollInterval = 50 * time.Millisecond
+	for {
+		select {
+		case <-done:
+			return context.Canceled
+		default:
+		}
+		if hasDataAvailableWithTimeout(r.fd, pollInterval) {
+			break
+		}
+	}
+	// Re-check done after poll to avoid reading stdin when the editor is
+	// shutting down (e.g., for Ctrl+R -> bubbletea handoff).
+	select {
+	case <-done:
+		return context.Canceled
+	default:
+		return nil
+	}
 }
 
 // specialKeyNames maps special key codes to their display names.
@@ -355,161 +615,109 @@ func keyString(k Key) string {
 	return strings.Join(parts, "+")
 }
 
-// readEscapeByte reads the next byte of an in-progress escape sequence into
-// r.buf[total]. Some reads are done with a timeout, where timing out identifies
-// the sequence on its own; in that case the resolved key is returned as early.
-func (r *InputReader) readEscapeByte(total int, firstRead bool) (n int, early *Key, err error) {
-	var timedOut bool
+// pasteEnd is the bracketed paste end marker.
+var pasteEnd = []byte("\x1b[201~")
 
-	switch {
-	case firstRead:
-		// Use timeout to detect standalone ESC vs escape sequence
-		n, err, timedOut = r.readWithTimeout(r.buf[total:total+1], r.escTimeout)
-		if timedOut {
-			// Timeout = standalone ESC key
-			return n, &Key{Special: KeyEscape}, err
-		}
-	case total == 2 && r.buf[1] == 'O':
-		// ESC O is either Alt+O or the start of an SS3 sequence; a
-		// timeout on the final byte means it was Alt+O.
-		n, err, timedOut = r.readWithTimeout(r.buf[total:total+1], r.escTimeout)
-		if timedOut {
-			return n, &Key{Rune: 'O', Alt: true}, err
-		}
-	default:
-		n, err = r.in.Read(r.buf[total : total+1])
+// pasteState is where the reader is with bracketed pastes. A paste in
+// progress is read to its end in one call (readPaste) whatever done says: a
+// prompt torn down mid-paste must not leave the tail to be read as typed
+// keys, newlines and all. The paste goes to the next prompt instead.
+type pasteState int
+
+const (
+	pasteNone pasteState = iota
+	// pasteCut: the last paste paused for pasteIdleTimeout before its end
+	// marker and was delivered as it stood. Its late rest is dropped up to
+	// the marker, or until the input pauses again (the marker was lost).
+	pasteCut
+)
+
+// pasteIdleTimeout is how long a paste may pause before it is cut. A
+// terminal sends a paste in one go; a pause this long means its end marker
+// is not coming.
+const pasteIdleTimeout = 300 * time.Millisecond
+
+// readPaste reads a bracketed paste's content up to the end marker.
+// Content past maxPasteSize is dropped: the paste keeps its head, what the
+// user sees first. A paste that pauses before its marker is delivered as it
+// stands and its rest dropped (pasteCut). An input that ends mid-paste
+// delivers what came; the next read reports the end.
+func (r *InputReader) readPaste() Key {
+	limit := safeUintToInt(r.maxPasteSize)
+	var text []byte
+	over := false
+	ended, err := r.toPasteEnd(func(b []byte) {
+		over = over || len(text)+len(b) > limit
+		text = appendCapped(text, b, limit)
+	})
+	if !ended && err == nil {
+		r.paste = pasteCut
 	}
-
-	return n, nil, err
+	return Key{Special: KeyPaste, PasteText: string(text), PasteCut: over || !ended}
 }
 
-// escControlKey resolves an ESC followed by a control character (r.buf[1]).
-func (r *InputReader) escControlKey() Key {
-	// ESC + Enter (CR or LF) = Alt+Enter (used for multiline)
-	// Some terminals send this for Shift+Enter.
-	// Only treat as Alt+Enter if we're reading from a real terminal
-	// (which supports deadlines). Otherwise treat as separate keys.
-	if (r.buf[1] == '\r' || r.buf[1] == '\n') && r.supportsDeadlines() {
-		return Key{Special: KeyEnter, Alt: true}
-	}
-	// Other control chars (or non-terminal): treat as bare ESC and save for next read
-	r.pending = r.buf[1]
-	r.hasPending = true
-	return Key{Special: KeyEscape}
+// dropCutPaste drops the rest of a cut paste through its end marker.
+func (r *InputReader) dropCutPaste() {
+	r.paste = pasteNone
+	_, _ = r.toPasteEnd(func([]byte) {}) // a pause or the input's end stops it too
 }
 
-func (r *InputReader) readEscapeSequence() (Key, error) {
-	// Try to read more bytes for escape sequence
-	total := 1
-
-	// Use timeout for first byte after ESC to detect standalone ESC
-	firstRead := true
-
-	for total < len(r.buf) {
-		n, early, err := r.readEscapeByte(total, firstRead)
-		firstRead = false
-
-		if early != nil {
-			return *early, nil
-		}
-		if err != nil || n == 0 {
-			break
-		}
-
-		// If second byte is a control character (not '[' or 'O'),
-		// handle specially
-		if total == 1 && r.buf[1] < 0x20 && r.buf[1] != '[' {
-			return r.escControlKey(), nil
-		}
-
-		total++
-
-		// Check if we have a complete sequence
-		if isCompleteSequence(r.buf[:total]) {
-			break
-		}
-	}
-
-	// Check if this is a bracketed paste start sequence
-	if isPasteStart(r.buf[:total]) {
-		return r.readPasteContent()
-	}
-
-	return ParseKey(r.buf[:total]), nil
-}
-
-// readPasteContent reads all content until the paste end marker.
-// Content is truncated to maxPasteSize to prevent memory exhaustion.
-func (r *InputReader) readPasteContent() (Key, error) {
-	r.pasteBuffer = r.pasteBuffer[:0] // Reset buffer
-
-	// We keep 6 extra bytes beyond maxPasteSize for end marker detection
-	maxSize := safeUintToInt(r.maxPasteSize)
-	bufferLimit := maxSize + 6
-
-	// Read until we see the paste end sequence \x1b[201~
-	var singleByte [1]byte
+// toPasteEnd reads in blocks through the paste end marker, passing what
+// comes before it to take, and gives the bytes after it back to the queue.
+// Only a possible start of the marker is held back between blocks. It
+// reports false, with the held bytes back in the queue, when the input
+// paused for pasteIdleTimeout first, and with the error when it ended.
+func (r *InputReader) toPasteEnd(take func([]byte)) (bool, error) {
+	var held, scan []byte
+	var chunk [4096]byte
 	for {
-		n, err := r.in.Read(singleByte[:])
-		if err != nil {
-			// Return whatever we have on error
-			return Key{Special: KeyPaste, PasteText: string(r.pasteBuffer)}, err
-		}
-		if n == 0 {
-			continue
-		}
-
-		// Append byte, but maintain sliding window when at limit
-		if len(r.pasteBuffer) < bufferLimit {
-			r.pasteBuffer = append(r.pasteBuffer, singleByte[0])
-		} else {
-			// Sliding window: shift left and add new byte
-			copy(r.pasteBuffer, r.pasteBuffer[1:])
-			r.pasteBuffer[bufferLimit-1] = singleByte[0]
-		}
-
-		// Check if we've reached the end marker
-		if isPasteEnd(r.pasteBuffer) {
-			// Remove the end marker from the content
-			contentLen := len(r.pasteBuffer) - 6
-			if contentLen > maxSize {
-				contentLen = maxSize
+		data := r.queue
+		r.queue = nil
+		if len(data) == 0 {
+			if r.err != nil {
+				return false, r.err
 			}
-			content := r.pasteBuffer[:contentLen]
-			return Key{Special: KeyPaste, PasteText: string(content)}, nil
+			if r.timed() && !hasDataAvailableWithTimeout(r.fd, pasteIdleTimeout) {
+				r.unread(held)
+				return false, nil
+			}
+			n, err := r.in.Read(chunk[:])
+			if err == nil && n == 0 {
+				err = io.EOF
+			}
+			r.err, data = err, chunk[:n]
 		}
+
+		scan = append(append(scan[:0], held...), data...)
+		if i := bytes.Index(scan, pasteEnd); i >= 0 {
+			take(scan[:i])
+			r.unread(scan[i+len(pasteEnd):])
+			return true, nil
+		}
+		keep := markerStartLen(scan)
+		take(scan[:len(scan)-keep])
+		held = append(held[:0], scan[len(scan)-keep:]...)
 	}
 }
 
-// isCompleteSequence checks if we have a complete escape sequence.
-func isCompleteSequence(b []byte) bool {
-	if len(b) < 2 {
-		return false
+// markerStartLen is the length of the longest end of b that could begin the
+// paste end marker.
+func markerStartLen(b []byte) int {
+	for n := min(len(b), len(pasteEnd)-1); n > 0; n-- {
+		if bytes.HasPrefix(pasteEnd, b[len(b)-n:]) {
+			return n
+		}
 	}
-	if b[1] == 'O' {
-		return len(b) >= 3 // SS3 (application cursor keys): ESC O <code>
-	}
-	if b[1] != '[' {
-		return true // Alt+char
-	}
+	return 0
+}
 
-	// CSI sequence ends with a letter
-	last := b[len(b)-1]
-	return (last >= 'A' && last <= 'Z') || (last >= 'a' && last <= 'z') || last == '~'
+// appendCapped appends as much of b to text as fits in limit bytes.
+func appendCapped(text, b []byte, limit int) []byte {
+	room := max(limit-len(text), 0)
+	return append(text, b[:min(len(b), room)]...)
 }
 
 // isPasteStart checks if the sequence is the bracketed paste start marker.
 func isPasteStart(b []byte) bool {
-	// \x1b[200~
-	return len(b) == 6 && b[0] == 0x1b && b[1] == '[' && b[2] == '2' && b[3] == '0' && b[4] == '0' && b[5] == '~'
-}
-
-// isPasteEnd checks if the buffer ends with the bracketed paste end marker.
-func isPasteEnd(b []byte) bool {
-	// \x1b[201~
-	if len(b) < 6 {
-		return false
-	}
-	end := b[len(b)-6:]
-	return end[0] == 0x1b && end[1] == '[' && end[2] == '2' && end[3] == '0' && end[4] == '1' && end[5] == '~'
+	return string(b) == "\x1b[200~"
 }

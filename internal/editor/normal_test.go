@@ -82,7 +82,7 @@ func TestNormalMode_SelectLine_x(t *testing.T) {
 	if !state.Cursor.HasSelection() {
 		t.Error("Should have selection after x")
 	}
-	start, end := state.Cursor.SelectionRange()
+	start, end := state.Cursor.SelectionRange(state.Buffer)
 	if start.Col != 0 || end.Col != 5 {
 		t.Errorf("Selection = %d-%d, want 0-5", start.Col, end.Col)
 	}
@@ -94,7 +94,7 @@ func TestNormalMode_Enter_Submits(t *testing.T) {
 
 	result := mode.HandleKey(Key{Special: KeyEnter}, state)
 
-	if !result.Submit {
+	if result.Command != CommandSubmit {
 		t.Error("Enter in normal mode should submit")
 	}
 }
@@ -123,7 +123,7 @@ func TestNormalMode_CtrlP_ContextPicker(t *testing.T) {
 	key := Key{Ctrl: true, Rune: 'p'}
 	result := mode.HandleKey(key, state)
 
-	if !result.ContextPicker {
+	if result.Command != CommandContextPicker {
 		t.Error("Ctrl+P should set ContextPicker=true in normal mode")
 	}
 }

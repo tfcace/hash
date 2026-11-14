@@ -69,7 +69,7 @@ func TestTextStreamFromEvents_ExposesTransientToolStatusOutsideGhostText(t *test
 	close(events)
 	close(errs)
 
-	updates, streamErrs := textStreamFromEvents(context.Background(), events, errs)
+	updates, streamErrs := textStreamFromEvents(context.Background(), events, errs, nil)
 	if got := <-updates; got.Status != "Agent running pwd..." || got.Text != "" {
 		t.Fatalf("first ghost update = %#v, want transient tool activity", got)
 	}
@@ -90,7 +90,7 @@ func TestTextStreamFromEvents_StopsWhenContextCanceledWithoutEditorReader(t *tes
 	errs := make(chan error)
 	close(errs)
 
-	updates, _ := textStreamFromEvents(ctx, events, errs)
+	updates, _ := textStreamFromEvents(ctx, events, errs, nil)
 	select {
 	case _, ok := <-updates:
 		if ok {
@@ -98,60 +98,6 @@ func TestTextStreamFromEvents_StopsWhenContextCanceledWithoutEditorReader(t *tes
 		}
 	case <-time.After(time.Second):
 		t.Fatal("adapter did not stop after cancellation")
-	}
-}
-
-func TestCollectAgentStream_TrimLeadingNewlineOnce(t *testing.T) {
-	sh := &Shell{}
-
-	textCh := make(chan string, 1)
-	errCh := make(chan error)
-	textCh <- "\n\nQuestion 1: Is it alive?"
-	close(textCh)
-	close(errCh)
-
-	var rendered strings.Builder
-	result := sh.collectAgentStream(context.Background(), textCh, errCh, agentStreamCollectionOptions{
-		trimLeadingNewline: true,
-		writeRendered: func(text string) {
-			rendered.WriteString(text)
-		},
-	})
-
-	if strings.HasPrefix(result.responseText, "\n\n") {
-		t.Fatalf("expected at most one leading newline in response, got %q", result.responseText)
-	}
-	if strings.HasPrefix(rendered.String(), "\n\n") {
-		t.Fatalf("expected at most one leading newline in render, got %q", rendered.String())
-	}
-}
-
-func TestCollectAgentStream_StripsSplitAwaitingInputMarker(t *testing.T) {
-	sh := &Shell{}
-
-	textCh := make(chan string, 3)
-	errCh := make(chan error)
-	textCh <- "Which directory"
-	textCh <- " should I inspect?\n[AWAI"
-	textCh <- "TING_INPUT]"
-	close(textCh)
-	close(errCh)
-
-	var rendered strings.Builder
-	result := sh.collectAgentStream(context.Background(), textCh, errCh, agentStreamCollectionOptions{
-		writeRendered: func(text string) {
-			rendered.WriteString(text)
-		},
-	})
-
-	if strings.Contains(result.responseText, "[AWAITING_INPUT]") {
-		t.Fatalf("response text leaked marker: %q", result.responseText)
-	}
-	if strings.Contains(rendered.String(), "[AWAITING_INPUT]") {
-		t.Fatalf("rendered text leaked marker: %q", rendered.String())
-	}
-	if result.responseText != "Which directory should I inspect?\n" {
-		t.Fatalf("response text = %q, want marker-free question", result.responseText)
 	}
 }
 
@@ -163,7 +109,7 @@ func TestTextStreamFromEvents_ReportsContextErrorOnErrChan(t *testing.T) {
 	events := make(chan agent.StreamEvent)
 	errs := make(chan error)
 
-	_, errCh := textStreamFromEvents(ctx, events, errs)
+	_, errCh := textStreamFromEvents(ctx, events, errs, nil)
 
 	select {
 	case err := <-errCh:
@@ -199,4 +145,109 @@ func TestCollectAgentEventStream_WrapsToWidth(t *testing.T) {
 	if result.lineCount != 2 {
 		t.Errorf("lineCount = %d, want 2 rows", result.lineCount)
 	}
+}
+
+// A request that times out before the agent finishes ends the pacer; it must
+// say why, or the turn reads the closed stream as an empty reply ("agent
+// ended the turn without text") and offers no retry.
+func TestPaceAgentEvents_ReportsTheRequestTimeout(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	events := make(chan agent.StreamEvent) // the agent never answers
+	errs := make(chan error)
+
+	out, outErrs := paceAgentEvents(ctx, events, errs, agentStreamPacerOptions{})
+	for range out {
+	}
+	err := <-outErrs
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("pacer error = %v, want the deadline", err)
+	}
+}
+
+// Ctrl+C closes the request's paced stream as it cancels the turn: the
+// collector can see both channels close before it sees the cancel. The
+// request was still canceled, not a reply that came back empty.
+func TestCollectAgentEventStream_CancelSeenAfterTheStreamClosesIsACancel(t *testing.T) {
+	sh := &Shell{}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	for range 50 {
+		events := make(chan agent.StreamEvent)
+		errs := make(chan error)
+		close(events)
+		close(errs)
+		if result := sh.collectAgentEventStream(ctx, events, errs, agentStreamCollectionOptions{}, nil); !result.canceled {
+			t.Fatalf("a canceled request ended as %+v", result)
+		}
+	}
+}
+
+// ghostFill streams chunks as an inline reply through textStreamFromEvents
+// and returns the fill the ghost text ends up showing, the way the editor
+// appends each update.
+func ghostFill(t *testing.T, chunks ...string) string {
+	t.Helper()
+	events := make(chan agent.StreamEvent, len(chunks))
+	for _, c := range chunks {
+		events <- textEvent(c)
+	}
+	close(events)
+	errs := make(chan error)
+	close(errs)
+	updates, _ := textStreamFromEvents(context.Background(), events, errs, nil)
+	var fill strings.Builder
+	for u := range updates {
+		fill.WriteString(u.Text)
+	}
+	return fill.String()
+}
+
+// Sonnet wraps an inline fill in backticks; Enter then ran it as command
+// substitution (`ls` bare). The fill the user accepts is what is inside.
+func TestTextStreamFromEvents_UnwrapsAnInlineFill(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		chunks []string
+		want   string
+	}{
+		{"backticks across chunks", []string{"`internal/", "shell/*.go`"}, "internal/shell/*.go"},
+		{"backticks one chunk", []string{"`--all`"}, "--all"},
+		{"backtick alone first", []string{"`", "internal/shell/*.go", "`"}, "internal/shell/*.go"},
+		{"code fence", []string{"```bash\n", "internal/shell/*.go\n", "```"}, "internal/shell/*.go"},
+		{"code fence split", []string{"``", "`sh\ninternal/", "shell/*.go\n`", "``\n"}, "internal/shell/*.go"},
+		{"plain", []string{"--format=", "'%h %s'"}, "--format='%h %s'"},
+		{"substitution kept", []string{"`pwd`", "/bin"}, "`pwd`/bin"},
+		{"inner backtick kept", []string{"$(echo `date`)"}, "$(echo `date`)"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fill := ghostFill(t, tc.chunks...)
+			if fill != tc.want {
+				t.Errorf("fill = %q, want %q", fill, tc.want)
+			}
+			if tc.name == "backticks across chunks" {
+				if line := "ls " + fill; line != "ls internal/shell/*.go" {
+					t.Errorf("accepted line = %q", line)
+				}
+			}
+		})
+	}
+}
+
+// A fill that is not wrapped still streams as it arrives.
+func TestTextStreamFromEvents_StreamsAPlainFillAsItArrives(t *testing.T) {
+	events := make(chan agent.StreamEvent)
+	errs := make(chan error)
+	updates, _ := textStreamFromEvents(context.Background(), events, errs, nil)
+	events <- textEvent("--al")
+	select {
+	case u := <-updates:
+		if u.Text != "--al" {
+			t.Errorf("first update = %q, want the chunk", u.Text)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("a plain chunk was held back")
+	}
+	close(events)
+	close(errs)
 }

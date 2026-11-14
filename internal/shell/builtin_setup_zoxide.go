@@ -30,7 +30,7 @@ type zoxideHashrcChanges struct {
 // and configures the chpwd hook for directory tracking.
 func (s *Shell) builtinSetupZoxide(ctx context.Context, args []string) error {
 	if len(args) > 0 && (args[0] == "--help" || args[0] == "-h") {
-		fmt.Println(`Usage: setup-zoxide
+		fmt.Fprintln(s.out(), `Usage: setup-zoxide
 
 Set up zoxide integration with Hash.
 
@@ -45,13 +45,8 @@ See: https://github.com/ajeetdsouza/zoxide`)
 		return nil
 	}
 
-	// Check if zoxide is installed
-	if _, err := exec.LookPath("zoxide"); err != nil {
-		fmt.Println("zoxide is not installed.")
-		fmt.Println()
-		fmt.Println("Install it first:")
-		fmt.Println("  https://github.com/ajeetdsouza/zoxide#installation")
-		return nil //nolint:nilerr // intentional: not-installed is a user message, not an error
+	if ready, err := s.zoxideSetupReady(); !ready {
+		return err
 	}
 
 	var changes []string
@@ -87,27 +82,45 @@ See: https://github.com/ajeetdsouza/zoxide`)
 
 	// 3. Report results
 	if len(changes) == 0 {
-		fmt.Println("zoxide is already configured.")
+		fmt.Fprintln(s.out(), "zoxide is already configured.")
 	} else {
-		fmt.Println("zoxide setup complete:")
+		fmt.Fprintln(s.out(), "zoxide setup complete:")
 		for _, c := range changes {
-			fmt.Printf("  + %s\n", c)
+			fmt.Fprintf(s.out(), "  + %s\n", c)
 		}
 
 		// Try to activate in the current session
 		if s.executor != nil {
 			evalErr := activateZoxideInSession(ctx, s.executor, hashrcChanges)
 			if evalErr == nil {
-				fmt.Println()
-				fmt.Println("zoxide is active in this session.")
+				fmt.Fprintln(s.out())
+				fmt.Fprintln(s.out(), "zoxide is active in this session.")
 			} else {
-				fmt.Println()
-				fmt.Println("Restart hash to apply changes.")
+				fmt.Fprintln(s.out())
+				fmt.Fprintln(s.out(), "Restart hash to apply changes.")
 			}
 		}
 	}
 
 	return nil
+}
+
+// zoxideSetupReady reports whether setup-zoxide can make changes: zoxide is
+// installed (else it prints how to get it) and config.toml loaded cleanly.
+func (s *Shell) zoxideSetupReady() (bool, error) {
+	if _, err := exec.LookPath("zoxide"); err != nil {
+		fmt.Fprintln(s.out(), "zoxide is not installed.")
+		fmt.Fprintln(s.out())
+		fmt.Fprintln(s.out(), "Install it first:")
+		fmt.Fprintln(s.out(), "  https://github.com/ajeetdsouza/zoxide#installation")
+		return false, nil //nolint:nilerr // intentional: not-installed is a user message, not an error
+	}
+	// A config that did not load cleanly holds defaults for what failed;
+	// writing it back would replace the user's file with them.
+	if s.config != nil && s.config.LoadIssue != nil {
+		return false, fmt.Errorf("%w; fix it first, setup-zoxide would rewrite it", s.config.LoadIssue)
+	}
+	return true, nil
 }
 
 // setupZoxideUpdateConfig updates config.toml with zoxide settings.

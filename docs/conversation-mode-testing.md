@@ -134,6 +134,10 @@ single final tool rows. Replace `agent acp` with any authenticated ACP command.
 - Empty input exits the conversation
 - Ctrl+C exits the conversation
 - Normal shell prompt returns
+- Text typed before `you> ` appears (while the agent still writes) ends the
+  conversation and shows up at the shell prompt instead
+- Ctrl+C while a follow-up streams ends the conversation, and `echo $?`
+  prints 1 even though the first reply was complete
 
 ### 9. Twenty Questions With Side Request
 

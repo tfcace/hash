@@ -3,6 +3,7 @@ package executor
 import (
 	"os"
 	"runtime"
+	"slices"
 	"strings"
 
 	"mvdan.cc/sh/v3/expand"
@@ -27,7 +28,37 @@ func newEnvStoreFromOS() *envStore {
 			Str:      value,
 		}
 	}
+	vars[flagsVar] = interactiveFlags()
 	return &envStore{vars: vars}
+}
+
+// flagsVar is what the interactive shell's $- expands, ${__hash_flags[$-]}
+// (markInteractive): a read-only associative array from each value the
+// interpreter's $- can have, its set flags (aefnux), to the same flags with
+// the interactive shell's i among them, as bash's $- has it. It is in
+// every shell's variables, as hash's own, so that every runner and every
+// copy of one (a subshell, a pipeline's command, a job) has it.
+const flagsVar = "__hash_flags"
+
+// posixFlags are the flags the interpreter's $- can hold, sorted, as it
+// prints them.
+const posixFlags = "aefnux"
+
+// interactiveFlags is flagsVar's value.
+func interactiveFlags() expand.Variable {
+	m := make(map[string]string, 1<<len(posixFlags))
+	for set := range 1 << len(posixFlags) {
+		var flags []byte
+		for i := range len(posixFlags) {
+			if set&(1<<i) != 0 {
+				flags = append(flags, posixFlags[i])
+			}
+		}
+		withI := append(slices.Clone(flags), 'i')
+		slices.Sort(withI)
+		m[string(flags)] = string(withI)
+	}
+	return expand.Variable{Set: true, ReadOnly: true, Kind: expand.Associative, Map: m}
 }
 
 func normalizeEnvName(name string) string {

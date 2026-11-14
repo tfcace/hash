@@ -4,58 +4,47 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
-	"sync"
 	"time"
 )
 
 // CobraCompleter provides completions from Cobra-based CLI tools.
-// It uses background prefetching to avoid blocking on TAB press.
+// Fetches run in the background; Complete never blocks on them.
 type CobraCompleter struct {
-	cache           map[string]cachedResult
-	cacheMu         sync.RWMutex
-	cacheTTL        time.Duration
-	prefetchTimeout time.Duration
-	prefetched      map[string]time.Time // prefetch key -> next retry time
-	prefetchMu      sync.RWMutex
+	resolvePath func(string) (string, error)
+	getwd       func() string
+	policy      flightPolicy // __complete results
+	pathPolicy  flightPolicy // command name resolution
 
-	resolvePath      func(string) (string, error)
-	lookPathCache    map[string]string // command name → resolved path
-	lookPathInFlight map[string]*cobraLookPathCall
-	lookPathMaxAge   time.Duration
-	lookPathCacheMu  sync.RWMutex
+	results flightCache[Result] // keyed by directory, $PATH, command name and __complete args
+	paths   flightCache[string] // (command name, $PATH) -> resolved path
+	ready   readyNotifier
 
-	supportsMu sync.RWMutex
-	supports   map[string]bool // cmdPath → tool has answered __complete before
-
-	readyMu sync.RWMutex
-	onReady func()
-}
-
-type cobraLookPathCall struct {
-	started time.Time
-}
-
-type cachedResult struct {
-	result    Result
-	expiresAt time.Time
+	// tools are the commands this completer may ask. Asking runs the
+	// command (`<cmd> __complete <args>`), so it is never tried on a command
+	// that is not known to be a Cobra tool: for rm that ran rm.
+	tools map[string]bool
 }
 
 // cobraPrefetchTimeout bounds a background fetch, not the TAB the user is
 // waiting on, so it can afford to be generous. A cold kubectl __complete
 // takes 150-500ms; killing it early caches nothing and fails identically on
 // every retry, which shows up as completion "randomly" needing several
-// attempts to start working.
+// attempts to start working. A Tab during that time joins the running fetch.
 const cobraPrefetchTimeout = 3 * time.Second
+
+// cobraFailedPrefetchTTL is how long a failed fetch (not a cobra tool,
+// timed out) is remembered, so a pending Tab's retry falls through instead
+// of relaunching it.
 const cobraFailedPrefetchTTL = 2 * time.Second
 
-// knownCobraCommands seeds tools that are widely known to answer
-// __complete, so their very first cache miss in a session reports pending
-// (fetching notice, menu opens itself) instead of flashing an unrelated
-// filename menu once. A wrong entry self-corrects: the fetch fails, the
-// failure is cached briefly, and completion falls through as before.
+// knownCobraCommands are tools known to answer __complete. They are the
+// only commands asked by default; the config adds more
+// ([completions] cobra_commands).
 var knownCobraCommands = map[string]bool{
 	"kubectl":  true,
 	"helm":     true,
@@ -66,20 +55,42 @@ var knownCobraCommands = map[string]bool{
 	"kind":     true,
 }
 
-var errCobraLookPathBusy = errors.New("cobra command path lookup already in progress")
+var errCobraPathUnavailable = errors.New("completion: cobra command path unavailable")
 
-// NewCobraCompleter creates a new Cobra completer.
-func NewCobraCompleter() *CobraCompleter {
-	return &CobraCompleter{
-		cache:            make(map[string]cachedResult),
-		cacheTTL:         5 * time.Minute,
-		prefetchTimeout:  cobraPrefetchTimeout,
-		prefetched:       make(map[string]time.Time),
-		resolvePath:      exec.LookPath,
-		lookPathCache:    make(map[string]string),
-		lookPathInFlight: make(map[string]*cobraLookPathCall),
-		lookPathMaxAge:   contextReadInflightMaxWaitAge,
+// NewCobraCompleter creates a Cobra completer that asks the known Cobra
+// tools and the extra ones named.
+func NewCobraCompleter(extra ...string) *CobraCompleter {
+	tools := make(map[string]bool, len(knownCobraCommands)+len(extra))
+	for name := range knownCobraCommands {
+		tools[name] = true
 	}
+	for _, name := range extra {
+		if name = strings.TrimSpace(name); name != "" {
+			tools[name] = true
+		}
+	}
+	c := &CobraCompleter{
+		tools:       tools,
+		resolvePath: exec.LookPath,
+		getwd:       defaultGetwd,
+		policy: flightPolicy{
+			ttl:        5 * time.Minute,
+			failureTTL: cobraFailedPrefetchTTL,
+			timeout:    cobraPrefetchTimeout,
+			wait:       0, // Complete answers from cache only
+		},
+		pathPolicy: flightPolicy{
+			// PATH scans can block on slow mounts, so a resolved path is kept
+			// for as long as PATH stays the same (re-resolved hourly).
+			// Failures are not kept: the result fetch that needed the path
+			// backs off instead.
+			ttl:     time.Hour,
+			timeout: time.Second,
+			wait:    waitUntilCanceled,
+		},
+	}
+	c.results.ready = &c.ready
+	return c
 }
 
 // Name returns the completer name.
@@ -87,161 +98,83 @@ func (c *CobraCompleter) Name() string {
 	return "cobra"
 }
 
-// SetOnReady registers a callback fired whenever a background fetch finishes
-// and fills the cache. The UI uses it to refresh a "fetching" menu without
-// another TAB.
+// SetOnReady registers a callback fired whenever a background fetch
+// finishes, success or failure. The UI uses it to refresh a "fetching" menu
+// without another TAB, or to clear it and fall back.
 func (c *CobraCompleter) SetOnReady(fn func()) {
-	c.readyMu.Lock()
-	c.onReady = fn
-	c.readyMu.Unlock()
+	c.ready.set(fn)
 }
 
-func (c *CobraCompleter) notifyReady() {
-	c.readyMu.RLock()
-	fn := c.onReady
-	c.readyMu.RUnlock()
-	if fn != nil {
-		fn()
-	}
+// cobraRequest is one __complete invocation derived from the input line.
+type cobraRequest struct {
+	cmdName string
+	args    []string // starts with "__complete"
+	// dir is where __complete runs. Many tools answer per directory (gh
+	// per repository, kubectl per kubeconfig context set by direnv), so
+	// it is part of the key: a result must never leak across a cd.
+	dir string
+	// pathEnv is $PATH when the request was made. Activating a venv or
+	// entering a direnv directory changes which binary the name runs, so
+	// the resolved path and its answers are keyed by it.
+	pathEnv string
 }
 
-func (c *CobraCompleter) markSupportsComplete(cmdPath string) {
-	c.supportsMu.Lock()
-	if c.supports == nil {
-		c.supports = make(map[string]bool)
-	}
-	c.supports[cmdPath] = true
-	c.supportsMu.Unlock()
+func (r cobraRequest) key() string {
+	return r.dir + "\x00" + r.pathKey() + "\x00" + strings.Join(r.args, "\x00")
 }
 
-func (c *CobraCompleter) supportsComplete(cmdPath string) bool {
-	c.supportsMu.RLock()
-	defer c.supportsMu.RUnlock()
-	return c.supports[cmdPath]
+// pathKey keys the command name's resolved path.
+func (r cobraRequest) pathKey() string {
+	return r.cmdName + "\x00" + r.pathEnv
 }
 
-// lookPath returns the resolved path for a command, using a cache to avoid
-// repeated PATH scans on every TAB press.
-func (c *CobraCompleter) lookPath(name string) (string, error) {
-	c.lookPathCacheMu.RLock()
-	if p, ok := c.lookPathCache[name]; ok {
-		c.lookPathCacheMu.RUnlock()
-		return p, nil
+// request returns the __complete request for the line, or false when the
+// cursor is not in an argument of a Cobra tool this completer may ask.
+func (c *CobraCompleter) request(line string, pos int) (cobraRequest, bool) {
+	req, ok := parseCobraRequest(line, pos)
+	if !ok || !c.tools[req.cmdName] {
+		return cobraRequest{}, false
 	}
-	c.lookPathCacheMu.RUnlock()
-
-	c.lookPathCacheMu.Lock()
-	if p, ok := c.lookPathCache[name]; ok {
-		c.lookPathCacheMu.Unlock()
-		return p, nil
-	}
-	if c.lookPathInFlight == nil {
-		c.lookPathInFlight = make(map[string]*cobraLookPathCall)
-	}
-	now := time.Now()
-	if call, ok := c.lookPathInFlight[name]; ok {
-		maxAge := c.lookPathMaxAge
-		if maxAge == 0 {
-			maxAge = contextReadInflightMaxWaitAge
-		}
-		if maxAge < 0 || now.Sub(call.started) < maxAge {
-			c.lookPathCacheMu.Unlock()
-			return "", errCobraLookPathBusy
-		}
-		delete(c.lookPathInFlight, name)
-	}
-	call := &cobraLookPathCall{started: now}
-	c.lookPathInFlight[name] = call
-	c.lookPathCacheMu.Unlock()
-
-	resolve := c.resolvePath
-	if resolve == nil {
-		resolve = exec.LookPath
-	}
-	p, err := resolve(name)
-
-	c.lookPathCacheMu.Lock()
-	if c.lookPathInFlight[name] != call {
-		c.lookPathCacheMu.Unlock()
-		return "", errCobraLookPathBusy
-	}
-	delete(c.lookPathInFlight, name)
-	if err != nil {
-		c.lookPathCacheMu.Unlock()
-		return "", err
-	}
-	c.lookPathCache[name] = p
-	c.lookPathCacheMu.Unlock()
-	return p, nil
+	req.dir = c.getwd()
+	req.pathEnv = os.Getenv("PATH")
+	return req, true
 }
 
-func (c *CobraCompleter) cachedPath(name string) (string, bool) {
-	c.lookPathCacheMu.RLock()
-	defer c.lookPathCacheMu.RUnlock()
-	p, ok := c.lookPathCache[name]
-	return p, ok
+func parseCobraRequest(line string, pos int) (cobraRequest, bool) {
+	cw := parseCommandWords(line, pos)
+	// Only arguments: the command name itself is still being typed.
+	if !cw.inArgumentPosition() {
+		return cobraRequest{}, false
+	}
+	args := append([]string{"__complete"}, cw.args()...)
+	args = append(args, cw.current)
+	return cobraRequest{cmdName: cw.command(), args: args}, true
 }
 
-// Complete returns completions from cache only.
-// Use Prefetch to populate the cache in the background.
+// Complete returns completions from cache only. A miss starts the
+// background fetch, so a recalled or pasted line that never got a
+// space-triggered prefetch still answers on the next Tab.
 func (c *CobraCompleter) Complete(ctx context.Context, line string, pos int) (Result, error) {
-	pos = clampCursor(line, pos)
-
-	// Extract pipe context - get command segment after last pipe
-	pipeLine, pipePos := ExtractPipeContext(line, pos)
-
-	// Extract command and args from the pipe context
-	parts := strings.Fields(pipeLine[:pipePos])
-	if len(parts) == 0 {
-		return Result{}, nil
-	}
-
-	cmdName := parts[0]
-	if isShellBuiltinForCobra(cmdName) {
-		return Result{}, nil
-	}
-
-	// "$VAR" and "~/..." words belong to the env and file completers; a
-	// pending (or cached) cobra answer must not shadow them.
-	if len(parts) > 1 && !strings.HasSuffix(line[:pos], " ") {
-		if w := parts[len(parts)-1]; strings.HasPrefix(w, "$") || strings.HasPrefix(w, "~") {
-			return Result{}, nil
-		}
-	}
-
-	// Complete must be cache-only. PATH scans can block on slow mounts and
-	// must stay in background prefetch.
-	cmdPath, ok := c.cachedPath(cmdName)
+	req, ok := c.request(line, pos)
 	if !ok {
 		return Result{}, nil
 	}
-
-	// Build cache key
-	args := append([]string{"__complete"}, parts[1:]...)
-	if strings.HasSuffix(line[:pos], " ") {
-		args = append(args, "")
-	}
-	cacheKey := cmdPath + ":" + strings.Join(args, " ")
-
-	// Only return cached results - never block.
-	c.cacheMu.RLock()
-	cached, ok := c.cache[cacheKey]
-	c.cacheMu.RUnlock()
-	if ok && time.Now().Before(cached.expiresAt) {
-		return cached.result, nil
+	// "$VAR" and "~/..." words belong to the env and file completers; a
+	// pending (or cached) cobra answer must not shadow them.
+	if current := req.args[len(req.args)-1]; strings.HasPrefix(current, "$") || strings.HasPrefix(current, "~") {
+		return Result{}, nil
 	}
 
-	// Miss: always start the background fetch (deduplicated), so the next
-	// TAB can answer even when no space-triggered prefetch covered this key.
-	c.startPrefetch(cmdName, args)
-
-	// For a tool that answers __complete (learned this session, or seeded),
-	// falling through would answer a subcommand argument with filenames, so
-	// report pending; the ready notification reopens the menu when the data
-	// lands. Unknown tools keep the fall-through: pending would wrongly
-	// block file completion for them.
-	if c.supportsComplete(cmdPath) || knownCobraCommands[cmdName] {
-		return Result{Pending: true}, nil
+	result, status := c.results.get(ctx, req.key(), c.policy, c.fetch(req))
+	switch status {
+	case lookupFresh, lookupStale:
+		return result, nil
+	case lookupPending:
+		// Only Cobra tools are asked, so a subcommand argument waits for
+		// the answer instead of falling through to filenames; the ready
+		// notification reopens the menu when it lands. A failed fetch
+		// (lookupFailed) falls through.
+		return pendingResult(), nil
 	}
 	return Result{}, nil
 }
@@ -249,101 +182,43 @@ func (c *CobraCompleter) Complete(ctx context.Context, line string, pos int) (Re
 // Prefetch triggers background fetching of Cobra completions.
 // Call this when the user types a space after a command.
 func (c *CobraCompleter) Prefetch(line string, pos int) {
-	pos = clampCursor(line, pos)
-
-	// Extract pipe context - get command segment after last pipe
-	pipeLine, pipePos := ExtractPipeContext(line, pos)
-
-	// Extract command and args from the pipe context
-	parts := strings.Fields(pipeLine[:pipePos])
-	if len(parts) == 0 {
+	req, ok := c.request(line, pos)
+	if !ok {
 		return
 	}
-
-	cmdName := parts[0]
-	if isShellBuiltinForCobra(cmdName) {
-		return
-	}
-
-	// Build cache key
-	args := append([]string{"__complete"}, parts[1:]...)
-	if strings.HasSuffix(line[:pos], " ") {
-		args = append(args, "")
-	}
-
-	c.startPrefetch(cmdName, args)
+	c.results.warm(req.key(), c.policy, c.fetch(req))
 }
 
-// startPrefetch launches a background fetch unless one for the same key is
-// already running or recently failed.
-func (c *CobraCompleter) startPrefetch(cmdName string, args []string) {
-	prefetchKey := cmdName + ":" + strings.Join(args, " ")
-	now := time.Now()
-	c.prefetchMu.Lock()
-	if retryAt, ok := c.prefetched[prefetchKey]; ok && now.Before(retryAt) {
-		c.prefetchMu.Unlock()
-		return
-	}
-	c.prefetched[prefetchKey] = c.nextFailedPrefetchRetry(now)
-	c.prefetchMu.Unlock()
-
-	// Run prefetch in background
-	go c.prefetchCommand(prefetchKey, cmdName, args)
-}
-
-func (c *CobraCompleter) prefetchCommand(prefetchKey, cmdName string, args []string) {
-	cmdPath, err := c.lookPath(cmdName)
-	if err != nil {
-		if errors.Is(err, errCobraLookPathBusy) {
-			c.forgetPrefetch(prefetchKey)
+// fetch resolves the command (shared across requests for the same tool)
+// and runs its __complete.
+func (c *CobraCompleter) fetch(req cobraRequest) func(context.Context) (Result, error) {
+	return func(ctx context.Context) (Result, error) {
+		// exec.LookPath reads the process's PATH, which is pathEnv unless
+		// it changed in the moment since the request.
+		cmdPath, status := c.paths.get(ctx, req.pathKey(), c.pathPolicy, func(context.Context) (string, error) {
+			resolve := c.resolvePath
+			if resolve == nil {
+				resolve = exec.LookPath
+			}
+			return resolve(req.cmdName)
+		})
+		if status != lookupFresh {
+			return Result{}, errCobraPathUnavailable
 		}
-		return
+		return runCobraComplete(ctx, cmdPath, req.args, req.dir)
 	}
-
-	cacheKey := cmdPath + ":" + strings.Join(args, " ")
-
-	// Check if already cached
-	c.cacheMu.RLock()
-	if cached, ok := c.cache[cacheKey]; ok && time.Now().Before(cached.expiresAt) {
-		c.cacheMu.RUnlock()
-		c.markPrefetchedUntil(prefetchKey, cached.expiresAt)
-		return
-	}
-	c.cacheMu.RUnlock()
-
-	c.doPrefetch(cmdPath, args, cacheKey)
 }
 
-func (c *CobraCompleter) forgetPrefetch(prefetchKey string) {
-	c.prefetchMu.Lock()
-	delete(c.prefetched, prefetchKey)
-	c.prefetchMu.Unlock()
-}
+var errNotCobraOutput = errors.New("completion: output is not a cobra __complete answer")
 
-func (c *CobraCompleter) markPrefetchedUntil(prefetchKey string, retryAt time.Time) {
-	c.prefetchMu.Lock()
-	c.prefetched[prefetchKey] = retryAt
-	c.prefetchMu.Unlock()
-}
-
-func (c *CobraCompleter) nextFailedPrefetchRetry(now time.Time) time.Time {
-	ttl := cobraFailedPrefetchTTL
-	if c.cacheTTL > 0 && c.cacheTTL < ttl {
-		ttl = c.cacheTTL
-	}
-	return now.Add(ttl)
-}
-
-// doPrefetch runs the actual Cobra completion in the background.
-func (c *CobraCompleter) doPrefetch(cmdPath string, args []string, cacheKey string) {
-	// Use short timeout - Cobra completions should be fast
-	ctx, cancel := context.WithTimeout(context.Background(), c.prefetchTimeout)
-	defer cancel()
-
+// runCobraComplete runs `cmdPath __complete args...` in dir and parses its
+// answer.
+func runCobraComplete(ctx context.Context, cmdPath string, args []string, dir string) (Result, error) {
 	cmd := exec.CommandContext(ctx, cmdPath, args...)
-	var stdout, stderr bytes.Buffer
+	cmd.Dir = dir
+	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	cmd.Stderr = io.Discard
 
 	// Completely isolate the process from our terminal:
 	// - Setsid creates a new session, detaching from controlling terminal
@@ -356,50 +231,31 @@ func (c *CobraCompleter) doPrefetch(cmdPath string, args []string, cacheKey stri
 		defer devNull.Close()
 	}
 
-	err = cmd.Run()
-	if err != nil {
-		// Command doesn't support __complete or timed out. Cache the empty
-		// result briefly so a pending Complete stops re-reporting pending,
-		// and notify so a "fetching" menu can clear itself and fall back.
-		c.cacheFailedPrefetch(cacheKey)
-		return
+	// A failure means the command doesn't support __complete or timed out.
+	if err := cmd.Run(); err != nil {
+		return Result{}, err
 	}
 
 	// A successful exit alone does not prove Cobra support: ordinary commands
 	// such as echo also accept arbitrary arguments. Cobra's __complete protocol
 	// always terminates stdout with a numeric directive line.
-	result, valid := c.parseOutput(stdout.String())
+	result, valid := parseCobraOutput(stdout.String())
 	if !valid {
-		c.cacheFailedPrefetch(cacheKey)
-		return
+		return Result{}, errNotCobraOutput
 	}
-
-	// The tool answered __complete: cache misses for it may now report
-	// pending instead of falling through to unrelated completers.
-	c.markSupportsComplete(cmdPath)
-
-	// Cache result (even empty results to avoid re-fetching)
-	c.cacheMu.Lock()
-	c.cache[cacheKey] = cachedResult{
-		result:    result,
-		expiresAt: time.Now().Add(c.cacheTTL),
-	}
-	c.cacheMu.Unlock()
-	c.notifyReady()
+	return result, nil
 }
 
-func (c *CobraCompleter) cacheFailedPrefetch(cacheKey string) {
-	c.cacheMu.Lock()
-	c.cache[cacheKey] = cachedResult{expiresAt: time.Now().Add(cobraFailedPrefetchTTL)}
-	c.cacheMu.Unlock()
-	c.notifyReady()
-}
+// cobraDirectiveNoFileComp is cobra's ShellCompDirectiveNoFileComp bit: the
+// tool says files are not valid here, so an empty answer is "no matches"
+// rather than a cue to fall back to filenames.
+const cobraDirectiveNoFileComp = 4
 
-// parseOutput parses Cobra __complete output.
+// parseCobraOutput parses Cobra __complete output.
 // Format: one completion per line, with an optional tab-separated description,
 // followed by a final :<unsigned integer> directive line.
-func (c *CobraCompleter) parseOutput(output string) (Result, bool) {
-	var items []Item
+func parseCobraOutput(output string) (Result, bool) {
+	var result Result
 
 	lines := strings.Split(output, "\n")
 	lastNonEmpty := -1
@@ -409,7 +265,8 @@ func (c *CobraCompleter) parseOutput(output string) (Result, bool) {
 			break
 		}
 	}
-	if lastNonEmpty < 0 || !isCobraDirectiveLine(strings.TrimSuffix(lines[lastNonEmpty], "\r")) {
+	directive, ok := parseCobraDirective(strings.TrimSuffix(lines[max(lastNonEmpty, 0)], "\r"))
+	if lastNonEmpty < 0 || !ok {
 		return Result{}, false
 	}
 
@@ -430,58 +287,27 @@ func (c *CobraCompleter) parseOutput(output string) (Result, bool) {
 			desc = parts[1]
 		}
 
-		items = append(items, Item{
-			Value:       value,
-			Display:     value,
-			Description: desc,
-		})
-		if len(items) >= completionItemLimit {
+		if !result.add(Item{Value: value, Display: value, Description: desc}) {
 			break
 		}
 	}
 
-	return Result{Items: items}, true
+	if directive&cobraDirectiveNoFileComp != 0 {
+		result.empty = OutcomeNoMatches // owned: no matches when empty
+	}
+	return result, true
 }
 
-func isCobraDirectiveLine(line string) bool {
+// parseCobraDirective parses the final ":<unsigned integer>" line.
+func parseCobraDirective(line string) (int, bool) {
 	if len(line) < 2 || line[0] != ':' {
-		return false
+		return 0, false
 	}
 	for _, r := range line[1:] {
 		if r < '0' || r > '9' {
-			return false
+			return 0, false
 		}
 	}
-	return true
-}
-
-func isShellBuiltinForCobra(cmd string) bool {
-	switch cmd {
-	case "cd", "pushd", "popd", "exit", "quit", "history", "copy", "issue", "status", "tips", "setup-zoxide":
-		return true
-	case "alias", "unalias", "export", "unset", "source", ".":
-		return true
-	default:
-		return false
-	}
-}
-
-// SetCacheTTL sets the cache TTL.
-func (c *CobraCompleter) SetCacheTTL(ttl time.Duration) {
-	c.cacheTTL = ttl
-}
-
-// ClearCache clears the completion cache.
-func (c *CobraCompleter) ClearCache() {
-	c.cacheMu.Lock()
-	c.cache = make(map[string]cachedResult)
-	c.cacheMu.Unlock()
-
-	c.prefetchMu.Lock()
-	c.prefetched = make(map[string]time.Time)
-	c.prefetchMu.Unlock()
-
-	c.lookPathCacheMu.Lock()
-	c.lookPathCache = make(map[string]string)
-	c.lookPathCacheMu.Unlock()
+	directive, err := strconv.Atoi(line[1:])
+	return directive, err == nil
 }

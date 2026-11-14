@@ -1,12 +1,37 @@
 package clipboard
 
+import (
+	"unicode/utf8"
+
+	"github.com/tfcace/hash/internal/termtext"
+)
+
 // entry represents a command and its output.
 type entry struct {
 	command string
-	output  string
+	output  string // OutputCaptured's text
+	state   OutputState
 }
 
-// Buffer stores recent commands and their outputs.
+// OutputState is what became of a command's output.
+type OutputState int
+
+const (
+	// OutputAwaiting: the command was added and its output not set yet.
+	// Only the newest entry can await it.
+	OutputAwaiting OutputState = iota
+	// OutputCaptured: hash kept what it printed.
+	OutputCaptured
+	// OutputNone: it printed nothing hash saw.
+	OutputNone
+	// OutputUncaptured: it wrote straight to the terminal (a pipeline's
+	// tail at the prompt), which hash never sees.
+	OutputUncaptured
+)
+
+// Buffer stores recent commands and their outputs. AddCommand opens an
+// entry that awaits its output; SetOutput or SetUncaptured settles that
+// entry, once, so output can never land on an older command.
 type Buffer struct {
 	entries       []entry
 	maxEntries    int
@@ -37,32 +62,61 @@ func (b *Buffer) AddCommand(cmd string) {
 		b.entries = b.entries[1:]
 	}
 
-	b.entries = append(b.entries, entry{
-		command: cmd,
-	})
+	b.entries = append(b.entries, entry{command: cmd})
 }
 
-// SetOutput sets the output for the most recent command.
+// awaiting is the newest entry when it awaits its output, else nil.
+func (b *Buffer) awaiting() *entry {
+	if len(b.entries) == 0 || b.entries[len(b.entries)-1].state != OutputAwaiting {
+		return nil
+	}
+	return &b.entries[len(b.entries)-1]
+}
+
+// SetOutput sets the output of the command AddCommand added last, once; with
+// no command awaiting output it does nothing. Output is captured from a
+// terminal: the buffer keeps the text it shows (termtext.Plain), so what
+// `copy out` and Ctrl+O put on the clipboard is text, not terminal bytes.
+// An empty output is OutputNone.
 func (b *Buffer) SetOutput(output string) {
-	if len(b.entries) == 0 {
+	e := b.awaiting()
+	if e == nil {
 		return
 	}
+	e.output = b.cut(termtext.Plain(output))
+	e.state = OutputCaptured
+	if e.output == "" {
+		e.state = OutputNone
+	}
+}
 
+// SetUncaptured settles the command AddCommand added last as one that
+// wrote straight to the terminal, past hash; with no command awaiting
+// output it does nothing.
+func (b *Buffer) SetUncaptured() {
+	if e := b.awaiting(); e != nil {
+		e.state = OutputUncaptured
+	}
+}
+
+// cut cuts output to the size limit.
+func (b *Buffer) cut(output string) string {
 	if b.maxOutputSize < 0 {
-		b.entries[len(b.entries)-1].output = output
-		return
+		return output
 	}
 	if b.maxOutputSize == 0 {
-		b.entries[len(b.entries)-1].output = ""
-		return
+		return ""
 	}
 
-	// Truncate if too large
+	// Truncate if too large, at a character boundary
 	if len(output) > b.maxOutputSize {
-		output = output[:b.maxOutputSize]
+		cut := b.maxOutputSize
+		for cut > 0 && !utf8.RuneStart(output[cut]) {
+			cut--
+		}
+		output = output[:cut]
 	}
-
-	b.entries[len(b.entries)-1].output = output
+	return output
 }
 
 // Len returns the number of entries in the buffer.
@@ -86,6 +140,16 @@ func (b *Buffer) GetOutput(index int) string {
 		return ""
 	}
 	return b.entries[idx].output
+}
+
+// OutputState returns what became of the output at the given index (0 =
+// most recent); OutputNone when there is no entry there.
+func (b *Buffer) OutputState(index int) OutputState {
+	idx := len(b.entries) - 1 - index
+	if idx < 0 || idx >= len(b.entries) {
+		return OutputNone
+	}
+	return b.entries[idx].state
 }
 
 // LastCommand returns the most recent command.

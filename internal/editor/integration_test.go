@@ -22,7 +22,7 @@ func TestIntegration_TypeAndSubmit(t *testing.T) {
 	}
 
 	var output bytes.Buffer
-	ed := New(Config{Keybindings: "helix"}, bytes.NewReader(input), &output)
+	ed := New(Config{}, bytes.NewReader(input), &output)
 
 	result, err := ed.Run(context.Background())
 	if err != nil {
@@ -31,7 +31,7 @@ func TestIntegration_TypeAndSubmit(t *testing.T) {
 	if result.Text != "hello" {
 		t.Errorf("Text = %q, want %q", result.Text, "hello")
 	}
-	if result.Canceled {
+	if result.Exit == ExitCanceled {
 		t.Error("Canceled = true, want false")
 	}
 }
@@ -44,7 +44,7 @@ func TestIntegration_EnterSubmitsInInsertMode(t *testing.T) {
 	}
 	var output bytes.Buffer
 
-	ed := New(Config{Keybindings: "helix"}, bytes.NewReader(input), &output)
+	ed := New(Config{}, bytes.NewReader(input), &output)
 
 	result, err := ed.Run(context.Background())
 	if err != nil {
@@ -117,13 +117,12 @@ func TestIntegration_HistoryNavigation(t *testing.T) {
 
 	historyCalled := false
 	cfg := Config{
-		Keybindings: "helix",
-		HistoryFunc: func(dir int, currentLine string) string {
+		HistoryFunc: func(dir int, currentLine string) (string, bool) {
 			historyCalled = true
 			if dir == -1 {
-				return "previous command"
+				return "previous command", true
 			}
-			return ""
+			return "", false
 		},
 	}
 	ed := New(cfg, bytes.NewReader(input), &output)
@@ -149,7 +148,7 @@ func TestIntegration_CtrlC_ClearsBuffer(t *testing.T) {
 	}
 
 	var output bytes.Buffer
-	ed := New(Config{Keybindings: "helix"}, bytes.NewReader(input), &output)
+	ed := New(Config{}, bytes.NewReader(input), &output)
 
 	result, err := ed.Run(context.Background())
 	if err != nil {
@@ -169,11 +168,11 @@ func TestIntegration_CtrlC_EmptyBufferCancels(t *testing.T) {
 	}
 
 	var output bytes.Buffer
-	ed := New(Config{Keybindings: "helix"}, bytes.NewReader(input), &output)
+	ed := New(Config{}, bytes.NewReader(input), &output)
 
 	result, _ := ed.Run(context.Background())
 
-	if !result.Canceled {
+	if result.Exit != ExitCanceled {
 		t.Error("Canceled = false, want true")
 	}
 }
@@ -185,11 +184,11 @@ func TestIntegration_CtrlD_EmptyBufferEOF(t *testing.T) {
 	}
 
 	var output bytes.Buffer
-	ed := New(Config{Keybindings: "helix"}, bytes.NewReader(input), &output)
+	ed := New(Config{}, bytes.NewReader(input), &output)
 
 	result, _ := ed.Run(context.Background())
 
-	if !result.EOF {
+	if result.Exit != ExitEOF {
 		t.Error("EOF = false, want true")
 	}
 }
@@ -204,7 +203,7 @@ func TestIntegration_Backspace(t *testing.T) {
 	}
 
 	var output bytes.Buffer
-	ed := New(Config{Keybindings: "helix"}, bytes.NewReader(input), &output)
+	ed := New(Config{}, bytes.NewReader(input), &output)
 
 	result, err := ed.Run(context.Background())
 	if err != nil {
@@ -226,7 +225,7 @@ func TestIntegration_CtrlA_MoveToStart(t *testing.T) {
 	}
 
 	var output bytes.Buffer
-	ed := New(Config{Keybindings: "helix"}, bytes.NewReader(input), &output)
+	ed := New(Config{}, bytes.NewReader(input), &output)
 
 	result, err := ed.Run(context.Background())
 	if err != nil {
@@ -249,7 +248,7 @@ func TestIntegration_CtrlE_MoveToEnd(t *testing.T) {
 	}
 
 	var output bytes.Buffer
-	ed := New(Config{Keybindings: "helix"}, bytes.NewReader(input), &output)
+	ed := New(Config{}, bytes.NewReader(input), &output)
 
 	result, err := ed.Run(context.Background())
 	if err != nil {
@@ -271,7 +270,7 @@ func TestIntegration_ArrowKeys(t *testing.T) {
 	}
 
 	var output bytes.Buffer
-	ed := New(Config{Keybindings: "helix"}, bytes.NewReader(input), &output)
+	ed := New(Config{}, bytes.NewReader(input), &output)
 
 	result, err := ed.Run(context.Background())
 	if err != nil {
@@ -292,7 +291,7 @@ func TestIntegration_CtrlW_DeleteWord(t *testing.T) {
 	}
 
 	var output bytes.Buffer
-	ed := New(Config{Keybindings: "helix"}, bytes.NewReader(input), &output)
+	ed := New(Config{}, bytes.NewReader(input), &output)
 
 	result, err := ed.Run(context.Background())
 	if err != nil {
@@ -313,7 +312,7 @@ func TestIntegration_CtrlW_DeletePathSegment(t *testing.T) {
 	}
 
 	var output bytes.Buffer
-	ed := New(Config{Keybindings: "helix"}, bytes.NewReader(input), &output)
+	ed := New(Config{}, bytes.NewReader(input), &output)
 
 	result, err := ed.Run(context.Background())
 	if err != nil {
@@ -334,7 +333,7 @@ func TestIntegration_AltBackspace_DeleteWholeToken(t *testing.T) {
 	}
 
 	var output bytes.Buffer
-	ed := New(Config{Keybindings: "helix"}, bytes.NewReader(input), &output)
+	ed := New(Config{}, bytes.NewReader(input), &output)
 
 	result, err := ed.Run(context.Background())
 	if err != nil {
@@ -356,7 +355,7 @@ func TestIntegration_CtrlU_DeleteToStart(t *testing.T) {
 	}
 
 	var output bytes.Buffer
-	ed := New(Config{Keybindings: "helix"}, bytes.NewReader(input), &output)
+	ed := New(Config{}, bytes.NewReader(input), &output)
 
 	result, err := ed.Run(context.Background())
 	if err != nil {
@@ -426,9 +425,9 @@ func TestIntegration_BracketedPaste_MultipleLines(t *testing.T) {
 	}
 }
 
-func TestIntegration_TabInsertsTab_WhenNoCompleteFunc(t *testing.T) {
+func TestIntegration_TabInsertsTab_WhenNoCompleter(t *testing.T) {
 	// Without a CompleteFunc, Tab in insert mode triggers completion
-	// but since there's no completion UI yet, the result.Complete flag is set
+	// but since there's no completion UI yet, the result.Command == CommandComplete flag is set
 	// but nothing happens. This tests that the input still works.
 	input := []byte{
 		'h', 'e', 'l', 'l', 'o',
@@ -437,7 +436,7 @@ func TestIntegration_TabInsertsTab_WhenNoCompleteFunc(t *testing.T) {
 	}
 
 	var output bytes.Buffer
-	ed := New(Config{Keybindings: "helix"}, bytes.NewReader(input), &output)
+	ed := New(Config{}, bytes.NewReader(input), &output)
 
 	result, err := ed.Run(context.Background())
 	if err != nil {

@@ -40,24 +40,33 @@ func (c *Client) StreamEvents(ctx context.Context, req Request) (<-chan StreamEv
 	go func() {
 		defer close(events)
 		defer close(errs)
-		for textCh != nil || errCh != nil {
+		// Text first, then the error, as SendStreaming delivers them. A
+		// reader that stops reading, or a transport that stops sending, is
+		// released by ctx.
+		for {
 			select {
 			case text, ok := <-textCh:
 				if !ok {
-					textCh = nil
+					for err := range errCh {
+						if err != nil {
+							errs <- err
+							return
+						}
+					}
+					return
+				}
+				if text == "" {
 					continue
 				}
-				if text != "" {
-					events <- StreamEvent{Type: StreamEventText, Text: text}
+				select {
+				case events <- StreamEvent{Type: StreamEventText, Text: text}:
+				case <-ctx.Done():
+					errs <- ctx.Err()
+					return
 				}
-			case err, ok := <-errCh:
-				if !ok {
-					errCh = nil
-					continue
-				}
-				if err != nil {
-					errs <- err
-				}
+			case <-ctx.Done():
+				errs <- ctx.Err()
+				return
 			}
 		}
 	}()

@@ -58,28 +58,40 @@ func isShellWordBoundary(b byte) bool {
 	return false
 }
 
-// typoFixLine returns line with its first whole-word occurrence of typo
-// replaced by correction (e.g. "gti status" -> "git status"), or "" when the
-// typo does not appear as a word, so a correction never lands mid-token.
+// typoFixLine returns line with every whole-word occurrence of typo
+// replaced by correction (e.g. "gti status; gti log" -> "git status; git
+// log"), or "" when the typo does not appear as a word, so a correction
+// never lands mid-token. It reads the line once, left to right, and resumes
+// after each correction it puts in, so a correction that holds the typo is
+// not corrected again.
 func typoFixLine(line, typo, correction string) string {
 	if typo == "" {
 		return ""
 	}
-	for start := 0; start <= len(line)-len(typo); {
+	var b strings.Builder
+	found, start := false, 0
+	for start <= len(line)-len(typo) {
 		idx := strings.Index(line[start:], typo)
 		if idx < 0 {
-			return ""
+			break
 		}
 		idx += start
 		end := idx + len(typo)
 		before := idx == 0 || isShellWordBoundary(line[idx-1])
 		after := end == len(line) || isShellWordBoundary(line[end])
-		if before && after {
-			return line[:idx] + correction + line[end:]
+		if !before || !after {
+			b.WriteString(line[start : idx+1])
+			start = idx + 1
+			continue
 		}
-		start = idx + 1
+		b.WriteString(line[start:idx])
+		b.WriteString(correction)
+		found, start = true, end
 	}
-	return ""
+	if !found {
+		return ""
+	}
+	return b.String() + line[start:]
 }
 
 // gitBranches lists local branch names in the current directory's repository.

@@ -205,3 +205,16 @@ func TestParseKey_SS3UnknownDiscarded(t *testing.T) {
 		t.Errorf("unknown SS3 should be discarded, got Special=%v Rune=%q", key.Special, key.Rune)
 	}
 }
+
+// Alt is one bool however the terminal sent it: encoded as a modifier, or
+// ESC and the key in one write.
+func TestParseKey_Alt(t *testing.T) {
+	for seq, alt := range map[string]bool{
+		"b": false, "\x1bb": true, "\x1b\x7f": true, "\x1b\r": true, "\x1b[1;3D": true,
+		"\x1b[46;3u": true, "\x1b[27;3;46~": true, "\x1b[1;5D": false,
+	} {
+		if key := ParseKey([]byte(seq)); key.Alt != alt {
+			t.Errorf("ParseKey(%q).Alt = %v, want %v", seq, key.Alt, alt)
+		}
+	}
+}

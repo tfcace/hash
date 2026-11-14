@@ -1,8 +1,6 @@
 package config
 
 import (
-	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -29,7 +27,6 @@ type Config struct {
 
 type ShellConfig struct {
 	Editor          string             `toml:"editor"`
-	Keybindings     string             `toml:"keybindings"`
 	Dialect         string             `toml:"dialect"`          // "bash" or "zsh" parser dialect
 	InitCommands    []string           `toml:"init_commands"`    // Legacy: run always
 	ProfileCommands []string           `toml:"profile"`          // Run on login shells
@@ -52,7 +49,6 @@ type StartupFilesConfig struct {
 
 // InputConfig configures the input/editing mode.
 type InputConfig struct {
-	Keybindings  string `toml:"keybindings"`    // "helix", "emacs", "vim"
 	Gutter       bool   `toml:"gutter"`         // Show visual indicator for multiline
 	MaxPasteSize string `toml:"max_paste_size"` // Maximum paste size (e.g., "10MB")
 }
@@ -108,11 +104,12 @@ type HistoryConfig struct {
 }
 
 type CompletionsConfig struct {
-	Fuzzy            bool `toml:"fuzzy"`
-	FileIcons        bool `toml:"file_icons"`
-	CobraEnabled     bool `toml:"cobra_enabled"`
-	MaskSensitiveEnv bool `toml:"mask_sensitive_env"` // Mask values of sensitive env vars (KEY, SECRET, TOKEN, etc.)
-	PluginsEnabled   bool `toml:"plugins_enabled"`    // Declarative completion plugins (built-in + <config>/completions/*.toml)
+	Fuzzy            bool     `toml:"fuzzy"`
+	FileIcons        bool     `toml:"file_icons"`
+	CobraEnabled     bool     `toml:"cobra_enabled"`
+	CobraCommands    []string `toml:"cobra_commands"`     // Cobra tools to ask for __complete beyond the built-in list (kubectl, helm, gh, docker, podman, minikube, kind)
+	MaskSensitiveEnv bool     `toml:"mask_sensitive_env"` // Mask values of sensitive env vars (KEY, SECRET, TOKEN, etc.)
+	PluginsEnabled   bool     `toml:"plugins_enabled"`    // Declarative completion plugins (built-in + <config>/completions/*.toml)
 }
 
 type ClipboardConfig struct {
@@ -121,13 +118,15 @@ type ClipboardConfig struct {
 	PreserveColors bool   `toml:"preserve_colors"`
 }
 
-// PredictionConfig configures command and path prediction.
+// PredictionConfig configures command prediction.
 type PredictionConfig struct {
 	Enabled             bool     `toml:"enabled"`
 	AcceptKeys          []string `toml:"accept_keys"`
 	ConfidenceThreshold float64  `toml:"confidence_threshold"`
-	PathMinCount        int      `toml:"path_min_count"`
-	PathRecencyHours    int      `toml:"path_recency_boost_hours"`
+	// RecencyWindowHours is the recency window for scoring command
+	// sequences. Its key keeps the name of the path prediction it was
+	// first meant for, so existing config files still set it.
+	RecencyWindowHours int `toml:"path_recency_boost_hours"`
 }
 
 // ParseMaxOutputSize parses the MaxOutputSize string and returns bytes.
@@ -139,9 +138,8 @@ func (c *ClipboardConfig) ParseMaxOutputSize() (int64, error) {
 func Default() *Config {
 	return &Config{
 		Shell: ShellConfig{
-			Editor:      os.Getenv("EDITOR"),
-			Keybindings: "emacs",
-			Dialect:     "bash",
+			Editor:  os.Getenv("EDITOR"),
+			Dialect: "bash",
 			StartupFiles: StartupFilesConfig{
 				Login: []string{
 					"/etc/profile",
@@ -154,7 +152,6 @@ func Default() *Config {
 			},
 		},
 		Input: InputConfig{
-			Keybindings:  "helix",
 			Gutter:       true,
 			MaxPasteSize: "10MB",
 		},
@@ -189,25 +186,26 @@ func Default() *Config {
 			Enabled:             true,
 			AcceptKeys:          []string{"right", "tab"},
 			ConfidenceThreshold: 0.6,
-			PathMinCount:        2,
-			PathRecencyHours:    24,
+			RecencyWindowHours:  24,
 		},
 	}
 }
 
-// Load reads configuration from the given config directory.
-// Falls back to defaults for missing values.
-// On parse errors, returns defaults with error (shell should warn but continue).
-func Load(configDir string) (*Config, error) {
+// Load reads configuration from the given config directory, falling back to
+// defaults for missing values. It always returns a usable config: when the
+// file could not be fully loaded it holds defaults plus whatever could be
+// salvaged, and cfg.LoadIssue says what went wrong (startup warns with it,
+// status reports it).
+func Load(configDir string) *Config {
 	cfg := Default()
 
 	configPath := filepath.Join(configDir, "config.toml")
 	data, err := os.ReadFile(configPath)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return cfg, nil
+		if !os.IsNotExist(err) {
+			cfg.LoadIssue = &LoadError{Kind: LoadReadFailed, Path: configPath, Detail: err.Error(), Err: err}
 		}
-		return nil, err
+		return cfg
 	}
 
 	if err := toml.Unmarshal(data, cfg); err != nil {
@@ -217,7 +215,7 @@ func Load(configDir string) (*Config, error) {
 	cfg.loadNamedAgents(decodeAgentTables(data))
 	applyEmptyDefaults(cfg)
 
-	return cfg, nil
+	return cfg
 }
 
 // decodeAgentTables decodes just the [agent] section into a raw map. The
@@ -236,14 +234,8 @@ func decodeAgentTables(data []byte) map[string]interface{} {
 
 // applyEmptyDefaults fills defaults for values the file left empty.
 func applyEmptyDefaults(cfg *Config) {
-	if cfg.Shell.Keybindings == "" {
-		cfg.Shell.Keybindings = "emacs"
-	}
 	if cfg.Shell.Dialect == "" {
 		cfg.Shell.Dialect = "bash"
-	}
-	if cfg.Input.Keybindings == "" {
-		cfg.Input.Keybindings = "helix"
 	}
 	if cfg.Prompt.Mode == "" {
 		cfg.Prompt.Mode = "starship"
@@ -253,15 +245,15 @@ func applyEmptyDefaults(cfg *Config) {
 // recoverConfig salvages what it can from a config file that failed to
 // decode. Sections that decode individually keep the user's values; broken
 // ones fall back to defaults. A syntax error means nothing can be salvaged.
-// The returned error is a *LoadError, also attached as cfg.LoadIssue.
-func recoverConfig(configPath string, data []byte, cause error) (*Config, error) {
+// What went wrong is recorded in cfg.LoadIssue.
+func recoverConfig(configPath string, data []byte, cause error) *Config {
 	detail := decodeErrorDetail(cause)
 
 	var raw map[string]any
 	if err := toml.Unmarshal(data, &raw); err != nil {
 		cfg := Default()
-		cfg.LoadIssue = &LoadError{Path: configPath, Detail: detail, Err: cause}
-		return cfg, cfg.LoadIssue
+		cfg.LoadIssue = &LoadError{Kind: LoadSyntaxError, Path: configPath, Detail: detail, Err: cause}
+		return cfg
 	}
 
 	cfg := Default()
@@ -287,8 +279,8 @@ func recoverConfig(configPath string, data []byte, cause error) (*Config, error)
 	cfg.loadNamedAgents(agentRaw)
 	applyEmptyDefaults(cfg)
 
-	cfg.LoadIssue = &LoadError{Path: configPath, BadSections: bad, Detail: detail, Err: cause}
-	return cfg, cfg.LoadIssue
+	cfg.LoadIssue = &LoadError{Kind: LoadPartial, Path: configPath, BadSections: bad, Detail: detail, Err: cause}
+	return cfg
 }
 
 // EffectiveAgent returns the concrete agent settings selected by [agent].default.
@@ -341,7 +333,8 @@ func (c *Config) loadNamedAgents(agentRaw map[string]interface{}) {
 	agents := make(map[string]AgentEndpoint)
 	for name, value := range agentRaw {
 		table, ok := value.(map[string]interface{})
-		if !ok {
+		// headers is the flat [agent] config's own table, not a named agent.
+		if !ok || name == "headers" {
 			continue
 		}
 		agents[name] = AgentEndpoint{
@@ -393,14 +386,4 @@ func stringMapValue(values map[string]interface{}, key string) map[string]string
 		}
 	}
 	return out
-}
-
-// LoadWithWarnings is like Load but writes warnings to the given writer.
-// This is the preferred way to load config as it handles errors gracefully.
-func LoadWithWarnings(configDir string, warn io.Writer) *Config {
-	cfg, err := Load(configDir)
-	if err != nil {
-		fmt.Fprintf(warn, "Warning: %v\n", err)
-	}
-	return cfg
 }

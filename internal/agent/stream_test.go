@@ -128,3 +128,22 @@ func TestStreamCollector_PlainAnswerStaysExplanation(t *testing.T) {
 		t.Errorf("Explanation = %q, want %q", resp.Explanation, "**servicer-111-222-333 at 7d5h**")
 	}
 }
+
+// A bare command whose argument starts with + (date's format, set +x) is a
+// command, not prose: `?? what's today's date` came back as text.
+func TestStreamCollector_PlusArgumentCommandIsACommand(t *testing.T) {
+	for _, text := range []string{"date +%Y-%m-%d", "date +%F", "`date +%s`"} {
+		c := NewStreamCollector()
+		c.Append(text)
+		if resp := c.Response(); resp.Type != ResponseTypeCommand {
+			t.Errorf("%q: type %v, want a command", text, resp.Type)
+		}
+	}
+	for _, text := range []string{"Add +1 to the count", "Use +x to make it executable"} {
+		c := NewStreamCollector()
+		c.Append(text)
+		if resp := c.Response(); resp.Type == ResponseTypeCommand {
+			t.Errorf("%q: read as a command", text)
+		}
+	}
+}

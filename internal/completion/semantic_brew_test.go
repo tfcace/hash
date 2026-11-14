@@ -107,7 +107,8 @@ func TestBrewHandler_ReturnsWhenListCommandIgnoresContext(t *testing.T) {
 	}
 }
 
-func TestBrewHandler_CoalescesFreshBlockedLookupAndRetriesWhenStale(t *testing.T) {
+// A blocked lookup is joined rather than duplicated.
+func TestBrewHandler_CoalescesBlockedLookupAndRefetchesAfterItLands(t *testing.T) {
 	release := make(chan struct{})
 	defer close(release)
 	var calls atomic.Int32
@@ -140,13 +141,17 @@ func TestBrewHandler_CoalescesFreshBlockedLookupAndRetriesWhenStale(t *testing.T
 		t.Fatalf("expected second blocked brew completion to coalesce, got %d command calls", got)
 	}
 
-	time.Sleep(90 * time.Millisecond)
+	// The blocked lookup lands; with no cache TTL its answer went to its
+	// waiters only, so the next Tab queries again.
+	release <- struct{}{}
+	release <- struct{}{}
+	time.Sleep(20 * time.Millisecond)
 	result := h.Complete(context.Background(), []string{"upgrade"}, "")
 	if got := calls.Load(); got != 4 {
-		t.Fatalf("expected stale brew lookup to retry formula and cask queries, got %d calls", got)
+		t.Fatalf("expected brew formula and cask queries to run again after the lookup landed, got %d calls", got)
 	}
 	if len(result.Items) != 2 {
-		t.Fatalf("expected fresh brew formula and cask packages after stale retry, got %#v", result.Items)
+		t.Fatalf("expected fresh brew formula and cask packages after the blocked lookup landed, got %#v", result.Items)
 	}
 }
 

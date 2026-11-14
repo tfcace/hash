@@ -2,15 +2,18 @@
 package main
 
 import (
-	"bufio"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 
+	"charm.land/lipgloss/v2"
 	"github.com/tfcace/hash/internal/compat"
 	"github.com/tfcace/hash/internal/config"
+	"github.com/tfcace/hash/internal/tilde"
 )
 
 func printMigrateHelp() {
@@ -59,68 +62,72 @@ func runMigrate(args []string) int {
 
 func runMigrateStatus(w io.Writer, statePath string) error {
 	state, err := compat.LoadState(statePath)
-	if err != nil {
+	if errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("no migration found (run 'hash migrate' first)")
 	}
+	if err != nil {
+		return fmt.Errorf("%w (run 'hash migrate' to import again)", err)
+	}
 
-	fmt.Fprintf(w, "Migration from %s (shell: %s)\n\n", state.SourceFile, state.SourceShell)
-	fmt.Fprintf(w, "Imported:\n")
-	fmt.Fprintf(w, "  %d aliases\n", state.Summary.Aliases)
-	fmt.Fprintf(w, "  %d environment variables\n", state.Summary.Exports)
-	fmt.Fprintf(w, "  %d functions\n", state.Summary.Functions)
-	fmt.Fprintf(w, "\nSkipped: %d items\n", state.Summary.Skipped)
-	fmt.Fprintf(w, "\nLast import: %s\n", state.LastImport.Format("2006-01-02 15:04:05"))
+	names := make([]string, len(state.Paths))
+	for i, p := range state.Paths {
+		names[i] = tilde.Abbrev(p)
+	}
+	source := strings.Join(names, " + ")
+	if state.Status == compat.StatusDeclined {
+		fmt.Fprintf(w, "Migration from %s (shell: %s) was declined.\n", source, state.SourceShell)
+		fmt.Fprintf(w, "Run 'hash migrate' to import it.\n")
+		return nil
+	}
+
+	fmt.Fprintf(w, "Migration from %s (shell: %s)\n\n", source, state.SourceShell)
+	// The files are filtered again so what is shown is what the next
+	// startup loads and skips; no report: no file loads.
+	_, report, notLoaded := compat.FilterFiles(state.Paths, state.SourceShell, migrateShellDialect())
+	if report == nil {
+		fmt.Fprintf(w, "Imported: nothing, as no migrated file loads\n")
+	} else {
+		summary := report.Summary
+		fmt.Fprintf(w, "Imported:\n")
+		fmt.Fprintf(w, "  %s\n", compat.Count(summary.Aliases, "alias", "aliases"))
+		fmt.Fprintf(w, "  %s\n", compat.Count(summary.Exports, "environment variable", "environment variables"))
+		fmt.Fprintf(w, "  %s\n", compat.Count(summary.Functions, "function", "functions"))
+		fmt.Fprintf(w, "\nSkipped: %s\n", compat.Count(summary.Skipped, "item", "items"))
+		for _, item := range report.SkippedItems {
+			fmt.Fprintf(w, "  %s:%d: %s (%s)\n", tilde.Abbrev(item.File), item.Line, item.Content, item.Reason)
+		}
+	}
+	// The files the migrated files source are known once they ran: as the
+	// last startup found them.
+	notLoadedFiles := state.Import.SourcedNotLoaded
+	if report != nil {
+		for _, n := range notLoadedFiles {
+			report.NotLoad(n)
+		}
+		notLoadedFiles = report.NotLoaded
+	}
+	printNotLoaded(w, notLoaded, notLoadedFiles)
+	fmt.Fprintf(w, "\nLast import: %s\n", state.Import.Time.Format("2006-01-02 15:04:05"))
 
 	return nil
 }
 
-func runMigrateInteractive() int {
-	shellFiles := compat.DetectPreviousShellFiles()
-	if shellFiles.Shell == "" {
-		fmt.Println("No previous shell configuration found.")
-		fmt.Println("Use 'hash migrate --from zsh' or 'hash migrate --from bash' to import manually.")
-		return 0
+// printNotLoaded lists the migrated files that did not load: those the
+// filter failed on (errs), and those in which a statement does not parse.
+func printNotLoaded(w io.Writer, errs []error, files []compat.NotLoaded) {
+	if len(errs) == 0 && len(files) == 0 {
+		return
 	}
-
-	files := shellFiles.Files()
-	if len(files) == 0 {
-		fmt.Println("No previous shell configuration found.")
-		return 0
+	fmt.Fprintf(w, "\nNot loaded:\n")
+	for _, err := range errs {
+		fmt.Fprintf(w, "  %v\n", err)
 	}
+	for _, n := range files {
+		fmt.Fprintf(w, "  %s\n", n)
+	}
+}
 
-	fmt.Println(compat.FormatWelcomePromptFiles(shellFiles))
-
-	// Read user input
-	reader := bufio.NewReader(os.Stdin)
-	for {
-		fmt.Print("\nChoice [Y/n/?]: ")
-		input, err := reader.ReadString('\n')
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "hash migrate: %v\n", err)
-			return 1
-		}
-
-		input = strings.TrimSpace(strings.ToLower(input))
-
-		switch input {
-		case "", "y", "yes":
-			// Proceed with migration
-			return doMigrationFiles(shellFiles)
-
-		case "n", "no":
-			// User declined - save state so we don't ask again
-			state := &compat.State{
-				SourceFile:  strings.Join(files, ", "),
-				SourceFiles: files,
-				SourceShell: shellFiles.Shell,
-				Declined:    true,
-			}
-			_ = state.Save(compat.DefaultStatePath())
-			fmt.Println("\nNo problem! You can run 'hash migrate' anytime to load settings.")
-			return 0
-
-		case "?":
-			fmt.Println(`
+const migrateHelp = `
 Hash will source your existing config with compatibility filtering:
 
   ✓ Aliases (e.g., alias ll='ls -la')
@@ -136,85 +143,94 @@ and compdef remain compatibility no-ops.
 Run 'hash migrate status' to see what was skipped.
 
 Your original config files are not modified - Hash sources them
-directly with a compatibility layer.`)
+directly with a compatibility layer.
+`
 
-		default:
-			fmt.Println("Please enter Y, n, or ?")
+func runMigrateInteractive() int {
+	return migrateInteractive(os.Stdin, os.Stdout, compat.DefaultStatePath())
+}
+
+// migrateInteractive offers to import the previous shell's config. Answering
+// no records a decline, except that an existing import is kept: "no" to a
+// re-run of `hash migrate` means "change nothing", not "stop loading my config".
+func migrateInteractive(in io.Reader, out io.Writer, statePath string) int {
+	shellFiles := compat.DetectPreviousShellFiles()
+	files := shellFiles.Files()
+	if shellFiles.Shell == "" || len(files) == 0 {
+		fmt.Fprintln(out, "No previous shell configuration found.")
+		fmt.Fprintln(out, "Use 'hash migrate --from zsh' or 'hash migrate --from bash' to import manually.")
+		return 0
+	}
+
+	_, _ = lipgloss.Fprintln(out, compat.FormatWelcomePromptFiles(shellFiles))
+
+	switch compat.AskMigration(compat.LineReader(in), out, "Choice", migrateHelp) {
+	case compat.DecisionImport:
+		return importMigration(out, statePath, shellFiles.Shell, files)
+	case compat.DecisionDecline:
+		if state, err := compat.LoadState(statePath); err == nil && state.Status == compat.StatusImported {
+			fmt.Fprintln(out, "\nNothing changed: your existing migration is still loaded at startup.")
+			return 0
 		}
+		if err := compat.RecordDecline(statePath, shellFiles.Shell, files); err != nil {
+			fmt.Fprintf(os.Stderr, "hash migrate: could not save the answer: %v\n", err)
+			return 1
+		}
+		fmt.Fprintln(out, "\nNo problem! You can run 'hash migrate' anytime to load settings.")
+		return 0
+	default:
+		fmt.Fprintln(os.Stderr, "hash migrate: no answer, nothing changed")
+		return 1
 	}
 }
 
-func doMigrationFiles(shellFiles compat.ShellFiles) int {
-	files := shellFiles.Files()
-	fmt.Print("\nAnalyzing config files... ")
-	targetDialect := migrateShellDialect()
+// importMigration filters files to report what will load and records the
+// import; the files themselves are sourced by the next interactive startup.
+// Typed in hash, it runs in a child process: nothing loads into the
+// session it was typed in, so it says the import loads in new sessions.
+func importMigration(out io.Writer, statePath, shell string, paths []string) int {
+	fmt.Fprint(out, "\nAnalyzing config files... ")
 
-	// Filter all files and merge reports (actual execution happens at shell startup)
-	var totalReport *compat.Report
-	for _, file := range files {
-		_, report, err := compat.FilterWithDialect(file, shellFiles.Shell, targetDialect)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "\nhash migrate: %s: %v\n", file, err)
-			continue
-		}
-		if totalReport == nil {
-			totalReport = report
-		} else {
-			// Merge summaries
-			totalReport.Summary.Aliases += report.Summary.Aliases
-			totalReport.Summary.Exports += report.Summary.Exports
-			totalReport.Summary.Functions += report.Summary.Functions
-			totalReport.Summary.Skipped += report.Summary.Skipped
-			totalReport.ImportedItems = append(totalReport.ImportedItems, report.ImportedItems...)
-			totalReport.SkippedItems = append(totalReport.SkippedItems, report.SkippedItems...)
-		}
+	files, report, errs := compat.FilterFiles(paths, shell, migrateShellDialect())
+	for _, err := range errs {
+		fmt.Fprintf(os.Stderr, "\nhash migrate: %v\n", err)
 	}
-
-	if totalReport == nil {
+	if report == nil {
 		fmt.Fprintf(os.Stderr, "\nhash migrate: no files could be loaded\n")
 		return 1
 	}
 
-	fmt.Println("done!")
-	fmt.Println()
-	totalReport.SourceFile = strings.Join(files, " + ")
-	fmt.Println(compat.FormatImportSummary(totalReport))
+	fmt.Fprintln(out, "done!")
+	fmt.Fprintln(out)
+	inHash := os.Getenv("HASH_SHELL") == "1"
+	_, _ = lipgloss.Fprintln(out, compat.FormatImportSummary(report, inHash))
 
-	// Create .hashrc with source lines for all files
-	home, _ := os.UserHomeDir()
-	hashrcPath := filepath.Join(home, ".hashrc")
-	content := compat.FormatHashrcCommentFiles(files)
-	if err := os.WriteFile(hashrcPath, []byte(content), 0o644); err != nil { //nolint:gosec // G306: user shell config file
-		fmt.Fprintf(os.Stderr, "hash migrate: could not create .hashrc: %v\n", err)
-	} else {
-		fmt.Printf("Created %s\n", hashrcPath)
+	created, hashrcErr, err := compat.RecordImport(statePath, shell, files, report)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "hash migrate: could not save the migration, nothing was imported: %v\n", err)
+		return 1
 	}
-
-	// Save state
-	state := &compat.State{
-		SourceFile:  strings.Join(files, ", "),
-		SourceFiles: files,
-		SourceShell: shellFiles.Shell,
-		SourceMtime: totalReport.SourceMtime,
-		LastImport:  totalReport.ImportTime,
-		Summary:     totalReport.Summary,
+	if created {
+		fmt.Fprintf(out, "Created %s\n", compat.HashrcPath())
 	}
-	if err := state.Save(compat.DefaultStatePath()); err != nil {
-		fmt.Fprintf(os.Stderr, "hash migrate: warning: could not save state: %v\n", err)
+	if hashrcErr != nil {
+		fmt.Fprintf(os.Stderr, "hash migrate: warning: %v\n", hashrcErr)
 	}
-
+	if inHash {
+		fmt.Fprintln(out, "Loads in new hash sessions: open a new tab, or run 'exec hash -l'.")
+	}
 	return 0
 }
 
-func runMigrateFrom(shell string, args []string) int {
+func runMigrateFrom(shell string, _ []string) int {
 	home, _ := os.UserHomeDir()
 	var rcFile string
 
 	switch shell {
 	case "zsh":
-		rcFile = home + "/.zshrc"
+		rcFile = filepath.Join(home, ".zshrc")
 	case "bash":
-		rcFile = home + "/.bashrc"
+		rcFile = filepath.Join(home, ".bashrc")
 	default:
 		fmt.Fprintf(os.Stderr, "hash migrate: unsupported shell %q (use zsh or bash)\n", shell)
 		return 1
@@ -225,35 +241,14 @@ func runMigrateFrom(shell string, args []string) int {
 		return 1
 	}
 
-	_, report, err := compat.FilterWithDialect(rcFile, shell, migrateShellDialect())
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "hash migrate: %v\n", err)
-		return 1
-	}
-
-	fmt.Println(compat.FormatImportSummary(report))
-
-	// Save state
-	state := &compat.State{
-		SourceFile:  rcFile,
-		SourceFiles: []string{rcFile},
-		SourceShell: shell,
-		SourceMtime: report.SourceMtime,
-		LastImport:  report.ImportTime,
-		Summary:     report.Summary,
-	}
-	if err := state.Save(compat.DefaultStatePath()); err != nil {
-		fmt.Fprintf(os.Stderr, "hash migrate: warning: could not save state: %v\n", err)
-	}
-
-	return 0
+	return importMigration(os.Stdout, compat.DefaultStatePath(), shell, []string{rcFile})
 }
 
+// migrateShellDialect returns the configured parser dialect. Load always
+// returns a usable config, keeping the sections that decoded, so a broken
+// unrelated section must not reset the dialect to bash.
 func migrateShellDialect() string {
-	cfg, err := config.Load(config.Dir())
-	if err != nil {
-		return "bash"
-	}
+	cfg := config.Load(config.Dir())
 	if strings.TrimSpace(cfg.Shell.Dialect) == "" {
 		return "bash"
 	}

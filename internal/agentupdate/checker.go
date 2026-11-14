@@ -18,7 +18,8 @@ const defaultEvery = 24 * time.Hour
 
 // Checker decides whether to ask the registry and whether to tell the user.
 // Run never fails: when the registry is unreachable the stored answer
-// stands, and with nothing stored it stays quiet.
+// stands, and with nothing stored it stays quiet. The registry is asked at
+// most once a day, answered or not.
 type Checker struct {
 	StatePath string
 	Installed Install
@@ -40,8 +41,13 @@ func (c Checker) Run(ctx context.Context) (Notice, bool) {
 	// A zero or future CheckedAt (first run, clock moved back) counts as due.
 	due := st.CheckedAt.IsZero() || st.CheckedAt.After(t) || t.Sub(st.CheckedAt) >= defaultEvery
 	if c.Fetcher != nil && due {
-		if latest, err := c.Fetcher.Latest(ctx, Package); err == nil {
-			st.Latest = latest
+		latest, err := c.Fetcher.Latest(ctx, Package)
+		switch {
+		case err == nil:
+			st.Latest, st.CheckedAt = latest, t
+		case ctx.Err() == nil:
+			// The registry was asked and did not answer: that is the day's
+			// request too, or an offline machine would ask at every start.
 			st.CheckedAt = t
 		}
 	}

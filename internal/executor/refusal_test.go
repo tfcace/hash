@@ -50,6 +50,39 @@ func TestExecute_RefusalSetsExitStatusVariable(t *testing.T) {
 	}
 }
 
+// A refused command whose stderr is not the line's own (2>/dev/null, 2>&1,
+// a pipe) gets the plain message there, as bash's: no banner, and it is
+// not one of the line's refusals. conda's and pyenv's init lines
+// (`x=$(nosuch 2>/dev/null)`) drew a banner at every start.
+func TestExecute_RefusalBannerOnlyOnTheLinesStderr(t *testing.T) {
+	for _, tt := range []struct {
+		line, stdout string
+		banners      int
+	}{
+		{"nosuch-hash-a 2>/dev/null; echo st=$?", "st=127\n", 0},
+		{"x=$(nosuch-hash-a 2>/dev/null); echo st=$?", "st=127\n", 0},
+		{"nosuch-hash-a 2>&1 | tr a A", "hAsh: nosuch-hAsh-A: commAnd not found\n", 0},
+		{"f() { nosuch-hash-a; }; f 2>/dev/null; echo st=$?", "st=127\n", 0},
+		{"x=$(nosuch-hash-a); echo st=$?", "st=127\n", 1},
+		{"nosuch-hash-a; { nosuch-hash-b; } 2>/dev/null", "", 1},
+	} {
+		e := New()
+		var seen []error
+		e.SetRefusalHandler(func(err error) { seen = append(seen, err) })
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		var stdout, stderr bytes.Buffer
+		res, err := e.Execute(ctx, tt.line, &stdout, &stderr)
+		cancel()
+		if err != nil {
+			t.Fatalf("%q: %v", tt.line, err)
+		}
+		if stdout.String() != tt.stdout || stderr.Len() != 0 || len(seen) != tt.banners || len(res.Refusals) != tt.banners {
+			t.Errorf("%q: stdout %q stderr %q, %d banners, refusals %v; want stdout %q, %d banners and refusals",
+				tt.line, stdout.String(), stderr.String(), len(seen), res.Refusals, tt.stdout, tt.banners)
+		}
+	}
+}
+
 // The shell installs a handler to render its own banner at the point of
 // refusal; with one installed the executor prints nothing itself.
 func TestExecute_RefusalHandlerReplacesDefaultMessage(t *testing.T) {

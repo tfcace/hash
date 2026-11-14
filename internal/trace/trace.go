@@ -11,18 +11,21 @@ import (
 	"time"
 )
 
-var global *Tracer
+// global is the process tracer: nil until Init enables tracing and again
+// after Close. Readers load it once; a Tracer that Close detached may still be
+// held by an in-flight Emit, which then finds it closed and drops the event.
+var global atomic.Pointer[Tracer]
 
-// Tracer writes trace events to a file.
+// Tracer writes trace events to a file. It is on while file is set; Close,
+// or a failed write, turns it off for good.
 type Tracer struct {
 	mu            sync.Mutex
-	file          *os.File
+	file          *os.File // nil once off
 	subsystems    map[string]bool
 	level         Level
 	startTime     time.Time
 	lastTime      sync.Map // subsystem -> time.Time
 	eventsWritten atomic.Int64
-	disabled      atomic.Bool // Set on write error
 }
 
 // Init initializes the global tracer from environment variables.
@@ -75,7 +78,9 @@ func Init() error {
 		level:      level,
 		startTime:  time.Now(),
 	}
-	global = t
+	if old := global.Swap(t); old != nil {
+		old.close()
+	}
 
 	// Write start entry
 	subList := make([]string, 0, len(subsystems))
@@ -89,42 +94,39 @@ func Init() error {
 
 // Close closes the global tracer.
 func Close() {
-	if global == nil {
+	if t := global.Swap(nil); t != nil {
+		t.close()
+	}
+}
+
+// close writes the end entry and closes the file; later writes are dropped.
+func (t *Tracer) close() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.file == nil {
 		return
 	}
-
-	duration := time.Since(global.startTime).Milliseconds()
-	global.writeEntry(EndEntry(duration, global.eventsWritten.Load()))
-	if err := global.file.Close(); err != nil {
-		// Best-effort close for tracing output; error is handled explicitly.
-		_ = err
-	}
-	global = nil
+	t.writeEntryLocked(EndEntry(time.Since(t.startTime).Milliseconds(), t.eventsWritten.Load()))
+	_ = t.file.Close() // best effort
+	t.file = nil
 }
 
 // Enabled returns true if the subsystem is being traced.
 func Enabled(subsystem string) bool {
-	if global == nil {
+	return global.Load().enabled(subsystem)
+}
+
+func (t *Tracer) enabled(subsystem string) bool {
+	if t == nil {
 		return false
 	}
-	if global.subsystems["all"] {
-		return true
-	}
-	return global.subsystems[subsystem]
+	return t.subsystems["all"] || t.subsystems[subsystem]
 }
 
 // Emit writes a trace event.
 func Emit(subsystem, event string, level Level, data any) {
-	if global == nil {
-		return
-	}
-	if global.disabled.Load() {
-		return
-	}
-	if !Enabled(subsystem) {
-		return
-	}
-	if !levelEnabled(global.level, level) {
+	t := global.Load()
+	if t == nil || !t.enabled(subsystem) || !levelEnabled(t.level, level) {
 		return
 	}
 
@@ -132,10 +134,10 @@ func Emit(subsystem, event string, level Level, data any) {
 
 	// Calculate delta from last event in this subsystem
 	var deltaMs float64
-	if last, ok := global.lastTime.Load(subsystem); ok {
+	if last, ok := t.lastTime.Load(subsystem); ok {
 		deltaMs = float64(now.Sub(last.(time.Time)).Microseconds()) / 1000.0
 	}
-	global.lastTime.Store(subsystem, now)
+	t.lastTime.Store(subsystem, now)
 
 	entry := Entry{
 		Timestamp: now.UTC().Format(time.RFC3339Nano),
@@ -147,12 +149,20 @@ func Emit(subsystem, event string, level Level, data any) {
 		Data:      data,
 	}
 
-	global.writeEntry(entry)
+	t.writeEntry(entry)
 }
 
 func (t *Tracer) writeEntry(e Entry) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	t.writeEntryLocked(e)
+}
+
+// writeEntryLocked writes e unless the tracer is off. Must hold mu.
+func (t *Tracer) writeEntryLocked(e Entry) {
+	if t.file == nil {
+		return // off
+	}
 
 	data, err := json.Marshal(e)
 	if err != nil {
@@ -164,9 +174,10 @@ func (t *Tracer) writeEntry(e Entry) {
 	buf.WriteByte('\n')
 
 	if _, err := t.file.Write(buf.Bytes()); err != nil {
-		// Log once and disable
-		t.disabled.Store(true)
+		// Say so once and turn off
 		os.Stderr.WriteString("hash: trace write failed, disabling: " + err.Error() + "\n")
+		_ = t.file.Close()
+		t.file = nil
 		return
 	}
 

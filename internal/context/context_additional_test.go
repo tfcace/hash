@@ -285,38 +285,6 @@ func TestCollection_SelectedItems(t *testing.T) {
 	}
 }
 
-// TestCollection_Serialize_CategoryOrder tests category ordering in serialization.
-func TestCollection_Serialize_CategoryOrder(t *testing.T) {
-	c := NewCollection()
-	// Add items in reverse category order
-	c.Add(Item{Category: CategoryCustom, Key: "custom", Value: "val", Selected: true})
-	c.Add(Item{Category: CategoryEnv, Key: "env", Value: "val", Selected: true})
-	c.Add(Item{Category: CategoryHistory, Key: "history", Value: "val", Selected: true})
-	c.Add(Item{Category: CategoryAutoDetect, Key: "auto", Value: "val", Selected: true})
-
-	serialized := c.Serialize()
-
-	// AutoDetect should come before History
-	autoIdx := strings.Index(serialized, "Auto-detected")
-	histIdx := strings.Index(serialized, "History")
-	envIdx := strings.Index(serialized, "Environment")
-	customIdx := strings.Index(serialized, "Custom")
-
-	if autoIdx == -1 || histIdx == -1 || envIdx == -1 || customIdx == -1 {
-		t.Fatalf("Serialized output missing categories: %s", serialized)
-	}
-
-	if autoIdx > histIdx {
-		t.Error("AutoDetect should come before History")
-	}
-	if histIdx > envIdx {
-		t.Error("History should come before Environment")
-	}
-	if envIdx > customIdx {
-		t.Error("Environment should come before Custom")
-	}
-}
-
 // TestCollection_Add_SizeCalculation tests automatic size calculation.
 func TestCollection_Add_SizeCalculation(t *testing.T) {
 	c := NewCollection()

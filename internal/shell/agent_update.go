@@ -6,17 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"os/exec"
-	"os/signal"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/tfcace/hash/internal/agent"
 	"github.com/tfcace/hash/internal/agentupdate"
-	"github.com/tfcace/hash/internal/progress"
 	"github.com/tfcace/hash/internal/version"
 )
 
@@ -33,7 +29,7 @@ func agentUpdateStatePath() string {
 // A notice that the adapter has caught up with since the check ran (model
 // update at the first prompt, npm run by hand elsewhere) is dropped unseen.
 func (s *Shell) flushUpdateNotice(now time.Time) {
-	if s.updateNotices == nil || s.fixes.SuggestedFix() != "" {
+	if s.updateNotices == nil || s.offer.kind != offerNone {
 		return
 	}
 	select {
@@ -46,7 +42,7 @@ func (s *Shell) flushUpdateNotice(now time.Time) {
 			h = NewErrorHandler()
 		}
 		h.showUpdateAvailable(n, now)
-		s.updateGhost = updateCommand
+		s.offer = promptOffer{kind: offerUpdate, line: updateCommand}
 	default:
 	}
 }
@@ -151,15 +147,13 @@ func (s *Shell) updateStatePath() string {
 	return agentUpdateStatePath()
 }
 
-// oscProgress is the OSC 9;4 progress channel of the response UI, or a
-// disabled one when the shell has no UI (tests).
-func (s *Shell) oscProgress() *progress.OSC {
-	if s.responseUI != nil && s.responseUI.progress != nil {
-		return s.responseUI.progress
+// oscProgress is the response UI's OSC 9;4 progress bar, or nil (which
+// reports nothing) when the shell has no UI (tests).
+func (s *Shell) oscProgress() *progressBar {
+	if s.responseUI == nil {
+		return nil
 	}
-	o := progress.NewOSC(io.Discard)
-	o.SetEnabled(false)
-	return o
+	return s.responseUI.progress
 }
 
 // runModelUpdate updates the Claude adapter so the model list is current: it
@@ -172,23 +166,11 @@ func (s *Shell) runModelUpdate(ctx context.Context, out io.Writer) error {
 		return err
 	}
 
-	// Outside a ?? turn hash has no SIGINT handler, so a Ctrl-C while npm
-	// runs would be Go's default: hash exits. Mirror the ?? turn instead:
-	// cancel the install's context, which makes ExecRunner SIGINT npm (it
-	// got the terminal's SIGINT too), and the failure branch below names
-	// the manual command.
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT)
-	defer signal.Stop(sigCh)
-	go func() {
-		select {
-		case <-sigCh:
-			cancel()
-		case <-ctx.Done():
-		}
-	}()
+	// A Ctrl-C while npm runs cancels the install's context, which makes
+	// ExecRunner SIGINT npm (it got the terminal's SIGINT too), and the
+	// failure branch below names the manual command.
+	ctx, done := s.interrupts.interruptible(ctx)
+	defer done()
 
 	before := s.agentHandler.AvailableModels()
 	prog := s.oscProgress()
@@ -197,13 +179,13 @@ func (s *Shell) runModelUpdate(ctx context.Context, out io.Writer) error {
 	fmt.Fprintf(out, "\033[36m◐ Updating %s\033[0m\n", agentupdate.DisplayName)
 	fmt.Fprintf(out, "  \033[90m$ %s\033[0m\n", cmd)
 	s.agentStatus.working("Updating " + agentupdate.DisplayName)
-	prog.Start()
+	prog.start()
 
 	npmOut := newIndentWriter(out)
 	res, err := installer.Install(ctx, npmOut)
 	npmOut.finish()
 	if err != nil {
-		failProgress(prog)
+		prog.fail()
 		s.agentStatus.failed("Update failed")
 		printInstallFailure(out, err, cmd)
 		return err
@@ -220,18 +202,18 @@ func (s *Shell) runModelUpdate(ctx context.Context, out io.Writer) error {
 		case latest == "":
 			// Offline right after npm: nothing changed and nothing can be
 			// confirmed, so say that instead of a ✓ and a pointless restart.
-			prog.Done()
+			prog.done()
 			fmt.Fprintf(out, "\n\033[33m⚠\033[0m %s %s unchanged · could not reach the registry to confirm it is current; try again online\n",
 				agentupdate.DisplayName, res.After.Version)
 			s.agentStatus.done(agentupdate.DisplayName + " unchanged")
 			return nil
 		case latest == res.After.Version:
-			prog.Done()
+			prog.done()
 			fmt.Fprintf(out, "\n\033[32m✓\033[0m %s %s · already current\n", agentupdate.DisplayName, res.After.Version)
 			s.agentStatus.done(agentupdate.DisplayName + " already current")
 			return nil
 		case agentupdate.Compare(latest, res.After.Version) > 0:
-			failProgress(prog)
+			prog.fail()
 			s.agentStatus.failed("Update did not take effect")
 			fmt.Fprintf(out, "\033[33m⚠ %s on PATH still runs %s\033[0m from %s\n", agentCfg.Command, res.After.Version, res.After.Dir)
 			if prefix := installer.GlobalPrefix(ctx); prefix != "" {
@@ -279,14 +261,14 @@ func (s *Shell) lookupLatest(ctx context.Context) string {
 // restartAfterUpdate brings the new adapter into service and shows what it
 // offers. A restart failure is not an install failure: the version is on
 // disk and the next ?? starts it, so the outcome is still a success.
-func (s *Shell) restartAfterUpdate(ctx context.Context, out io.Writer, prog *progress.OSC, before []agent.ModelOption, res agentupdate.Result) error {
+func (s *Shell) restartAfterUpdate(ctx context.Context, out io.Writer, prog *progressBar, before []agent.ModelOption, res agentupdate.Result) error {
 	installed := agentupdate.DisplayName
 	if res.After.Version != "" {
 		installed += " " + res.After.Version
 	}
 	fmt.Fprint(out, "  \033[90mrestarting agent\033[0m\n")
 	err := s.agentHandler.Restart(ctx)
-	prog.Done()
+	prog.done()
 	if err != nil {
 		fmt.Fprintf(out, "\n\033[32m✓\033[0m %s installed · it loads on your next ??\n", installed)
 		fmt.Fprintf(out, "  \033[90m(agent restart failed: %v)\033[0m\n", err)
@@ -311,13 +293,6 @@ func printInstallFailure(out io.Writer, err error, cmd string) {
 	default:
 		fmt.Fprintf(out, "\033[31m✗ update failed\033[0m · %v\n  run it yourself: %s\n", err, cmd)
 	}
-}
-
-// failProgress shows the error badge briefly and then clears it, the way
-// progress.Tracker does; a bare Error() leaves the terminal's badge red.
-func failProgress(prog *progress.OSC) {
-	prog.Error()
-	time.AfterFunc(500*time.Millisecond, prog.Done)
 }
 
 // renderModelsCard lists the models the agent offers after an update, the

@@ -24,6 +24,19 @@ The prompt is a lightweight shell prompt, not a separate full-screen mode. The u
 - Redirect within the conversation, such as "let's pause the game and list my kubernetes contexts".
 - Submit an empty line, press Esc, or press Ctrl+C to leave the conversation.
 
+Two ways out are less obvious, and deliberate:
+
+- Typing early leaves the conversation. Keys typed while the agent is still
+  writing, its question included, are typeahead for the next prompt, as
+  everywhere else in hash: once the agent's answer is over the conversation
+  ends and the typed text is at the shell prompt, not in the reply box. Wait
+  for the `you>` prompt to reply.
+- A follow-up that fails or is canceled (Ctrl+C or Esc while it streams)
+  ends the conversation, and the whole `??` line exits 1, even when an
+  earlier reply was complete: the line's status says whether the agent's
+  last request finished. A line the shell's ending cuts off (a fatal
+  signal) ends with 128+signal instead.
+
 ## Agent Continuity
 
 ACP transports already keep a protocol session between prompts. Follow-up turns should send a small instruction frame plus the user's latest message through that same session, without duplicating the transcript. The frame tells the agent that side requests are allowed, tool use is appropriate when needed, and the prior conversation state should be preserved.

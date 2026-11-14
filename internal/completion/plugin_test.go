@@ -3,6 +3,7 @@ package completion
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -249,7 +250,7 @@ cache_ttl = "0s"
 		return []string{"web"}, nil
 	})
 	now := time.Now()
-	c.now = func() time.Time { return now }
+	c.sources.now = func() time.Time { return now }
 
 	line := "docker rm "
 	if _, err := c.Complete(context.Background(), line, len(line)); err != nil {
@@ -293,7 +294,7 @@ cache_ttl = "0s"
 	if err != nil {
 		t.Fatalf("Complete: %v", err)
 	}
-	if !result.Pending {
+	if result.Outcome() != OutcomePending {
 		t.Fatal("precondition: slow cold source should report pending")
 	}
 
@@ -398,6 +399,35 @@ func TestPluginCompleter_FuzzyModeKeepsNonPrefixCandidates(t *testing.T) {
 	}
 }
 
+// Fuzzy mode matches the whole source, not its first 200 lines.
+func TestPluginCompleter_FuzzyMatchesPastTheFirst200Lines(t *testing.T) {
+	lines := make([]string, 300)
+	for i := range lines {
+		lines[i] = fmt.Sprintf("box%03d\t...", i)
+	}
+	c := newTestPluginCompleter(t, testPluginSpec, staticRunner(lines))
+	c.SetFuzzyMode(true)
+	r := NewRouter()
+	r.SetFuzzy(true)
+	r.Register(c, PriorityPlugin)
+
+	line := "docker rm box29"
+	got, err := r.Complete(context.Background(), line, len(line))
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if got.Outcome() == OutcomePending {
+		got, err = r.Complete(context.Background(), line, len(line))
+	}
+	values := map[string]bool{}
+	for _, it := range got.Items {
+		values[it.Value] = true
+	}
+	if err != nil || !values["box290"] || !values["box029"] {
+		t.Fatalf("%q: items %+v (err %v), want box290 and box029", line, got.Items, err)
+	}
+}
+
 func TestPluginCompleter_NoMatchCases(t *testing.T) {
 	c := newTestPluginCompleter(t, testPluginSpec, staticRunner([]string{"abc123\tweb"}))
 
@@ -467,7 +497,7 @@ exec = ["docker", "ps", "-a"]
 	if err != nil {
 		t.Fatalf("Complete(%q): %v", line, err)
 	}
-	if len(result.Items) != 0 || result.Handled || result.Pending {
+	if len(result.Items) != 0 || result.Outcome() == OutcomeNoMatches || result.Outcome() == OutcomePending {
 		t.Errorf("Complete(%q) = %+v, want silence while typing a flag value", line, result)
 	}
 }
@@ -708,7 +738,7 @@ func waitForCalls(t *testing.T, calls *atomic.Int64, want int64) {
 // A matched rule whose source answered still owns the argument even when no
 // candidate survives the filter, so the router doesn't offer filenames for
 // something like `docker rm nonexistent<TAB>`.
-func TestPluginCompleter_MatchedRuleWithZeroCandidatesIsHandled(t *testing.T) {
+func TestPluginCompleter_MatchedRuleWithZeroCandidatesIsNoMatches(t *testing.T) {
 	c := newTestPluginCompleter(t, testPluginSpec, staticRunner([]string{"abc123\tweb"}))
 
 	line := "docker rm zzz"
@@ -719,8 +749,8 @@ func TestPluginCompleter_MatchedRuleWithZeroCandidatesIsHandled(t *testing.T) {
 	if len(result.Items) != 0 {
 		t.Fatalf("items = %+v, want none", result.Items)
 	}
-	if !result.Handled {
-		t.Error("a matched rule with a successful source must report Handled")
+	if result.Outcome() != OutcomeNoMatches {
+		t.Error("a matched rule with a successful source must report no matches")
 	}
 }
 
@@ -1233,7 +1263,7 @@ type testClock struct{ offset atomic.Int64 }
 
 func newTestClock(c *PluginCompleter) *testClock {
 	clock := &testClock{}
-	c.now = func() time.Time { return time.Now().Add(time.Duration(clock.offset.Load())) }
+	c.sources.now = func() time.Time { return time.Now().Add(time.Duration(clock.offset.Load())) }
 	return clock
 }
 
@@ -1450,7 +1480,7 @@ func TestPluginCompleter_ReportsPendingWhileSourceRuns(t *testing.T) {
 	if len(result.Items) != 0 {
 		t.Fatalf("items = %+v, want none while loading", result.Items)
 	}
-	if !result.Pending {
+	if result.Outcome() != OutcomePending {
 		t.Error("result should be marked pending while the source is still running")
 	}
 }
@@ -1464,7 +1494,7 @@ func TestPluginCompleter_NotPendingWhenNoRuleMatches(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Complete: %v", err)
 	}
-	if result.Pending {
+	if result.Outcome() == OutcomePending {
 		t.Error("no rule matched, so nothing should be pending")
 	}
 }
@@ -1498,18 +1528,16 @@ func TestPluginCompleter_FailureIsCachedBriefly(t *testing.T) {
 		return nil, errors.New("daemon down")
 	})
 	now := time.Now()
-	c.now = func() time.Time { return now }
+	c.sources.now = func() time.Time { return now }
 
 	line := "docker rm "
-	rule := c.entries["docker"].rules[0]
-	first := c.startSourceCall(sourceCacheKey(rule.Source.Exec, c.getwd()), rule, rule.Source.Exec, c.getwd())
-	<-first.done
+	_, _ = c.Complete(context.Background(), line, len(line)) // fails fast
 
 	result, err := c.Complete(context.Background(), line, len(line))
 	if err != nil {
 		t.Fatalf("Complete: %v", err)
 	}
-	if result.Pending {
+	if result.Outcome() == OutcomePending {
 		t.Error("a recent failure must not report Pending again")
 	}
 	if len(result.Items) != 0 {
@@ -1625,7 +1653,7 @@ func TestBuiltinHash_CompletionsSubcommands(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Complete: %v", err)
 	}
-	if len(result.Items) != 0 || result.Handled || result.Pending {
+	if len(result.Items) != 0 || result.Outcome() == OutcomeNoMatches || result.Outcome() == OutcomePending {
 		t.Fatalf("result = %+v, want fallthrough after the subcommand", result)
 	}
 }
@@ -1666,8 +1694,7 @@ func TestPluginCompleter_EmitsTraceEvents(t *testing.T) {
 		`"event":"plugin_source_start"`,
 		`"event":"plugin_source_done"`,
 		`"event":"plugin_lookup"`,
-		`"outcome":"live"`,
-		`"outcome":"cache_hit"`,
+		`"outcome":"fresh"`,
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("trace missing %s:\n%s", want, text)

@@ -90,7 +90,10 @@ func (s *Store) migrate() error {
 	);
 
 	CREATE INDEX IF NOT EXISTS idx_commands_timestamp ON commands(timestamp DESC);
-	CREATE INDEX IF NOT EXISTS idx_commands_command ON commands(command);
+	-- A command's runs, latest first (Search's Unique); it replaced an
+	-- index on command alone.
+	CREATE INDEX IF NOT EXISTS idx_commands_latest ON commands(command, timestamp DESC, id DESC);
+	DROP INDEX IF EXISTS idx_commands_command;
 	CREATE INDEX IF NOT EXISTS idx_commands_is_sudo ON commands(is_sudo);
 	CREATE INDEX IF NOT EXISTS idx_agent_interactions_command ON agent_interactions(command_id);
 	`
@@ -170,6 +173,12 @@ func (s *Store) Search(opts SearchOptions) ([]Command, error) {
 	if !opts.Before.IsZero() {
 		conditions = append(conditions, "c.timestamp < ?")
 		args = append(args, opts.Before)
+	}
+
+	if opts.Unique {
+		// The command's latest run, one seek of idx_commands_latest.
+		conditions = append(conditions, `c.id = (SELECT n.id FROM commands n WHERE n.command = c.command
+			ORDER BY n.timestamp DESC, n.id DESC LIMIT 1)`)
 	}
 
 	if len(conditions) > 0 {

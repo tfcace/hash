@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/tfcace/hash/internal/tilde"
 	"github.com/tfcace/hash/internal/version"
 )
 
@@ -95,9 +96,9 @@ func (s *Shell) builtinIssue(args []string) error {
 	// Open editor
 	editor := s.findEditor()
 	cmd := exec.Command(editor, tmpPath)
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	cmd.Stdin = s.in()
+	cmd.Stdout = s.out()
+	cmd.Stderr = s.errOut()
 
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("editor failed: %w", err)
@@ -108,20 +109,20 @@ func (s *Shell) builtinIssue(args []string) error {
 	newContent, _ := os.ReadFile(tmpPath)
 
 	if origInfo.ModTime().Equal(newInfo.ModTime()) || bytes.Equal(origContent, newContent) {
-		fmt.Println("Aborting issue (no changes)")
+		fmt.Fprintln(s.out(), "Aborting issue (no changes)")
 		return nil
 	}
 
 	// Check if content is essentially empty (just template)
 	if s.isEmptyIssue(string(newContent)) {
-		fmt.Println("Aborting issue (empty content)")
+		fmt.Fprintln(s.out(), "Aborting issue (empty content)")
 		return nil
 	}
 
 	// Parse the edited content
 	issueTitle, issueBody := s.parseIssueContent(string(newContent))
 	if issueTitle == "" {
-		fmt.Println("Aborting issue (no title)")
+		fmt.Fprintln(s.out(), "Aborting issue (no title)")
 		return nil
 	}
 
@@ -144,17 +145,17 @@ func (s *Shell) buildIssueContext(useLast bool) issueContext {
 		stderr:   "(none)",
 	}
 
-	if useLast || s.lastCommand != "" {
-		if s.lastCommand != "" {
-			ctx.command = "`" + s.lastCommand + "`"
+	if useLast || s.last.command != "" {
+		if s.last.command != "" {
+			ctx.command = "`" + s.last.command + "`"
 		}
-		ctx.exitCode = s.lastExitCode
-		if s.lastCwd != "" {
+		ctx.exitCode = s.last.exitCode
+		if s.last.cwd != "" {
 			// Shorten home directory
-			ctx.cwd = s.shortenPath(s.lastCwd)
+			ctx.cwd = s.shortenPath(s.last.cwd)
 		}
-		if s.lastStderr != "" {
-			ctx.stderr = s.lastStderr
+		if s.last.stderr != "" {
+			ctx.stderr = s.last.stderr
 		}
 	}
 
@@ -162,11 +163,7 @@ func (s *Shell) buildIssueContext(useLast bool) issueContext {
 }
 
 func (s *Shell) shortenPath(path string) string {
-	home, _ := os.UserHomeDir()
-	if home != "" && strings.HasPrefix(path, home) {
-		return "~" + path[len(home):]
-	}
-	return path
+	return tilde.Abbrev(path)
 }
 
 func (s *Shell) findEditor() string {
@@ -263,9 +260,9 @@ func (s *Shell) submitIssue(title, body string) error {
 		"--title", title,
 		"--body", body,
 	)
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	cmd.Stdin = s.in()
+	cmd.Stdout = s.out()
+	cmd.Stderr = s.errOut()
 
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("failed to create issue: %w", err)
@@ -275,7 +272,7 @@ func (s *Shell) submitIssue(title, body string) error {
 }
 
 func (s *Shell) issueHelp() error {
-	fmt.Println(`Usage: issue [OPTIONS] [TITLE]
+	fmt.Fprintln(s.out(), `Usage: issue [OPTIONS] [TITLE]
 
 Submit an issue to the Hash GitHub repository.
 

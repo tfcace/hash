@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 const validKubectlTOML = `[plugin]
@@ -408,5 +410,56 @@ func TestCollectToolHelp_FallsBackToHelpSubcommand(t *testing.T) {
 	out := collectToolHelp(context.Background(), tool)
 	if !strings.Contains(out, "from help subcommand") {
 		t.Errorf("collectToolHelp = %q, want fallback output", out)
+	}
+}
+
+// A review that accepts a draft that failed validation (nothing to save)
+// gets the agent's retry, told what was wrong, not the first prompt again.
+func TestPluginGenerator_AcceptingAnInvalidDraftAsksForAFixedOne(t *testing.T) {
+	var prompts []string
+	replies := []string{"not toml at all", validKubectlTOML}
+	gen, _, _ := newTestGenerator(t, func(ctx context.Context, prompt string) (string, error) {
+		prompts = append(prompts, prompt)
+		reply := replies[0]
+		replies = replies[1:]
+		return reply, nil
+	}, accept(), accept())
+
+	if _, err := gen.run(context.Background(), "kubectl", ""); err != nil {
+		t.Fatal(err)
+	}
+	if len(prompts) != 2 {
+		t.Fatalf("prompts = %d, want 2", len(prompts))
+	}
+	if prompts[1] == prompts[0] {
+		t.Error("the invalid draft was silently re-asked with the first prompt")
+	}
+}
+
+// Lines typed ahead of the review prompt (while the agent drafts) never
+// answer it: they are the next shell prompt's, and only a line typed at the
+// review once the keys settled does. The review used to read them
+// first, so a stray "a⏎" accepted a draft not yet seen and overwrote the
+// spec.
+func TestTerminalReview_TypeaheadNeverAnswers(t *testing.T) {
+	t.Parallel()
+	sh, typing := terminalShell(t)
+	typing.WriteString("a\r")
+	time.Sleep(20 * time.Millisecond)
+	review := newLineReview(func() (string, bool) { return sh.keyboard().answerLine(questionCtx(t), io.Discard) }, io.Discard)
+	got := make(chan genChoice, 1)
+	go func() { got <- review(true) }()
+	time.Sleep(30 * time.Millisecond)
+	typing.WriteString("q\r")
+	select {
+	case c := <-got:
+		if c.action != genQuit {
+			t.Fatalf("review = %+v, want quit, typed at the review", c)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("q did not answer the review")
+	}
+	if line := nextLine(t, sh); line != "a" {
+		t.Errorf("next prompt ran %q, want the line typed ahead, \"a\"", line)
 	}
 }

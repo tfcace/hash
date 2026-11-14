@@ -39,16 +39,45 @@ e2e/
 ├── testdata/               # Sample files for testing
 │   ├── data.csv            # Sample CSV for data processing tests
 │   ├── access.log          # Sample log file for parsing tests
-│   └── git-diff.patch      # Sample git diff for commit message tests
+│   ├── git-diff.patch      # Sample git diff for commit message tests
+│   └── homes/              # Startup homes for the PTY tests (Debian, Fedora, oh-my-zsh, ...)
 ├── mock_agent.go           # Configurable mock agent with chaos testing
 ├── agent_syntax_test.go    # Tests for ?? prefix, pipe, inline patterns
 ├── data_processing_test.go # Tests for CSV/JSON transforms, log parsing
 ├── devops_recipes_test.go  # Tests for kubectl/docker workflows
 ├── git_recipes_test.go     # Tests for conventional commits, branch cleanup
 ├── learning_e2e_test.go    # Tests for error pattern learning
-├── completion_test.go      # Tests for three-tier completion
+├── completion_test.go      # Tests for tab completion
 ├── live_agent_test.go      # Live agent tests (e2e_live tag)
-└── debug_pipe_test.go      # Debug/diagnostic tests for pipe behavior
+├── debug_pipe_test.go      # Debug/diagnostic tests for pipe behavior
+├── hash_pty_test.go        # PTY harness: builds hash, isolated homes, drives hash -i
+├── vt_screen_test.go       # Small terminal emulator: screen, scrollback count, query replies
+├── startup_homes_test.go   # Real-world startup files reach the prompt quietly
+├── typeahead_pty_test.go   # Keys typed during and across commands, fast bursts
+├── multiline_pty_test.go   # Multi-line entry, a buffer taller than the pane
+└── agent_editor_pty_test.go # Esc at a completion menu in the agent's inline editor
+```
+
+## PTY Tests
+
+The PTY tests run the real hash binary (built once per test run) as `hash -i`
+on a pseudo-terminal, in a home of their own under `t.TempDir()`: `HOME`, the
+XDG dirs and hash's config, a clean environment, the built-in prompt and no
+agent update check. They never read the user's config, the network or the
+system clipboard. A small emulator (`vtScreen`) answers hash's terminal
+queries and keeps the screen, so a test can check what a person would see and
+how many rows went into scrollback.
+
+Fixture homes in `testdata/homes/` keep only the constructs of real startup
+files that broke hash (nvm's `$-` flag tests, oh-my-zsh's non-zsh guard,
+prezto's and zinit's zsh-only syntax, `exec zsh` in a sourced `.bashrc`); each
+stand-in names the upstream file it comes from. `testHome.migrated` records
+them as imported, as hash's first-run question answered yes would.
+
+To see a test fail on an older build, point it at that binary:
+
+```bash
+HASH_E2E_BIN=/path/to/old/hash go test -tags=e2e -run TestStartupHome ./e2e/
 ```
 
 ## Design Principles
@@ -150,6 +179,12 @@ Live tests validate the full ACP protocol stack against `claude-agent-acp`:
 | Database persistence | learning_e2e_test.go | e2e |
 | Common error patterns | learning_e2e_test.go | e2e |
 | Multiple fix selection | learning_e2e_test.go | e2e |
+| Real-world startup homes reach the prompt | startup_homes_test.go | e2e |
+| `$SHELL -ilc env` sees the user's PATH | startup_homes_test.go | e2e |
+| Ctrl+C ends a startup loop | startup_homes_test.go | e2e |
+| Typeahead, pastes and typed bursts | typeahead_pty_test.go | e2e |
+| Multi-line entry, tall buffers | multiline_pty_test.go | e2e |
+| Agent editor Esc at a completion menu | agent_editor_pty_test.go | e2e |
 | Filesystem completion | completion_test.go | e2e |
 | Directory indicator (/) | completion_test.go | e2e |
 | Tilde expansion (~/) | completion_test.go | e2e |

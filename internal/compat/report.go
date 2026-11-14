@@ -2,10 +2,14 @@
 package compat
 
 import (
-	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"time"
+
+	"github.com/tfcace/hash/internal/executor"
+	"github.com/tfcace/hash/internal/tilde"
 )
 
 // ItemType represents the type of imported item.
@@ -19,6 +23,7 @@ const (
 
 // SkippedItem represents a line that was skipped during import.
 type SkippedItem struct {
+	File    string `json:"file,omitempty"` // set once the item's file is known
 	Line    int    `json:"line"`
 	Content string `json:"content"`
 	Reason  string `json:"reason"`
@@ -41,22 +46,71 @@ type Summary struct {
 
 // Report tracks the results of a migration import.
 type Report struct {
-	SourceFile    string         `json:"source_file"`
+	Files         []string       `json:"files"` // the files it reports on, in order
 	SourceShell   string         `json:"source_shell"`
-	SourceMtime   time.Time      `json:"source_mtime"`
 	ImportTime    time.Time      `json:"import_time"`
 	Summary       Summary        `json:"summary"`
 	ImportedItems []ImportedItem `json:"imported_items,omitempty"`
 	SkippedItems  []SkippedItem  `json:"skipped_items,omitempty"`
+	// NotLoaded lists the files that did not load, or not all of them, each
+	// once (NotLoad): the reported files, by the filter's word, and the
+	// files they sourced as they ran, which the shell that ran them adds.
+	NotLoaded []NotLoaded `json:"not_loaded,omitempty"`
 }
 
-// NewReport creates a new migration report.
-func NewReport(sourceFile, sourceShell string) *Report {
-	return &Report{
-		SourceFile:  sourceFile,
-		SourceShell: sourceShell,
-		ImportTime:  time.Now(),
+// NotLoad records n, a file that did not load, unless the file is listed
+// already: the filter's word on a migrated file and the run's, when another
+// migrated file sources it, are one entry.
+func (r *Report) NotLoad(n NotLoaded) {
+	if !slices.ContainsFunc(r.NotLoaded, func(m NotLoaded) bool { return m.File == n.File }) {
+		r.NotLoaded = append(r.NotLoaded, n)
 	}
+}
+
+// SourcedNotLoaded is the files not loaded (NotLoaded) that are not the
+// reported ones: those they sourced, known once they ran.
+func (r *Report) SourcedNotLoaded() []NotLoaded {
+	var sourced []NotLoaded
+	for _, n := range r.NotLoaded {
+		if !slices.Contains(r.Files, n.File) {
+			sourced = append(sourced, n)
+		}
+	}
+	return sourced
+}
+
+// NotLoaded is a file that did not load, or not all of it: a statement in
+// it does not parse, at Line (0 when the parser gave none), for Reason.
+// Load is executor.LoadedBefore when the statements before it ran, else
+// executor.LoadedNone.
+type NotLoaded struct {
+	File   string              `json:"file"`
+	Load   executor.SourceLoad `json:"load"`
+	Line   int                 `json:"line"`
+	Reason string              `json:"reason"`
+}
+
+// String says so in a line, naming the file as ~: "~/.bashrc: not loaded:
+// line 3: ...", or "not loaded from line 3" when the lines before it ran.
+func (n NotLoaded) String() string {
+	where := ": not loaded"
+	switch {
+	case n.Load == executor.LoadedBefore:
+		where = fmt.Sprintf(": not loaded from line %d", n.Line)
+	case n.Line > 0:
+		where = fmt.Sprintf(": not loaded: line %d", n.Line)
+	}
+	return tilde.Abbrev(n.File) + where + ": " + n.Reason
+}
+
+// NewReport creates a new migration report on the file at path, or on
+// none for "".
+func NewReport(path, sourceShell string) *Report {
+	r := &Report{SourceShell: sourceShell, ImportTime: time.Now()}
+	if path != "" {
+		r.Files = []string{path}
+	}
+	return r
 }
 
 // AddImported records a successfully imported item.
@@ -86,40 +140,26 @@ func (r *Report) AddSkipped(line int, content, reason string) {
 	r.Summary.Skipped++
 }
 
-// State represents the persisted migration state.
-type State struct {
-	SourceFile  string    `json:"source_file"`
-	SourceFiles []string  `json:"source_files,omitempty"` // Individual file paths for sourcing
-	SourceShell string    `json:"source_shell"`
-	SourceMtime time.Time `json:"source_mtime"`
-	LastImport  time.Time `json:"last_import"`
-	Declined    bool      `json:"declined"`
-	Summary     Summary   `json:"summary"`
+// Merge appends another file's results to this report.
+func (r *Report) Merge(o *Report) {
+	r.Files = append(r.Files, o.Files...)
+	r.Summary.Aliases += o.Summary.Aliases
+	r.Summary.Exports += o.Summary.Exports
+	r.Summary.Functions += o.Summary.Functions
+	r.Summary.Skipped += o.Summary.Skipped
+	r.ImportedItems = append(r.ImportedItems, o.ImportedItems...)
+	r.SkippedItems = append(r.SkippedItems, o.SkippedItems...)
+	for _, n := range o.NotLoaded {
+		r.NotLoad(n)
+	}
 }
 
-// Save writes the state to a JSON file.
-func (s *State) Save(path string) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil { //nolint:gosec // G301: standard user data dir perms
-		return err
+// Count returns n with the noun for it: "1 alias", "2 aliases".
+func Count(n int, one, many string) string {
+	if n == 1 {
+		return fmt.Sprintf("%d %s", n, one)
 	}
-	data, err := json.MarshalIndent(s, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(path, data, 0o644) //nolint:gosec // G306: non-sensitive migration state
-}
-
-// LoadState reads the state from a JSON file.
-func LoadState(path string) (*State, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	var state State
-	if err := json.Unmarshal(data, &state); err != nil {
-		return nil, err
-	}
-	return &state, nil
+	return fmt.Sprintf("%d %s", n, many)
 }
 
 // DefaultStatePath returns the default path for migration state.

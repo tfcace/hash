@@ -45,7 +45,7 @@ func TestDisplay_Render_WithGutter(t *testing.T) {
 	var out bytes.Buffer
 	d := NewDisplay(&out, 80, 24)
 	d.SetGutter(true)
-	d.SetMode("insert")
+	d.SetNormalMode(false)
 
 	buf := NewBufferFromString("hello")
 	cur := NewCursor()
@@ -67,7 +67,7 @@ func TestDisplay_Render_WithGutter_NormalMode(t *testing.T) {
 	var out bytes.Buffer
 	d := NewDisplay(&out, 80, 24)
 	d.SetGutter(true)
-	d.SetMode("normal")
+	d.SetNormalMode(true)
 
 	buf := NewBufferFromString("hello")
 	cur := NewCursor()
@@ -112,7 +112,7 @@ func TestDisplay_RenderCompletionMenu(t *testing.T) {
 		{Text: "bar", Description: "Bar item"},
 	}
 
-	d.RenderCompletionMenu(items, 0, 5, 0, 5) // selected=0, startCol=5
+	d.RenderCompletionMenu(items, 0, 0, 5, "") // selected=0, word at cell 5
 
 	output := buf.String()
 	if !strings.Contains(output, "foo") {
@@ -157,7 +157,7 @@ func TestDisplay_RenderCompletionMenu_WithGutter(t *testing.T) {
 	// startCol=3 (e.g., after "ls " in buffer)
 	// With gutter (2) + prompt "$ " (2) = prefix of 4
 	// Menu should be positioned at column 3 + 4 = 7
-	d.RenderCompletionMenu(items, 0, 3, 0, 3)
+	d.RenderCompletionMenu(items, 0, 0, 3, "")
 
 	output := buf.String()
 
@@ -183,26 +183,11 @@ func TestDisplay_RenderCompletionMenu_ShowsColoredRailForShortLists(t *testing.T
 		{Text: "beta", Description: "Second"},
 	}
 
-	d.RenderCompletionMenu(items, 0, 0, 0, 0)
+	d.RenderCompletionMenu(items, 0, 0, 0, "")
 
 	output := buf.String()
 	if !strings.Contains(output, "▌") {
 		t.Fatalf("completion rail should render for short lists when color is configured, got %q", output)
-	}
-}
-
-func TestDisplay_ClearCompletionMenu_DoesNotEmitNewLines(t *testing.T) {
-	var buf bytes.Buffer
-	d := NewDisplay(&buf, 80, 24)
-
-	d.ClearCompletionMenu(12, 0, 4)
-
-	output := buf.String()
-	if strings.Contains(output, "\r\n") || strings.Contains(output, "\n") {
-		t.Fatalf("clear should move across existing menu rows without emitting new lines, got %q", output)
-	}
-	if !strings.Contains(output, "\x1b[1B") {
-		t.Fatalf("clear should move down into existing menu rows, got %q", output)
 	}
 }
 
@@ -353,8 +338,8 @@ func TestDisplay_Render_LongWrappedLineTracksVisualCursorRow(t *testing.T) {
 	cur.MoveTo(0, len("abcdefghijklmno"))
 
 	d.Render(buf, cur, false)
-	if d.lastCursorRow != 1 {
-		t.Fatalf("lastCursorRow = %d, want 1", d.lastCursorRow)
+	if d.drawn.cursorRow != 1 {
+		t.Fatalf("drawn.cursorRow = %d, want 1", d.drawn.cursorRow)
 	}
 
 	out.Reset()
@@ -373,7 +358,7 @@ func TestDisplay_LayoutUsesUTF8VisibleWidth(t *testing.T) {
 	cur := NewCursor()
 	cur.MoveTo(0, len("שלום"))
 
-	_, _, cursorCol := d.layoutForStandardRender(buf, cur, 0)
+	_, _, cursorCol := d.layoutForStandardRender(buf, cur, "")
 	if cursorCol != d.promptWidth+4 {
 		t.Fatalf("cursorCol = %d, want prompt width %d + 4 visible Hebrew runes", cursorCol, d.promptWidth)
 	}
@@ -387,7 +372,7 @@ func TestDisplay_LayoutUsesTerminalCellWidth(t *testing.T) {
 	cur := NewCursor()
 	cur.MoveTo(0, len("語e\u0301"))
 
-	_, _, cursorCol := d.layoutForStandardRender(buf, cur, 0)
+	_, _, cursorCol := d.layoutForStandardRender(buf, cur, "")
 	if cursorCol != d.promptWidth+3 {
 		t.Fatalf("cursorCol = %d, want prompt width %d + 3 terminal cells", cursorCol, d.promptWidth)
 	}
@@ -402,7 +387,7 @@ func TestDisplay_RenderCompletionMenu_AlignsWideText(t *testing.T) {
 		{Text: "ab", Description: "ascii"},
 	}
 
-	d.RenderCompletionMenu(items, 1, 0, 0, 0)
+	d.RenderCompletionMenu(items, 1, 0, 0, "")
 	output := buf.String()
 
 	if !strings.Contains(output, "語  \x1b[2mwide") {
@@ -444,8 +429,8 @@ func TestDisplay_RenderWithFrame_LongWrappedLineTracksVisualCursorRow(t *testing
 	cur.MoveTo(0, len("abcdefghijklmno"))
 
 	d.Render(buf, cur, false)
-	if d.lastCursorRow != 2 {
-		t.Fatalf("lastCursorRow = %d, want 2", d.lastCursorRow)
+	if d.drawn.cursorRow != 2 {
+		t.Fatalf("drawn.cursorRow = %d, want 2", d.drawn.cursorRow)
 	}
 
 	out.Reset()
@@ -458,22 +443,24 @@ func TestDisplay_RenderWithFrame_LongWrappedLineTracksVisualCursorRow(t *testing
 
 func TestDisplay_RenderCompletionMenu_WrapsLongColumns(t *testing.T) {
 	var out bytes.Buffer
-	d := NewDisplay(&out, 10, 24)
+	d := NewDisplay(&out, 20, 24)
 	d.SetPrompt("$ ")
 
 	items := []CompletionItem{
 		{Text: "file.txt", Description: "A file"},
 	}
 
-	d.RenderCompletionMenu(items, 0, 15, 0, 17)
+	// The input render left the cursor at cell 27 + prefix 2, wrapped to 9.
+	d.drawn = drawnFrame{cursorRow: 1, cursorCol: 9}
+	d.RenderCompletionMenu(items, 0, 0, 25, "")
 	output := out.String()
 
-	// startCol=15 + prefix=2 => wrapped column 7
+	// startCol=25 + prefix=2 => wrapped column 7
 	if !strings.Contains(output, "\x1b[7C") {
 		t.Fatalf("menu should wrap start column to 7, got %q", output)
 	}
 
-	// cursorCol=17 + prefix=2 => wrapped restore column 9
+	// back to where the render left the cursor: wrapped column 9
 	if !strings.Contains(output, "\x1b[9C") {
 		t.Fatalf("menu should restore wrapped cursor column 9, got %q", output)
 	}
@@ -517,7 +504,7 @@ func TestDisplay_RenderCompletionMenu_RowsFitTerminalWidth(t *testing.T) {
 		{Text: "tfcace/agent-client-protocol", Description: "A protocol for connecting any editor to any agent"},
 	}
 
-	d.RenderCompletionMenu(items, 0, len("gh repo clone "), 0, len("gh repo clone "))
+	d.RenderCompletionMenu(items, 0, 0, len("gh repo clone "), "")
 
 	for i, got := range menuRowWidths(t, out.String()) {
 		if got > width {
@@ -539,7 +526,7 @@ func TestDisplay_RenderCompletionMenu_WideRunesFitTerminalWidth(t *testing.T) {
 		{Text: "データベース", Description: "本番環境のPostgreSQLデータベース、毎日バックアップ"},
 	}
 
-	d.RenderCompletionMenu(items, 0, 0, 0, 0)
+	d.RenderCompletionMenu(items, 0, 0, 0, "")
 
 	for i, got := range menuRowWidths(t, out.String()) {
 		if got > width {
@@ -560,7 +547,7 @@ func TestDisplay_RenderCompletionMenu_LongValuesFitTerminalWidth(t *testing.T) {
 		{Text: strings.Repeat("registry.example.com/org/very-long-image-name:", 3), Description: "oversized"},
 	}
 
-	d.RenderCompletionMenu(items, 0, 0, 0, 0)
+	d.RenderCompletionMenu(items, 0, 0, 0, "")
 
 	for i, got := range menuRowWidths(t, out.String()) {
 		if got > width {
@@ -592,10 +579,6 @@ func TestDisplay_FinalizeClearsWrappedRowsFirst(t *testing.T) {
 	if clear < 0 || clear > strings.Index(output, "abc") {
 		t.Fatalf("finalize must clear to end of screen before redrawing, got %q", output)
 	}
-	// "│$ " + 15 characters on a 10-column terminal: two rows.
-	if got := d.FinalizedLines(); got != 2 {
-		t.Errorf("FinalizedLines() = %d, want 2 wrapped rows", got)
-	}
 }
 
 func TestDisplay_FinalizeWithFrameClearsWrappedRowsFirst(t *testing.T) {
@@ -621,9 +604,5 @@ func TestDisplay_FinalizeWithFrameClearsWrappedRowsFirst(t *testing.T) {
 	clear := strings.Index(output, ansiClearToEnd)
 	if clear < 0 || clear > strings.Index(output, "│ you › ") {
 		t.Fatalf("finalize must clear to end of screen before redrawing, got %q", output)
-	}
-	// 8 + 30 columns on a 20-column terminal: two rows.
-	if got := d.FinalizedLines(); got != 2 {
-		t.Errorf("FinalizedLines() = %d, want 2 wrapped rows", got)
 	}
 }

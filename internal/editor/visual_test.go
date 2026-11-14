@@ -147,7 +147,7 @@ func TestInsertMode_UpOnWrappedLineDoesNotHijackHistory(t *testing.T) {
 	if !handled {
 		t.Fatal("KeyUp should be handled")
 	}
-	if result.HistoryPrev {
+	if result.Command == CommandHistoryPrev {
 		t.Fatal("Up on a lower visual row must move within the line, not open history")
 	}
 	if state.Cursor.Pos.Col != 2 {
@@ -156,7 +156,7 @@ func TestInsertMode_UpOnWrappedLineDoesNotHijackHistory(t *testing.T) {
 
 	// Now on the first visual row: Up opens history
 	result, _ = mode.handleSpecialKey(Key{Special: KeyUp}, state)
-	if !result.HistoryPrev {
+	if result.Command != CommandHistoryPrev {
 		t.Fatal("Up on the first visual row must signal HistoryPrev")
 	}
 }
@@ -167,7 +167,7 @@ func TestNormalMode_KOnWrappedLineDoesNotHijackHistory(t *testing.T) {
 	mode := NewNormalMode()
 
 	result := mode.HandleKey(Key{Rune: 'k'}, state)
-	if result.HistoryPrev {
+	if result.Command == CommandHistoryPrev {
 		t.Fatal("k on a lower visual row must move within the line")
 	}
 	if state.Cursor.Pos.Col != 2 {

@@ -3,9 +3,11 @@ package shell
 import (
 	"bytes"
 	"context"
+	"io"
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/tfcace/hash/internal/agent"
 	"github.com/tfcace/hash/internal/config"
@@ -142,9 +144,9 @@ func TestAgentConversationInputFrame(t *testing.T) {
 }
 
 func TestAgentConversationEditorConfigCancelsOnEscape(t *testing.T) {
-	base := editor.Config{Keybindings: "helix", Gutter: true}
+	base := editor.Config{Gutter: true}
 	cfg := agentConversationEditorConfig(base, true)
-	if !cfg.CancelOnEscape {
+	if cfg.Decline != editor.DeclineEraseRow {
 		t.Fatal("conversation reply editor should let Escape leave the conversation")
 	}
 	if cfg.InputFrame == nil || !strings.Contains(cfg.InputFrame.TopLine, "esc to leave") {
@@ -230,34 +232,52 @@ func TestLegacyAgentMarkerSanitizer_StripsSplitMarkers(t *testing.T) {
 	}
 }
 
-func TestAgentTurnReplyDecisions(t *testing.T) {
-	explanation := agent.Response{Type: agent.ResponseTypeExplanation, Explanation: "Which directory?"}
-	command := agent.Response{Type: agent.ResponseTypeCommand, Command: "ls"}
-	commandLikeQuestion := agent.Response{
-		Type:    agent.ResponseTypeCommand,
-		Command: "Go ahead and answer Question 1: Is it a physical object you could touch?",
+// classifyReply decides every turn's next step. The same reply classifies
+// the same on any turn, with one deliberate exception: a question opens the
+// reply box directly only once the user is in a conversation.
+func TestClassifyReply(t *testing.T) {
+	commandLikeQuestion := "Go ahead and answer Question 1: Is it a physical object you could touch?"
+	deny := func(cmd string) func(agent.Response) agent.Response {
+		return func(r agent.Response) agent.Response {
+			if r.Type == agent.ResponseTypeCommand && r.Command == cmd {
+				return agent.Response{Type: agent.ResponseTypeExplanation, Explanation: cmd}
+			}
+			return r
+		}
 	}
-
-	if !agentTurnAllowsReply(parser.CommandTypeAgent, explanation) {
-		t.Fatal("full agent explanations should allow explicit reply")
+	tests := []struct {
+		name           string
+		typ            parser.CommandType
+		inConversation bool
+		text           string
+		demote         func(agent.Response) agent.Response
+		wantType       agent.ResponseType
+		wantNext       replyNext
+		wantConfirm    ConfirmationType
+	}{
+		{"command", parser.CommandTypeAgent, false, "ls -la", nil, agent.ResponseTypeCommand, replyAwaitsKey, ConfirmTypeCommand},
+		{"command in conversation", parser.CommandTypeAgent, true, "ls -la", nil, agent.ResponseTypeCommand, replyAwaitsKey, ConfirmTypeCommand},
+		{"prose", parser.CommandTypeAgent, false, "The config is in ./internal.", nil, agent.ResponseTypeExplanation, replyAwaitsKey, ConfirmTypeExplanation},
+		{"prose in conversation", parser.CommandTypeAgent, true, "The config is in ./internal.", nil, agent.ResponseTypeExplanation, replyAwaitsKey, ConfirmTypeExplanation},
+		{"question shows the hint first", parser.CommandTypeAgent, false, "Which directory?", nil, agent.ResponseTypeExplanation, replyAwaitsKey, ConfirmTypeExplanation},
+		{"question in conversation asks back", parser.CommandTypeAgent, true, "Which directory?", nil, agent.ResponseTypeExplanation, replyAsksBack, 0},
+		{"question misread as a command", parser.CommandTypeAgent, false, commandLikeQuestion, nil, agent.ResponseTypeExplanation, replyAwaitsKey, ConfirmTypeExplanation},
+		{"question misread as a command in conversation", parser.CommandTypeAgent, true, commandLikeQuestion, nil, agent.ResponseTypeExplanation, replyAsksBack, 0},
+		{"command ending in ? stays a command", parser.CommandTypeAgent, true, "ls ?", nil, agent.ResponseTypeCommand, replyAwaitsKey, ConfirmTypeCommand},
+		{"denied command becomes prose", parser.CommandTypeAgent, false, "rm -rf build", deny("rm -rf build"), agent.ResponseTypeExplanation, replyAwaitsKey, ConfirmTypeExplanation},
+		{"pipe prose stands", parser.CommandTypeAgentPipe, false, "Two files changed.", nil, agent.ResponseTypeExplanation, replyStands, 0},
+		{"pipe question stands", parser.CommandTypeAgentPipe, false, "Which directory?", nil, agent.ResponseTypeExplanation, replyStands, 0},
+		{"pipe command still confirms", parser.CommandTypeAgentPipe, false, "ls -la", nil, agent.ResponseTypeCommand, replyAwaitsKey, ConfirmTypeCommand},
+		// An error reply has no key to press: "enter to retry" would do nothing.
+		{"error reply stands", parser.CommandTypeAgent, false, "", nil, agent.ResponseTypeError, replyStands, 0},
 	}
-	if agentTurnAllowsReply(parser.CommandTypeAgentPipe, explanation) {
-		t.Fatal("pipe explanations should remain single-turn")
-	}
-	if agentTurnAllowsReply(parser.CommandTypeAgent, command) {
-		t.Fatal("command suggestions should keep run/edit/cancel flow")
-	}
-	if !agentTurnShouldPromptForReply(parser.CommandTypeAgent, explanation, "Which directory?") {
-		t.Fatal("full agent explanation ending with a question should prompt automatically")
-	}
-	if agentTurnShouldPromptForReply(parser.CommandTypeAgent, explanation, "The config is in ./internal.") {
-		t.Fatal("plain explanations should not prompt automatically")
-	}
-	if !agentTurnShouldPromptForReply(parser.CommandTypeAgent, commandLikeQuestion, commandLikeQuestion.Command) {
-		t.Fatal("natural-language questions misclassified as commands should keep the conversation prompt")
-	}
-	if agentTurnShouldPromptForReply(parser.CommandTypeAgent, command, "ls ?") {
-		t.Fatal("command-shaped responses ending with ? should keep command confirmation")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resp, next, confirm := classifyReply(tt.typ, tt.inConversation, tt.text, tt.demote)
+			if resp.Type != tt.wantType || next != tt.wantNext || confirm != tt.wantConfirm {
+				t.Errorf("classifyReply(%q) = %v, %v, %v; want %v, %v, %v", tt.text, resp.Type, next, confirm, tt.wantType, tt.wantNext, tt.wantConfirm)
+			}
+		})
 	}
 }
 
@@ -274,22 +294,19 @@ func TestRunAgentConversationLoop_SendsFollowUpReply(t *testing.T) {
 		Explanation: "Thanks, I can inspect that.",
 	})
 	responseUI := NewResponseUI(&strings.Builder{})
-	responseUI.in = replyIn
 	sh := &Shell{
 		config:       config.Default(),
 		agentHandler: NewAgentHandler(agent.NewClient(mock)),
 		responseUI:   responseUI,
 		agentOutput:  NewAgentOutputCoordinator(&strings.Builder{}),
-		agentReplyInputHook: func(ctx context.Context) (string, error) {
-			return "internal/shell", nil
-		},
 	}
+	typeAhead(t, sh, "internal/shell\r\x04") // the reply, then leave
 	transcript := []agentConversationMessage{
 		{Role: "user", Text: "Find my config files"},
 		{Role: "assistant", Text: "Which directory should I inspect?"},
 	}
 
-	sh.runAgentConversationLoop(context.Background(), "test-model", transcript)
+	captureStdout(t, sh, func() { sh.runAgentConversationLoop(startTurn(t, sh), transcript) })
 
 	requests := mock.Requests()
 	if len(requests) != 1 {
@@ -300,39 +317,49 @@ func TestRunAgentConversationLoop_SendsFollowUpReply(t *testing.T) {
 	}
 }
 
+// The first text chunk of a follow-up arrives while a tool permission
+// prompt is up: it must be held, not written, and the clear before it must
+// not erase the prompt's key line.
 func TestStreamAgentFollowUpTurn_FirstChunkDuringPermissionPrompt(t *testing.T) {
-	var out strings.Builder
-	mock := agent.NewMockTransport(agent.Response{
-		Type:        agent.ResponseTypeExplanation,
-		Explanation: "All done.",
-	})
-	aoc := NewAgentOutputCoordinator(&out)
-	sh := &Shell{
-		config:       config.Default(),
-		agentHandler: NewAgentHandler(agent.NewClient(mock)),
-		responseUI:   NewResponseUI(&out),
-		agentOutput:  aoc,
-	}
+	t.Parallel()
+	prompted := make(chan struct{})
+	var sh *Shell
+	var screen *lockedBuffer
+	tr := &scriptedTransport{scripts: []turnScript{{
+		events: []agent.StreamEvent{toolEvent("t1", "ls", agent.ToolCallPending)},
+		during: func(ctx context.Context) {
+			sh.handleToolPermission(ctx, agent.ToolPermissionRequest{Command: "ls", ToolName: "Bash", ToolCallID: "t1"})
+		},
+		gate:  prompted,
+		after: []agent.StreamEvent{textEvent("All done.")},
+		hold:  400 * time.Millisecond, // the agent waits on the answer
+	}}}
+	var tt *testTerminal
+	sh, screen, _, tt = newTurnShellOn(t, tr)
+	tt.answerPermissions("") // the test answers
+	go func() {
+		waitFor(t, func() bool { return strings.Contains(screen.String(), "Agent wants to run") })
+		close(prompted)
+		time.Sleep(100 * time.Millisecond) // the chunk lands behind the prompt
+		out := screen.String()
+		if strings.Contains(out, "All done.") {
+			t.Errorf("chunk written to terminal while permission prompt active:\n%q", out)
+		}
+		if tail := out[strings.Index(out, "Agent wants to run"):]; strings.Contains(tail, "\r\x1b[K") {
+			t.Errorf("a clear-line erased the prompt's key line: %q", tail)
+		}
+		tt.typeKeys("y")
+	}()
 
-	// A tool permission prompt is pending (terminal in raw mode) when the
-	// first text chunk arrives. The chunk must be buffered, not written.
-	aoc.EnterPermission()
-
-	_, text, ok := sh.streamAgentFollowUpTurn(context.Background(), "go ahead", nil)
+	text, ok := sh.streamAgentFollowUpTurn(startTurn(t, sh), "go ahead", nil)
 	if !ok {
 		t.Fatal("streamAgentFollowUpTurn failed")
 	}
 	if !strings.Contains(text, "All done.") {
 		t.Fatalf("response text not collected, got %q", text)
 	}
-	if strings.Contains(out.String(), "All done.") {
-		t.Fatalf("chunk written to terminal while permission prompt active:\n%q", out.String())
-	}
-	// Exactly one clear-line: the post-stream spinner cleanup. The
-	// first-chunk clear must be skipped while the prompt is up, or it
-	// erases the prompt's keybinding line.
-	if got := strings.Count(out.String(), "\r\x1b[K"); got != 1 {
-		t.Fatalf("expected 1 clear-line sequence, got %d in %q", got, out.String())
+	if !strings.Contains(screen.String(), "All done.") {
+		t.Errorf("held chunk never drawn once the prompt cleared: %q", screen.String())
 	}
 }
 
@@ -346,16 +373,14 @@ func TestRunAgentConversationLoop_ExitReplyDoesNotCallAgent(t *testing.T) {
 		agentHandler: NewAgentHandler(agent.NewClient(mock)),
 		responseUI:   NewResponseUI(&strings.Builder{}),
 		agentOutput:  NewAgentOutputCoordinator(&strings.Builder{}),
-		agentReplyInputHook: func(ctx context.Context) (string, error) {
-			return "ok, I've had enough", nil
-		},
 	}
+	typeAhead(t, sh, "ok, I've had enough\r")
 	transcript := []agentConversationMessage{
 		{Role: "user", Text: "play twenty questions"},
 		{Role: "assistant", Text: "Question 3: Is it found indoors?"},
 	}
 
-	sh.runAgentConversationLoop(context.Background(), "test-model", transcript)
+	captureStdout(t, sh, func() { sh.runAgentConversationLoop(startTurn(t, sh), transcript) })
 
 	if got := len(mock.Requests()); got != 0 {
 		t.Fatalf("mock recorded %d requests, want none", got)
@@ -363,8 +388,8 @@ func TestRunAgentConversationLoop_ExitReplyDoesNotCallAgent(t *testing.T) {
 }
 
 func TestRunAgentConversationLoop_CommandClassifiedQuestionKeepsReplyPrompt(t *testing.T) {
+	t.Parallel()
 	var out strings.Builder
-	replies := []string{"you ask the questions", "yes"}
 	mock := agent.NewMockTransport(agent.Response{
 		Type:    agent.ResponseTypeCommand,
 		Command: "Question --answer?",
@@ -374,21 +399,14 @@ func TestRunAgentConversationLoop_CommandClassifiedQuestionKeepsReplyPrompt(t *t
 		agentHandler: NewAgentHandler(agent.NewClient(mock)),
 		responseUI:   NewResponseUI(&out),
 		agentOutput:  NewAgentOutputCoordinator(&out),
-		agentReplyInputHook: func(ctx context.Context) (string, error) {
-			if len(replies) == 0 {
-				return "", context.Canceled
-			}
-			reply := replies[0]
-			replies = replies[1:]
-			return reply, nil
-		},
 	}
+	typeAhead(t, sh, "you ask the questions\ryes\r\x04")
 	transcript := []agentConversationMessage{
 		{Role: "user", Text: "play twenty questions"},
 		{Role: "assistant", Text: "Ready."},
 	}
 
-	sh.runAgentConversationLoop(context.Background(), "test-model", transcript)
+	captureStdout(t, sh, func() { sh.runAgentConversationLoop(startTurn(t, sh), transcript) })
 
 	if got := len(mock.Requests()); got != 2 {
 		t.Fatalf("mock recorded %d requests, want 2 follow-up turns", got)
@@ -400,7 +418,6 @@ func TestRunAgentConversationLoop_CommandClassifiedQuestionKeepsReplyPrompt(t *t
 
 func TestHandleAgentFullStreaming_QuestionShowsReplyHintWithoutAutoStartingConversation(t *testing.T) {
 	var out strings.Builder
-	replyCalled := false
 	mock := agent.NewMockTransport(agent.Response{
 		Type:        agent.ResponseTypeExplanation,
 		Explanation: "Which directory should I inspect?",
@@ -410,18 +427,15 @@ func TestHandleAgentFullStreaming_QuestionShowsReplyHintWithoutAutoStartingConve
 		agentHandler: NewAgentHandler(agent.NewClient(mock)),
 		responseUI:   NewResponseUI(&out),
 		agentOutput:  NewAgentOutputCoordinator(&out),
-		agentReplyInputHook: func(ctx context.Context) (string, error) {
-			replyCalled = true
-			return "internal/shell", nil
-		},
 	}
+	keys := typeAhead(t, sh, "internal/shell\r")
 
-	sh.handleAgentFullStreaming(context.Background(), parser.ParseResult{
+	sh.handleAgentFullStreaming(startTurn(t, sh), parser.ParseResult{
 		Type:        parser.CommandTypeAgent,
 		AgentPrompt: "help me choose a file",
-	}, "test-model")
+	})
 
-	if replyCalled {
+	if got := readKeys(t, keys, 1); got[0] != (editor.Key{Rune: 'i'}) {
 		t.Fatal("plain agent questions should not automatically enter conversation mode")
 	}
 	if got := len(mock.Requests()); got != 1 {
@@ -434,7 +448,6 @@ func TestHandleAgentFullStreaming_QuestionShowsReplyHintWithoutAutoStartingConve
 
 func TestHandleAgentFullStreaming_ExplicitConversationPromptStillWaitsForReplyAction(t *testing.T) {
 	var out strings.Builder
-	replyCalled := false
 	mock := agent.NewMockTransport(agent.Response{
 		Type:        agent.ResponseTypeExplanation,
 		Explanation: "Question 1: Is it a physical object?",
@@ -444,18 +457,15 @@ func TestHandleAgentFullStreaming_ExplicitConversationPromptStillWaitsForReplyAc
 		agentHandler: NewAgentHandler(agent.NewClient(mock)),
 		responseUI:   NewResponseUI(&out),
 		agentOutput:  NewAgentOutputCoordinator(&out),
-		agentReplyInputHook: func(ctx context.Context) (string, error) {
-			replyCalled = true
-			return "", context.Canceled
-		},
 	}
+	keys := typeAhead(t, sh, "internal/shell\r")
 
-	sh.handleAgentFullStreaming(context.Background(), parser.ParseResult{
+	sh.handleAgentFullStreaming(startTurn(t, sh), parser.ParseResult{
 		Type:        parser.CommandTypeAgent,
 		AgentPrompt: "Let's play twenty questions. Ask one question at a time.",
-	}, "test-model")
+	})
 
-	if replyCalled {
+	if got := readKeys(t, keys, 1); got[0] != (editor.Key{Rune: 'i'}) {
 		t.Fatal("conversation prompt text should not bypass the r: reply action")
 	}
 	if got := len(mock.Requests()); got != 1 {
@@ -479,10 +489,10 @@ func TestHandleAgentFullStreaming_CommandClassifiedQuestionShowsReplyHint(t *tes
 		agentOutput:  NewAgentOutputCoordinator(&out),
 	}
 
-	sh.handleAgentFullStreaming(context.Background(), parser.ParseResult{
+	sh.handleAgentFullStreaming(startTurn(t, sh), parser.ParseResult{
 		Type:        parser.CommandTypeAgent,
 		AgentPrompt: "I'll think of something, and you ask up to 20 yes/no questions to guess it.",
-	}, "test-model")
+	})
 
 	output := out.String()
 	if strings.Contains(output, "cmd ·") {
@@ -503,10 +513,10 @@ func TestHandleAgentFullStreaming_EmptyStreamShowsErrorWithoutRetryPrompt(t *tes
 		agentOutput:  NewAgentOutputCoordinator(&out),
 	}
 
-	sh.handleAgentFullStreaming(context.Background(), parser.ParseResult{
+	sh.handleAgentFullStreaming(startTurn(t, sh), parser.ParseResult{
 		Type:        parser.CommandTypeAgent,
 		AgentPrompt: "hello",
-	}, "test-model")
+	})
 
 	output := out.String()
 	if !strings.Contains(output, emptyAgentResponseMessage) {
@@ -527,8 +537,8 @@ func TestStreamAgentFollowUpTurn_EmptyStreamShowsErrorWithoutResponse(t *testing
 		agentOutput:  NewAgentOutputCoordinator(&out),
 	}
 
-	_, _, ok := sh.streamAgentFollowUpTurn(
-		context.Background(),
+	_, ok := sh.streamAgentFollowUpTurn(
+		startTurn(t, sh),
 		"ready",
 		[]agentConversationMessage{{Role: "user", Text: "play twenty questions"}},
 	)
@@ -542,5 +552,28 @@ func TestStreamAgentFollowUpTurn_EmptyStreamShowsErrorWithoutResponse(t *testing
 	}
 	if strings.Contains(output, "enter to retry") {
 		t.Fatalf("empty response should not show retry confirmation, got:\n%s", output)
+	}
+}
+
+// The reply box takes prose for the agent, not a shell command: Tab must not
+// run shell completion there, whichever completion hook the base editor has.
+func TestAgentConversationEditorConfigDisablesShellCompletion(t *testing.T) {
+	calls := 0
+	base := editor.Config{
+		CompleteOutcomeFunc: func(string, int) editor.CompletionOutcome {
+			calls++
+			return editor.MenuOutcome([]editor.Completion{{Text: "github"}}, 0)
+		},
+	}
+	cfg := agentConversationEditorConfig(base, true)
+	cfg.InputFrame = nil
+
+	in := strings.NewReader("gi\t\r")
+	result, err := editor.New(cfg, in, io.Discard).Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if calls != 0 || result.Text != "gi" {
+		t.Fatalf("completion calls = %d, text = %q; want 0 calls and the typed %q", calls, result.Text, "gi")
 	}
 }

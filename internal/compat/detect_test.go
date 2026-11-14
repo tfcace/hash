@@ -115,3 +115,21 @@ func TestShellFiles_Files(t *testing.T) {
 		t.Errorf("Files()[1] = %q, want rc second", files[1])
 	}
 }
+
+func TestShellForPath(t *testing.T) {
+	for path, want := range map[string]string{
+		"/h/.zshrc": "zsh", "/h/.zprofile": "zsh", "/x/plugin.zsh": "zsh",
+		"/h/.bashrc": "bash", "/h/.profile": "bash", "/x/a.sh": "bash",
+		"/h/.hashrc": "", "/etc/profile": "",
+		// zsh's files by their other names
+		"/etc/zshrc": "zsh", "/etc/zprofile": "zsh", "/etc/zshenv": "zsh", "/etc/zlogin": "zsh",
+		"/etc/zsh/zshrc": "zsh", "/h/.zshrc.local": "zsh", "/h/.zsh_aliases": "zsh", "/h/.zlogout": "zsh",
+		"/h/.zshenv.local": "zsh",
+		// the extension wins over the name
+		"/x/zsh-compat.sh": "bash", "/h/.zshrc.bash": "bash", "/x/zprofile.sh": "bash", "/h/.bashrc.zsh": "zsh",
+	} {
+		if got := ShellForPath(path); got != want {
+			t.Errorf("ShellForPath(%q) = %q, want %q", path, got, want)
+		}
+	}
+}

@@ -2,101 +2,88 @@
 package compat
 
 import (
-	"context"
+	"errors"
 	"fmt"
-	"io"
 	"os"
 	"strings"
 
+	"github.com/tfcace/hash/internal/executor"
 	"github.com/tfcace/hash/internal/trace"
-	"mvdan.cc/sh/v3/expand"
-	"mvdan.cc/sh/v3/interp"
 	"mvdan.cc/sh/v3/syntax"
 )
 
-// FilterWithCompat pre-processes a shell config file for compatibility.
-// It returns the filtered content (with zsh-specific commands commented out)
-// and a report of what was processed. The caller should execute the content
-// through their own executor/interpreter.
-func FilterWithCompat(path, shell string) (string, *Report, error) {
-	return FilterWithDialect(path, shell, "bash")
+// FilterWithDialect pre-processes a shell config file for the target parser
+// dialect. A file the filter fails on (a bug in it) is an error, so that
+// startup reports the file as not loaded and goes on; the caller names the
+// file.
+func FilterWithDialect(path, shell, targetDialect string) (filtered string, report *Report, err error) {
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return "", nil, err
+	}
+	return filterFile(path, string(content), shell, targetDialect)
 }
 
-// FilterWithDialect pre-processes a shell config file for the target parser dialect.
-func FilterWithDialect(path, shell, targetDialect string) (string, *Report, error) {
+// FilterSourced returns content, the file at path that a source or . reads
+// at runtime in a file written for from ("": hash's own, or none), as the
+// dialect runs it. A startup file of from's shell (the .bashrc a migrated
+// .bash_profile sources) is filtered as that shell's, as the file sourcing
+// it was, and a zsh file (ShellForPath) in the bash dialect as zsh's; any
+// other file is as it is. It is the shell's source filter
+// (executor.SetSourceFilter). A file that does not load all says so
+// (notLoaded, nil when it does): a statement the filter stops at, or the
+// filter's failure, which loads none of it.
+func FilterSourced(path string, content []byte, dialect, from string) (filtered []byte, notLoaded *NotLoaded) {
+	shell := ShellForPath(path)
+	switch {
+	case from != "" && startupFileShell(path) == from:
+	case shell != "zsh", langVariantForDialect(dialect) == syntax.LangZsh:
+		return content, nil
+	}
+	text, report, err := filterFile(path, string(content), shell, dialect)
+	var failed filterFailure
+	switch {
+	case errors.As(err, &failed):
+		return nil, &NotLoaded{File: path, Load: executor.LoadedNone, Reason: failed.reason()}
+	case len(report.NotLoaded) > 0:
+		return []byte(text), &report.NotLoaded[0]
+	}
+	return []byte(text), nil
+}
+
+// filterFailure is the filter failing on a file (a bug in it): the file
+// does not load.
+type filterFailure struct{ cause any }
+
+func (f filterFailure) Error() string { return "not loaded, " + f.reason() }
+
+// reason says why the file did not load.
+func (f filterFailure) reason() string {
+	return fmt.Sprintf("the compatibility filter failed: %v", f.cause)
+}
+
+// filterFile filters content, the file at path written for shell, for the
+// target dialect.
+func filterFile(path, content, shell, targetDialect string) (filtered string, report *Report, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			filtered, report, err = "", nil, filterFailure{r}
+		}
+	}()
 	trace.Emit("compat", "filter_start", trace.LevelVerbose, map[string]any{
 		"path":           path,
 		"shell":          shell,
 		"target_dialect": targetDialect,
 	})
 
-	info, err := os.Stat(path)
-	if err != nil {
-		return "", nil, err
+	filtered, report = filterContent(content, shell, targetDialect, func() *Report {
+		return NewReport(path, shell)
+	})
+	for i := range report.SkippedItems {
+		report.SkippedItems[i].File = path
 	}
-
-	report := NewReport(path, shell)
-	report.SourceMtime = info.ModTime()
-
-	content, err := os.ReadFile(path)
-	if err != nil {
-		return "", nil, err
-	}
-
-	// Pre-process: identify and filter shell-specific commands for the target dialect.
-	lines := strings.Split(string(content), "\n")
-	var filteredLines []string
-	noops := NoopBuiltins()
-
-	for i, line := range lines {
-		trimmed := strings.TrimSpace(line)
-
-		// Skip empty lines and comments
-		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
-			filteredLines = append(filteredLines, line)
-			continue
-		}
-
-		// Check for shell-specific tool initializations that Hash handles natively.
-		if reason := shouldSkipLine(trimmed, targetDialect); reason != "" {
-			report.AddSkipped(i+1, trimmed, reason)
-			filteredLines = append(filteredLines, hashCompatNoop(line))
-			continue
-		}
-
-		// Check for no-op builtins
-		cmd := firstWord(trimmed)
-		if fn, ok := noops[cmd]; ok {
-			// Execute no-op and log
-			args := strings.Fields(trimmed)[1:]
-			fn(args, report) //nolint:errcheck // no-op functions don't fail
-			filteredLines = append(filteredLines, hashCompatNoop(line))
-			// Update line number in last skipped item
-			if len(report.SkippedItems) > 0 {
-				report.SkippedItems[len(report.SkippedItems)-1].Line = i + 1
-			}
-			continue
-		}
-
-		// Track aliases and exports for reporting
-		if strings.HasPrefix(trimmed, "alias ") {
-			parts := strings.SplitN(trimmed[6:], "=", 2)
-			if len(parts) == 2 {
-				report.AddImported(ItemAlias, strings.TrimSpace(parts[0]), strings.Trim(parts[1], "'\""))
-			}
-		} else if strings.HasPrefix(trimmed, "export ") {
-			parts := strings.SplitN(trimmed[7:], "=", 2)
-			if len(parts) >= 1 {
-				name := strings.TrimSpace(parts[0])
-				value := ""
-				if len(parts) == 2 {
-					value = parts[1]
-				}
-				report.AddImported(ItemExport, name, value)
-			}
-		}
-
-		filteredLines = append(filteredLines, line)
+	for i := range report.NotLoaded {
+		report.NotLoaded[i].File = path
 	}
 
 	trace.Emit("compat", "filter_done", trace.LevelVerbose, map[string]any{
@@ -105,169 +92,11 @@ func FilterWithDialect(path, shell, targetDialect string) (string, *Report, erro
 		"skipped":        report.Summary.Skipped,
 	})
 
-	return strings.Join(filteredLines, "\n"), report, nil
+	return filtered, report, nil
 }
 
-func hashCompatNoop(line string) string {
-	trimmedLeft := strings.TrimLeft(line, " \t")
-	indent := line[:len(line)-len(trimmedLeft)]
-	trimmed := strings.TrimSpace(line)
-
-	// A skipped Zsh-only conditional must retain valid control-flow syntax for
-	// the Bash parser. Powerlevel10k's instant prompt is one such conditional:
-	// its condition and body both use `${(%):-%n}`. Replacing the condition with
-	// false preserves the matching `fi` while ensuring the body never runs.
-	// `then` may be on this line or the next, so retain the form that matches
-	// the original layout.
-	if strings.HasPrefix(trimmed, "if ") {
-		if hasInlineThen(trimmed) {
-			return indent + "if false; then # [hash-compat] " + trimmed
-		}
-		return indent + "if false # [hash-compat] " + trimmed
-	}
-
-	return indent + ": # [hash-compat] " + strings.TrimSpace(line)
-}
-
-func hasInlineThen(line string) bool {
-	_, after, found := strings.Cut(line, ";")
-	if !found {
-		return false
-	}
-
-	after = strings.TrimLeft(after, " \t")
-	if !strings.HasPrefix(after, "then") {
-		return false
-	}
-	if len(after) == len("then") {
-		return true
-	}
-
-	switch after[len("then")] {
-	case ' ', '\t', '#':
-		return true
-	default:
-		return false
-	}
-}
-
-// SourceWithCompat sources a shell rc file with graceful error handling.
-// It skips zsh-specific builtins and recovers from parse errors.
-// Note: This creates its own interpreter runner, so aliases/functions won't
-// persist to the caller's shell. Use FilterWithCompat + executor for that.
-//
-//nolint:gocyclo // shell compatibility requires handling multiple file formats
-func SourceWithCompat(ctx context.Context, path, shell string, stdout io.Writer) (*Report, error) {
-	return SourceWithDialect(ctx, path, shell, "bash", stdout)
-}
-
-// SourceWithDialect sources a shell rc file with graceful error handling for the target dialect.
-//
-//nolint:gocyclo // shell compatibility requires handling multiple file formats
-func SourceWithDialect(ctx context.Context, path, shell, targetDialect string, stdout io.Writer) (*Report, error) {
-	info, err := os.Stat(path)
-	if err != nil {
-		return nil, err
-	}
-
-	report := NewReport(path, shell)
-	report.SourceMtime = info.ModTime()
-
-	content, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-
-	// Pre-process: identify and filter shell-specific commands for the target dialect.
-	lines := strings.Split(string(content), "\n")
-	var filteredLines []string
-	noops := NoopBuiltins()
-
-	for i, line := range lines {
-		trimmed := strings.TrimSpace(line)
-
-		// Skip empty lines and comments
-		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
-			filteredLines = append(filteredLines, line)
-			continue
-		}
-
-		// Check for shell-specific tool initializations that Hash handles natively.
-		if reason := shouldSkipLine(trimmed, targetDialect); reason != "" {
-			report.AddSkipped(i+1, trimmed, reason)
-			filteredLines = append(filteredLines, hashCompatNoop(line))
-			continue
-		}
-
-		// Check for no-op builtins
-		cmd := firstWord(trimmed)
-		if fn, ok := noops[cmd]; ok {
-			// Execute no-op and log
-			args := strings.Fields(trimmed)[1:]
-			fn(args, report) //nolint:errcheck // no-op functions don't fail
-			filteredLines = append(filteredLines, hashCompatNoop(line))
-			// Update line number in last skipped item
-			if len(report.SkippedItems) > 0 {
-				report.SkippedItems[len(report.SkippedItems)-1].Line = i + 1
-			}
-			continue
-		}
-
-		// Track aliases and exports for reporting
-		if strings.HasPrefix(trimmed, "alias ") {
-			parts := strings.SplitN(trimmed[6:], "=", 2)
-			if len(parts) == 2 {
-				report.AddImported(ItemAlias, strings.TrimSpace(parts[0]), strings.Trim(parts[1], "'\""))
-			}
-		} else if strings.HasPrefix(trimmed, "export ") {
-			parts := strings.SplitN(trimmed[7:], "=", 2)
-			if len(parts) >= 1 {
-				name := strings.TrimSpace(parts[0])
-				value := ""
-				if len(parts) == 2 {
-					value = parts[1]
-				}
-				report.AddImported(ItemExport, name, value)
-			}
-		}
-
-		filteredLines = append(filteredLines, line)
-	}
-
-	// Parse with error recovery and the target dialect.
-	filtered := strings.Join(filteredLines, "\n")
-	parser := syntax.NewParser(
-		syntax.Variant(langVariantForDialect(targetDialect)),
-		syntax.RecoverErrors(100),
-	)
-	prog, err := parser.Parse(strings.NewReader(filtered), path)
-	if err != nil {
-		// Log parse errors but continue
-		report.AddSkipped(0, "", "parse error: "+err.Error())
-	}
-
-	if prog == nil {
-		return report, nil
-	}
-
-	// Create interpreter and run
-	if stdout == nil {
-		stdout = io.Discard
-	}
-
-	runner, err := interp.New(
-		interp.StdIO(nil, stdout, stdout),
-		interp.Env(expand.ListEnviron(os.Environ()...)),
-	)
-	if err != nil {
-		return report, err
-	}
-
-	// Run with error recovery - don't fail on individual command errors
-	_ = runner.Run(ctx, prog)
-
-	return report, nil
-}
+// filterContent is filterRC; a test makes it fail.
+var filterContent = filterRC
 
 // firstWord returns the first word of a line.
 func firstWord(line string) string {
@@ -333,25 +162,4 @@ func shouldSkipLine(line, targetDialect string) string {
 	}
 
 	return ""
-}
-
-// CheckSourceChanged checks if the source file has changed since last import.
-func CheckSourceChanged(statePath string) (bool, error) {
-	state, err := LoadState(statePath)
-	if err != nil {
-		return false, err
-	}
-
-	info, err := os.Stat(state.SourceFile)
-	if err != nil {
-		return false, err
-	}
-
-	return info.ModTime().After(state.SourceMtime), nil
-}
-
-// FormatChangeNotice returns a one-line notice about source file changes.
-func FormatChangeNotice(rcFile string, skipped int) string {
-	return fmt.Sprintf("hash: %s changed — %d zsh-specific items skipped (hash migrate status)\n",
-		rcFile, skipped)
 }

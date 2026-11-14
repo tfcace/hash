@@ -39,7 +39,8 @@ func TestManHandler_ReturnsWhenAproposCommandIgnoresContext(t *testing.T) {
 	}
 }
 
-func TestManHandler_CoalescesFreshBlockedAproposLookupAndRetriesWhenStale(t *testing.T) {
+// A blocked lookup is joined rather than duplicated.
+func TestManHandler_CoalescesBlockedAproposLookupAndRefetchesAfterItLands(t *testing.T) {
 	release := make(chan struct{})
 	defer close(release)
 	var calls atomic.Int32
@@ -66,12 +67,15 @@ func TestManHandler_CoalescesFreshBlockedAproposLookupAndRetriesWhenStale(t *tes
 		t.Fatalf("expected second blocked man completion to coalesce, got %d apropos calls", got)
 	}
 
-	time.Sleep(90 * time.Millisecond)
+	// The blocked lookup lands; with no cache TTL its answer went to its
+	// waiters only, so the next Tab queries again.
+	release <- struct{}{}
+	time.Sleep(20 * time.Millisecond)
 	result := h.Complete(context.Background(), nil, "pri")
 	if got := calls.Load(); got != 2 {
-		t.Fatalf("expected stale apropos lookup to retry, got %d calls", got)
+		t.Fatalf("expected apropos lookup to run again after it landed, got %d calls", got)
 	}
 	if len(result.Items) != 1 || result.Items[0].Value != "printf" {
-		t.Fatalf("expected fresh man completion after stale retry, got %#v", result.Items)
+		t.Fatalf("expected fresh man completion after the blocked lookup landed, got %#v", result.Items)
 	}
 }

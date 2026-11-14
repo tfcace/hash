@@ -82,8 +82,10 @@ func TestParseKey_Vt220TildeModifierParameter(t *testing.T) {
 		seq  string
 		want Key
 	}{
-		// two-digit modifier: 13 = 1 + Ctrl(4) + Meta(8); Ctrl must survive
-		{"\x1b[3;13~", Key{Special: KeyDelete, Ctrl: true}},
+		// two-digit modifier: 69 = 1 + Ctrl(4) + Caps Lock(64); Ctrl must survive
+		{"\x1b[3;69~", Key{Special: KeyDelete, Ctrl: true}},
+		// 13 = 1 + Ctrl(4) + Super(8): a Super chord binds nothing
+		{"\x1b[3;13~", Key{}},
 		// a malformed parameter is discarded, never turned into random modifiers
 		{"\x1b[3;x~", Key{}},
 		{"\x1b[3;~", Key{}},

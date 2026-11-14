@@ -2,6 +2,7 @@
 package modelpicker
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
@@ -9,6 +10,7 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/tfcace/hash/internal/agent"
+	"github.com/tfcace/hash/internal/termtext"
 )
 
 // PickerUI is a single-select TUI listing the agent's available models.
@@ -41,9 +43,10 @@ func NewPickerUI(models []agent.ModelOption, current string) *PickerUI {
 }
 
 // Run starts the interactive picker. It returns the selected model value and
-// ok=true when the user confirms, or ok=false when they cancel.
-func (ui *PickerUI) Run() (value string, ok bool, err error) {
-	p := tea.NewProgram(ui)
+// ok=true when the user confirms, or ok=false when they cancel. It ends
+// with ctx (the shell ending), with an error.
+func (ui *PickerUI) Run(ctx context.Context) (value string, ok bool, err error) {
+	p := tea.NewProgram(ui, tea.WithContext(ctx))
 	final, err := p.Run()
 	if err != nil {
 		return "", false, err
@@ -113,14 +116,16 @@ func (ui *PickerUI) View() tea.View {
 			check = checkStyle.Render("[x]")
 		}
 
+		// Names and descriptions come from the agent: drawn inert.
 		label := m.Name
 		if label == "" {
 			label = m.Value
 		}
+		label = termtext.OneLine(label)
 
 		line := fmt.Sprintf("%s %s", check, label)
 		if m.Description != "" {
-			line = fmt.Sprintf("%s %s %s", check, label, dimStyle.Render(m.Description))
+			line = fmt.Sprintf("%s %s %s", check, label, dimStyle.Render(termtext.OneLine(m.Description)))
 		}
 
 		if i == ui.cursor {

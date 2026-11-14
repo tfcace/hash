@@ -26,14 +26,14 @@ func TestErrorHandler_HandleNotExecutable(t *testing.T) {
 	}
 }
 
-func TestHandleExecutionError_NotExecutableIs126(t *testing.T) {
+func TestShowRefusal_NotExecutableIs126(t *testing.T) {
 	var out bytes.Buffer
 	sh := &Shell{errors: &ErrorHandler{out: &out}}
 
-	sh.handleExecutionError(&executor.CommandNotExecutableError{Command: "./deploy.sh", Reason: "Permission denied"})
+	code := sh.showRefusal(&executor.CommandNotExecutableError{Command: "./deploy.sh", Reason: "Permission denied"})
 
-	if sh.lastExitCode != 126 {
-		t.Errorf("lastExitCode = %d, want 126", sh.lastExitCode)
+	if code != 126 {
+		t.Errorf("exit code = %d, want 126", code)
 	}
 	if !strings.Contains(out.String(), "Permission denied") {
 		t.Errorf("expected the reason on screen, got:\n%s", out.String())
@@ -50,11 +50,11 @@ func TestHandleExecutionResult_UsesErrorTextWhenStderrIsEmpty(t *testing.T) {
 
 	sh.handleExecutionResult("./deploy.sh", &executor.Result{ExitCode: 126, Refusals: []error{refusal}}, nil, capture)
 
-	if sh.lastStderr != "./deploy.sh: Permission denied" {
-		t.Errorf("lastStderr = %q, want the refusal text", sh.lastStderr)
+	if sh.last.stderr != "./deploy.sh: Permission denied" {
+		t.Errorf("lastStderr = %q, want the refusal text", sh.last.stderr)
 	}
-	if sh.lastExitCode != 126 {
-		t.Errorf("lastExitCode = %d, want 126", sh.lastExitCode)
+	if sh.last.exitCode != 126 {
+		t.Errorf("lastExitCode = %d, want 126", sh.last.exitCode)
 	}
 }
 
@@ -76,12 +76,12 @@ func TestNew_RefusalShowsBannerAndKeepsLineRunning(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := sh.executeRegularCommand(context.Background(), script+" || true"); err != nil {
-		t.Fatalf("executeRegularCommand() error = %v", err)
+	if _, err := sh.runShellLine(context.Background(), script+" || true"); err != nil {
+		t.Fatalf("runShellLine() error = %v", err)
 	}
 
-	if sh.lastExitCode != 0 {
-		t.Errorf("lastExitCode = %d, want 0: the fallback ran", sh.lastExitCode)
+	if sh.last.exitCode != 0 {
+		t.Errorf("lastExitCode = %d, want 0: the fallback ran", sh.last.exitCode)
 	}
 	if !strings.Contains(banner.String(), "Permission denied") {
 		t.Errorf("banner should be rendered at the point of refusal, got %q", banner.String())

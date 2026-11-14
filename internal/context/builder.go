@@ -58,7 +58,7 @@ func (b *Builder) WithHistory(commands []string) *Builder {
 	for _, cmd := range commands {
 		b.collection.Add(Item{
 			Category: CategoryHistory,
-			Key:      truncateString(cmd, 40),
+			Key:      cmd, // the whole command: a truncated one names two alike
 			Value:    cmd,
 			Selected: false, // History items are not selected by default
 		})

@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os/exec"
 	"strings"
@@ -18,9 +19,25 @@ var (
 	ErrACPIdleTimeout = errors.New("acp idle timeout")
 	// ErrACPNoOutput indicates the ACP prompt completed without displayable text.
 	ErrACPNoOutput = errors.New("acp prompt completed without output")
+	// ErrACPTransportClosed indicates hash closed the transport: final until Restart.
+	ErrACPTransportClosed = errors.New("acp transport closed")
 	// ErrACPUnsupportedAgent indicates the configured ACP adapter is known incompatible.
 	ErrACPUnsupportedAgent = errors.New("unsupported acp agent")
 )
+
+// RPCError is the JSON-RPC error an ACP agent replied to a request with:
+// the agent's own account of its failure (a usage limit, a lapsed sign-in),
+// as opposed to an error hash or the connection produced.
+type RPCError struct {
+	Code    int
+	Message string
+	// ErrorKind is the failure's category from the error's data, where the
+	// agent gives one (claude-agent-acp's data.errorKind: rate_limit,
+	// authentication_failed, ...); "" otherwise.
+	ErrorKind string
+}
+
+func (e *RPCError) Error() string { return fmt.Sprintf("rpc error %d: %s", e.Code, e.Message) }
 
 // IsStartupError reports whether the error indicates a startup/configuration issue.
 func IsStartupError(err error) bool {
@@ -60,7 +77,7 @@ func IsRetryableError(err error) bool {
 	if err == nil {
 		return false
 	}
-	if errors.Is(err, context.Canceled) || IsStartupError(err) {
+	if errors.Is(err, context.Canceled) || errors.Is(err, ErrACPTransportClosed) || IsStartupError(err) {
 		return false
 	}
 	if IsTimeoutError(err) {

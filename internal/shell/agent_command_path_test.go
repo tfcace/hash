@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -32,6 +33,7 @@ func newShellForAgentCommand(t *testing.T) *Shell {
 // A pipe-mode turn has no confirmation step, and is still a ?? exchange
 // worth recalling.
 func TestHandleAgentFullStreaming_PipeTurnIsRecorded(t *testing.T) {
+	t.Parallel()
 	store, err := history.NewStore(":memory:")
 	if err != nil {
 		t.Fatalf("NewStore: %v", err)
@@ -46,11 +48,11 @@ func TestHandleAgentFullStreaming_PipeTurnIsRecorded(t *testing.T) {
 		history:      store,
 	}
 
-	sh.handleAgentFullStreaming(context.Background(), parser.ParseResult{
+	sh.handleAgentFullStreaming(startTurn(t, sh), parser.ParseResult{
 		Type:        parser.CommandTypeAgentPipe,
 		Command:     "git diff",
 		AgentPrompt: "summarize",
-	}, "test-model")
+	})
 
 	turns, err := store.GetAgentInteractions("", 10)
 	if err != nil || len(turns) != 1 {
@@ -67,7 +69,7 @@ func TestHandleAgentFullStreaming_PipeTurnIsRecorded(t *testing.T) {
 func TestHandleAgentConfirmAction_CommandTurnWithoutARunIsNotAccepted(t *testing.T) {
 	sh := newShellForAgentCommand(t)
 
-	sh.handleAgentConfirmAction(context.Background(), ConfirmRun, ConfirmTypeCommand,
+	sh.handleAgentConfirmAction(startTurn(t, sh), ConfirmRun, ConfirmTypeCommand,
 		agent.Response{Type: agent.ResponseTypeCommand, Command: "   "}, agentTurn{prompt: "noop", response: "   "})
 
 	turns, err := sh.history.GetAgentInteractions("", 10)
@@ -83,21 +85,21 @@ func TestHandleAgentConfirmAction_CommandTurnWithoutARunIsNotAccepted(t *testing
 // the shell's last error names it, and a bare ?? explains the right thing.
 func TestHandleAgentConfirmAction_FailedCommandBecomesLastError(t *testing.T) {
 	sh := newShellForAgentCommand(t)
-	sh.lastCommand = "echo hello" // the line typed before the ?? turn
+	sh.last.command = "echo hello" // the line typed before the ?? turn
 	missing := filepath.Join(t.TempDir(), "nope.txt")
 	cmd := "cat " + missing
 
-	sh.handleAgentConfirmAction(context.Background(), ConfirmRun, ConfirmTypeCommand,
+	sh.handleAgentConfirmAction(startTurn(t, sh), ConfirmRun, ConfirmTypeCommand,
 		agent.Response{Type: agent.ResponseTypeCommand, Command: cmd}, agentTurn{response: cmd})
 
-	if sh.lastCommand != cmd {
-		t.Errorf("lastCommand = %q, want the agent command %q", sh.lastCommand, cmd)
+	if sh.last.command != cmd {
+		t.Errorf("lastCommand = %q, want the agent command %q", sh.last.command, cmd)
 	}
-	if sh.lastExitCode != 1 {
-		t.Errorf("lastExitCode = %d, want 1", sh.lastExitCode)
+	if sh.last.exitCode != 1 {
+		t.Errorf("lastExitCode = %d, want 1", sh.last.exitCode)
 	}
-	if !strings.Contains(sh.lastStderr, "No such file") {
-		t.Errorf("lastStderr = %q, want cat's error text", sh.lastStderr)
+	if !strings.Contains(sh.last.stderr, "No such file") {
+		t.Errorf("lastStderr = %q, want cat's error text", sh.last.stderr)
 	}
 }
 
@@ -108,14 +110,14 @@ func TestHandleAgentConfirmAction_CommandContainingDoubleQuestionMarkRunsAsShell
 	sh := newShellForAgentCommand(t)
 	cmd := "echo a??b"
 
-	sh.handleAgentConfirmAction(context.Background(), ConfirmRun, ConfirmTypeCommand,
+	sh.handleAgentConfirmAction(startTurn(t, sh), ConfirmRun, ConfirmTypeCommand,
 		agent.Response{Type: agent.ResponseTypeCommand, Command: cmd}, agentTurn{response: cmd})
 
-	if sh.lastCommand != cmd {
-		t.Errorf("lastCommand = %q, want %q to have run as a shell line", sh.lastCommand, cmd)
+	if sh.last.command != cmd {
+		t.Errorf("lastCommand = %q, want %q to have run as a shell line", sh.last.command, cmd)
 	}
-	if sh.lastExitCode != 0 {
-		t.Errorf("lastExitCode = %d, want 0", sh.lastExitCode)
+	if sh.last.exitCode != 0 {
+		t.Errorf("lastExitCode = %d, want 0", sh.last.exitCode)
 	}
 }
 
@@ -123,11 +125,11 @@ func TestHandleAgentConfirmAction_CommandContainingDoubleQuestionMarkRunsAsShell
 func TestHandleAgentConfirmAction_ExitEndsTheShell(t *testing.T) {
 	sh := newShellForAgentCommand(t)
 
-	err := sh.handleAgentConfirmAction(context.Background(), ConfirmRun, ConfirmTypeCommand,
+	err := sh.handleAgentConfirmAction(startTurn(t, sh), ConfirmRun, ConfirmTypeCommand,
 		agent.Response{Type: agent.ResponseTypeCommand, Command: "exit"}, agentTurn{response: "exit"})
 
-	if err != errExit {
-		t.Fatalf("handleAgentConfirmAction() error = %v, want errExit", err)
+	if !endsShell(err) {
+		t.Fatalf("handleAgentConfirmAction() error = %v, want a shellExit", err)
 	}
 }
 
@@ -137,7 +139,7 @@ func TestHandleAgentConfirmAction_RunLinksTheTurnToItsCommand(t *testing.T) {
 	sh := newShellForAgentCommand(t)
 	turn := agentTurn{prompt: "print linked", response: "echo linked"}
 
-	sh.handleAgentConfirmAction(context.Background(), ConfirmRun, ConfirmTypeCommand,
+	sh.handleAgentConfirmAction(startTurn(t, sh), ConfirmRun, ConfirmTypeCommand,
 		agent.Response{Type: agent.ResponseTypeCommand, Command: "echo linked"}, turn)
 
 	recent, err := sh.history.GetRecent(1)
@@ -166,7 +168,7 @@ func TestHandleAgentConfirmAction_CancelRecordsTheTurnAsDeclined(t *testing.T) {
 	sh.responseUI = NewResponseUI(io.Discard)
 	turn := agentTurn{prompt: "delete everything", response: "rm -rf /"}
 
-	sh.handleAgentConfirmAction(context.Background(), ConfirmCancel, ConfirmTypeCommand,
+	sh.handleAgentConfirmAction(startTurn(t, sh), ConfirmCancel, ConfirmTypeCommand,
 		agent.Response{Type: agent.ResponseTypeCommand, Command: "rm -rf /"}, turn)
 
 	turns, err := sh.history.GetAgentInteractions("", 10)
@@ -185,7 +187,7 @@ func TestHandleAgentConfirmAction_RunShowsTheCommandAsTyped(t *testing.T) {
 	var out bytes.Buffer
 	sh.responseUI = NewResponseUI(&out)
 
-	sh.handleAgentConfirmAction(context.Background(), ConfirmRun, ConfirmTypeCommand,
+	sh.handleAgentConfirmAction(startTurn(t, sh), ConfirmRun, ConfirmTypeCommand,
 		agent.Response{Type: agent.ResponseTypeCommand, Command: "true"}, agentTurn{response: "true"})
 
 	got := out.String()
@@ -206,7 +208,7 @@ func TestHandleAgentConfirmAction_ExplanationKeepsText(t *testing.T) {
 		sh := newShellForAgentCommand(t)
 		sh.responseUI = NewResponseUI(&out)
 
-		sh.handleAgentConfirmAction(context.Background(), action, ConfirmTypeExplanation,
+		sh.handleAgentConfirmAction(startTurn(t, sh), action, ConfirmTypeExplanation,
 			agent.Response{Type: agent.ResponseTypeExplanation, Explanation: "answer"},
 			agentTurn{prompt: "q", response: "answer"})
 
@@ -220,13 +222,14 @@ func TestHandleAgentConfirmAction_ExplanationKeepsText(t *testing.T) {
 // away: the agent is told to reply with it, so it shows as text instead.
 func TestDemoteDeniedCommand(t *testing.T) {
 	sh := newShellForAgentCommand(t)
-	sh.noteDeniedCommand("mkdir -p /tmp/x")
+	turn := startTurn(t, sh)
+	turn.noteDenied("mkdir -p /tmp/x")
 
-	got := sh.demoteDeniedCommand(agent.Response{Type: agent.ResponseTypeCommand, Command: " mkdir -p /tmp/x "})
+	got := turn.demoteDenied(agent.Response{Type: agent.ResponseTypeCommand, Command: " mkdir -p /tmp/x "})
 	if got.Type != agent.ResponseTypeExplanation {
 		t.Errorf("denied command offered as %v, want an explanation", got.Type)
 	}
-	other := sh.demoteDeniedCommand(agent.Response{Type: agent.ResponseTypeCommand, Command: "ls /tmp/x"})
+	other := turn.demoteDenied(agent.Response{Type: agent.ResponseTypeCommand, Command: "ls /tmp/x"})
 	if other.Type != agent.ResponseTypeCommand {
 		t.Errorf("a command that was not denied became %v", other.Type)
 	}
@@ -239,14 +242,50 @@ func TestRunEditedCommand_TypedQuestionMarksAreARequest(t *testing.T) {
 	sh := newShellForAgentCommand(t)
 	edited := "?? explain this"
 	sh.runEditedCommand(context.Background(), "echo hi", edited)
-	if sh.lastCommand == edited {
+	if sh.last.command == edited && sh.last.kind != agentLine {
 		t.Errorf("edited ?? line ran as shell code")
 	}
 
 	sh = newShellForAgentCommand(t)
 	glob := "echo a??b c"
 	sh.runEditedCommand(context.Background(), "echo a??b", glob)
-	if sh.lastCommand != glob || sh.lastExitCode != 0 {
-		t.Errorf("agent's ?? glob: lastCommand = %q exit %d, want it run as shell", sh.lastCommand, sh.lastExitCode)
+	if sh.last.command != glob || sh.last.exitCode != 0 {
+		t.Errorf("agent's ?? glob: lastCommand = %q exit %d, want it run as shell", sh.last.command, sh.last.exitCode)
+	}
+}
+
+// Ctrl+R and Ctrl+P end the prompt's editor so the prompt can open a
+// picker. In the editor on agent output they used to be read as Enter: the
+// half-edited line ran. There they do nothing; only a submitted line runs.
+func TestAgentTextEditors_RunOnlyASubmittedLine(t *testing.T) {
+	for key, keys := range map[string]string{"ctrl+r": "\x12", "ctrl+p": "\x10"} {
+		for name, run := range map[string]func(*Shell) error{
+			"edit": func(sh *Shell) error {
+				_, err := sh.handleEditCommand(sh.beginTurn(context.Background()), "probe")
+				return err
+			},
+			"inline": func(sh *Shell) error { return ask(t, sh, "probe ?? anything") },
+		} {
+			t.Run(key+"/"+name, func(t *testing.T) {
+				tr := &scriptedTransport{scripts: []turnScript{{events: []agent.StreamEvent{textEvent(" now")}}}}
+				sh, _, _ := newTurnShell(t, tr)
+				var typed *os.File
+				sh.editorCfg.Input, typed = typedKeys(t)
+				ran := false
+				sh.executor.RegisterBuiltin("probe", func(context.Context, []string, io.Writer, io.Writer) error {
+					ran = true
+					return nil
+				})
+				typed.WriteString(keys + "\x03\x03") // the key, then leave the line
+				var err error
+				captureStdout(t, sh, func() { err = run(sh) })
+				if err != nil {
+					t.Fatal(err)
+				}
+				if ran {
+					t.Errorf("%s ran the line", key)
+				}
+			})
+		}
 	}
 }

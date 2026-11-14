@@ -6,7 +6,6 @@ import (
 
 	"github.com/tfcace/hash/internal/history"
 	"github.com/tfcace/hash/internal/prompt"
-	"github.com/tfcace/hash/internal/readline"
 )
 
 // TestCtrlRE2E is an end-to-end test for Ctrl+R functionality
@@ -86,14 +85,6 @@ func TestCtrlRE2E(t *testing.T) {
 		t.Fatal("SearchUI creation failed")
 	}
 	t.Log("✓ SearchUI created successfully")
-
-	// Test 6: Test InputHandler creation
-	t.Log("\nTest 6: Testing InputHandler creation...")
-	handler := readline.NewInputHandler(nil, store)
-	if handler == nil {
-		t.Fatal("InputHandler creation failed")
-	}
-	t.Log("✓ InputHandler created successfully")
 
 	// Test 7: Verify Ctrl+R rune value
 	t.Log("\nTest 7: Verifying Ctrl+R handling...")

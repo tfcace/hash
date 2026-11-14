@@ -191,20 +191,26 @@ func TestFixTracker_SuggestedFixLifecycle(t *testing.T) {
 	store := newTestFixStore(t)
 	pattern := learning.ExtractPattern("./deploy.sh", "permission denied", 126)
 	recordSuccesses(t, store, pattern, "chmod +x deploy.sh", 2)
+	suggested := func(tr *fixTracker) string {
+		if tr.pending == nil {
+			return ""
+		}
+		return tr.pending.suggested
+	}
 
 	tr := newFixTracker(store)
-	if got := tr.SuggestedFix(); got != "" {
-		t.Errorf("SuggestedFix() before any failure = %q, want empty", got)
+	if got := suggested(tr); got != "" {
+		t.Errorf("suggested before any failure = %q, want empty", got)
 	}
 
 	tr.Observe("./deploy.sh", "permission denied", 126)
-	if got := tr.SuggestedFix(); got != "chmod +x deploy.sh" {
-		t.Errorf("SuggestedFix() after failure = %q, want %q", got, "chmod +x deploy.sh")
+	if got := suggested(tr); got != "chmod +x deploy.sh" {
+		t.Errorf("suggested after failure = %q, want %q", got, "chmod +x deploy.sh")
 	}
 
 	tr.Observe("chmod +x deploy.sh", "", 0)
-	if got := tr.SuggestedFix(); got != "" {
-		t.Errorf("SuggestedFix() after success = %q, want empty", got)
+	if got := suggested(tr); got != "" {
+		t.Errorf("suggested after success = %q, want empty", got)
 	}
 }
 

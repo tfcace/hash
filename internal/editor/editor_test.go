@@ -19,9 +19,7 @@ func TestEditor_SimpleInput(t *testing.T) {
 	})
 	var output bytes.Buffer
 
-	cfg := Config{
-		Keybindings: "helix",
-	}
+	cfg := Config{}
 	ed := New(cfg, input, &output)
 
 	result, err := ed.Run(context.Background())
@@ -31,7 +29,7 @@ func TestEditor_SimpleInput(t *testing.T) {
 	if result.Text != "hello" {
 		t.Errorf("Text = %q, want %q", result.Text, "hello")
 	}
-	if result.Canceled {
+	if result.Exit == ExitCanceled {
 		t.Error("Canceled = true, want false")
 	}
 }
@@ -44,7 +42,7 @@ func TestEditor_EnterSubmitsInInsertMode(t *testing.T) {
 	})
 	var output bytes.Buffer
 
-	cfg := Config{Keybindings: "helix"}
+	cfg := Config{}
 	ed := New(cfg, input, &output)
 
 	result, err := ed.Run(context.Background())
@@ -60,7 +58,7 @@ func TestEditor_UTF8HebrewInputRoundTrips(t *testing.T) {
 	input := bytes.NewReader(append([]byte("שלום"), '\r'))
 	var output bytes.Buffer
 
-	ed := New(Config{Keybindings: "helix"}, input, &output)
+	ed := New(Config{}, input, &output)
 
 	result, err := ed.Run(context.Background())
 	if err != nil {
@@ -79,8 +77,7 @@ func TestEditor_EscapeCancelsWhenConfigured(t *testing.T) {
 	var output bytes.Buffer
 
 	cfg := Config{
-		Keybindings:    "helix",
-		CancelOnEscape: true,
+		Decline: DeclineEraseRow,
 	}
 	ed := New(cfg, input, &output)
 
@@ -88,7 +85,7 @@ func TestEditor_EscapeCancelsWhenConfigured(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
-	if !result.Canceled {
+	if result.Exit != ExitCanceled {
 		t.Fatalf("Escape should cancel when configured, got result %#v", result)
 	}
 }
@@ -104,13 +101,12 @@ func TestEditor_HistoryCallback(t *testing.T) {
 
 	historyCalled := false
 	cfg := Config{
-		Keybindings: "helix",
-		HistoryFunc: func(dir int, currentLine string) string {
+		HistoryFunc: func(dir int, currentLine string) (string, bool) {
 			historyCalled = true
 			if dir == -1 {
-				return "previous command"
+				return "previous command", true
 			}
-			return ""
+			return "", false
 		},
 	}
 	ed := New(cfg, input, &output)
@@ -127,17 +123,17 @@ func TestEditor_HistoryCallback(t *testing.T) {
 
 func TestEditor_CompletionState(t *testing.T) {
 	cfg := Config{
-		CompleteFunc: func(line string, pos int) []Completion {
+		CompleteOutcomeFunc: itemsOnly(func(line string, pos int) []Completion {
 			return []Completion{
 				{Text: "foo", Description: "Foo item"},
 				{Text: "foobar", Description: "Foobar item"},
 			}
-		},
+		}),
 	}
 	ed := New(cfg, strings.NewReader(""), io.Discard)
 
 	// Initially no completion active
-	if ed.completionActive {
+	if ed.menu != nil {
 		t.Error("completion should not be active initially")
 	}
 }
@@ -145,11 +141,11 @@ func TestEditor_CompletionState(t *testing.T) {
 func TestEditor_TriggerCompletion(t *testing.T) {
 	completeCalled := false
 	cfg := Config{
-		CompleteFunc: func(line string, pos int) []Completion {
+		CompleteOutcomeFunc: itemsOnly(func(line string, pos int) []Completion {
 			completeCalled = true
 			// Return multiple items so menu activates
 			return []Completion{{Text: "test1"}, {Text: "test2"}}
-		},
+		}),
 	}
 	ed := New(cfg, strings.NewReader(""), io.Discard)
 	ed.state.Buffer = NewBufferFromString("foo")
@@ -158,16 +154,16 @@ func TestEditor_TriggerCompletion(t *testing.T) {
 	ed.triggerCompletion()
 
 	if !completeCalled {
-		t.Error("CompleteFunc should have been called")
+		t.Error("the completer should have been called")
 	}
-	if !ed.completionActive {
+	if ed.menu == nil {
 		t.Error("completion should be active after triggering")
 	}
 }
 
 func TestEditor_TriggerCompletion_NoFunc(t *testing.T) {
 	cfg := Config{
-		CompleteFunc: nil, // No completion function
+		CompleteOutcomeFunc: nil, // No completion function
 	}
 	ed := New(cfg, strings.NewReader(""), io.Discard)
 	ed.state.Buffer = NewBufferFromString("foo")
@@ -176,16 +172,16 @@ func TestEditor_TriggerCompletion_NoFunc(t *testing.T) {
 	// Should not panic
 	ed.triggerCompletion()
 
-	if ed.completionActive {
-		t.Error("completion should not be active without CompleteFunc")
+	if ed.menu != nil {
+		t.Error("completion should not be active without a completer")
 	}
 }
 
 func TestEditor_TriggerCompletion_NoMatches(t *testing.T) {
 	cfg := Config{
-		CompleteFunc: func(line string, pos int) []Completion {
+		CompleteOutcomeFunc: itemsOnly(func(line string, pos int) []Completion {
 			return []Completion{} // Empty results
-		},
+		}),
 	}
 	ed := New(cfg, strings.NewReader(""), io.Discard)
 	ed.state.Buffer = NewBufferFromString("xyz")
@@ -193,17 +189,17 @@ func TestEditor_TriggerCompletion_NoMatches(t *testing.T) {
 
 	ed.triggerCompletion()
 
-	if ed.completionActive {
+	if ed.menu != nil {
 		t.Error("completion should not be active with empty results")
 	}
 }
 
 func TestEditor_TriggerCompletion_SingleMatch(t *testing.T) {
 	cfg := Config{
-		CompleteFunc: func(line string, pos int) []Completion {
+		CompleteOutcomeFunc: itemsOnly(func(line string, pos int) []Completion {
 			// Single match should auto-accept
 			return []Completion{{Text: "foobar"}}
-		},
+		}),
 	}
 	ed := New(cfg, strings.NewReader(""), io.Discard)
 	ed.state.Buffer = NewBufferFromString("foo")
@@ -212,7 +208,7 @@ func TestEditor_TriggerCompletion_SingleMatch(t *testing.T) {
 	ed.triggerCompletion()
 
 	// Single match auto-accepts, so menu should NOT be active
-	if ed.completionActive {
+	if ed.menu != nil {
 		t.Error("completion should not be active after single-match auto-accept")
 	}
 	// Buffer should contain the completion
@@ -282,10 +278,10 @@ func TestEditor_TriggerCompletion_MultilineBuffer(t *testing.T) {
 	// Previously, the code sliced the full buffer content using a column index
 	// that was relative to the current line, which caused incorrect results or panics.
 	cfg := Config{
-		CompleteFunc: func(line string, pos int) []Completion {
+		CompleteOutcomeFunc: itemsOnly(func(line string, pos int) []Completion {
 			// Return multiple items so menu activates
 			return []Completion{{Text: "bar"}, {Text: "baz"}}
-		},
+		}),
 	}
 	ed := New(cfg, strings.NewReader(""), io.Discard)
 
@@ -296,16 +292,16 @@ func TestEditor_TriggerCompletion_MultilineBuffer(t *testing.T) {
 	// This should not panic and should correctly extract "b" as the prefix
 	ed.triggerCompletion()
 
-	if !ed.completionActive {
+	if ed.menu == nil {
 		t.Error("completion should be active after triggering")
 	}
 	// The prefix should be "b" (just the word on current line, not involving previous lines)
-	if ed.completionPrefix != "b" {
-		t.Errorf("completionPrefix = %q, want %q", ed.completionPrefix, "b")
+	if ed.menu.word != "b" {
+		t.Errorf("completionPrefix = %q, want %q", ed.menu.word, "b")
 	}
-	// completionCol should be 4 (where "b" starts on line 2)
-	if ed.completionCol != 4 {
-		t.Errorf("completionCol = %d, want 4", ed.completionCol)
+	// The word starts at byte 15 of the buffer ("b" on line 2)
+	if ed.menu.from != 15 {
+		t.Errorf("menu.from = %d, want 15", ed.menu.from)
 	}
 }
 
@@ -314,7 +310,7 @@ func TestEditor_AcceptCompletion(t *testing.T) {
 	ed := New(cfg, strings.NewReader(""), io.Discard)
 	ed.state.Buffer = NewBufferFromString("fo")
 	ed.state.Cursor.MoveTo(0, 2)
-	ed.completionCol = 0
+	ed.menu = &completionMenu{items: []Completion{{Text: "foobar"}, {Text: "foo"}}}
 
 	ed.acceptCompletion(Completion{Text: "foobar"})
 
@@ -325,7 +321,7 @@ func TestEditor_AcceptCompletion(t *testing.T) {
 	if ed.state.Cursor.Pos.Col != 6 {
 		t.Errorf("Cursor col = %d, want 6", ed.state.Cursor.Pos.Col)
 	}
-	if ed.completionActive {
+	if ed.menu != nil {
 		t.Error("completion should be dismissed after accept")
 	}
 }
@@ -334,8 +330,7 @@ func TestEditor_GhostModifiedTabAcceptsWord(t *testing.T) {
 	ed := New(Config{}, strings.NewReader(""), io.Discard)
 	ed.state.Buffer = NewBufferFromString("git ")
 	ed.state.Cursor.MoveTo(0, 4)
-	ed.ghost.Set("commit -m test")
-	ed.ghost.FromAgent = true
+	setAgentGhost(ed.ghost, "commit -m test", false)
 
 	handled := ed.handleGhostTextKey(Key{Special: KeyTab, Alt: true})
 	if !handled {
@@ -359,6 +354,8 @@ func TestEditor_FindWordStartShellAware(t *testing.T) {
 		{name: "escaped space", line: `cp My\ File.txt`, want: 3},
 		{name: "single quoted space", line: `cp 'My File.txt`, want: 3},
 		{name: "double quoted space", line: `cp "My File.txt`, want: 3},
+		{name: "substitution in double quotes", line: `echo "$(git ch`, want: 12},
+		{name: "ANSI-C quoted space", line: `cat $'it\'s fi`, want: 4},
 	}
 
 	for _, tt := range tests {
@@ -376,68 +373,34 @@ func TestEditor_FindWordStartShellAware(t *testing.T) {
 func TestEditor_CompletionNavigation(t *testing.T) {
 	cfg := Config{}
 	ed := New(cfg, strings.NewReader(""), io.Discard)
-	ed.completionItems = []Completion{
+	ed.menu = &completionMenu{items: []Completion{
 		{Text: "foo"},
 		{Text: "bar"},
 		{Text: "baz"},
-	}
-	ed.completionActive = true
-	ed.completionIndex = 0
+	}}
 
 	// Down moves to next
 	ed.handleCompletionKey(Key{Special: KeyDown})
-	if ed.completionIndex != 1 {
-		t.Errorf("After down: index = %d, want 1", ed.completionIndex)
+	if ed.menu.index != 1 {
+		t.Errorf("After down: index = %d, want 1", ed.menu.index)
 	}
 
 	// Down again
 	ed.handleCompletionKey(Key{Special: KeyDown})
-	if ed.completionIndex != 2 {
-		t.Errorf("After down 2: index = %d, want 2", ed.completionIndex)
+	if ed.menu.index != 2 {
+		t.Errorf("After down 2: index = %d, want 2", ed.menu.index)
 	}
 
 	// Down wraps
 	ed.handleCompletionKey(Key{Special: KeyDown})
-	if ed.completionIndex != 0 {
-		t.Errorf("After wrap: index = %d, want 0", ed.completionIndex)
+	if ed.menu.index != 0 {
+		t.Errorf("After wrap: index = %d, want 0", ed.menu.index)
 	}
 
 	// Up wraps backwards
 	ed.handleCompletionKey(Key{Special: KeyUp})
-	if ed.completionIndex != 2 {
-		t.Errorf("After up wrap: index = %d, want 2", ed.completionIndex)
-	}
-}
-
-func TestEditor_CompletionKey_EmptyItems(t *testing.T) {
-	cfg := Config{}
-	ed := New(cfg, strings.NewReader(""), io.Discard)
-	ed.completionItems = nil // Empty items
-	ed.completionActive = true
-
-	// Should not panic and should dismiss completion
-	handled := ed.handleCompletionKey(Key{Special: KeyDown})
-	if handled {
-		t.Error("handleCompletionKey should return false for empty items")
-	}
-	if ed.completionActive {
-		t.Error("completion should be dismissed when items are empty")
-	}
-
-	// Test with KeyTab as well (also uses modulo)
-	ed.completionActive = true
-	ed.completionItems = []Completion{} // Explicitly empty slice
-	handled = ed.handleCompletionKey(Key{Special: KeyTab})
-	if handled {
-		t.Error("handleCompletionKey should return false for empty slice")
-	}
-
-	// Test with KeyEnter (would cause index out of bounds)
-	ed.completionActive = true
-	ed.completionItems = nil
-	handled = ed.handleCompletionKey(Key{Special: KeyEnter})
-	if handled {
-		t.Error("handleCompletionKey should return false for empty items on Enter")
+	if ed.menu.index != 2 {
+		t.Errorf("After up wrap: index = %d, want 2", ed.menu.index)
 	}
 }
 
@@ -446,7 +409,7 @@ func TestEditor_CompletionKey_EmptyItems(t *testing.T) {
 func TestEditor_PendingCompletionShowsFetchingNotice(t *testing.T) {
 	e := New(Config{
 		CompleteOutcomeFunc: func(line string, pos int) CompletionOutcome {
-			return CompletionOutcome{Pending: true}
+			return EmptyOutcome(CompletionPending)
 		},
 	}, strings.NewReader(""), io.Discard)
 	e.state.Buffer = NewBufferFromString("gh repo clone ")
@@ -454,11 +417,11 @@ func TestEditor_PendingCompletionShowsFetchingNotice(t *testing.T) {
 
 	e.triggerCompletion()
 
-	if e.completionActive {
+	if e.menu != nil {
 		t.Error("menu should not activate with no items")
 	}
-	if e.completionNotice != completionFetchingNotice {
-		t.Errorf("notice = %q, want %q", e.completionNotice, completionFetchingNotice)
+	if e.feedback.kind != feedbackFetching {
+		t.Errorf("notice = %q, want %q", e.feedback.notice(), "fetching completions...")
 	}
 }
 
@@ -468,33 +431,30 @@ func TestEditor_CompletionReadyOpensMenuWithoutKeypress(t *testing.T) {
 	e := New(Config{
 		CompleteOutcomeFunc: func(line string, pos int) CompletionOutcome {
 			if !landed.Load() {
-				return CompletionOutcome{Pending: true}
+				return EmptyOutcome(CompletionPending)
 			}
-			return CompletionOutcome{Items: []Completion{
-				{Text: "tfcace/hash"},
-				{Text: "tfcace/blog"},
-			}}
+			return wordMenu(line, pos, Completion{Text: "tfcace/hash"}, Completion{Text: "tfcace/blog"})
 		},
 	}, strings.NewReader(""), io.Discard)
 	e.state.Buffer = NewBufferFromString("gh repo clone ")
 	e.state.Cursor.MoveTo(0, len("gh repo clone "))
 
 	e.triggerCompletion()
-	if e.completionActive {
+	if e.menu != nil {
 		t.Fatal("precondition: menu should not be active while pending")
 	}
 
 	landed.Store(true)
 	e.handleCompletionReady()
 
-	if !e.completionActive {
+	if e.menu == nil {
 		t.Error("menu should open when the pending source lands")
 	}
-	if len(e.completionItems) != 2 {
-		t.Errorf("items = %d, want 2", len(e.completionItems))
+	if len(e.menu.items) != 2 {
+		t.Errorf("items = %d, want 2", len(e.menu.items))
 	}
-	if e.completionNotice != "" {
-		t.Errorf("notice = %q, want it cleared once items arrived", e.completionNotice)
+	if e.feedback.notice() != "" {
+		t.Errorf("notice = %q, want it cleared once items arrived", e.feedback.notice())
 	}
 }
 
@@ -502,13 +462,12 @@ func TestEditor_CompletionReadyOpensMenuWithoutKeypress(t *testing.T) {
 func TestEditor_CompletionReadyIgnoredAfterInputChanged(t *testing.T) {
 	e := New(Config{
 		CompleteOutcomeFunc: func(line string, pos int) CompletionOutcome {
-			return CompletionOutcome{Items: []Completion{{Text: "tfcace/hash"}}}
+			return wordMenu(line, pos, Completion{Text: "tfcace/hash"})
 		},
 	}, strings.NewReader(""), io.Discard)
 	e.state.Buffer = NewBufferFromString("gh repo clone ")
 	e.state.Cursor.MoveTo(0, len("gh repo clone "))
-	e.completionNotice = completionFetchingNotice
-	e.awaitingCompletion = "gh repo clone "
+	e.feedback = lineFeedback{kind: feedbackFetching, line: "gh repo clone ", pos: len("gh repo clone ")}
 
 	// The user typed on: the awaited line is stale.
 	e.state.Buffer = NewBufferFromString("gh repo clone something-else")
@@ -516,7 +475,7 @@ func TestEditor_CompletionReadyIgnoredAfterInputChanged(t *testing.T) {
 
 	e.handleCompletionReady()
 
-	if e.completionActive {
+	if e.menu != nil {
 		t.Error("a late arrival for older input must not open a menu")
 	}
 }
@@ -527,24 +486,22 @@ func TestEditor_CompletionReadyIgnoredAfterInputChanged(t *testing.T) {
 func TestEditor_CompletionReadyIgnoredAfterCursorMoved(t *testing.T) {
 	e := New(Config{
 		CompleteOutcomeFunc: func(line string, pos int) CompletionOutcome {
-			return CompletionOutcome{Items: []Completion{{Text: "tfcace/hash"}}}
+			return wordMenu(line, pos, Completion{Text: "tfcace/hash"})
 		},
 	}, strings.NewReader(""), io.Discard)
 	e.state.Buffer = NewBufferFromString("docker rm redis")
 	e.state.Cursor.MoveTo(0, len("docker rm redis"))
-	e.completionNotice = completionFetchingNotice
-	e.awaitingCompletion = "docker rm redis"
-	e.awaitingCompletionPos = len("docker rm redis")
+	e.feedback = lineFeedback{kind: feedbackFetching, line: "docker rm redis", pos: len("docker rm redis")}
 
 	// The user arrowed back to another argument; the buffer text is identical.
 	e.state.Cursor.MoveTo(0, len("docker"))
 
 	e.handleCompletionReady()
 
-	if e.completionActive {
+	if e.menu != nil {
 		t.Error("a late arrival for another cursor position must not open a menu")
 	}
-	if e.awaitingCompletion != "" {
+	if e.feedback.kind == feedbackFetching {
 		t.Error("a stale pending completion must be cleared, not left armed")
 	}
 }
@@ -554,9 +511,9 @@ func TestEditor_CompletionReadyIgnoredAfterCursorMoved(t *testing.T) {
 func TestEditor_EscapeClearsWhenConfigured(t *testing.T) {
 	input := bytes.NewReader([]byte("half typed\x1b"))
 	var output bytes.Buffer
-	ed := New(Config{Keybindings: "helix", CancelOnEscape: true, ClearOnCancel: true}, input, &output)
+	ed := New(Config{Decline: DeclineEraseRow}, input, &output)
 
-	if result, err := ed.Run(context.Background()); err != nil || !result.Canceled {
+	if result, err := ed.Run(context.Background()); err != nil || result.Exit != ExitCanceled {
 		t.Fatalf("Run() = %#v, %v; want canceled", result, err)
 	}
 	out := output.String()

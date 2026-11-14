@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -22,7 +23,7 @@ func TestVCSCompleter_Name(t *testing.T) {
 
 func TestVCSCompleter_GitCheckout(t *testing.T) {
 	c := NewVCSCompleter()
-	c.listGitRefs = func(ctx context.Context) ([]string, error) {
+	c.listGitRefs = func(ctx context.Context, dir string) ([]string, error) {
 		return []string{"main", "feature/api", "origin/main"}, nil
 	}
 
@@ -40,9 +41,9 @@ func TestVCSCompleter_GitCheckout(t *testing.T) {
 
 func TestVCSCompleter_CachesGitRefsForRepeatedCompletion(t *testing.T) {
 	c := NewVCSCompleter()
-	c.cacheTTL = time.Minute
+	c.policy.ttl = time.Minute
 	calls := 0
-	c.listGitRefs = func(ctx context.Context) ([]string, error) {
+	c.listGitRefs = func(ctx context.Context, dir string) ([]string, error) {
 		calls++
 		return []string{"main", "feature/api", "feature/ui"}, nil
 	}
@@ -71,7 +72,7 @@ func TestVCSCompleter_ReturnsWhenGitRefLookupIgnoresContext(t *testing.T) {
 	c := NewVCSCompleter()
 	release := make(chan struct{})
 	defer close(release)
-	c.listGitRefs = func(ctx context.Context) ([]string, error) {
+	c.listGitRefs = func(ctx context.Context, dir string) ([]string, error) {
 		<-release
 		return []string{"main"}, nil
 	}
@@ -99,17 +100,18 @@ func TestVCSCompleter_ReturnsWhenGitRefLookupIgnoresContext(t *testing.T) {
 	}
 }
 
-func TestVCSCompleter_CoalescesFreshBlockedGitRefLookupAndRetriesWhenStale(t *testing.T) {
+// A blocked lookup is joined while it is within its timeout; one that
+// outlives it (ignoring its context) fails but is not doubled, and its
+// late answer is kept.
+func TestVCSCompleter_CoalescesBlockedGitRefLookupAndDoesNotDoubleAHungOne(t *testing.T) {
 	c := NewVCSCompleter()
+	c.policy.timeout = 50 * time.Millisecond
+	c.policy.failureTTL = 10 * time.Millisecond
 	release := make(chan struct{})
-	defer close(release)
 	var calls atomic.Int32
-	c.listGitRefs = func(ctx context.Context) ([]string, error) {
-		call := calls.Add(1)
-		if call == 1 {
-			<-release
-			return []string{"stale"}, nil
-		}
+	c.listGitRefs = func(ctx context.Context, dir string) ([]string, error) {
+		calls.Add(1)
+		<-release
 		return []string{"main"}, nil
 	}
 
@@ -129,15 +131,16 @@ func TestVCSCompleter_CoalescesFreshBlockedGitRefLookupAndRetriesWhenStale(t *te
 	}
 
 	time.Sleep(90 * time.Millisecond)
-	result, err := c.Complete(context.Background(), "git checkout m", len("git checkout m"))
-	if err != nil {
-		t.Fatalf("Complete() error = %v", err)
+	if result, _ := c.Complete(context.Background(), "git checkout m", len("git checkout m")); result.Outcome() == OutcomePending {
+		t.Fatal("Tab after the lookup timed out is still pending")
 	}
-	if got := calls.Load(); got != 2 {
-		t.Fatalf("expected stale git ref lookup to retry, got %d lookups", got)
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("hung git ref lookup launched %d times, want 1", got)
 	}
-	if len(result.Items) != 1 || result.Items[0].Value != "main" {
-		t.Fatalf("expected fresh git ref completion after stale retry, got %#v", result.Items)
+
+	close(release)
+	if result, ok := tabUntil(t, c, "git checkout m", "main", time.Second); !ok {
+		t.Fatalf("after the hung lookup returned: items = %#v, want main", result.Items)
 	}
 }
 
@@ -145,11 +148,11 @@ func TestVCSCompleter_JJRevisionReturnsWhenLookupIgnoresContext(t *testing.T) {
 	c := NewVCSCompleter()
 	release := make(chan struct{})
 	defer close(release)
-	c.listJJRevs = func(ctx context.Context) ([]string, error) {
+	c.listJJRevs = func(ctx context.Context, dir string) ([]string, error) {
 		<-release
 		return []string{"main"}, nil
 	}
-	c.listJJChangeIDs = func(ctx context.Context) ([]string, error) {
+	c.listJJChangeIDs = func(ctx context.Context, dir string) ([]string, error) {
 		return []string{"abc123"}, nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
@@ -178,12 +181,12 @@ func TestVCSCompleter_JJRevisionReturnsWhenLookupIgnoresContext(t *testing.T) {
 
 func TestVCSCompleter_DoesNotCacheCanceledGitRefLookup(t *testing.T) {
 	c := NewVCSCompleter()
-	c.cacheTTL = time.Minute
+	c.policy.ttl = time.Minute
 	release := make(chan struct{})
 	finished := make(chan struct{})
 	var first atomic.Bool
 	first.Store(true)
-	c.listGitRefs = func(ctx context.Context) ([]string, error) {
+	c.listGitRefs = func(ctx context.Context, dir string) ([]string, error) {
 		if first.Swap(false) {
 			<-release
 			close(finished)
@@ -234,7 +237,7 @@ func TestVCSCompleter_GitCheckoutEmitsLookupTrace(t *testing.T) {
 	t.Cleanup(trace.Close)
 
 	c := NewVCSCompleter()
-	c.listGitRefs = func(ctx context.Context) ([]string, error) {
+	c.listGitRefs = func(ctx context.Context, dir string) ([]string, error) {
 		return []string{"main", "feature/api"}, nil
 	}
 
@@ -262,7 +265,7 @@ func TestVCSCompleter_GitCheckoutEmitsLookupTrace(t *testing.T) {
 
 func TestVCSCompleter_GitSwitch_AfterCreateFlag(t *testing.T) {
 	c := NewVCSCompleter()
-	c.listGitRefs = func(ctx context.Context) ([]string, error) {
+	c.listGitRefs = func(ctx context.Context, dir string) ([]string, error) {
 		t.Fatalf("should not query refs when creating a new branch")
 		return nil, nil
 	}
@@ -278,7 +281,7 @@ func TestVCSCompleter_GitSwitch_AfterCreateFlag(t *testing.T) {
 
 func TestVCSCompleter_GitCheckout_AfterDoubleDash(t *testing.T) {
 	c := NewVCSCompleter()
-	c.listGitRefs = func(ctx context.Context) ([]string, error) {
+	c.listGitRefs = func(ctx context.Context, dir string) ([]string, error) {
 		t.Fatalf("should not query refs for pathspec context")
 		return nil, nil
 	}
@@ -294,10 +297,10 @@ func TestVCSCompleter_GitCheckout_AfterDoubleDash(t *testing.T) {
 
 func TestVCSCompleter_JJEdit(t *testing.T) {
 	c := NewVCSCompleter()
-	c.listJJRevs = func(ctx context.Context) ([]string, error) {
+	c.listJJRevs = func(ctx context.Context, dir string) ([]string, error) {
 		return []string{"@", "@-", "main", "tools"}, nil
 	}
-	c.listJJChangeIDs = func(ctx context.Context) ([]string, error) {
+	c.listJJChangeIDs = func(ctx context.Context, dir string) ([]string, error) {
 		return []string{"konsqmsq", "pnkqxpql"}, nil
 	}
 
@@ -315,10 +318,10 @@ func TestVCSCompleter_JJEdit(t *testing.T) {
 
 func TestVCSCompleter_JJEdit_IncludesChangeIDs(t *testing.T) {
 	c := NewVCSCompleter()
-	c.listJJRevs = func(ctx context.Context) ([]string, error) {
+	c.listJJRevs = func(ctx context.Context, dir string) ([]string, error) {
 		return []string{"@", "@-", "tools"}, nil
 	}
-	c.listJJChangeIDs = func(ctx context.Context) ([]string, error) {
+	c.listJJChangeIDs = func(ctx context.Context, dir string) ([]string, error) {
 		return []string{"konsqmsq", "pnkqxpql"}, nil
 	}
 
@@ -336,7 +339,7 @@ func TestVCSCompleter_JJEdit_IncludesChangeIDs(t *testing.T) {
 
 func TestVCSCompleter_JJOnlyFirstPositional(t *testing.T) {
 	c := NewVCSCompleter()
-	c.listJJRevs = func(ctx context.Context) ([]string, error) {
+	c.listJJRevs = func(ctx context.Context, dir string) ([]string, error) {
 		t.Fatalf("should not query refs for second positional argument")
 		return nil, nil
 	}
@@ -352,7 +355,7 @@ func TestVCSCompleter_JJOnlyFirstPositional(t *testing.T) {
 
 func TestVCSCompleter_IgnoreLookupErrors(t *testing.T) {
 	c := NewVCSCompleter()
-	c.listGitRefs = func(ctx context.Context) ([]string, error) {
+	c.listGitRefs = func(ctx context.Context, dir string) ([]string, error) {
 		return nil, errors.New("not a git repo")
 	}
 
@@ -367,7 +370,7 @@ func TestVCSCompleter_IgnoreLookupErrors(t *testing.T) {
 
 func TestVCSCompleter_GitAdd_ModifiedFiles(t *testing.T) {
 	c := NewVCSCompleter()
-	c.listGitModified = func(ctx context.Context) ([]string, error) {
+	c.listGitModified = func(ctx context.Context, dir string) ([]string, error) {
 		return []string{"src/main.go", "src/util.go", "README.md"}, nil
 	}
 
@@ -382,7 +385,7 @@ func TestVCSCompleter_GitAdd_ModifiedFiles(t *testing.T) {
 
 func TestVCSCompleter_GitBranchDelete_CompleteBranches(t *testing.T) {
 	c := NewVCSCompleter()
-	c.listGitRefs = func(ctx context.Context) ([]string, error) {
+	c.listGitRefs = func(ctx context.Context, dir string) ([]string, error) {
 		return []string{"main", "feature/api", "bugfix/login"}, nil
 	}
 
@@ -400,7 +403,7 @@ func TestVCSCompleter_GitBranchDelete_CompleteBranches(t *testing.T) {
 
 func TestVCSCompleter_GitStashPop_CompleteEntries(t *testing.T) {
 	c := NewVCSCompleter()
-	c.listGitStashes = func(ctx context.Context) ([]string, error) {
+	c.listGitStashes = func(ctx context.Context, dir string) ([]string, error) {
 		return []string{"stash@{0}", "stash@{1}", "stash@{2}"}, nil
 	}
 
@@ -415,7 +418,7 @@ func TestVCSCompleter_GitStashPop_CompleteEntries(t *testing.T) {
 
 func TestVCSCompleter_GitRemote_CompleteNames(t *testing.T) {
 	c := NewVCSCompleter()
-	c.listGitRemotes = func(ctx context.Context) ([]string, error) {
+	c.listGitRemotes = func(ctx context.Context, dir string) ([]string, error) {
 		return []string{"origin", "upstream"}, nil
 	}
 
@@ -430,7 +433,7 @@ func TestVCSCompleter_GitRemote_CompleteNames(t *testing.T) {
 
 func TestVCSCompleter_GitLog_CompleteRefs(t *testing.T) {
 	c := NewVCSCompleter()
-	c.listGitRefs = func(ctx context.Context) ([]string, error) {
+	c.listGitRefs = func(ctx context.Context, dir string) ([]string, error) {
 		return []string{"main", "develop"}, nil
 	}
 
@@ -445,7 +448,7 @@ func TestVCSCompleter_GitLog_CompleteRefs(t *testing.T) {
 
 func TestVCSCompleter_JJBookmarkDelete_CompleteBookmarks(t *testing.T) {
 	c := NewVCSCompleter()
-	c.listJJRevs = func(ctx context.Context) ([]string, error) {
+	c.listJJRevs = func(ctx context.Context, dir string) ([]string, error) {
 		return []string{"@", "@-", "@+", "main", "feature"}, nil
 	}
 
@@ -466,7 +469,7 @@ func TestVCSCompleter_JJBookmarkDelete_CompleteBookmarks(t *testing.T) {
 
 func TestVCSCompleter_JJDescribe_CompleteChangeIDs(t *testing.T) {
 	c := NewVCSCompleter()
-	c.listJJChangeIDs = func(ctx context.Context) ([]string, error) {
+	c.listJJChangeIDs = func(ctx context.Context, dir string) ([]string, error) {
 		return []string{"abc123", "def456", "ghi789"}, nil
 	}
 
@@ -479,5 +482,23 @@ func TestVCSCompleter_JJDescribe_CompleteChangeIDs(t *testing.T) {
 	}
 	if result.Items[0].Value != "abc123" {
 		t.Errorf("got %q, want %q", result.Items[0].Value, "abc123")
+	}
+}
+
+// A rename or copy record is followed by its source path, whether git saw
+// it in the index ("R ") or in the work tree (" R", after git add -N); the
+// source is gone and is no record of its own.
+func TestStatusPaths_SkipsTheSourceOfARename(t *testing.T) {
+	tests := map[string][]string{
+		"R  new.txt\x00old.txt\x00 M kept.txt\x00": {"kept.txt", "new.txt"},
+		" R new.txt\x00old.txt\x00 M kept.txt\x00": {"kept.txt", "new.txt"},
+		"C  copy.txt\x00orig.txt\x00":              {"copy.txt"},
+		" C copy.txt\x00orig.txt\x00":              {"copy.txt"},
+		"RM moved.txt\x00from.txt\x00?? u.txt\x00": {"moved.txt", "u.txt"},
+	}
+	for out, want := range tests {
+		if got := statusPaths(out, ""); !reflect.DeepEqual(got, want) {
+			t.Errorf("statusPaths(%q) = %q, want %q", out, got, want)
+		}
 	}
 }

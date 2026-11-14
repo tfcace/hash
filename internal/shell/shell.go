@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"os/signal"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -15,8 +14,8 @@ import (
 	"syscall"
 	"time"
 
-	"golang.org/x/sys/unix"
 	"golang.org/x/term"
+	"mvdan.cc/sh/v3/syntax"
 
 	"github.com/tfcace/hash/internal/agent"
 	"github.com/tfcace/hash/internal/agentupdate"
@@ -34,8 +33,8 @@ import (
 	"github.com/tfcace/hash/internal/prediction"
 	"github.com/tfcace/hash/internal/programstatus"
 	"github.com/tfcace/hash/internal/prompt"
-	"github.com/tfcace/hash/internal/readline"
 	"github.com/tfcace/hash/internal/shell/integration"
+	"github.com/tfcace/hash/internal/shparse"
 	"github.com/tfcace/hash/internal/trace"
 	"github.com/tfcace/hash/internal/version"
 )
@@ -50,58 +49,47 @@ type Mode struct {
 
 // Shell is the main Hash shell instance.
 type Shell struct {
-	mode                Mode // Startup mode
-	config              *config.Config
-	executor            *executor.Executor
-	prompt              *prompt.Prompt
-	readline            *readline.Readline
-	inputHandler        *readline.InputHandler // For Ctrl+R search
-	editorCfg           editor.Config          // Editor configuration
-	agentHandler        *AgentHandler
-	responseUI          *ResponseUI
-	history             *history.Store
-	historyPath         string
-	learning            *learning.FixStore
-	fixes               *fixTracker     // Learning loop: observes outcomes, suggests fixes
-	errors              *ErrorHandler   // Renders error/fix banners (stderr by default)
-	branchLister        func() []string // Local git branches for did-you-mean; nil = gitBranches
-	clipboard           *clipboard.Buffer
-	predictor           *prediction.Predictor
-	suggestor           *CommandSuggestor
-	colorPalette        prompt.Palette
-	allowlist           *allowlist.Manager
-	agentOutput         *AgentOutputCoordinator
-	agentStatus         *agentStatus                     // OSC 7501 reports for the ?? turn
-	turnCancel          context.CancelFunc               // cancels the ?? turn in flight (Ctrl+C, Esc)
-	streamKeys          atomic.Pointer[streamKeyWatcher] // reads Esc while a reply streams
-	deniedMu            sync.Mutex
-	denied              map[string]bool                                  // commands denied at a permission prompt during the ?? request
-	updateNotices       chan agentupdate.Notice                          // newer-adapter notices from the background check, drained before a prompt
-	updateGhost         string                                           // "model update" offered as ghost text at the next prompt only
-	updateChecker       func(context.Context) (agentupdate.Notice, bool) // nil = real detect + registry check
-	adapterVersion      func() string                                    // nil = re-detect the installed adapter; tests inject a version
-	installer           adapterInstaller                                 // nil = agentupdate.Installer for the configured command
-	updateStateFile     string                                           // override of agentUpdateStatePath() for tests
-	latestLookup        func(context.Context) string                     // nil = ask the npm registry; tests inject a version
-	readKey             func(ctx context.Context) byte
-	agentReplyInputHook func(context.Context) (string, error)
-	lastExitCode        int
-	lastDuration        time.Duration
-	lastCommandID       int64  // history id of the last recorded command, 0 if none
-	runningLine         string // line the executor is running, for refusals raised mid-line
-	pendingTypoFix      string // corrected line for a mistyped command name, until the learning loop offers it
-	lastCommand         string // Last executed command
-	lastStderr          string // Stderr from last command (truncated)
-	lastCwd             string // Working directory of last command
+	mode                  Mode     // Startup mode
+	stdin, stdout, stderr *os.File // the shell's own terminal streams; nil: the process's (in, out, errOut)
+	config                *config.Config
+	executor              *executor.Executor
+	prompt                *prompt.Prompt
+	editorCfg             editor.Config // Editor configuration
+	agentHandler          *AgentHandler
+	responseUI            *ResponseUI
+	history               *history.Store
+	historyPath           string
+	learning              *learning.FixStore
+	fixes                 *fixTracker     // Learning loop: observes outcomes, suggests fixes
+	errors                *ErrorHandler   // Renders error/fix banners (stderr by default)
+	branchLister          func() []string // Local git branches for did-you-mean; nil = gitBranches
+	clipboard             *clipboard.Buffer
+	predictor             *prediction.Predictor
+	suggestor             *CommandSuggestor
+	colorPalette          prompt.Palette
+	allowlist             *allowlist.Manager
+	agentOutput           *AgentOutputCoordinator
+	agentStatus           *agentStatus                                     // OSC 7501 reports for the ?? turn
+	interrupts            interrupts                                       // routes Ctrl+C (SIGINT) to whatever claims it; hash itself never dies of it
+	turn                  atomic.Pointer[liveTurn]                         // the ?? turn in flight, nil between turns
+	updateNotices         chan agentupdate.Notice                          // newer-adapter notices from the background check, drained before a prompt
+	offer                 promptOffer                                      // ghost text offered at the next prompt only
+	updateChecker         func(context.Context) (agentupdate.Notice, bool) // nil = real detect + registry check
+	adapterVersion        func() string                                    // nil = re-detect the installed adapter; tests inject a version
+	installer             adapterInstaller                                 // nil = agentupdate.Installer for the configured command
+	updateStateFile       string                                           // override of agentUpdateStatePath() for tests
+	latestLookup          func(context.Context) string                     // nil = ask the npm registry; tests inject a version
+	status                lineStatus                                       // how the user's last line ended
+	last                  commandOutcome                                   // the user's last command, a shell line or ?? request
 
-	osc *integration.Emitter // OSC shell integration emitter
+	marks promptMarks // OSC 133 marks and OSC 7 for each prompt
 
 	// History navigation state for editor mode
-	historyIndex     int    // -1 means current line (not in history)
-	historySavedLine string // Saved current line when navigating into history
+	historyNav historyNav
 
 	// Context picker state
-	selectedContext *hashcontext.Collection // nil = use auto-detect defaults
+	contextPicks hashcontext.Selection // what Ctrl+P picked; the zero value is the auto-detected defaults
+	exitStatus   int                   // the status the shell exits with: Run's end sets it (ended), close sets it last (the EXIT trap may exit)
 
 	// Directory change hook state
 	prevCwd string // Previous working directory for chpwd hook
@@ -118,6 +106,7 @@ func New(cfg *config.Config) (*Shell, error) {
 	if err := e.SetDialect(cfg.Shell.Dialect); err != nil {
 		fmt.Fprintf(os.Stderr, "hash: warning: %v; using bash dialect\n", err)
 	}
+	UseSourceFilter(e)
 	agentCfg := cfg.EffectiveAgent()
 
 	promptCfg := prompt.Config{
@@ -130,28 +119,24 @@ func New(cfg *config.Config) (*Shell, error) {
 	// Use default palette initially — will be extracted from starship in Run()
 	colorPalette := prompt.DefaultPalette()
 
-	// Use built-in prompt as placeholder — will be replaced by initPromptAndPalette() in Run()
-	// This avoids spawning starship during construction (saves ~50ms)
-	initialPrompt := "❯ "
-
 	// Set up completion router
 	router := completion.NewRouter()
 	router.SetFuzzy(cfg.Completions.Fuzzy)
+	_ = router.SetDialect(e.Dialect()) // completed lines are read back as the executor parses them
 
 	fileCompleter := completion.NewFileCompleter()
 	fileCompleter.SetFuzzyMode(cfg.Completions.Fuzzy)
 	router.Register(fileCompleter, completion.PriorityFilesystem)
-
-	// Alias/function completer for user-defined functions
-	router.Register(completion.NewAliasCompleter(e), completion.PriorityAlias)
 
 	// Environment variable completer ($VAR, ${VAR})
 	envCompleter := completion.NewEnvCompleter(e)
 	envCompleter.SetMaskSensitive(cfg.Completions.MaskSensitiveEnv)
 	router.Register(envCompleter, completion.PriorityEnv)
 
-	// Executable completer for command names from PATH, plus hash builtins.
+	// Executable completer for command names from PATH, plus the user's
+	// functions and aliases and hash builtins.
 	executableCompleter := completion.NewExecutableCompleter()
+	executableCompleter.SetFunctions(e)
 	executableCompleter.SetBuiltins(enabledCompletableBuiltins(cfg))
 	router.Register(executableCompleter, completion.PriorityExecutable)
 
@@ -164,8 +149,9 @@ func New(cfg *config.Config) (*Shell, error) {
 	completionReadyCh := make(chan struct{}, 1)
 
 	// Declarative completion plugins: built-in specs (docker) plus user specs
-	// from <config>/completions/*.toml. Registered ahead of semantic so user
-	// plugins can override the built-in handlers.
+	// from <config>/completions/*.toml. PriorityPlugin outranks the semantic
+	// and tool-native completers, so user plugins override the built-in
+	// handlers; registration order does not matter.
 	var pluginCompleter *completion.PluginCompleter
 	if cfg.Completions.PluginsEnabled {
 		pluginSpecs, pluginErrs := completion.LoadPluginSpecs(filepath.Join(getConfigDir(), "completions"))
@@ -174,30 +160,23 @@ func New(cfg *config.Config) (*Shell, error) {
 		}
 		pluginCompleter = completion.NewPluginCompleter(pluginSpecs)
 		pluginCompleter.SetFuzzyMode(cfg.Completions.Fuzzy)
-		// Wake the editor when a slow source lands so a "fetching" menu can
-		// fill itself in without the user pressing Tab again. Non-blocking:
-		// one pending wake-up is enough to trigger a refresh.
-		pluginCompleter.SetOnReady(func() {
-			select {
-			case completionReadyCh <- struct{}{}:
-			default:
-			}
-		})
 		router.Register(pluginCompleter, completion.PriorityPlugin)
 	}
 
 	if cfg.Completions.CobraEnabled {
-		cobraCompleter := completion.NewCobraCompleter()
-		// Same wake-up contract as the plugin completer: a cache miss for a
-		// known __complete-capable tool reports pending and fills in here.
-		cobraCompleter.SetOnReady(func() {
-			select {
-			case completionReadyCh <- struct{}{}:
-			default:
-			}
-		})
-		router.Register(cobraCompleter, completion.PriorityToolNative)
+		router.Register(completion.NewCobraCompleter(cfg.Completions.CobraCommands...), completion.PriorityToolNative)
 	}
+
+	// Wake the editor when a slow source (plugin, cobra, git, PATH scan,
+	// ...) lands so a "fetching" menu can fill itself in without the user
+	// pressing Tab again. Non-blocking: one pending wake-up is enough to
+	// trigger a refresh.
+	router.SetOnReady(func() {
+		select {
+		case completionReadyCh <- struct{}{}:
+		default:
+		}
+	})
 
 	// Set up agent (for both ?? commands and completions)
 	var agentHandler *AgentHandler
@@ -227,11 +206,11 @@ func New(cfg *config.Config) (*Shell, error) {
 
 	// Create allowlist manager for agent permission requests
 	cwd, _ := os.Getwd()
-	allowlistMgr := allowlist.New(
-		agentCfg.AllowedCommandsScope,
-		cwd,
-		getConfigDir(),
-	)
+	scope, scopeErr := allowlist.ParseScope(agentCfg.AllowedCommandsScope)
+	if scopeErr != nil {
+		fmt.Fprintf(os.Stderr, "hash: %v; approvals last for this session only\n", scopeErr)
+	}
+	allowlistMgr := allowlist.New(scope, cwd, getConfigDir())
 
 	// Create agent output coordinator for serialized output during agent interactions
 	// Created early so permission handler can use it
@@ -240,14 +219,9 @@ func New(cfg *config.Config) (*Shell, error) {
 	if transport != nil {
 		agentClient = agent.NewClient(transport)
 		agentHandler = NewAgentHandler(agentClient)
-
-		// Add agent completer for ?? inline
-		router.Register(completion.NewAgentCompleter(agentClient), completion.PriorityAgent)
 	}
 
-	completerAdapter := readline.NewCompleterAdapter(router)
-
-	// Initialize history store (must happen before readline creation)
+	// Initialize history store
 	var historyStore *history.Store
 	historyPath := configuredHistoryPath(cfg)
 	var err error
@@ -258,34 +232,6 @@ func New(cfg *config.Config) (*Shell, error) {
 			fmt.Fprintf(os.Stderr, "hash: warning: history unavailable: %v\n", err)
 		}
 	}
-
-	// Create input handler and Ctrl+R filter
-	inputHandler := readline.NewInputHandler(nil, historyStore) // will be set after readline creation
-
-	rlCfg := readline.Config{
-		Prompt:       initialPrompt,
-		Keybindings:  cfg.Shell.Keybindings,
-		Completer:    completerAdapter,
-		HistoryStore: historyStore,
-		FuncFilterInputRune: func(r rune) (rune, bool) {
-			// Ctrl+R is ASCII 18
-			if r == 18 {
-				// Launch history picker directly from callback
-				// HandleCtrlR manages terminal cleanup and refresh
-				inputHandler.HandleCtrlR()
-				return 0, false
-			}
-			// All other runes pass through normally
-			return r, true
-		},
-	}
-	rl, err := readline.New(rlCfg)
-	if err != nil {
-		return nil, fmt.Errorf("readline: %w", err)
-	}
-
-	// Now set the readline instance in the input handler
-	inputHandler.SetReadline(rl)
 
 	// Initialize learning store
 	var learningStore *learning.FixStore
@@ -307,15 +253,16 @@ func New(cfg *config.Config) (*Shell, error) {
 				Enabled:             cfg.Prediction.Enabled,
 				AcceptKeys:          cfg.Prediction.AcceptKeys,
 				ConfidenceThreshold: cfg.Prediction.ConfidenceThreshold,
-				PathMinCount:        cfg.Prediction.PathMinCount,
-				PathRecencyHours:    cfg.Prediction.PathRecencyHours,
+				RecencyWindowHours:  cfg.Prediction.RecencyWindowHours,
 			}
 			predictor = prediction.NewPredictor(predictionStore, predCfg)
 		}
 	}
 
-	// Initialize command suggestor (PATH caching happens in background)
+	// Initialize command suggestor (PATH caching happens in background).
+	// A typo is looked up in the PATH commands run with, which rc files set.
 	suggestor := NewCommandSuggestor(historyStore)
+	suggestor.pathFunc = func() string { return environValue(e.Environ(), "PATH") }
 
 	// Initialize OSC shell integration emitter
 	osc := integration.New()
@@ -349,23 +296,6 @@ func New(cfg *config.Config) (*Shell, error) {
 		}
 	}
 
-	// Set clipboard buffer on input handler for Ctrl+R output cross-referencing
-	inputHandler.SetClipboard(clipboardBuf)
-
-	// Set up the history picker function
-	inputHandler.SetPickerFunc(func() string {
-		if historyStore == nil {
-			return ""
-		}
-		picker := history.NewSearchUI(historyStore, colorPalette)
-		picker.SetClipboard(clipboardBuf)
-		selected, err := picker.Run()
-		if err != nil {
-			return ""
-		}
-		return selected
-	})
-
 	// Set clipboard buffer on agent handler for context
 	if agentHandler != nil {
 		agentHandler.SetClipboard(clipboardBuf)
@@ -373,7 +303,6 @@ func New(cfg *config.Config) (*Shell, error) {
 
 	// Configure editor mode
 	editorCfg := editor.Config{
-		Keybindings:         cfg.Input.Keybindings,
 		Gutter:              cfg.Input.Gutter,
 		InputBgColor:        "",
 		ScrollbarColor:      colorPalette.Primary,
@@ -381,7 +310,8 @@ func New(cfg *config.Config) (*Shell, error) {
 		CompletionReadyCh:   completionReadyCh,
 		PrefetchFunc:        makeEditorPrefetchFunc(router),
 		SuggestionFunc:      makeEditorSuggestionFunc(historyStore, predictor),
-		MaxPasteSize:        cfg.Input.ParseMaxPasteSize(),
+		// The shell's one key reader, for its life (see keyboard).
+		Input: newKeyReader(os.Stdin, cfg.Input.ParseMaxPasteSize()),
 	}
 
 	// Capture initial working directory for chpwd hook
@@ -391,8 +321,6 @@ func New(cfg *config.Config) (*Shell, error) {
 		config:       cfg,
 		executor:     e,
 		prompt:       p,
-		readline:     rl,
-		inputHandler: inputHandler,
 		editorCfg:    editorCfg,
 		agentHandler: agentHandler,
 		responseUI:   NewResponseUI(os.Stdout),
@@ -408,9 +336,7 @@ func New(cfg *config.Config) (*Shell, error) {
 		colorPalette: colorPalette,
 		allowlist:    allowlistMgr,
 		agentOutput:  agentOutput,
-		readKey:      readSingleKey,
-		historyIndex: -1, // Start before history (current line)
-		osc:          osc,
+		marks:        promptMarks{osc: osc},
 		prevCwd:      initialCwd,
 
 		pluginCompleter: pluginCompleter,
@@ -428,18 +354,12 @@ func New(cfg *config.Config) (*Shell, error) {
 
 	// Tab on an inline ?? line submits it to start agent completion
 	shell.editorCfg.AgentCompleteLine = shell.agentCompleteLinePredicate(exec.LookPath)
+	// Enter on an unfinished shell line adds a row, as at bash's PS2
+	shell.editorCfg.Incomplete = shell.lineIncomplete
 
 	// Set up shell integration callback for editor mode
 	// This emits OSC 133;B (CommandStart) when the editor is ready for input
-	shell.editorCfg.OnInputReady = func() {
-		if shell.osc != nil {
-			shell.osc.CommandStart()
-		}
-	}
-
-	// Set prompt refresh callback for Ctrl+R history picker
-	// This prints the Starship prefix (info bar) when returning from the picker
-	inputHandler.SetPromptRefreshFunc(shell.printPromptPrefix)
+	shell.editorCfg.OnInputReady = shell.marks.inputReady
 
 	// Set accent color callback for permission prompts
 	// This allows the permission prompt to use the dynamically-updated colorPalette
@@ -449,7 +369,9 @@ func New(cfg *config.Config) (*Shell, error) {
 
 	// A refused command (not found, not executable) gets its banner at the
 	// point of failure while the line keeps running with the right status.
-	e.SetRefusalHandler(shell.handleExecutionError)
+	// The banner is all: the status is the line's, and a hook's refusal is
+	// not the user's line.
+	e.SetRefusalHandler(func(err error) { shell.showRefusal(err) })
 
 	return shell, nil
 }
@@ -461,6 +383,9 @@ func NewWithMode(cfg *config.Config, mode Mode) (*Shell, error) {
 		return nil, err
 	}
 	sh.mode = mode
+	if mode.Interactive {
+		sh.executor.UseInteractiveTerminal()
+	}
 	return sh, nil
 }
 
@@ -471,24 +396,24 @@ func (s *Shell) Mode() Mode {
 
 // Run starts the shell REPL.
 func (s *Shell) Run(ctx context.Context) error {
-	defer s.readline.Close() //nolint:errcheck // cleanup on exit
+	// Hash owns SIGINT from here on: without a handler, a Ctrl+C that reaches
+	// hash (a command running with the terminal cooked, a builtin waiting on
+	// the agent) would be Go's default and end the shell.
+	defer s.interrupts.listen()()
 
 	// Run startup files and commands based on mode
 	if err := s.runStartup(ctx); err != nil {
-		if err == errExit {
-			return nil
-		}
-		return err
+		return s.ended(err)
 	}
 	s.showWelcomeIfNeeded()
 
 	// Generate first prompt and extract color palette concurrently.
-	// This replaces separate refreshColorPalette() + updatePrompt() calls,
+	// This replaces separate refreshColorPalette() + printPromptPrefix() calls,
 	// reducing starship subprocess spawns from 4 to 2 (~75ms savings).
-	s.initPromptAndPalette()
+	first := s.initPromptAndPalette()
+	head := &first // the first prompt's info bar, drawn once it starts
 	s.startUpdateCheck(ctx)
 
-	firstPrompt := true
 	for {
 		select {
 		case <-ctx.Done():
@@ -496,8 +421,9 @@ func (s *Shell) Run(ctx context.Context) error {
 		default:
 		}
 
-		s.flushUpdateNotice(time.Now())
-		s.emitShellIntegration(&firstPrompt)
+		s.marks.promptStart(s.status.exitCode)
+		s.drawPromptHead(head)
+		head = nil
 		trace.ShellHigh("prompt_start", map[string]any{
 			"mode": "editor",
 		})
@@ -509,22 +435,70 @@ func (s *Shell) Run(ctx context.Context) error {
 			"error": errStr(err),
 		})
 
-		if done, exitErr := s.handleInputError(err); done {
-			return exitErr
+		if stop := s.handleInputError(err); stop != nil {
+			return s.ended(stop)
 		}
 
-		line = trimSpace(line)
-		if s.handleSpecialInput(line) {
-			continue
+		if err := s.handleLine(ctx, trimSpace(line)); err != nil {
+			return s.ended(err)
 		}
-
-		if err := s.dispatchCommand(ctx, line); err == errExit {
-			return nil
-		}
-
-		s.runChpwdHook(ctx)
-		s.updatePrompt()
 	}
+}
+
+// shellExit is the shell ending with the status hash exits with: exit ran
+// (on a line, in an agent command, in init_commands), or the input ended
+// (Ctrl+D). It is the error the line returns, up to Run.
+type shellExit struct{ status int }
+
+func (e shellExit) Error() string { return fmt.Sprintf("exit %d", e.status) }
+
+// endsShell reports whether err is the shell ending.
+func endsShell(err error) bool {
+	var exit shellExit
+	return errors.As(err, &exit)
+}
+
+// ended is what Run returns for err, the error that stopped its loop: a
+// shellExit becomes the status ExitStatus reports, and $? with it, so the
+// EXIT trap Close runs sees the status the shell exits with (exit 4 after a
+// failure is 4, as in bash). Any other error is Run's.
+func (s *Shell) ended(err error) error {
+	var exit shellExit
+	if errors.As(err, &exit) {
+		s.exitStatus = exit.status
+		s.syncStatus(exit.status)
+		return nil
+	}
+	return err
+}
+
+// handleLine runs one line the user entered. It returns a shellExit when the line ended the shell, and ctx's
+// error when the shell is ending (a fatal signal ended ctx while the line
+// ran).
+//
+// Once the line and its hooks have run, $? is set to the line's status, the
+// one the prompt and OSC 133 D show: this is the only place it is set for a
+// line, so a hook, a ?? request or a builtin hash runs itself cannot leave
+// the interpreter disagreeing with s.status. An empty line keeps $? as it is.
+func (s *Shell) handleLine(ctx context.Context, line string) error {
+	if line == "" {
+		return nil
+	}
+	s.marks.lineRan()
+	if line == "!!" {
+		s.handleIssueShortcut(ctx)
+	} else if err := s.dispatchCommand(ctx, line); endsShell(err) {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		// The shell is ending (a fatal signal): no hook runs, and no prompt
+		// bar draws for a prompt that never comes.
+		s.syncStatus(s.status.exitCode)
+		return err
+	}
+	s.runChpwdHook(ctx)
+	s.syncStatus(s.status.exitCode)
+	return nil
 }
 
 func (s *Shell) showWelcomeIfNeeded() {
@@ -554,25 +528,25 @@ func (s *Shell) runOnboarding() {
 	}
 
 	if !ok {
-		fmt.Printf("  No agent set up. Run %s anytime · %s\n", "\033[36msetup\033[0m", onboardingDocsURL)
+		fmt.Fprintf(s.out(), "  No agent set up. Run %s anytime · %s\n", "\033[36msetup\033[0m", onboardingDocsURL)
 		return
 	}
 
 	switch {
 	case onboarding.AgentConfigured(configPath):
-		fmt.Printf("  Config already exists at %s — left unchanged.\n", configPath)
+		fmt.Fprintf(s.out(), "  Config already exists at %s — left unchanged.\n", configPath)
 	default:
 		if werr := onboarding.WriteAgentConfig(configPath, chosen); werr != nil {
-			fmt.Fprintf(os.Stderr, "  Could not write config: %v\n", werr)
+			fmt.Fprintf(s.errOut(), "  Could not write config: %v\n", werr)
 			return
 		}
 		// The default config already targets claude-agent-acp, so when the
 		// chosen command matches what's loaded and a handler exists, ?? works
 		// immediately; otherwise the new transport applies on next launch.
 		if s.agentHandler != nil && s.config.EffectiveAgent().Command == chosen.Command {
-			fmt.Printf("  \033[32m✓\033[0m %s ready — type \033[36m??\033[0m to try it.\n", chosen.Name)
+			fmt.Fprintf(s.out(), "  \033[32m✓\033[0m %s ready — type \033[36m??\033[0m to try it.\n", chosen.Name)
 		} else {
-			fmt.Printf("  \033[32m✓\033[0m %s configured — restart hash to use it.\n", chosen.Name)
+			fmt.Fprintf(s.out(), "  \033[32m✓\033[0m %s configured — restart hash to use it.\n", chosen.Name)
 		}
 	}
 }
@@ -606,69 +580,94 @@ func writeNoAgentHint(w io.Writer) {
 	fmt.Fprintf(w, "  Run \033[36msetup\033[0m to configure one, or see %s\n", onboardingDocsURL)
 }
 
-// emitShellIntegration emits OSC shell integration sequences before prompt.
-func (s *Shell) emitShellIntegration(firstPrompt *bool) {
-	if s.osc == nil {
+// handleInputError is what reading a line ended with means for the loop:
+// nil to carry on (Ctrl+C), else the error that ends it. Ctrl+D, or the
+// input closing, ends the shell with the last line's status, as in bash.
+func (s *Shell) handleInputError(err error) error {
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, ErrEditorCanceled):
+		// Ctrl+C at empty prompt: just print ^C and continue (like Fish)
+		fmt.Fprintln(s.out(), "^C")
+		return nil
+	case errors.Is(err, ErrEditorEOF):
+		fmt.Fprintln(s.out(), "exit")
+		return shellExit{status: s.status.exitCode}
+	case errors.Is(err, editor.ErrInputBusy) && s.editorCfg.Input != nil:
+		// The prompt is the top reader: a claim still held now leaked. Take
+		// the keyboard back rather than end the user's login shell.
+		was := s.editorCfg.Input.Reset()
+		fmt.Fprintf(s.errOut(), "hash: took the keyboard back from %s\n", was)
+		trace.ShellHigh("keyboard_leak", map[string]any{"owner": was})
+		return nil
+	default:
+		return err
+	}
+}
+
+// handleIssueShortcut handles the !! shortcut for quick issue submission:
+// `issue --last` for the command before it. It is a line the user ran, so
+// its status is the one the prompt and OSC 133 D report, but no command:
+// the last command stays the one before it, for a bare ??, a second !! and
+// the predictor, and history and the learning loop never see it. It asks
+// first, whatever the last command did (issueQuestion); Ctrl+C at the
+// question interrupts the line (130), and the question ends when ctx does
+// (hash terminated).
+func (s *Shell) handleIssueShortcut(ctx context.Context) {
+	s.status = lineStatus{}
+	fmt.Fprint(s.out(), issueQuestion(s.last))
+	switch s.keyboard().yes(ctx, s.out()) {
+	case answerInterrupted:
+		s.status.exitCode = 130
+		return
+	case answeredNo:
 		return
 	}
-	if !*firstPrompt {
-		s.osc.CommandFinished(s.lastExitCode)
-	}
-	*firstPrompt = false
-	s.osc.PromptStart()
-	if cwd, err := os.Getwd(); err == nil {
-		s.osc.ReportDirectory(cwd)
+	if err := s.builtinIssue([]string{"--last"}); err != nil {
+		fmt.Fprintf(s.errOut(), "hash: %v\n", err)
+		s.status.exitCode = 1
 	}
 }
 
-// handleInputError processes readline errors. Returns (done, error).
-// done=true means exit the shell loop (with optional error).
-// done=false means continue the loop (error is ignored).
-func (s *Shell) handleInputError(err error) (bool, error) {
-	if err == nil {
-		return false, nil
+// issueQuestion is what !! asks before it opens the editor on an issue
+// about the last line, last: always, as opening an editor is not what a
+// user who typed !! for bash's history expansion expects.
+func issueQuestion(last commandOutcome) string {
+	switch {
+	case last.command == "":
+		return "Open an issue? [y/N] "
+	case last.exitCode == 0:
+		return "Last command succeeded. Open an issue anyway? [y/N] "
 	}
-	if readline.IsInterrupt(err) || errors.Is(err, ErrEditorCanceled) {
-		// Ctrl+C at empty prompt: just print ^C and continue (like Fish)
-		fmt.Println("^C")
-		return false, nil
-	}
-	if readline.IsEOF(err) || errors.Is(err, ErrEditorEOF) {
-		fmt.Println("exit")
-		return true, nil
-	}
-	return true, err
+	return fmt.Sprintf("Open an issue about the last command (exit %d)? [y/N] ", last.exitCode)
 }
 
-// handleSpecialInput handles empty lines and !! shortcut. Returns true if handled.
-func (s *Shell) handleSpecialInput(line string) bool {
-	if line == "" {
-		s.updatePrompt()
-		return true
+// in, out and errOut are the shell's terminal streams: the process's
+// unless the shell was given its own (stdin, stdout, stderr).
+func (s *Shell) in() *os.File {
+	if s.stdin != nil {
+		return s.stdin
 	}
-	if line == "!!" {
-		s.handleIssueShortcut()
-		return true
-	}
-	return false
+	return os.Stdin
 }
 
-// handleIssueShortcut handles the !! shortcut for quick issue submission.
-func (s *Shell) handleIssueShortcut() {
-	if s.lastExitCode == 0 {
-		fmt.Print("Last command succeeded. Open issue anyway? [y/N] ")
-		var response string
-		fmt.Scanln(&response)
-		if !strings.EqualFold(response, "y") {
-			s.updatePrompt()
-			return
-		}
+func (s *Shell) out() *os.File {
+	if s.stdout != nil {
+		return s.stdout
 	}
-	_ = s.builtinIssue([]string{"--last"})
-	s.updatePrompt()
+	return os.Stdout
 }
 
-// dispatchCommand parses and executes a command line. Returns errExit if shell should exit.
+func (s *Shell) errOut() *os.File {
+	if s.stderr != nil {
+		return s.stderr
+	}
+	return os.Stderr
+}
+
+// dispatchCommand parses and executes a command line. It returns a
+// shellExit when the line ended the shell.
 func (s *Shell) dispatchCommand(ctx context.Context, line string) error {
 	parsed := parser.Parse(line)
 	if trace.Enabled("shell") {
@@ -681,40 +680,35 @@ func (s *Shell) dispatchCommand(ctx context.Context, line string) error {
 
 	switch parsed.Type {
 	case parser.CommandTypeEmpty:
-		s.updatePrompt()
+		// Nothing ran; the caller draws the next prompt.
 	case parser.CommandTypeAgent, parser.CommandTypeAgentPipe, parser.CommandTypeAgentInline:
-		s.recordCommand(line, 0, 0)
-		if err := s.handleAgentRequest(ctx, parsed); err != nil {
+		if err := s.handleAgentRequest(ctx, line, parsed); err != nil {
 			return err
 		}
 	case parser.CommandTypeRegular:
-		return s.executeRegularCommand(ctx, line)
+		_, err := s.runShellLine(ctx, line)
+		return err
 	}
 	return nil
 }
 
-// executeRegularCommand executes a regular shell command.
-func (s *Shell) executeRegularCommand(ctx context.Context, line string) error {
+// runShellLine runs a shell line the user typed or accepted from the agent,
+// builtins included, and sets its outcome. It reports whether the line ran:
+// exit ends the shell instead.
+func (s *Shell) runShellLine(ctx context.Context, line string) (ran bool, err error) {
 	// Check for builtins first
 	handled, err := s.executeBuiltin(ctx, line)
-	if err == errExit {
-		return errExit
+	if endsShell(err) {
+		return false, err
 	}
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "hash: %v\n", err)
-		s.setLastCommandFailure(line, err, 1)
-		s.recordCommand(line, s.lastExitCode, s.lastDuration)
-		s.observeCommandOutcome(line)
-		s.updatePrompt()
-		return nil
-	}
-	if handled {
-		s.lastExitCode = 0
-		s.lastDuration = 0
-		s.recordCommand(line, 0, 0)
-		s.observeCommandOutcome(line)
-		s.updatePrompt()
-		return nil
+	if handled || err != nil {
+		o := commandOutcome{command: line}
+		if err != nil {
+			fmt.Fprintf(s.errOut(), "hash: %v\n", err)
+			o.exitCode, o.stderr = 1, err.Error()
+		}
+		s.finishShellLine(o)
+		return true, nil
 	}
 
 	// Record command to clipboard buffer before execution
@@ -723,85 +717,167 @@ func (s *Shell) executeRegularCommand(ctx context.Context, line string) error {
 	}
 
 	// Capture stderr for issue reporting
-	stderrCap := newStderrCapture(os.Stderr)
+	stderrCap := newStderrCapture(s.errOut())
 
-	// Execute external command. The line is kept while it runs so a refusal
-	// raised mid-line (command not found) can correct the line as typed.
-	s.runningLine = line
-	result, err := s.executor.Execute(ctx, line, os.Stdout, stderrCap)
-	s.runningLine = ""
+	result, err := s.executeLine(ctx, line, s.out(), stderrCap)
 	s.handleExecutionResult(line, result, err, stderrCap)
-	return nil
+	if err == nil && result.End == executor.LineExited {
+		// The line ran exit in the shell itself (true && exit 4): the shell
+		// ends with the status it set.
+		return true, shellExit{status: result.ExitCode}
+	}
+	return true, nil
 }
 
-// handleExecutionResult processes the result of command execution.
-func (s *Shell) handleExecutionResult(line string, result *executor.Result, err error, stderrCap *stderrCapture) {
-	if err != nil {
-		s.handleExecutionError(err)
-	} else {
-		s.lastExitCode = result.ExitCode
-		s.lastDuration = result.Duration
-		if s.clipboard != nil && result.CapturedOutput != "" {
-			s.clipboard.SetOutput(result.CapturedOutput)
+// executeLine runs line in the interpreter with Ctrl+C claimed for it, as
+// bash does: a SIGINT the foreground command dies of, or one that comes
+// while only in-process work runs (a loop of builtins, read), ends the line
+// with status 130, and the shell goes on. The line runs on its own context
+// (lineContext), which a background job it starts outlives the line on.
+func (s *Shell) executeLine(ctx context.Context, line string, stdout, stderr io.Writer) (*executor.Result, error) {
+	return s.runOnLine(newLineContext(ctx), line, stdout, stderr)
+}
+
+// runOnLine runs line on the running line lc (executeLine), for a caller
+// that reads how lc ended.
+func (s *Shell) runOnLine(lc *lineContext, line string, stdout, stderr io.Writer) (*executor.Result, error) {
+	return s.onLine(lc, func(ctx context.Context) (*executor.Result, error) {
+		return s.executor.Execute(ctx, line, stdout, stderr)
+	})
+}
+
+// onLine is run, which runs a line's text in the executor on ctx, run as
+// the line lc: the one place a line claims Ctrl+C and ends, a line typed
+// at the prompt or a startup step (Startup.line).
+func (s *Shell) onLine(lc *lineContext, run func(ctx context.Context) (*executor.Result, error)) (*executor.Result, error) {
+	release := s.interrupts.claim(func() {
+		// A foreground command that runs decides (it ends the line if it
+		// dies of the signal); with nothing external running the line
+		// ends now.
+		if !s.executor.InterruptLine(lc.interrupt) {
+			lc.interrupt()
 		}
+	})
+	result, err := run(lc)
+	release()
+	if err == nil {
+		result.ExitCode = lc.status(result)
 	}
+	lc.returned(lineJobsDone(result))
+	return result, err
+}
 
-	// Store the previous command for prediction before updating
-	prevCommand := s.lastCommand
+// handleExecutionResult turns an external line's result into its outcome.
+func (s *Shell) handleExecutionResult(line string, result *executor.Result, err error, stderrCap *stderrCapture) {
+	o := commandOutcome{command: line}
+	if err != nil {
+		o.exitCode = s.showRefusal(err)
+	} else {
+		o.exitCode = result.ExitCode
+		o.duration = result.Duration
+	}
+	s.keepOutput(result)
 
-	// Store for issue reporting
-	s.lastCommand = line
-	s.lastStderr = stderrCap.String()
-	if s.lastStderr == "" {
+	o.stderr = stderrCap.String()
+	if o.stderr == "" {
 		// A PTY merges child stderr into its output stream; recover the error
 		// text from the captured tail so learning patterns, ?? explanations,
 		// and issue reports see what actually went wrong.
-		s.lastStderr = ptyStderrFallback(result)
+		o.stderr = ptyStderrFallback(result)
 	}
-	if s.lastStderr == "" {
+	if o.stderr == "" {
 		// The shell itself refused a command (not found, not executable): its
 		// own words are the only error text for learning and a bare ??.
 		switch {
 		case err != nil:
-			s.lastStderr = err.Error()
+			o.stderr = err.Error()
 		case result != nil && len(result.Refusals) > 0:
 			msgs := make([]string, 0, len(result.Refusals))
 			for _, r := range result.Refusals {
 				msgs = append(msgs, r.Error())
 			}
-			s.lastStderr = strings.Join(msgs, "\n")
+			o.stderr = strings.Join(msgs, "\n")
 		}
 	}
-	s.lastCwd, _ = os.Getwd()
+	if result != nil {
+		o.typoFix = s.closeRefusals(line, result.Refusals)
+	}
+	s.finishShellLine(o)
+}
 
-	// Record command in history
-	s.recordCommand(line, s.lastExitCode, s.lastDuration)
-
-	// Feed the learning loop: failures may surface a learned fix,
-	// a subsequent success records the fix that worked
-	s.observeCommandOutcome(line)
-
-	// Record command sequence for prediction (only successful commands)
-	if s.predictor != nil && s.lastExitCode == 0 && prevCommand != "" {
-		cwd, _ := os.Getwd()
-		s.predictor.Record(prevCommand, line, cwd, nil)
+// keepOutput settles the clipboard's entry for the line that gave result
+// (nil: the line was refused): what it printed, nothing, or output that
+// went straight to the terminal, past hash.
+func (s *Shell) keepOutput(result *executor.Result) {
+	switch {
+	case s.clipboard == nil:
+	case result == nil:
+		s.clipboard.SetOutput("")
+	case result.Uncaptured:
+		s.clipboard.SetUncaptured()
+	default:
+		s.clipboard.SetOutput(result.CapturedOutput)
 	}
 }
 
-// handleExecutionError handles errors from command execution. A mistyped
-// command name with a close match leaves the corrected line for the learning
-// loop to offer at the next prompt, and the banner promises the accept key
-// only when that offer will be made.
-func (s *Shell) handleExecutionError(err error) {
+// finishShellLine makes o the line's outcome and feeds it to history, the
+// learning loop and the predictor's command sequences.
+func (s *Shell) finishShellLine(o commandOutcome) {
+	prev := s.last.shellCommand()
+	o.cwd, _ = os.Getwd()
+	o.id = s.recordCommand(o.command, o.exitCode, o.duration)
+	s.last = o
+	s.status = o.status()
+
+	// Feed the learning loop: failures may surface a learned fix,
+	// a subsequent success records the fix that worked
+	s.observeCommandOutcome(o.command)
+
+	// Record command sequence for prediction (only successful commands)
+	if s.predictor != nil && o.exitCode == 0 && prev != "" {
+		s.predictor.Record(prev, o.command, o.cwd)
+	}
+}
+
+// finishAgentLine makes a ?? line's own result its outcome, for a turn that
+// handed no command to the shell, and records the line (recordAgentLine).
+func (s *Shell) finishAgentLine(line string, exitCode int, entered time.Time) {
+	s.recordAgentLine(line, exitCode, entered)
+	cwd, _ := os.Getwd()
+	s.last = commandOutcome{command: line, kind: agentLine, exitCode: exitCode, cwd: cwd}
+	s.status = s.last.status()
+}
+
+// recordAgentLine records a ?? line in history once its turn is over, with
+// the status it ended with, at the time it was entered: it sorts before a
+// command its turn handed to the shell, which history has by then.
+func (s *Shell) recordAgentLine(line string, exitCode int, entered time.Time) {
+	s.recordCommandAt(line, exitCode, 0, entered)
+}
+
+// syncStatus sets the interpreter's $? to exitCode once a line is over
+// (handleLine): the line may be one it did not run (a ?? request, a builtin
+// hash handles itself, a line it refused), and hooks may have run after
+// it. The prompt, OSC 133 D and $? then agree on how the line ended.
+// Nothing runs for it, so the ERR trap does not fire.
+func (s *Shell) syncStatus(exitCode int) {
+	if s.executor == nil {
+		return
+	}
+	s.executor.SetLastStatus(exitCode)
+}
+
+// showRefusal shows why the shell refused a command and returns the status
+// the refusal gives the line. It only draws: it is the executor's refusal
+// handler, called mid-line, for hooks and background jobs too, so what the
+// refusals mean for the user's line is worked out once the line is over
+// (closeRefusals).
+func (s *Shell) showRefusal(err error) (exitCode int) {
+	handler := s.errorHandler()
 	var nex *executor.CommandNotExecutableError
 	if errors.As(err, &nex) {
-		handler := s.errors
-		if handler == nil {
-			handler = NewErrorHandler()
-		}
 		handler.HandleNotExecutable(nex.Command, nex.Reason)
-		s.lastExitCode = 126
-		return
+		return 126
 	}
 
 	var cnf *executor.CommandNotFoundError
@@ -816,21 +892,57 @@ func (s *Shell) handleExecutionError(err error) {
 				}
 			}
 		}
-		handler := s.errors
-		if handler == nil {
-			handler = NewErrorHandler()
-		}
-		fix := ""
-		if len(suggestions) > 0 && s.fixes.active() {
-			fix = typoFixLine(s.runningLine, cnf.Command, suggestions[0])
-		}
-		handler.HandleCommandNotFound(cnf.Command, suggestions, installHint, fix != "")
-		s.pendingTypoFix = fix
-		s.lastExitCode = 127
-	} else {
-		fmt.Fprintf(os.Stderr, "hash: %v\n", err)
-		s.lastExitCode = 1
+		handler.HandleCommandNotFound(cnf.Command, suggestions, installHint)
+		return 127
 	}
+	fmt.Fprintf(s.errOut(), "hash: %v\n", err)
+	return 1
+}
+
+func (s *Shell) errorHandler() *ErrorHandler {
+	if s.errors == nil {
+		return NewErrorHandler()
+	}
+	return s.errors
+}
+
+// closeRefusals ends the banners the user's line drew for mistyped command
+// names with one footer, and returns the line with every one of them
+// corrected, for the next prompt to offer. There is no corrected line when
+// the learning loop is off, or a refusal has no correction in the line.
+func (s *Shell) closeRefusals(line string, refusals []error) (typoFix string) {
+	fixed, notFound := line, false
+	corrected := map[string]bool{}
+	for _, r := range refusals {
+		var cnf *executor.CommandNotFoundError
+		if !errors.As(r, &cnf) {
+			fixed = "" // not executable: no name to correct
+			continue
+		}
+		notFound = true
+		if fixed != "" && !corrected[cnf.Command] { // a loop refuses one name many times
+			corrected[cnf.Command] = true
+			fixed = correctTypo(fixed, cnf.Command, s.suggestor.Suggest(cnf.Command))
+		}
+	}
+	if !notFound {
+		return ""
+	}
+	if !s.fixes.active() {
+		fixed = ""
+	}
+	s.errorHandler().RefusalFooter(fixed != "")
+	return fixed
+}
+
+// correctTypo replaces typo with the first suggestion wherever it stands as
+// a word in line, or returns "" when there is no suggestion or the name is
+// not in the line (it came from a function or a variable).
+func correctTypo(line, typo string, suggestions []string) string {
+	if len(suggestions) == 0 {
+		return ""
+	}
+	return typoFixLine(line, typo, suggestions[0])
 }
 
 func (s *Shell) runInitCommands(ctx context.Context) error {
@@ -850,25 +962,30 @@ func (s *Shell) runInitCommands(ctx context.Context) error {
 			continue
 
 		case parser.CommandTypeAgent, parser.CommandTypeAgentPipe, parser.CommandTypeAgentInline:
-			fmt.Fprintf(os.Stderr, "hash: init_commands does not support agent syntax: %s\n", line)
+			fmt.Fprintf(s.errOut(), "hash: init_commands does not support agent syntax: %s\n", line)
 			continue
 
 		case parser.CommandTypeRegular:
 			handled, err := s.executeBuiltin(ctx, line)
-			if err == errExit {
-				return errExit
+			if endsShell(err) {
+				return err
 			}
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "hash: init command failed: %s: %v\n", line, err)
+				fmt.Fprintf(s.errOut(), "hash: init command failed: %s: %v\n", line, err)
 				continue
 			}
 			if handled {
 				continue
 			}
 
-			_, err = s.executor.Execute(ctx, line, os.Stdout, os.Stderr)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "hash: init command failed: %s: %v\n", line, err)
+			// A line of the shell, as one typed at the prompt: Ctrl+C
+			// interrupts it and the next one runs.
+			result, err := s.executeLine(ctx, line, s.out(), s.errOut())
+			switch {
+			case err != nil:
+				fmt.Fprintf(s.errOut(), "hash: init command failed: %s: %v\n", line, err)
+			case result.End == executor.LineExited:
+				return shellExit{status: result.ExitCode}
 			}
 		}
 	}
@@ -882,63 +999,61 @@ var ErrEditorCanceled = errors.New("editor canceled")
 // ErrEditorEOF is returned when the editor receives EOF (Ctrl+D).
 var ErrEditorEOF = errors.New("editor EOF")
 
-// readLineWithEditor uses the inline editor for input.
+// readLineWithEditor reads the next line the user enters. Reading moves
+// between two states: an editor edits the line, and a picker the editor
+// exited for (Ctrl+R, Ctrl+P) runs with the terminal handed to it and
+// gives the next editor the line to start from. The prompt resumes where
+// the picker opened: the editor clears its input row, the picker draws
+// there (inline, or on the alternate screen) and leaves the cursor on that
+// row, and the next editor draws on it, under the info bar still on
+// screen. It ends with the line an
+// editor submits, or an error: Ctrl+C, Ctrl+D, the input failing, or the
+// shell ending (ctx), after which no editor comes up again.
 func (s *Shell) readLineWithEditor(ctx context.Context) (string, error) {
-	initialText := ""
-
 	// Reset history navigation state for new input session
-	s.historyIndex = -1
-	s.historySavedLine = ""
+	s.historyNav.reset()
+	if s.executor != nil {
+		// Before the keys a reader held: no line runs on a PTY once one
+		// holds keys (TestKeyboard_TypedDuringComesBeforeTheKeysAReaderHeld).
+		s.keyboard().typedDuring(s.executor.TakeUnread())
+	}
 
+	text := ""
 	for {
-		// Get current prompt for editor
-		cfg := s.editorCfg
-		cfg.Prompt = s.currentPromptLine()
-
-		ed := editor.New(cfg, os.Stdin, os.Stdout)
-		if initialText != "" {
-			ed.SetInitialText(initialText)
-		}
-
-		// Ghost text: learned fix for the last failure, else prediction
-		if ghost := s.promptGhost(); ghost != "" {
-			ed.SetGhostText(ghost)
-		}
-
-		result, err := ed.Run(ctx)
+		result, err := s.editLine(ctx, text)
 		if err != nil {
 			return "", err
 		}
-		if result.EOF {
+		switch result.Exit {
+		case editor.ExitEOF:
 			return "", ErrEditorEOF
-		}
-		if result.Canceled {
+		case editor.ExitCanceled:
 			return "", ErrEditorCanceled
-		}
-		if result.HistorySearch {
-			// Launch history picker
-			selected := s.runHistoryPicker()
-			if selected != "" {
-				// Re-run editor with selected command
-				initialText = selected
-				s.printPromptPrefix()
-				continue
+		case editor.ExitHistorySearch, editor.ExitContextPicker:
+			if text, err = s.runPicker(ctx, result); err != nil {
+				return "", err
 			}
-			// No selection, re-run editor with previous text
-			initialText = result.Text
-			s.printPromptPrefix()
-			continue
+		default:
+			return result.Text, nil
 		}
-		if result.ContextPicker {
-			// Launch context picker
-			s.runContextPicker()
-			// Re-run editor with previous text
-			initialText = result.Text
-			s.printPromptPrefix()
-			continue
-		}
-		return result.Text, nil
 	}
+}
+
+// editLine runs one editor on the prompt, starting with text.
+func (s *Shell) editLine(ctx context.Context, text string) (editor.Result, error) {
+	cfg := s.editorCfg
+	cfg.Prompt = s.currentPromptLine()
+
+	ed := editor.New(cfg, s.in(), s.out())
+	if text != "" {
+		ed.SetInitialText(text)
+	}
+
+	// Ghost text: learned fix for the last failure, else prediction
+	if ghost := s.promptGhost(); ghost != "" {
+		ed.SetGhostText(ghost)
+	}
+	return ed.Run(ctx)
 }
 
 // currentPromptLine returns the current prompt line (without prefix).
@@ -946,34 +1061,78 @@ func (s *Shell) currentPromptLine() string {
 	cwd, _ := os.Getwd()
 	ctx := prompt.PromptContext{
 		Cwd:        cwd,
-		ExitCode:   s.lastExitCode,
-		DurationMs: s.lastDuration.Milliseconds(),
+		ExitCode:   s.status.exitCode,
+		DurationMs: s.status.duration.Milliseconds(),
 	}
 	_, promptLine := s.prompt.GenerateMultiLine(ctx)
 	return promptLine
 }
 
+// runPicker runs the picker an editor exited for (Ctrl+R, Ctrl+P), with
+// the terminal handed off to it, and returns the line the next editor
+// starts with: the history pick, else the editor's line. It returns ctx's
+// error when the shell ended while the picker ran.
+func (s *Shell) runPicker(ctx context.Context, result editor.Result) (string, error) {
+	h, _ := s.keyboard().handOff()
+	defer h.release()
+	text := result.Text
+	if result.Exit == editor.ExitHistorySearch {
+		if selected := s.runHistoryPicker(ctx); selected != "" {
+			text = selected
+		}
+	} else {
+		s.runContextPicker(ctx)
+	}
+	return text, ctx.Err()
+}
+
 // runHistoryPicker launches the Ctrl+R history picker and returns the selected command.
-func (s *Shell) runHistoryPicker() string {
+func (s *Shell) runHistoryPicker(ctx context.Context) string {
 	if s.history == nil {
 		return ""
 	}
 	picker := history.NewSearchUI(s.history, s.colorPalette)
 	picker.SetClipboard(s.clipboard)
-	selected, err := picker.Run()
-	// Drain any terminal responses (DECRPM) that bubbletea's shutdown
-	// queries left in stdin. Without this, responses like ESC[?2027;1$y
-	// leak into the next editor session as typed characters.
-	drainStdinBriefly()
+	selected, err := picker.Run(ctx)
 	if err != nil {
 		return ""
 	}
 	return selected
 }
 
-// runContextPicker launches the context picker TUI and stores selections.
-func (s *Shell) runContextPicker() {
-	// Build collection with available context
+// runContextPicker launches the context picker TUI on the current picks
+// and remembers what the user picked.
+func (s *Shell) runContextPicker(ctx context.Context) {
+	picks, err := hashcontext.NewPickerUI(s.pickedContext()).Run(ctx)
+	if err != nil {
+		// Picker canceled, errored or ended with the shell: keep the
+		// existing selection
+		return
+	}
+	s.contextPicks = picks
+}
+
+// contextSelection resolves the Ctrl+P picks against the context as it is
+// now, or nil for the auto-detected defaults. A pick that no longer exists
+// (a command gone from recent history) drops out.
+func (s *Shell) contextSelection() *hashcontext.Collection {
+	if s.contextPicks.Defaults() {
+		return nil
+	}
+	return s.pickedContext()
+}
+
+// pickedContext is the context on offer now, marked with the Ctrl+P picks
+// (or its defaults when there are none yet).
+func (s *Shell) pickedContext() *hashcontext.Collection {
+	collection := s.contextCollection()
+	s.contextPicks.Apply(collection)
+	return collection
+}
+
+// contextCollection is the context on offer right now: auto-detected
+// items, recent history, the last output and common env vars.
+func (s *Shell) contextCollection() *hashcontext.Collection {
 	builder := hashcontext.NewBuilder().AutoDetect()
 
 	// Add recent history if available
@@ -996,59 +1155,7 @@ func (s *Shell) runContextPicker() {
 	// Add common env vars as options
 	builder.WithEnvVars([]string{"GOPATH", "HOME", "PATH", "EDITOR"})
 
-	collection := builder.Build()
-
-	// Run the picker UI
-	picker := hashcontext.NewPickerUI(collection)
-	_, err := picker.Run()
-	drainStdinBriefly() // Drain DECRPM responses from bubbletea shutdown
-	if err != nil {
-		// Picker canceled or errored, keep existing selection
-		return
-	}
-
-	// Store the collection (with user's selections)
-	s.selectedContext = collection
-}
-
-// navigateHistory handles Up/Down arrow history navigation.
-// dir=-1 for Up (older history), dir=+1 for Down (newer history).
-// currentLine is the current buffer content, used to save when entering history.
-// Returns the command to display, or "" if at boundary.
-func (s *Shell) navigateHistory(dir int, currentLine string) string {
-	entries, _ := s.history.Search(history.SearchOptions{Limit: 1000})
-	if len(entries) == 0 {
-		return ""
-	}
-
-	// Calculate new index
-	// dir=-1 (Up) means go to older history = increase index
-	// dir=+1 (Down) means go to newer history = decrease index
-	newIndex := s.historyIndex - dir
-
-	// Boundary check: can't go before current line
-	if newIndex < -1 {
-		return ""
-	}
-
-	// Boundary check: can't go past oldest entry
-	if newIndex >= len(entries) {
-		return ""
-	}
-
-	// Save current line when first entering history
-	if s.historyIndex == -1 && newIndex >= 0 {
-		s.historySavedLine = currentLine
-	}
-
-	s.historyIndex = newIndex
-
-	// Return to current line (what user was typing)
-	if s.historyIndex == -1 {
-		return s.historySavedLine
-	}
-
-	return entries[s.historyIndex].Command
+	return builder.Build()
 }
 
 // agentRequestLabel names the ?? form that is about to run. A plain request
@@ -1065,13 +1172,12 @@ func agentRequestLabel(typ parser.CommandType) string {
 	}
 }
 
-func (s *Shell) handleAgentRequest(ctx context.Context, parsed parser.ParseResult) error {
-
-	fmt.Fprintf(os.Stdout, "\033[90m%s\033[0m ", agentRequestLabel(parsed.Type))
-
+func (s *Shell) handleAgentRequest(ctx context.Context, line string, parsed parser.ParseResult) error {
+	entered := time.Now()
 	if s.agentHandler == nil {
-		writeAgentNotConfiguredHint(os.Stderr)
-		s.lastExitCode = 1
+		drawAgentLabel(s.out(), parsed.Type)
+		writeAgentNotConfiguredHint(s.errOut())
+		s.finishAgentLine(line, 1, entered)
 		return nil
 	}
 
@@ -1079,70 +1185,40 @@ func (s *Shell) handleAgentRequest(ctx context.Context, parsed parser.ParseResul
 	// from PATH, or http transport with no URL), show friendly guidance
 	// instead of letting a raw exec failure surface.
 	if !s.agentAvailable(exec.LookPath) {
-		writeNoAgentHint(os.Stderr)
-		s.lastExitCode = 1
+		drawAgentLabel(s.out(), parsed.Type)
+		writeNoAgentHint(s.errOut())
+		s.finishAgentLine(line, 1, entered)
 		return nil
 	}
-
-	// Create a new context for the agent request that we can cancel independently.
-	// This allows Ctrl+C to cancel the agent operation without exiting the shell.
-	agentCtx, agentCancel := context.WithCancel(context.Background())
-	defer agentCancel()
-	s.turnCancel = agentCancel
-	defer func() { s.turnCancel = nil }()
-	s.resetDeniedCommands()
-
-	// Set up SIGINT handler for this agent request
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT)
-	defer signal.Stop(sigCh)
-
-	// Handle SIGINT by canceling the agent request.
-	go func() {
-		for {
-			select {
-			case <-sigCh:
-				if s.handleAgentInterrupt(agentCancel) {
-					return
-				}
-			case <-agentCtx.Done():
-				return
-			}
-		}
-	}()
-
-	// Pass selected context to agent handler
-	s.agentHandler.SetSelectedContext(s.selectedContext)
-
-	// Pass last error context so bare ?? can explain failures
-	if s.lastExitCode != 0 && s.lastCommand != "" {
-		s.agentHandler.SetLastError(&LastError{
-			Command:  s.lastCommand,
-			Stderr:   s.lastStderr,
-			ExitCode: s.lastExitCode,
-		})
-	} else {
-		s.agentHandler.SetLastError(nil)
+	if parsed.Type != parser.CommandTypeAgentPipe {
+		drawAgentLabel(s.out(), parsed.Type) // a pipe's once its command ran (runAgentTurn)
 	}
 
-	// Whatever path the turn takes, leave the terminal no stale record.
-	defer s.agentStatus.finish()
+	// The turn owns Ctrl+C and Esc while it runs: they cancel the agent
+	// request without exiting the shell. Whatever path it takes, the turn
+	// leaves the terminal no spinner, progress bar or stale status.
+	t := s.beginTurn(ctx)
+	defer t.end()
 
-	// Use unified streaming handler for all modes
-	return s.handleAgentRequestUnified(agentCtx, parsed)
+	// Every request of the turn carries the Ctrl+P picks and, so a bare ??
+	// can explain it, the line that failed.
+	t.facts = requestFacts{selection: s.contextSelection(), lastError: s.last.failedCommand()}
+
+	// Use unified streaming handler for all modes. A command the turn hands
+	// to the shell sets the line's outcome itself.
+	err := s.runAgentTurn(t, parsed)
+	if exitCode, ok := t.lineExitCode(); ok {
+		s.finishAgentLine(line, exitCode, entered)
+	} else {
+		s.recordAgentLine(line, 0, entered) // the agent's work finished; the command it handed off is the line's outcome
+	}
+	return err
 }
 
-// wireSpinnerGate keeps spinner frames off the screen while the output
-// coordinator has a permission prompt up. Wired lazily so any Shell,
-// including test fixtures built from struct literals, gets the guard.
-func (s *Shell) wireSpinnerGate() {
-	if s.responseUI == nil || s.agentOutput == nil {
-		return
-	}
-	aoc := s.agentOutput
-	s.responseUI.SetDrawGate(func() bool {
-		return aoc.State() != AgentOutputStatePermission
-	})
+// drawAgentLabel draws the label a ?? request's row starts with, the
+// spinner and the reply following it on the row.
+func drawAgentLabel(w io.Writer, typ parser.CommandType) {
+	fmt.Fprintf(w, "\033[90m%s\033[0m ", agentRequestLabel(typ))
 }
 
 func (s *Shell) agentRequestTimeout() time.Duration {
@@ -1156,246 +1232,245 @@ func (s *Shell) agentRequestTimeout() time.Duration {
 	return timeout
 }
 
-// handleAgentInlineStreaming uses ghost text for inline completions.
-func (s *Shell) handleAgentInlineStreaming(ctx context.Context, parsed parser.ParseResult, modelName string) error {
-	s.agentStatus.working(parsed.AgentPrompt)
-	requestCtx, timeoutCancel := context.WithTimeout(ctx, s.agentRequestTimeout())
+// handleAgentInlineStreaming uses ghost text for inline completions. The
+// turn follows the fill's stream, not the editor: when the fill has arrived
+// (or failed) the agent's work is over while the user may still be editing.
+func (s *Shell) handleAgentInlineStreaming(t *liveTurn, parsed parser.ParseResult) error {
+	requestCtx, timeoutCancel := context.WithTimeout(t.requestInline(parsed.AgentPrompt), s.agentRequestTimeout())
 	defer timeoutCancel()
-
-	// Start a frame-paced event stream. The adapter keeps lifecycle events out
-	// of the editable ghost completion while preventing per-character redraws.
-	events, errCh := s.agentHandler.StreamEvents(requestCtx, parsed)
-	events, errCh = paceAgentEvents(requestCtx, events, errCh, agentStreamPacerOptions{})
-	updates, errCh := textStreamFromEvents(requestCtx, events, errCh)
 
 	// Build initial text for editor
 	initialText := parsed.Command
 
+	// Start a frame-paced event stream. The adapter keeps lifecycle events out
+	// of the editable ghost completion while preventing per-character redraws.
+	streamDone := make(chan struct{})
+	var proposed string // the line as the ghost offered it; read once streamDone closes
+	events, errCh := s.agentHandler.StreamEvents(requestCtx, parsed, t.facts)
+	events, errCh = paceAgentEvents(requestCtx, events, errCh, agentStreamPacerOptions{})
+	updates, errCh := textStreamFromEvents(requestCtx, events, errCh, func(fill string, err error) {
+		proposed = initialText + fill
+		t.inlineEnded(proposed, err)
+		close(streamDone)
+	})
+
 	// Reset history navigation
-	s.historyIndex = -1
-	s.historySavedLine = ""
+	s.historyNav.reset()
 
-	// Configure editor with ghost text streaming
-	cfg := s.editorCfg
-	cfg.Prompt = s.currentPromptLine()
-
-	ed := editor.New(cfg, os.Stdin, os.Stdout)
+	ed := editor.New(s.agentTextEditorConfig(), s.in(), s.out())
 	if initialText != "" {
 		ed.SetInitialText(initialText)
 	}
 
 	// Set up streaming ghost text with model name
-	ed.SetGhostTextStreaming(updates, errCh)
-	ed.SetStreamingModel(modelName)
+	ed.SetGhostTextStreaming(updates, errCh, timeoutCancel)
 
-	// Run the editor on the shell's context, not the request's: the timeout
+	// Run the editor on the turn's context, not the request's: the timeout
 	// bounds how long we wait for the agent, never how long the user may edit.
-	result, err := ed.Run(ctx)
+	// The user leaves the line one of two ways: Enter on a line runs it;
+	// anything else (Esc, Ctrl+C, Ctrl+D, Enter on an empty line, an editor
+	// error) runs nothing, ends the turn (inlineLeft), and the line's status
+	// is how the request ended (lineExitCode).
+	result, err := ed.Run(t.ctx)
+	accepted := strings.TrimSpace(result.Text)
+	runs := err == nil && result.Exit == editor.ExitSubmit && accepted != ""
+	if !runs {
+		t.inlineLeft()
+	}
+	// The request is over whatever the user did: wait for its stream, so
+	// the turn knows how it ended before the line's status is read.
+	timeoutCancel()
+	<-streamDone
+
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "hash: editor error: %v\n", err)
-		s.lastExitCode = 1
+		t.editorFailed(err)
+	}
+	if !runs {
 		return nil
 	}
-
-	if result.Canceled {
-		return nil
-	}
-
-	if result.EOF {
-		fmt.Println("exit")
-		return errExit
-	}
-
-	// User accepted the command
-	command := strings.TrimSpace(result.Text)
-	if command == "" {
-		return nil
-	}
-
-	// Stop progress bar before executing (defer in caller will be a no-op)
-	s.responseUI.StopProgress()
 
 	// The user may have edited the line into anything, including a builtin
 	// such as exit or cd, so it takes the same path as a line typed at the
-	// prompt: builtins, history, learning and stderr capture included.
-	return s.dispatchCommand(ctx, command)
+	// prompt: builtins, history, learning and stderr capture included. As
+	// with an agent command the user edits, a ?? the fill brought is shell
+	// syntax and one the user typed is a request. The turn is over before
+	// it runs, the stream with it.
+	_, err = s.runEditedCommand(t.handOff(), proposed, accepted)
+	return err
 }
 
-// executePipeCommand runs the pipe command and captures its output.
-// Returns the captured output string, or error if execution failed.
-func (s *Shell) executePipeCommand(ctx context.Context, command string) (string, error) {
-	var outputBuf strings.Builder
+// pipeOutcome is how the command of `cmd | ?? prompt` ended, which decides
+// what the turn does next and, when no request goes, the ?? line's status.
+type pipeOutcome int
 
-	// Execute with output captured but not displayed
-	_, err := s.executor.Execute(ctx, command, &outputBuf, os.Stderr)
-	if err != nil {
-		return "", err
-	}
+const (
+	pipeRan         pipeOutcome = iota // it ran to its end, whatever its status: what it printed goes with the request
+	pipeInterrupted                    // Ctrl+C ended it, as a line: no request goes, and the line ends 130
+	pipeShellEnded                     // the shell's ending cut it off: the turn ends with the shell (ending)
+	pipeFailed                         // hash could not run it (a refusal): the turn fails
+)
 
-	return outputBuf.String(), nil
+// pipeCommand is the command of `cmd | ?? prompt` once it ended.
+type pipeCommand struct {
+	outcome pipeOutcome
+	output  string // what it printed (pipeRan)
+	err     error  // why it could not run (pipeFailed)
 }
 
-// handleAgentRequestUnified handles all ?? modes with streaming UX.
-func (s *Shell) handleAgentRequestUnified(ctx context.Context, parsed parser.ParseResult) error {
-	modelName := s.config.Agent.Model
-	if modelName == "" {
-		modelName = s.config.Agent.Command
+// runPipeCommand runs the command of `cmd | ?? prompt` as a line of the
+// shell (runOnLine, on shell, the shell's context), as one typed at the
+// prompt: Ctrl+C interrupts it, and a job it starts outlives the turn. It
+// runs in a subshell, as the left side of a pipe does in bash: a cd or an
+// assignment stays in it, and exit or errexit end only it. How it ended is
+// decided here, once, from its line: the shell's ending first, which makes
+// whatever the interpreter saw a cut-off.
+func (s *Shell) runPipeCommand(shell context.Context, command string) pipeCommand {
+	if err := s.checkSyntax(command); err != nil {
+		return pipeCommand{outcome: pipeFailed, err: err}
 	}
+	var out strings.Builder
+	lc := newLineContext(shell)
+	result, err := s.runOnLine(lc, "( "+command+"\n)", &out, s.errOut())
+	switch {
+	case err != nil:
+		return pipeCommand{outcome: pipeFailed, err: err}
+	case lc.shellEnded():
+		return pipeCommand{outcome: pipeShellEnded}
+	case result.End == executor.LineInterrupted:
+		return pipeCommand{outcome: pipeInterrupted}
+	}
+	return pipeCommand{outcome: pipeRan, output: out.String()}
+}
 
+// checkSyntax parses command, as a line of its own, in the shell's dialect:
+// a parse error names the lines and columns the user typed, where one of a
+// line hash wraps (a pipe command's subshell) named the wrapper's.
+func (s *Shell) checkSyntax(command string) error {
+	var lang syntax.LangVariant
+	if err := lang.Set(s.executor.Dialect()); err != nil {
+		lang = syntax.LangBash
+	}
+	_, err := shparse.Parse(syntax.NewParser(syntax.Variant(lang)), command+"\n", "hash")
+	return err
+}
+
+// runAgentTurn runs the requests of the turn t for the ?? line parsed, in
+// whichever form it has: full, pipe or inline.
+func (s *Shell) runAgentTurn(t *liveTurn, parsed parser.ParseResult) error {
 	// For pipe mode, capture command output first
-	var pipeOutput string
 	if parsed.Type == parser.CommandTypeAgentPipe {
-		var err error
-		pipeOutput, err = s.executePipeCommand(ctx, parsed.Command)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "hash: pipe command failed: %v\n", err)
-			s.lastExitCode = 1
+		pc := s.runPipeCommand(t.parent, parsed.Command)
+		switch pc.outcome {
+		case pipeShellEnded:
+			t.ending() // now, before any other event of the turn: it draws nothing
+			return nil
+		case pipeInterrupted:
+			t.cutOff()
+			return nil
+		case pipeFailed:
+			drawAgentLabel(s.out(), parsed.Type)
+			t.failed(fmt.Sprintf("pipe command failed: %v", pc.err))
 			return nil
 		}
+		drawAgentLabel(s.out(), parsed.Type)
 		// Update context with pipe output
 		if s.clipboard != nil {
 			s.clipboard.AddCommand(parsed.Command)
-			s.clipboard.SetOutput(pipeOutput)
+			s.clipboard.SetOutput(pc.output)
 		}
 	}
-
-	// Start progress bar
-	s.responseUI.StartProgress()
-	defer s.responseUI.StopProgress()
 
 	// For inline mode, use editor with ghost text
 	if parsed.Type == parser.CommandTypeAgentInline {
-		return s.handleAgentInlineStreaming(ctx, parsed, modelName)
+		return s.handleAgentInlineStreaming(t, parsed)
 	}
 
 	// Full ?? and pipe modes: streaming with confirmation UI
-	return s.handleAgentFullStreaming(ctx, parsed, modelName)
+	return s.handleAgentFullStreaming(t, parsed)
 }
 
 // handleAgentFullStreaming handles full ?? and pipe modes with streaming.
-func (s *Shell) handleAgentFullStreaming(ctx context.Context, parsed parser.ParseResult, modelName string) error {
-	started := time.Now()
-	s.agentStatus.working(parsed.AgentPrompt)
-	requestCtx, timeoutCancel := context.WithTimeout(ctx, s.agentRequestTimeout())
-	defer timeoutCancel()
-
-	// Show thinking indicator (multi-stage: thinking -> receiving)
-	s.wireSpinnerGate()
-	s.responseUI.SetAgentModel(s.agentHandler.CurrentModel())
-	s.responseUI.ShowState(AgentStateThinking)
-
-	events, errCh := s.agentHandler.StreamEvents(requestCtx, parsed)
-	events, errCh = paceAgentEvents(requestCtx, events, errCh, agentStreamPacerOptions{})
-	s.agentOutput.BeginToolTurn()
-
-	stopKeys := s.watchTurnKeys()
-	streamResult := s.collectAgentEventStream(ctx, events, errCh, agentStreamCollectionOptions{
-		onFirstChunk: func() {
-			// Stop the spinner before claiming the line. ClearActiveLine
-			// (not ClearLine) so an active permission prompt keeps its
-			// last line intact; StartStreaming defers to the prompt too.
-			s.responseUI.StopSpinner()
-			s.agentOutput.StartStreaming()
-			s.agentOutput.ClearActiveLine()
-		},
-		writeRendered: func(rendered string) {
-			s.agentOutput.WriteStream(rendered)
-		},
-		wrapWidth: replyWidth(0),
-	}, func(update agent.ToolCallUpdate) {
-		s.presentAgentToolUpdate(update, "")
-	})
-	stopKeys()
-
-	if streamResult.canceled {
-		s.agentStatus.idle()
-		s.endCanceledRow()
-		showTurnCanceled(os.Stdout, "")
-		s.lastExitCode = 1
+func (s *Shell) handleAgentFullStreaming(t *liveTurn, parsed parser.ParseResult) error {
+	responseText, latency, ok := s.streamFirstReply(t, parsed)
+	if !ok {
 		return nil
 	}
+	turn := agentTurn{prompt: parsed.AgentPrompt, response: responseText, latency: latency}
 
-	s.agentOutput.EndStreaming()
-
-	if streamResult.streamErr != nil {
-		return s.handleAgentStreamError(
-			ctx,
-			parsed,
-			modelName,
-			streamResult.streamErr,
-			len(streamResult.responseText),
-		)
-	}
-
-	responseText := strings.TrimSpace(streamResult.responseText)
-	if responseText == "" {
-		s.agentStatus.failed(emptyAgentResponseMessage)
-		s.responseUI.ClearLine()
-		s.responseUI.ShowError(emptyAgentResponseMessage)
-		s.lastExitCode = 1
-		return nil
-	}
-	turn := agentTurn{prompt: parsed.AgentPrompt, response: responseText, latency: time.Since(started)}
-
-	// Success path - end the reply's last row and clear the spinner
-	s.endReplyRow()
-
-	// Determine response type (single-turn flow)
-	collector := agent.NewStreamCollector()
-	collector.Append(responseText)
-	resp := collector.Response()
-	resp = agentTurnResponseForConfirmation(parsed.Type, resp, responseText)
-	resp = s.demoteDeniedCommand(resp)
-
-	allowReply := agentTurnAllowsReply(parsed.Type, resp)
-	transcript := s.initialAgentConversationTranscript(parsed, responseText)
-
-	confirmType, needsConfirmation := confirmationTypeForAgentResponse(resp, allowReply)
-	if !needsConfirmation {
-		s.agentStatus.done(firstNonEmptyLine(responseText))
-		s.responseUI.StopProgress()
+	resp, next, confirmType := classifyReply(parsed.Type, false, responseText, t.demoteDenied)
+	transcript := s.initialAgentConversationTranscript(t.ctx, parsed, t.facts, responseText)
+	t.answered(resp, responseText, next, confirmType)
+	if next != replyAwaitsKey {
 		s.recordAgentTurn(turn, true, 0)
 		return nil
 	}
 
-	s.reportConfirmationWait(confirmType, resp, responseText)
-	s.agentOutput.EnterConfirming()
-	s.agentOutput.ShowHints(confirmType)
-	action := s.responseUI.WaitForConfirmationByType(confirmType)
-	s.agentOutput.ExitConfirming()
-	fmt.Println()
-
-	// Stop progress bar before any action
-	s.responseUI.StopProgress()
-
+	action := t.confirm(confirmType)
 	if action == ConfirmReply {
 		s.clearConfirmationHint() // the reply box takes the hint's place
 		s.recordAgentTurn(turn, true, 0)
-		return s.runAgentConversationLoop(ctx, modelName, transcript)
+		return s.runAgentConversationLoop(t, transcript)
 	}
 
-	return s.handleAgentConfirmAction(ctx, action, confirmType, resp, turn)
+	return s.handleAgentConfirmAction(t, action, confirmType, resp, turn)
 }
 
-func (s *Shell) presentAgentToolUpdate(update agent.ToolCallUpdate, prefix string) {
-	if s.agentOutput == nil {
-		return
-	}
-	merged, finalized := s.agentOutput.RecordToolUpdate(update)
-	if finalized {
-		if s.responseUI != nil {
-			s.responseUI.ClearLine()
-		}
-		s.agentOutput.RenderToolResult(merged, prefix)
-		if s.responseUI != nil {
-			s.responseUI.ShowState(AgentStateThinking)
-		}
-		return
-	}
+// streamFirstReply sends the turn's request and draws the reply, retrying
+// a failure while the user asks to. It reports the reply and how long its
+// request took, or false when there is none to act on (the turn then ended
+// canceled or failed).
+func (s *Shell) streamFirstReply(t *liveTurn, parsed parser.ParseResult) (responseText string, latency time.Duration, ok bool) {
+	for {
+		started := time.Now()
+		streamResult := s.streamTurnRequest(t, parsed.AgentPrompt, func(ctx context.Context) (<-chan agent.StreamEvent, <-chan error) {
+			return s.agentHandler.StreamEvents(ctx, parsed, t.facts)
+		}, "", replyWidth(0), s.agentOutput.WriteStream)
 
-	if s.responseUI != nil {
-		s.responseUI.ShowActivity(agentToolActivityLabel(merged))
+		if streamResult.canceled {
+			t.canceled("")
+			return "", 0, false
+		}
+		if streamResult.streamErr != nil {
+			if s.handleAgentStreamError(t, streamResult.streamErr, len(streamResult.responseText)) {
+				continue
+			}
+			return "", 0, false
+		}
+		responseText = strings.TrimSpace(streamResult.responseText)
+		if responseText == "" {
+			t.failed(emptyAgentResponseMessage)
+			return "", 0, false
+		}
+		return responseText, time.Since(started), true
 	}
+}
+
+// streamTurnRequest sends one request of the turn and draws its reply as it
+// streams: start opens the request's events on the request's context, write
+// draws rendered text, and tool rows are drawn behind toolPrefix.
+func (s *Shell) streamTurnRequest(
+	t *liveTurn,
+	request string,
+	start func(context.Context) (<-chan agent.StreamEvent, <-chan error),
+	toolPrefix string,
+	wrapWidth int,
+	write func(string),
+) agentStreamCollectionResult {
+	t.request(request)
+	requestCtx, timeoutCancel := context.WithTimeout(t.ctx, s.agentRequestTimeout())
+	defer timeoutCancel()
+
+	events, errCh := start(requestCtx)
+	events, errCh = paceAgentEvents(requestCtx, events, errCh, agentStreamPacerOptions{})
+	result := s.collectAgentEventStream(t.ctx, events, errCh, agentStreamCollectionOptions{
+		beforeText:    t.text,
+		writeRendered: write,
+		wrapWidth:     wrapWidth,
+	}, func(update agent.ToolCallUpdate) {
+		t.tool(update, toolPrefix)
+	})
+	t.streamEnded()
+	return result
 }
 
 func agentToolActivityLabel(update agent.ToolCallUpdate) string {
@@ -1406,10 +1481,10 @@ func agentToolActivityLabel(update agent.ToolCallUpdate) string {
 	return "agent · running · " + truncateTerminalText(title, 72)
 }
 
-func (s *Shell) initialAgentConversationTranscript(parsed parser.ParseResult, responseText string) []agentConversationMessage {
+func (s *Shell) initialAgentConversationTranscript(ctx context.Context, parsed parser.ParseResult, facts requestFacts, responseText string) []agentConversationMessage {
 	userPrompt := strings.TrimSpace(parsed.AgentPrompt)
 	if s.agentHandler != nil {
-		if req, err := s.agentHandler.buildRequest(parsed); err == nil {
+		if req, err := s.agentHandler.buildRequest(ctx, parsed, facts); err == nil {
 			userPrompt = strings.TrimSpace(req.Prompt)
 		}
 	}
@@ -1424,11 +1499,11 @@ func (s *Shell) initialAgentConversationTranscript(parsed parser.ParseResult, re
 	return transcript
 }
 
-func (s *Shell) runAgentConversationLoop(ctx context.Context, modelName string, transcript []agentConversationMessage) error {
+func (s *Shell) runAgentConversationLoop(t *liveTurn, transcript []agentConversationMessage) error {
 	openRail := true
 	for {
-		s.agentStatus.blocked(programstatus.Question, lastNonEmptyLine(lastAssistantText(transcript)))
-		reply, ok := s.readAgentConversationReply(ctx, openRail)
+		t.replying(lastAssistantText(transcript))
+		reply, ok := s.readAgentConversationReply(t.ctx, openRail)
 		if !ok {
 			return nil
 		}
@@ -1439,7 +1514,7 @@ func (s *Shell) runAgentConversationLoop(ctx context.Context, modelName string, 
 
 		priorTranscript := append([]agentConversationMessage(nil), transcript...)
 		started := time.Now()
-		resp, responseText, ok := s.streamAgentFollowUpTurn(ctx, reply, priorTranscript)
+		responseText, ok := s.streamAgentFollowUpTurn(t, reply, priorTranscript)
 		transcript = append(transcript, agentConversationMessage{Role: "user", Text: reply})
 		if !ok {
 			return nil
@@ -1447,54 +1522,37 @@ func (s *Shell) runAgentConversationLoop(ctx context.Context, modelName string, 
 		transcript = append(transcript, agentConversationMessage{Role: "assistant", Text: responseText})
 		turn := agentTurn{prompt: reply, response: responseText, latency: time.Since(started)}
 
-		if agentTurnShouldPromptForReply(parser.CommandTypeAgent, resp, responseText) {
+		resp, next, confirmType := classifyReply(parser.CommandTypeAgent, true, responseText, t.demoteDenied)
+		t.answered(resp, responseText, next, confirmType)
+		switch next {
+		case replyAsksBack:
 			s.recordAgentTurn(turn, true, 0)
+			if s.keyboard().typedAhead() {
+				return nil // keys typed during the follow-up are the next prompt's
+			}
 			continue
-		}
-
-		resp = s.demoteDeniedCommand(resp)
-		confirmType, needsConfirmation := confirmationTypeForAgentResponse(
-			resp,
-			agentTurnAllowsReply(parser.CommandTypeAgent, resp),
-		)
-		if !needsConfirmation {
+		case replyStands:
 			s.recordAgentTurn(turn, true, 0)
 			return nil
 		}
 
-		s.reportConfirmationWait(confirmType, resp, responseText)
-		s.agentOutput.EnterConfirming()
-		s.agentOutput.ShowHints(confirmType)
-		action := s.responseUI.WaitForConfirmationByType(confirmType)
-		s.agentOutput.ExitConfirming()
-		fmt.Println()
-
-		s.responseUI.StopProgress()
-
+		action := t.confirm(confirmType)
 		if action == ConfirmReply {
 			s.clearConfirmationHint()
 			s.recordAgentTurn(turn, true, 0)
 			continue
 		}
-		return s.handleAgentConfirmAction(ctx, action, confirmType, resp, turn)
+		return s.handleAgentConfirmAction(t, action, confirmType, resp, turn)
 	}
 }
 
 func (s *Shell) readAgentConversationReply(ctx context.Context, openRail bool) (string, bool) {
-	if s.agentReplyInputHook != nil {
-		reply, err := s.agentReplyInputHook(ctx)
-		if err != nil {
-			return "", false
-		}
-		reply = strings.TrimSpace(reply)
-		return reply, reply != ""
-	}
-
 	cfg := agentConversationEditorConfig(s.editorCfg, openRail)
+	s.historyNav.reset() // Up recalls from the newest entry, not where the prompt left off
 
-	ed := editor.New(cfg, os.Stdin, os.Stdout)
+	ed := editor.New(cfg, s.in(), s.out())
 	result, err := ed.Run(ctx)
-	if err != nil || result.Canceled || result.EOF {
+	if err != nil || result.Exit == editor.ExitCanceled || result.Exit == editor.ExitEOF {
 		return "", false
 	}
 
@@ -1502,92 +1560,83 @@ func (s *Shell) readAgentConversationReply(ctx context.Context, openRail bool) (
 	return reply, reply != ""
 }
 
+// streamAgentFollowUpTurn sends a conversation reply and draws the agent's
+// answer behind the conversation rail. A failure is offered a retry exactly
+// as the first request's is. It reports the answer, or false when there is
+// none to act on.
 func (s *Shell) streamAgentFollowUpTurn(
-	ctx context.Context,
+	t *liveTurn,
 	reply string,
 	transcript []agentConversationMessage,
-) (response agent.Response, responseText string, ok bool) {
-	s.agentStatus.working(reply)
-	requestCtx, timeoutCancel := context.WithTimeout(ctx, s.agentRequestTimeout())
-	defer timeoutCancel()
+) (responseText string, ok bool) {
+	for {
+		railPrefixer := newAgentConversationRailPrefixer(s.agentOutput.WriteStream)
+		streamResult := s.streamTurnRequest(t, reply, func(ctx context.Context) (<-chan agent.StreamEvent, <-chan error) {
+			return s.agentHandler.StreamFollowUpEvents(ctx, reply, transcript, t.facts)
+		}, agentConversationAgentContinuation, replyWidth(agentConversationAgentPrefixWidth), railPrefixer.Write)
 
-	s.wireSpinnerGate()
-	s.responseUI.SetAgentModel(s.agentHandler.CurrentModel())
-	s.responseUI.ShowState(AgentStateThinking)
-	events, errCh := s.agentHandler.StreamFollowUpEvents(requestCtx, reply, transcript)
-	events, errCh = paceAgentEvents(requestCtx, events, errCh, agentStreamPacerOptions{})
-	s.agentOutput.BeginToolTurn()
-	railPrefixer := newAgentConversationRailPrefixer(func(rendered string) {
-		s.agentOutput.WriteStream(rendered)
-	})
+		if streamResult.canceled {
+			t.canceled(agentConversationAgentContinuation)
+			return "", false
+		}
 
-	stopKeys := s.watchTurnKeys()
-	streamResult := s.collectAgentEventStream(ctx, events, errCh, agentStreamCollectionOptions{
-		onFirstChunk: func() {
-			// Same permission-aware sequence as handleAgentFullStreaming.
-			s.responseUI.StopSpinner()
-			s.agentOutput.StartStreaming()
-			s.agentOutput.ClearActiveLine()
-		},
-		writeRendered: func(rendered string) {
-			railPrefixer.Write(rendered)
-		},
-		wrapWidth: replyWidth(agentConversationAgentPrefixWidth),
-	}, func(update agent.ToolCallUpdate) {
-		// Tool rows share the conversation rail without pretending they are
-		// assistant prose.
-		s.presentAgentToolUpdate(update, agentConversationAgentContinuation)
-	})
-	stopKeys()
+		if streamResult.streamErr != nil {
+			if s.handleAgentStreamError(t, streamResult.streamErr, len(streamResult.responseText)) {
+				continue
+			}
+			return "", false
+		}
 
-	if streamResult.canceled {
-		s.endCanceledRow()
-		s.agentStatus.idle()
-		showTurnCanceled(os.Stdout, agentConversationAgentContinuation)
-		s.lastExitCode = 1
-		return agent.Response{}, "", false
+		responseText = strings.TrimSpace(streamResult.responseText)
+		if responseText == "" {
+			t.failed(emptyAgentResponseMessage)
+			return "", false
+		}
+		return responseText, true
 	}
-
-	s.agentOutput.EndStreaming()
-
-	if streamResult.streamErr != nil {
-		s.agentStatus.failed(agentStreamErrorMessage(streamResult.streamErr))
-		s.responseUI.ClearLine()
-		s.responseUI.ShowError(agentStreamErrorMessage(streamResult.streamErr))
-		s.lastExitCode = 1
-		return agent.Response{}, "", false
-	}
-
-	responseText = strings.TrimSpace(streamResult.responseText)
-	if responseText == "" {
-		s.agentStatus.failed(emptyAgentResponseMessage)
-		s.responseUI.ClearLine()
-		s.responseUI.ShowError(emptyAgentResponseMessage)
-		s.lastExitCode = 1
-		return agent.Response{}, "", false
-	}
-
-	s.endReplyRow()
-
-	collector := agent.NewStreamCollector()
-	collector.Append(responseText)
-	return collector.Response(), responseText, true
 }
 
-func confirmationTypeForAgentResponse(resp agent.Response, allowExplanationReply bool) (ConfirmationType, bool) {
-	switch resp.Type {
-	case agent.ResponseTypeCommand:
-		return ConfirmTypeCommand, true
-	case agent.ResponseTypeExplanation:
-		if allowExplanationReply {
-			return ConfirmTypeExplanation, true
-		}
-	case agent.ResponseTypeError:
-		return ConfirmTypeError, true
-	default:
-		return 0, false
+// replyNext is what a complete reply asks of the user.
+type replyNext int
+
+const (
+	replyStands    replyNext = iota // nothing: the answer stands (a pipe turn's prose)
+	replyAwaitsKey                  // a confirmation hint waits for a key; its type says which
+	replyAsksBack                   // in a conversation, a question: the reply box opens at once
+)
+
+// classifyReply decides what a complete reply asks of the user, the same way
+// for every turn of the ?? form typ. The one deliberate difference is the
+// conversation: before it, a reply that asks a question still shows the hint
+// (the user opts in with r); inside it, the question opens the reply box
+// directly. demote turns a command the user denied into prose.
+func classifyReply(typ parser.CommandType, inConversation bool, responseText string, demote func(agent.Response) agent.Response) (agent.Response, replyNext, ConfirmationType) {
+	collector := agent.NewStreamCollector()
+	collector.Append(responseText)
+	resp := collector.Response()
+
+	full := typ == parser.CommandTypeAgent
+	wantsReply := full && agentResponseWantsReply(responseText)
+	// A natural-language question misread as a command is prose.
+	if wantsReply && resp.Type == agent.ResponseTypeCommand && agentConversationLooksLikeQuestion(responseText) {
+		resp = agent.Response{Type: agent.ResponseTypeExplanation, Explanation: responseText}
 	}
-	return 0, false
+	if inConversation && wantsReply && resp.Type == agent.ResponseTypeExplanation {
+		return resp, replyAsksBack, 0
+	}
+	if demote != nil {
+		resp = demote(resp)
+	}
+	switch {
+	case resp.Type == agent.ResponseTypeCommand:
+		return resp, replyAwaitsKey, ConfirmTypeCommand
+	case resp.Type == agent.ResponseTypeExplanation && full:
+		return resp, replyAwaitsKey, ConfirmTypeExplanation
+	default:
+		// Pipe prose, or an error reply: the text says it all, and there is
+		// nothing for a key to do.
+		return resp, replyStands, 0
+	}
 }
 
 // agentTurn is what the shell remembers about one ?? exchange once the user
@@ -1625,46 +1674,56 @@ func (s *Shell) recordAgentTurn(turn agentTurn, accepted bool, commandID int64) 
 
 // handleAgentConfirmAction processes the user's confirmation choice. A
 // command the user runs or edits takes the same path as a typed line, so
-// the error it returns (such as exit) is the shell's to act on.
-func (s *Shell) handleAgentConfirmAction(ctx context.Context, action ConfirmAction, confirmType ConfirmationType, resp agent.Response, turn agentTurn) error {
-	// The user acted: hash is at rest, and a command that runs now reports
-	// for itself.
-	s.agentStatus.idle()
-	var commandID int64
+// the error it returns (such as exit) is the shell's to act on. The turn is
+// over first: the command runs on the shell's context, not the turn's.
+func (s *Shell) handleAgentConfirmAction(t *liveTurn, action ConfirmAction, confirmType ConfirmationType, resp agent.Response, turn agentTurn) error {
+	if action == ConfirmEnded {
+		return nil // the shell is ending: the reply stays as it is, unrecorded
+	}
+	var ran bool
 	var err error
 	switch action {
 	case ConfirmRun:
 		if confirmType == ConfirmTypeCommand {
+			ctx := t.handOff()
 			s.showAgentCommandAsTyped(resp.Command)
-			commandID, err = s.runAgentCommand(ctx, resp.Command)
+			ran, err = s.runAgentCommand(ctx, resp.Command)
 			break
 		}
 		// An explanation is done: drop its hint, keep the answer.
+		t.acted()
 		s.clearConfirmationHint()
 	case ConfirmEdit:
 		if confirmType == ConfirmTypeCommand {
 			s.clearConfirmationHint() // the editor takes the hint's place
-			commandID, err = s.handleEditCommand(ctx, resp.Command)
+			ran, err = s.handleEditCommand(t, resp.Command)
 			break
 		}
 		// Copy explanation to system clipboard
+		t.acted()
 		s.clearConfirmationHint()
 		if copyErr := copyToSystemClipboard(turn.response); copyErr != nil {
-			fmt.Fprintf(os.Stderr, "\033[90mCould not copy: %v\033[0m\n", copyErr)
+			fmt.Fprintf(s.errOut(), "\033[90mCould not copy: %v\033[0m\n", copyErr)
 		} else {
-			fmt.Fprintf(os.Stdout, "\033[90mCopied to clipboard\033[0m\n")
+			fmt.Fprintf(s.out(), "\033[90mCopied to clipboard\033[0m\n")
 		}
-	case ConfirmCancel:
+	default:
 		// Declining keeps what the agent said, a proposed command included:
 		// the user has read it, its lead-in explains it, and rows already
 		// scrolled away could not be erased anyway. Only the hint goes.
+		t.acted()
 		s.clearConfirmationHint()
 	}
 	accepted := action != ConfirmCancel
+	var commandID int64
 	if confirmType == ConfirmTypeCommand {
 		// A command reply is accepted once a command ran (or ended the
-		// shell); an edit the user abandons is not acceptance.
-		accepted = commandID != 0 || err == errExit
+		// shell), whether or not history could record it; an edit the user
+		// abandons is not acceptance.
+		accepted = ran || endsShell(err)
+		if ran {
+			commandID = s.last.id
+		}
 	}
 	s.recordAgentTurn(turn, accepted, commandID)
 	return err
@@ -1690,83 +1749,46 @@ func (s *Shell) showAgentCommandAsTyped(command string) {
 // capture included, so a failure becomes the context a bare ?? explains.
 // The reply is a shell line, never a new request: a ?? inside it (a glob, a
 // grep pattern) is shell syntax, so it bypasses the ?? dispatch.
-// It reports the history id of the command that ran, 0 when none was recorded.
-func (s *Shell) runAgentCommand(ctx context.Context, command string) (commandID int64, err error) {
+// It reports whether a command ran; its outcome is then s.last.
+func (s *Shell) runAgentCommand(ctx context.Context, command string) (ran bool, err error) {
 	command = strings.TrimSpace(command)
 	if command == "" {
-		return 0, nil
+		return false, nil
 	}
-	before := s.lastCommandID
-	err = s.executeRegularCommand(ctx, command)
-	if s.lastCommandID != before {
-		commandID = s.lastCommandID
-	}
-	return commandID, err
+	return s.runShellLine(ctx, command)
 }
 
-// handleAgentStreamError handles errors during agent streaming. The caller
-// returns its result: nil once the error is handled, or the outcome of a
-// retried turn.
-func (s *Shell) handleAgentStreamError(ctx context.Context, parsed parser.ParseResult, modelName string, streamErr error, responseLen int) error {
-	s.agentStatus.failed(agentStreamErrorMessage(streamErr))
-	s.responseUI.ClearLine() // Stop spinner and clear the line
-	s.responseUI.ShowError(agentStreamErrorMessage(streamErr))
+// handleAgentStreamError shows a failed request and, when trying again can
+// help (a transient failure, or one partway through the reply), offers a
+// retry. It reports whether the user asked for one; the hint is gone either
+// way, and the error stays.
+func (s *Shell) handleAgentStreamError(t *liveTurn, streamErr error, responseLen int) (retry bool) {
+	t.failed(agentStreamErrorMessage(streamErr))
 
 	// If no response was received, classify the failure before showing hints.
 	// Startup errors get install/PATH hints; transient errors get retry.
 	if responseLen == 0 {
-		if agent.IsModelSelectionError(streamErr) {
+		switch {
+		case agent.IsModelSelectionError(streamErr):
 			s.responseUI.ShowModelHint()
-			s.lastExitCode = 1
-			return nil
-		}
-
-		if agent.IsStartupError(streamErr) {
+			return false
+		case agent.IsStartupError(streamErr):
 			s.responseUI.ShowAgentHint(
 				s.config.Agent.Transport,
 				s.config.Agent.Command,
 				s.config.Agent.URL,
 			)
-			s.lastExitCode = 1
-			return nil
+			return false
+		case !agent.IsRetryableError(streamErr):
+			return false
 		}
-
-		if agent.IsRetryableError(streamErr) {
-			s.agentOutput.EnterConfirming()
-			s.agentOutput.ShowHints(ConfirmTypeError)
-			action := s.responseUI.WaitForConfirmationByType(ConfirmTypeError)
-			s.agentOutput.ExitConfirming()
-			fmt.Println()
-			if action == ConfirmRun { // Retry
-				return s.handleAgentFullStreaming(ctx, parsed, modelName)
-			}
-			s.lastExitCode = 1
-			return nil
-		}
-
-		s.lastExitCode = 1
-		return nil
 	}
 
-	// Mid-stream error with partial response - offer retry
-	s.agentOutput.EnterConfirming()
-	s.agentOutput.ShowHints(ConfirmTypeError)
-	action := s.responseUI.WaitForConfirmationByType(ConfirmTypeError)
-	s.agentOutput.ExitConfirming()
-	fmt.Println()
-	if action == ConfirmRun { // Retry
-		return s.handleAgentFullStreaming(ctx, parsed, modelName)
+	action := t.confirm(ConfirmTypeError)
+	if action != ConfirmEnded {
+		s.clearConfirmationHint()
 	}
-	// Cancel: the partial reply and the error stay; only the hint goes.
-	s.clearConfirmationHint()
-	return nil
-}
-
-func agentStreamErrorMessage(err error) string {
-	if errors.Is(err, agent.ErrACPNoOutput) {
-		return emptyAgentResponseMessage
-	}
-	return err.Error()
+	return action == ConfirmRun
 }
 
 func writeAgentNotConfiguredHint(w io.Writer) {
@@ -1779,150 +1801,114 @@ func writeAgentNotConfiguredHint(w io.Writer) {
 	fmt.Fprintf(w, "  See docs/config-reference.md for options.\n")
 }
 
-// handleEditCommand opens the editor on the command and runs the edited line.
-func (s *Shell) handleEditCommand(ctx context.Context, command string) (int64, error) {
-	s.historyIndex = -1
-	s.historySavedLine = ""
+// handleEditCommand opens the editor on the command the turn produced and
+// runs the edited line. It reports whether a command ran. The turn hands off
+// only once the user submits a line: an edit left without one (Esc,
+// Ctrl+C, Ctrl+D, an empty line) declines the reply, and an editor error fails the
+// turn, as in the inline form.
+func (s *Shell) handleEditCommand(t *liveTurn, command string) (ran bool, err error) {
+	ctx := t.editing()
+	s.historyNav.reset()
 
-	cfg := s.editorCfg
-	cfg.Prompt = s.currentPromptLine()
-
-	ed := editor.New(cfg, os.Stdin, os.Stdout)
+	ed := editor.New(s.agentTextEditorConfig(), s.in(), s.out())
 	ed.SetInitialText(command)
 
 	result, err := ed.Run(ctx)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "hash: editor error: %v\n", err)
-		s.lastExitCode = 1
-		return 0, nil
+	switch {
+	case err != nil:
+		t.editorFailed(err)
+		return false, nil
+	case result.Exit != editor.ExitSubmit || strings.TrimSpace(result.Text) == "":
+		t.acted()
+		return false, nil
 	}
-
-	if result.Canceled || result.EOF {
-		return 0, nil
-	}
-
-	return s.runEditedCommand(ctx, command, result.Text)
+	return s.runEditedCommand(t.handOff(), command, result.Text)
 }
 
-// endReplyRow ends the reply's last row, if it is unfinished, so the footer
-// starts on its own row: a reply ending in a code block already did, and a
-// second newline drew a blank row before the footer.
-func (s *Shell) endReplyRow() {
-	if s.agentOutput.EndsMidRow() {
-		fmt.Println()
-	}
-	s.responseUI.ClearLine()
+// agentTextEditorConfig is the editor the user edits an agent's command or
+// inline fill in. It has no history search or context picker: those end the
+// editor so the prompt can open them, and here the only way out that runs
+// the line is Enter. Esc or one Ctrl+C declines what the agent offered,
+// whatever the line holds, as Esc declines a hint: the editor ends, and
+// the turn with it, so the prompt comes back. Left open on an emptied
+// line, it looked like the prompt but was still the turn's.
+func (s *Shell) agentTextEditorConfig() editor.Config {
+	cfg := s.editorCfg
+	cfg.Prompt = s.currentPromptLine()
+	cfg.DisableHistorySearch = true
+	cfg.DisableContextPicker = true
+	cfg.Decline = editor.DeclineKeepRow
+	return cfg
 }
 
-// endCanceledRow makes room for the canceled row without erasing what the
-// reply drew: the spinner's row is cleared, a half-drawn row is ended.
-func (s *Shell) endCanceledRow() {
-	if !s.responseUI.StopSpinnerAndClear() && s.agentOutput.EndsMidRow() {
-		fmt.Fprintln(os.Stdout)
-	}
-}
-
-// runEditedCommand runs the line the user made of the agent's command. The
-// edits are the user's typing, so a ?? they added is a request, as at the
-// prompt; a ?? the agent's command already had stays shell syntax.
-func (s *Shell) runEditedCommand(ctx context.Context, original, edited string) (int64, error) {
+// runEditedCommand runs the line the user made of what the agent proposed
+// (its command, or the partial line with its inline fill). The edits are
+// the user's typing, so a ?? they added is a request, as at the prompt; a
+// ?? the agent's proposal already had stays shell syntax. It reports
+// whether a shell command ran (a request is not one).
+func (s *Shell) runEditedCommand(ctx context.Context, original, edited string) (ran bool, err error) {
 	line := strings.TrimSpace(edited)
 	if !strings.Contains(original, "??") && parser.Parse(line).Type != parser.CommandTypeRegular {
-		return 0, s.dispatchCommand(ctx, line)
+		return false, s.dispatchCommand(ctx, line)
 	}
 	return s.runAgentCommand(ctx, edited)
 }
 
-func (s *Shell) resetDeniedCommands() {
-	s.deniedMu.Lock()
-	s.denied = nil
-	s.deniedMu.Unlock()
-}
-
-func (s *Shell) noteDeniedCommand(command string) {
-	command = strings.TrimSpace(command)
-	if command == "" {
+// drawPromptHead draws what comes before a prompt's input row, once the
+// prompt started (its OSC 133 A, after the last line's D, so a terminal
+// that keeps each command's output as a block does not add it to the last
+// command's): the notices hash has for the user, then the prompt's info
+// bar. generated is the first prompt's, made with the palette at startup;
+// nil makes it. It is the one place both are drawn, so nothing lands
+// between the bar and the input row the editor draws under it.
+func (s *Shell) drawPromptHead(generated *string) {
+	s.printNotices()
+	if s.prompt == nil {
 		return
 	}
-	s.deniedMu.Lock()
-	if s.denied == nil {
-		s.denied = map[string]bool{}
-	}
-	s.denied[command] = true
-	s.deniedMu.Unlock()
-}
-
-// demoteDeniedCommand keeps a command the user denied during this request
-// from coming back one Enter away. The agent is told to reply with a denied
-// command, so the reply stays readable, just not runnable.
-func (s *Shell) demoteDeniedCommand(resp agent.Response) agent.Response {
-	if resp.Type != agent.ResponseTypeCommand {
-		return resp
-	}
-	s.deniedMu.Lock()
-	denied := s.denied[strings.TrimSpace(resp.Command)]
-	s.deniedMu.Unlock()
-	if !denied {
-		return resp
-	}
-	resp.Type = agent.ResponseTypeExplanation
-	if resp.Explanation == "" {
-		resp.Explanation = resp.Command
-	}
-	return resp
-}
-
-func (s *Shell) updatePrompt() {
-	if s.prompt == nil || s.readline == nil {
+	if generated != nil {
+		printPromptInfoBar(s.out(), *generated)
 		return
 	}
 	s.printPromptPrefix()
 }
 
-// printPromptPrefix prints just the Starship prefix (info bar) and updates the
-// readline prompt. This is called when returning from the Ctrl+R history picker
-// or when updating the prompt after command execution.
+// printNotices prints what hash tells the user before a prompt: a newer
+// adapter (flushUpdateNotice), and the jobs that ended, as bash says
+// before its prompt.
+func (s *Shell) printNotices() {
+	s.flushUpdateNotice(time.Now())
+	if s.executor == nil {
+		return
+	}
+	for _, notice := range s.executor.JobNotices() {
+		fmt.Fprintln(s.errOut(), notice)
+	}
+}
+
+// printPromptPrefix prints the multi-line prompt's prefix (the info bar above
+// the input line), once for each prompt but the first (drawPromptHead);
+// the input line itself is drawn by the editor from currentPromptLine.
 func (s *Shell) printPromptPrefix() {
 	cwd, _ := os.Getwd()
 	ctx := prompt.PromptContext{
 		Cwd:        cwd,
-		ExitCode:   s.lastExitCode,
-		DurationMs: s.lastDuration.Milliseconds(),
+		ExitCode:   s.status.exitCode,
+		DurationMs: s.status.duration.Milliseconds(),
 	}
-
-	// Try precomputed prompt first (avoids starship subprocess).
-	var full string
-	if cached, ok := s.prompt.TryPrecomputed(ctx); ok {
-		full = cached
-	} else {
-		full = s.prompt.Generate(ctx)
-	}
-
-	// Split multi-line: prefix → stdout, prompt char → readline.
-	if lastNL := strings.LastIndex(full, "\n"); lastNL >= 0 {
-		fmt.Print(full[:lastNL+1])
-		s.readline.SetPrompt(full[lastNL+1:])
-	} else {
-		s.readline.SetPrompt(full)
-	}
-
-	// Precompute the next prompt while the user types.
-	s.prompt.StartPrecompute(cwd)
+	printPromptInfoBar(s.out(), s.prompt.Generate(ctx))
 }
 
-// initPromptAndPalette generates the first prompt and extracts the color palette
-// concurrently, minimizing starship subprocess calls. This replaces the separate
-// refreshColorPalette() + updatePrompt() sequence (5→2 starship calls total).
-func (s *Shell) initPromptAndPalette() {
+// initPromptAndPalette generates the first prompt, which it returns, and
+// extracts the color palette concurrently, minimizing starship subprocess
+// calls (5 to 2 starship calls in all).
+func (s *Shell) initPromptAndPalette() string {
 	cwd, _ := os.Getwd()
 	ctx := prompt.PromptContext{
 		Cwd:        cwd,
-		ExitCode:   s.lastExitCode,
-		DurationMs: s.lastDuration.Milliseconds(),
+		ExitCode:   s.status.exitCode,
+		DurationMs: s.status.duration.Milliseconds(),
 	}
-
-	// Resolve starship path once (just a LookPath, ~1ms) so concurrent calls are safe
-	s.prompt.ResolveStarship()
 
 	// Run display prompt and error palette extraction concurrently
 	var full string
@@ -1940,17 +1926,9 @@ func (s *Shell) initPromptAndPalette() {
 	}()
 	wg.Wait()
 
-	// Split multi-line prompt: prefix goes to stdout, prompt char goes to readline
-	if lastNL := strings.LastIndex(full, "\n"); lastNL >= 0 {
-		fmt.Print(full[:lastNL+1])
-		s.readline.SetPrompt(full[lastNL+1:])
-	} else {
-		s.readline.SetPrompt(full)
-	}
-
 	// Reuse the display output for success palette (exit code 0 at startup)
 	successOutput := full
-	if s.lastExitCode != 0 {
+	if s.status.exitCode != 0 {
 		successOutput = s.prompt.GenerateForPalette(0)
 	}
 
@@ -1960,9 +1938,25 @@ func (s *Shell) initPromptAndPalette() {
 		s.colorPalette = newPalette
 		s.editorCfg.ScrollbarColor = newPalette.Primary
 	}
+	return full
+}
 
-	// Precompute the next prompt while the user types their first command.
-	s.prompt.StartPrecompute(cwd)
+// printPromptInfoBar prints the rows of a multi-line prompt above its input
+// line; the editor draws the input line.
+func printPromptInfoBar(w io.Writer, full string) {
+	if lastNL := strings.LastIndex(full, "\n"); lastNL >= 0 {
+		fmt.Fprint(w, full[:lastNL+1])
+	}
+}
+
+// environValue is name's value in a NAME=value list, "" when unset.
+func environValue(environ []string, name string) string {
+	for _, kv := range environ {
+		if v, ok := strings.CutPrefix(kv, name+"="); ok {
+			return v
+		}
+	}
+	return ""
 }
 
 func trimSpace(s string) string {
@@ -1999,8 +1993,33 @@ func makeEditorSuggestionFunc(store *history.Store, pred *prediction.Predictor) 
 	}
 }
 
-// Close releases shell resources.
+// CloseOnSignal is Close for a shell the fatal signal sig ended: every job
+// still running gets SIGHUP, whatever sig is, as bash resends only SIGHUP
+// to its jobs (a nohup job runs on, a SIGTERM to hash too), and 128+sig is
+// $? for the EXIT trap and the status ExitStatus reports, unless the trap
+// exits itself.
+func (s *Shell) CloseOnSignal(sig syscall.Signal) error {
+	s.executor.SignalJobs(syscall.SIGHUP)
+	return s.close(128 + int(sig))
+}
+
+// Close runs the EXIT trap and releases shell resources: the agent session
+// and the stores. The shell closes with the status Run ended it with.
 func (s *Shell) Close() error {
+	return s.close(s.exitStatus)
+}
+
+// close closes the shell ending with status (close's callers decide it):
+// the EXIT trap runs with $? = status, and the status the shell exits with
+// is set for the last time: an exit in the trap replaces status, as in
+// bash.
+func (s *Shell) close(status int) error {
+	s.syncStatus(status)
+	if code, exited := s.executor.RunExitTrap(context.Background(), s.out(), s.errOut()); exited {
+		status = code
+	}
+	s.exitStatus = status
+	_ = s.agentHandler.Close()
 	if s.history != nil {
 		_ = s.history.Close()
 	}
@@ -2010,46 +2029,44 @@ func (s *Shell) Close() error {
 	if s.predictor != nil {
 		_ = s.predictor.Close()
 	}
-	return s.readline.Close()
+	return nil
 }
 
-// recordCommand saves a command to history.
-func (s *Shell) recordCommand(line string, exitCode int, duration time.Duration) {
+// recordCommand saves a command to history and returns its id, 0 when it
+// was not recorded.
+func (s *Shell) recordCommand(line string, exitCode int, duration time.Duration) int64 {
+	return s.recordCommandAt(line, exitCode, duration, time.Now())
+}
+
+// recordCommandAt is recordCommand with the time history orders the line by.
+func (s *Shell) recordCommandAt(line string, exitCode int, duration time.Duration, at time.Time) int64 {
 	if s.history == nil {
-		return
+		return 0
 	}
 
 	// Parse for sudo
 	sudoResult := history.ParseSudoCommand(line)
 
 	cwd, _ := os.Getwd()
-	gitBranch := detectGitBranch()
+	gitBranch := gitBranchAt(cwd)
 
 	cmd := history.Command{
 		Command:    sudoResult.Command,
 		Cwd:        cwd,
 		ExitCode:   exitCode,
 		DurationMs: duration.Milliseconds(),
-		Timestamp:  time.Now(),
+		Timestamp:  at,
 		GitBranch:  gitBranch,
 		IsSudo:     sudoResult.IsSudo,
 		SudoUser:   sudoResult.SudoUser,
 		RawCommand: sudoResult.RawCommand,
 	}
 
-	if id, err := s.history.Add(cmd); err == nil {
-		s.lastCommandID = id
-	}
-}
-
-// detectGitBranch returns the current git branch, or empty string if not in a git repo.
-func detectGitBranch() string {
-	cmd := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
-	out, err := cmd.Output()
+	id, err := s.history.Add(cmd)
 	if err != nil {
-		return ""
+		return 0
 	}
-	return strings.TrimSpace(string(out))
+	return id
 }
 
 // getDataDir returns the data directory for hash.
@@ -2093,14 +2110,8 @@ func (s *Shell) Learning() *learning.FixStore {
 	return s.learning
 }
 
-// handleAgentInterrupt handles Ctrl+C during agent streaming.
-func (s *Shell) handleAgentInterrupt(cancelFull context.CancelFunc) bool {
-	s.agentOutput.Cancel()
-	cancelFull()
-	return true
-}
-
-// runChpwdHook runs configured chpwd hook commands if the working directory changed.
+// runChpwdHook runs the configured chpwd hooks if the working directory
+// changed since they last ran.
 func (s *Shell) runChpwdHook(ctx context.Context) {
 	if s.config == nil || len(s.config.Shell.Hooks.Chpwd) == 0 {
 		return
@@ -2119,17 +2130,22 @@ func (s *Shell) runChpwdHook(ctx context.Context) {
 	}
 
 	s.prevCwd = cwd
+	// Each hook is a line of the shell (executeLine): it prints to the
+	// terminal and Ctrl+C interrupts it. Its status is not the user's
+	// line's: handleLine sets $? after the hooks.
 	for _, cmd := range s.config.Shell.Hooks.Chpwd {
-		_, err := s.executor.Execute(ctx, cmd, nil, os.Stderr)
+		_, err := s.executeLine(ctx, cmd, s.out(), s.errOut())
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "hash: chpwd hook failed: %v\n", err)
+			fmt.Fprintf(s.errOut(), "hash: chpwd hook failed: %v\n", err)
 		}
 	}
 }
 
 // handleToolPermission prompts the user to approve an agent tool call.
 // Runs on the agent's permission goroutine; ctx is the prompt turn's
-// context, and cancellation aborts the prompt with a deny.
+// context, and cancellation aborts the prompt with a deny. Inside a ?? turn
+// the turn gives the prompt the screen and takes it back; a builtin asking
+// the agent (completions generate) gets the bare prompt.
 func (s *Shell) handleToolPermission(ctx context.Context, req agent.ToolPermissionRequest) (allow, always bool) {
 	s.refreshProjectAllowlist()
 	if s.allowlist != nil && s.allowlist.IsAllowed(req.Command) {
@@ -2146,40 +2162,31 @@ func (s *Shell) handleToolPermission(ctx context.Context, req agent.ToolPermissi
 		"tool":    req.ToolName,
 	})
 
-	waitingFor := req.Command
-	if waitingFor == "" {
-		waitingFor = req.ToolName
+	t := s.turn.Load()
+	// Claim the next key before the prompt is drawn: a quick answer typed
+	// as it appears must not be swallowed as a stray keystroke. When no key
+	// can answer, no prompt is drawn: the tool is denied, saying why.
+	waitKey, release, canAsk := s.claimPermissionKey(t)
+	if !canAsk {
+		t.noteDenied(req.Command)
+		t.deniedUnasked(req.ToolCallID, permissionWaitingFor(req))
+		return false, false
 	}
-	s.agentStatus.blocked(programstatus.Permission, waitingFor)
-
-	// The prompt reads its own key; keep the stream watcher off stdin.
-	keys := s.streamKeys.Load()
-	keys.Pause()
-	defer keys.Resume()
-
-	// Stop the spinner so it doesn't overwrite the permission prompt, and
-	// give its row to the prompt so its last frame is not left behind.
-	rowFree := s.responseUI.StopSpinnerAndClear()
-
-	if s.agentOutput != nil {
-		s.agentOutput.RenderPermissionPromptOnRow(req.Command, req.ToolName, s.colorPalette.Primary, rowFree)
-		os.Stdout.Sync()
+	if !s.showPermissionPrompt(t, req) {
+		release()
+		return false, false // the turn is over: no one is there to answer
 	}
 
-	readKey := s.readKey
-	if readKey == nil {
-		readKey = readSingleKey
+	answer := permissionAnswerForKey(waitKey(ctx))
+	if answer == permissionCancel && t != nil {
+		t.interrupt() // Ctrl+C cancels the turn, the tool with it
 	}
-	key := readKey(ctx)
-	allow, always = permissionDecisionForKey(key)
-	s.agentStatus.resume()
+	allow = answer == permissionAllow || answer == permissionAlwaysAllow
+	always = answer == permissionAlwaysAllow
 
 	if always && s.allowlist != nil {
 		s.refreshProjectAllowlist()
 		_ = s.allowlist.Allow(req.Command)
-	}
-	if !allow {
-		s.noteDeniedCommand(req.Command)
 	}
 
 	trace.AgentHigh("tool_permission", map[string]any{
@@ -2188,19 +2195,60 @@ func (s *Shell) handleToolPermission(ctx context.Context, req agent.ToolPermissi
 		"decision": map[bool]string{true: "allow", false: "deny"}[allow],
 	})
 
-	if s.agentOutput != nil {
-		s.agentOutput.ClearPermissionPromptSilently(allow)
-		if update, finalized := s.agentOutput.ResolveToolPermission(req.ToolCallID, allow); finalized {
-			if s.responseUI != nil {
-				s.responseUI.ClearLine()
-			}
-			s.agentOutput.RenderToolResult(update, "")
-		} else if allow && s.responseUI != nil {
-			s.responseUI.ShowActivity(agentToolActivityLabel(update))
+	if t == nil {
+		if s.agentOutput != nil {
+			s.agentOutput.ClearPermissionPrompt()
+		}
+		return allow, always
+	}
+	if !allow {
+		t.noteDenied(req.Command)
+	}
+	t.exitPermission(req.ToolCallID, allow)
+	return allow, always
+}
+
+// showPermissionPrompt draws the prompt for req. Inside a turn the turn
+// gives it the screen, and reports false when the turn no longer waits on
+// the agent.
+func (s *Shell) showPermissionPrompt(t *liveTurn, req agent.ToolPermissionRequest) bool {
+	waitingFor := permissionWaitingFor(req)
+	render := func() {
+		if s.agentOutput != nil {
+			s.agentOutput.RenderPermissionPrompt(req.Command, req.ToolName, s.colorPalette.Primary)
+			s.out().Sync()
 		}
 	}
+	if t == nil {
+		render()
+		return true
+	}
+	return t.enterPermission(waitingFor, render)
+}
 
-	return allow, always
+// permissionWaitingFor is what a permission prompt for req waits on, for
+// the status and the rows that name it.
+func permissionWaitingFor(req agent.ToolPermissionRequest) string {
+	if req.Command != "" {
+		return req.Command
+	}
+	return req.ToolName
+}
+
+// claimPermissionKey claims the key that answers a permission prompt and
+// returns how to wait for it, and how to give it up when the prompt is not
+// drawn after all: the turn's key watcher inside a turn, the shell's key
+// reader outside one. It reports false when no key can answer (claimKey).
+func (s *Shell) claimPermissionKey(t *liveTurn) (wait func(context.Context) byte, release func(), ok bool) {
+	note := func() {
+		if s.agentOutput != nil {
+			s.agentOutput.NoteTooQuick()
+		}
+	}
+	if t != nil {
+		return t.claimKey(note)
+	}
+	return func(ctx context.Context) byte { return s.keyboard().permissionKey(ctx, note) }, func() {}, true
 }
 
 func (s *Shell) refreshProjectAllowlist() {
@@ -2216,14 +2264,6 @@ func (s *Shell) refreshProjectAllowlist() {
 	_ = s.allowlist.SetProjectDir(cwd)
 }
 
-func (s *Shell) setLastCommandFailure(command string, err error, exitCode int) {
-	s.lastExitCode = exitCode
-	s.lastDuration = 0
-	s.lastCommand = command
-	s.lastStderr = err.Error()
-	s.lastCwd, _ = os.Getwd()
-}
-
 func errStr(err error) string {
 	if err == nil {
 		return ""
@@ -2231,139 +2271,35 @@ func errStr(err error) string {
 	return err.Error()
 }
 
-// permissionDecisionForKey maps permission prompt key presses to decisions.
-// Only explicit y/a are accepted — Enter/newline are ignored to prevent stale
-// keystrokes from the command submission auto-approving tool requests.
-func permissionDecisionForKey(key byte) (allow, always bool) {
-	switch key {
-	case 'y', 'Y':
-		return true, false
-	case 'a', 'A':
-		return true, true
-	default:
-		return false, false
-	}
-}
+// permissionAnswer is what a key says to a tool permission prompt.
+type permissionAnswer int
 
 const (
-	permissionPromptInputSettleDelay = 10 * time.Millisecond
-	permissionPromptPollInterval     = 50 * time.Millisecond
+	permissionDeny        permissionAnswer = iota // n, Esc, or anything else
+	permissionAllow                               // y: this once
+	permissionAlwaysAllow                         // a: and remember it
+	permissionCancel                              // Ctrl+C: cancel the whole turn
 )
 
-// readSingleKey reads a single keypress from stdin while the given context
-// is alive. Returns the key byte (handles escape sequences for special keys),
-// or 'n' (deny) when ctx is canceled before a key arrives.
-//
-// The read must be cancellable: it runs on the agent's permission goroutine
-// with the terminal in raw mode. A non-cancellable read would outlive a
-// canceled turn, steal the next keystroke, and restore the terminal state
-// underneath the line editor, leaving the shell in raw mode (which renders
-// subsequent streamed output diagonally).
-func readSingleKey(ctx context.Context) byte {
-	fd := int(os.Stdin.Fd())
-
-	// Put terminal in raw mode to read single character
-	oldState, err := term.MakeRaw(fd)
-	if err != nil {
-		return 'n' // Default to deny on error
-	}
-	defer term.Restore(fd, oldState)
-
-	return readSingleKeyWithHooks(ctx, fd, pollStdin, os.Stdin.Read, drainStdin, time.Sleep)
-}
-
-func readSingleKeyWithHooks(
-	ctx context.Context,
-	fd int,
-	poll func(fd int, timeout time.Duration) (bool, error),
-	read func([]byte) (int, error),
-	drain func(int),
-	sleep func(time.Duration),
-) byte {
-	// Drain any buffered input first, then briefly wait for the Enter key that
-	// submitted the command to arrive before draining once more. Without the
-	// settle window, that trailing newline can be mistaken for an immediate
-	// "allow" response to the permission prompt.
-	drain(fd)
-	if sleep != nil {
-		sleep(permissionPromptInputSettleDelay)
-	}
-	drain(fd)
-
-	// Read into a larger buffer so that multi-byte escape sequences
-	// (e.g., arrow keys: \x1b[A) are consumed in one read rather than
-	// leaving trailing bytes in stdin for subsequent reads.
-	buf := make([]byte, 16)
-
-	// Skip any stale CR/LF bytes that may have leaked through the drain
-	// (e.g., from the command-submission Enter or terminal mode transitions).
-	// This is a defense-in-depth measure — permissionDecisionForKey also
-	// rejects these, but discarding them here avoids a spurious "deny".
-	for {
-		if ctx != nil && ctx.Err() != nil {
-			return 'n' // Turn canceled - deny and release the terminal
-		}
-
-		ready, err := poll(fd, permissionPromptPollInterval)
-		if err != nil {
-			return 'n'
-		}
-		if !ready {
-			continue // Timeout - re-check cancellation
-		}
-
-		n, err := read(buf)
-		if err != nil || n < 1 {
-			return 'n'
-		}
-		char := buf[0] //nolint:gosec // n >= 1 guarantees buf[0] is valid
-		if char != '\r' && char != '\n' {
-			if char == 0x1b {
-				return 0x1b // Return ESC (sequence bytes already consumed)
-			}
-			return char
-		}
-		// Discard stale newline, read again
+// permissionAnswerForKey maps a key pressed at a permission prompt to its
+// answer. Only explicit y/a allow: Enter and newline deny, so a stale
+// keystroke from the command submission never approves a tool. Ctrl+C
+// cancels the turn, as it does everywhere else in one; it arrives as a key
+// when the prompt reads stdin with signals off.
+func permissionAnswerForKey(key byte) permissionAnswer {
+	switch key {
+	case 'y', 'Y':
+		return permissionAllow
+	case 'a', 'A':
+		return permissionAlwaysAllow
+	case 0x03:
+		return permissionCancel
+	default:
+		return permissionDeny
 	}
 }
 
-// pollStdin waits up to timeout for input to become readable on fd.
-func pollStdin(fd int, timeout time.Duration) (bool, error) {
-	var readSet unix.FdSet
-	readSet.Set(fd)
-	tv := unix.NsecToTimeval(timeout.Nanoseconds())
-
-	n, err := unix.Select(fd+1, &readSet, nil, nil, &tv)
-	if err != nil {
-		if err == unix.EINTR {
-			return false, nil // Interrupted by signal - treat as timeout
-		}
-		return false, err
-	}
-	return n > 0, nil
-}
-
-// drainStdinBriefly waits briefly for terminal responses to arrive, then drains stdin.
-// Used after bubbletea programs exit — bubbletea sends DECRQM queries during shutdown,
-// and the terminal's DECRPM responses may still be in flight.
-func drainStdinBriefly() {
-	fd := int(os.Stdin.Fd())
-	// Wait up to 5ms for any DECRPM responses to arrive
-	time.Sleep(5 * time.Millisecond)
-	drainStdin(fd)
-}
-
-// drainStdin discards any bytes already buffered in stdin.
-// Uses non-blocking reads so it returns immediately when the buffer is empty.
-func drainStdin(fd int) {
-	if err := syscall.SetNonblock(fd, true); err != nil {
-		return
-	}
-	defer syscall.SetNonblock(fd, false) //nolint:errcheck
-	discard := make([]byte, 256)
-	for {
-		if _, err := os.Stdin.Read(discard); err != nil {
-			return
-		}
-	}
-}
+// ExitStatus is the status hash exits with once Run returns nil: the one
+// the shellExit that ended the loop carried (exit's, or the last line's on
+// Ctrl+D).
+func (s *Shell) ExitStatus() int { return s.exitStatus }

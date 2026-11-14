@@ -1,0 +1,38 @@
+# The constructs of Fedora's /etc/bashrc that run in an interactive shell.
+if [ -z "$BASHRCSOURCED" ]; then
+  BASHRCSOURCED="Y"
+  if [ "$PS1" ]; then
+    if [ -z "$PROMPT_COMMAND" ]; then
+      case $TERM in
+      xterm*|vte*)
+        if [ -e /etc/sysconfig/bash-prompt-xterm ]; then
+            PROMPT_COMMAND=/etc/sysconfig/bash-prompt-xterm
+        else
+            PROMPT_COMMAND='printf "\033]0;%s@%s:%s\007" "${USER}" "${HOSTNAME%%.*}" "${PWD/#$HOME/\~}"'
+        fi
+        ;;
+      *)
+        ;;
+      esac
+    fi
+    # Turn on checkwinsize
+    shopt -s checkwinsize
+    [ "$PS1" = "\\s-\\v\\\$ " ] && PS1="[\u@\h \W]\\$ "
+  fi
+  if ! shopt -q login_shell ; then # We're not a login shell
+    pathmunge () {
+        case ":${PATH}:" in
+            *:"$1":*)
+                ;;
+            *)
+                if [ "$2" = "after" ] ; then
+                    PATH=$PATH:$1
+                else
+                    PATH=$1:$PATH
+                fi
+        esac
+    }
+    unset -f pathmunge
+  fi
+fi
+export GLOBAL_BASHRC_RAN=1

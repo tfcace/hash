@@ -79,7 +79,6 @@ func TestHintRowsFitPane(t *testing.T) {
 	for _, ct := range []ConfirmationType{ConfirmTypeCommand, ConfirmTypeExplanation, ConfirmTypeError} {
 		var buf bytes.Buffer
 		aoc := NewAgentOutputCoordinator(&buf)
-		aoc.EnterConfirming()
 		aoc.ShowHints(ct)
 		assertRowsFit(t, buf.String(), 50)
 		if !strings.Contains(buf.String(), "enter to") {

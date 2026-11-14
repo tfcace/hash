@@ -1,7 +1,6 @@
 package shell
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"fmt"
@@ -13,6 +12,7 @@ import (
 	"time"
 
 	"github.com/tfcace/hash/internal/completion"
+	"github.com/tfcace/hash/internal/tilde"
 )
 
 const (
@@ -45,13 +45,13 @@ func (s *Shell) builtinCompletions(ctx context.Context, args []string) error {
 }
 
 func (s *Shell) completionsHelp() error {
-	fmt.Println(`Usage: completions <subcommand>
+	fmt.Fprintln(s.out(), `Usage: completions <subcommand>
 
 Manage tab-completion plugins (see docs/completion-plugins.md).
 
 Subcommands:
   list                       Show registered plugin handlers
-  reload                     Reload user plugins from ` + completionsSpecsDirDisplay() + `
+  reload                     Reload user plugins from `+completionsSpecsDirDisplay()+`
   generate <tool> [hints]    Ask the agent to write a plugin for <tool>
 
 Examples:
@@ -66,26 +66,22 @@ func completionsSpecsDir() string {
 }
 
 func completionsSpecsDirDisplay() string {
-	dir := completionsSpecsDir()
-	if home, err := os.UserHomeDir(); err == nil && home != "" && strings.HasPrefix(dir, home) {
-		return "~" + dir[len(home):]
-	}
-	return dir
+	return tilde.Abbrev(completionsSpecsDir())
 }
 
 func (s *Shell) completionsList() error {
 	if s.pluginCompleter == nil {
-		fmt.Println("Completion plugins are disabled (completions.plugins_enabled = false).")
+		fmt.Fprintln(s.out(), "Completion plugins are disabled (completions.plugins_enabled = false).")
 		return nil
 	}
 
 	infos := s.pluginCompleter.Plugins()
 	if len(infos) == 0 {
-		fmt.Println("No completion plugins registered.")
+		fmt.Fprintln(s.out(), "No completion plugins registered.")
 		return nil
 	}
 
-	fmt.Println("Completion plugins:")
+	fmt.Fprintln(s.out(), "Completion plugins:")
 	for _, info := range infos {
 		origin := "user"
 		if info.Builtin {
@@ -95,9 +91,9 @@ func (s *Shell) completionsList() error {
 		if info.Rules != 1 {
 			rules = "rules"
 		}
-		fmt.Printf("  %-14s %s (%s, %d %s)\n", info.Command, info.SpecName, origin, info.Rules, rules)
+		fmt.Fprintf(s.out(), "  %-14s %s (%s, %d %s)\n", info.Command, info.SpecName, origin, info.Rules, rules)
 	}
-	fmt.Printf("\nUser plugins live in %s\n", completionsSpecsDirDisplay())
+	fmt.Fprintf(s.out(), "\nUser plugins live in %s\n", completionsSpecsDirDisplay())
 	return nil
 }
 
@@ -105,7 +101,7 @@ func (s *Shell) completionsReload() error {
 	if err := s.reloadCompletionPlugins(); err != nil {
 		return err
 	}
-	fmt.Println("Completion plugins reloaded.")
+	fmt.Fprintln(s.out(), "Completion plugins reloaded.")
 	return nil
 }
 
@@ -117,7 +113,7 @@ func (s *Shell) reloadCompletionPlugins() error {
 	}
 	specs, errs := completion.LoadPluginSpecs(completionsSpecsDir())
 	for _, err := range errs {
-		fmt.Fprintf(os.Stderr, "hash: warning: completion plugin: %v\n", err)
+		fmt.Fprintf(s.errOut(), "hash: warning: completion plugin: %v\n", err)
 	}
 	s.pluginCompleter.SetUserSpecs(specs)
 	return nil
@@ -146,9 +142,11 @@ func (s *Shell) completionsGenerate(ctx context.Context, args []string) error {
 	gen := &pluginGenerator{
 		ask:      s.agentHandler.AskText,
 		toolHelp: collectToolHelp,
-		review:   reviewOnStdin,
+		review: newLineReview(func() (string, bool) {
+			return s.keyboard().answerLine(ctx, s.out())
+		}, s.out()),
 		specsDir: completionsSpecsDir(),
-		out:      os.Stdout,
+		out:      s.out(),
 	}
 
 	path, err := gen.run(ctx, tool, hints)
@@ -159,8 +157,8 @@ func (s *Shell) completionsGenerate(ctx context.Context, args []string) error {
 	if err := s.reloadCompletionPlugins(); err != nil {
 		return err
 	}
-	fmt.Printf("\nPlugin saved to %s and active now — try `%s <TAB>`.\n", path, tool)
-	fmt.Println("Edit the file to tweak it, or `completions reload` after manual changes.")
+	fmt.Fprintf(s.out(), "\nPlugin saved to %s and active now — try `%s <TAB>`.\n", path, tool)
+	fmt.Fprintln(s.out(), "Edit the file to tweak it, or `completions reload` after manual changes.")
 	return nil
 }
 
@@ -234,10 +232,10 @@ func (g *pluginGenerator) run(ctx context.Context, tool, hints string) (string, 
 			fmt.Fprintln(g.out, "Discarded.")
 			return "", nil
 		case genAccept:
-			if validErr != nil {
-				continue // Nothing valid to save; ask again.
+			if validErr == nil {
+				return g.save(tool, specTOML)
 			}
-			return g.save(tool, specTOML)
+			// Nothing valid to save: the retry below tells the agent why.
 		}
 
 		if validErr != nil {
@@ -386,21 +384,28 @@ func (b *limitedBuffer) String() string {
 	return b.buf.String()
 }
 
-// reviewOnStdin prompts for the next step. A bare word picks an action; a
-// revision may carry its instruction inline ("r also complete namespaces") or
-// be typed at the follow-up prompt. Anything unrecognized is treated as a
-// revision instruction, since that is what free text almost always is.
-func reviewOnStdin(allowAccept bool) genChoice {
-	reader := bufio.NewReader(os.Stdin)
+// newLineReview prompts on out for the next step and reads the answer with
+// readLine, which reports false when no answer comes (Esc, Ctrl+C, hash
+// terminated): that quits. A bare word picks an action; a revision may carry
+// its instruction inline ("r also complete namespaces") or be typed at the
+// follow-up prompt. Anything unrecognized is treated as a revision
+// instruction, since that is what free text almost always is.
+func newLineReview(readLine func() (string, bool), out io.Writer) func(allowAccept bool) genChoice {
+	return func(allowAccept bool) genChoice {
+		return reviewLine(readLine, out, allowAccept)
+	}
+}
+
+func reviewLine(readLine func() (string, bool), out io.Writer, allowAccept bool) genChoice {
 	for {
 		if allowAccept {
-			fmt.Print("\n[a]ccept  [r]evise <what to change>  [q]uit: ")
+			fmt.Fprint(out, "\n[a]ccept  [r]evise <what to change>  [q]uit: ")
 		} else {
-			fmt.Print("\n[r]evise <what to change>  [q]uit: ")
+			fmt.Fprint(out, "\n[r]evise <what to change>  [q]uit: ")
 		}
 
-		input, err := reader.ReadString('\n')
-		if err != nil {
+		input, ok := readLine()
+		if !ok {
 			return genChoice{action: genQuit}
 		}
 		input = strings.TrimSpace(input)
@@ -417,13 +422,13 @@ func reviewOnStdin(allowAccept bool) genChoice {
 			if allowAccept {
 				return genChoice{action: genAccept}
 			}
-			fmt.Println("Nothing valid to accept yet.")
+			fmt.Fprintln(out, "Nothing valid to accept yet.")
 			continue
 		case "r", "revise":
 			if rest == "" {
-				fmt.Print("What should change? (blank to let the agent retry): ")
-				line, err := reader.ReadString('\n')
-				if err != nil {
+				fmt.Fprint(out, "What should change? (blank to let the agent retry): ")
+				line, ok := readLine()
+				if !ok {
 					return genChoice{action: genQuit}
 				}
 				rest = strings.TrimSpace(line)

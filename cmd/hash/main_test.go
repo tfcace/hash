@@ -12,18 +12,11 @@ import (
 )
 
 func TestMain_CFlag(t *testing.T) {
-	// Build the binary in a temp location
-	tmpDir := t.TempDir()
-	binPath := filepath.Join(tmpDir, "hash_test")
-
-	cmd := exec.Command("go", "build", "-o", binPath, ".")
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("failed to build: %v", err)
-	}
+	binPath := hashBinary(t)
 
 	// Test -c flag
 	var stdout, stderr bytes.Buffer
-	cmd = exec.Command(binPath, "-c", "echo hello")
+	cmd := exec.Command(binPath, "-c", "echo hello")
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
@@ -39,16 +32,10 @@ func TestMain_CFlag(t *testing.T) {
 }
 
 func TestMain_CFlag_ExitCode(t *testing.T) {
-	tmpDir := t.TempDir()
-	binPath := filepath.Join(tmpDir, "hash_test")
-
-	cmd := exec.Command("go", "build", "-o", binPath, ".")
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("failed to build: %v", err)
-	}
+	binPath := hashBinary(t)
 
 	// Test exit code propagation
-	cmd = exec.Command(binPath, "-c", "exit 42")
+	cmd := exec.Command(binPath, "-c", "exit 42")
 	err := cmd.Run()
 
 	if exitErr, ok := err.(*exec.ExitError); ok {
@@ -63,17 +50,11 @@ func TestMain_CFlag_ExitCode(t *testing.T) {
 }
 
 func TestMain_CFlag_WithEnv(t *testing.T) {
-	tmpDir := t.TempDir()
-	binPath := filepath.Join(tmpDir, "hash_test")
-
-	cmd := exec.Command("go", "build", "-o", binPath, ".")
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("failed to build: %v", err)
-	}
+	binPath := hashBinary(t)
 
 	// Test that HASH_SHELL is set
 	var stdout bytes.Buffer
-	cmd = exec.Command(binPath, "-c", "echo $HASH_SHELL")
+	cmd := exec.Command(binPath, "-c", "echo $HASH_SHELL")
 	cmd.Stdout = &stdout
 	cmd.Env = os.Environ()
 
@@ -89,16 +70,10 @@ func TestMain_CFlag_WithEnv(t *testing.T) {
 }
 
 func TestMain_CFlag_NoArg(t *testing.T) {
-	tmpDir := t.TempDir()
-	binPath := filepath.Join(tmpDir, "hash_test")
-
-	cmd := exec.Command("go", "build", "-o", binPath, ".")
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("failed to build: %v", err)
-	}
+	binPath := hashBinary(t)
 
 	// Test -c without argument
-	cmd = exec.Command(binPath, "-c")
+	cmd := exec.Command(binPath, "-c")
 	err := cmd.Run()
 
 	if exitErr, ok := err.(*exec.ExitError); ok {
@@ -113,17 +88,11 @@ func TestMain_CFlag_NoArg(t *testing.T) {
 }
 
 func TestMain_LoginFlag(t *testing.T) {
-	tmpDir := t.TempDir()
-	binPath := filepath.Join(tmpDir, "hash_test")
-
-	cmd := exec.Command("go", "build", "-o", binPath, ".")
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("failed to build: %v", err)
-	}
+	binPath := hashBinary(t)
 
 	// Test -l flag sets HASH_LOGIN=1
 	var stdout bytes.Buffer
-	cmd = exec.Command(binPath, "-l", "-c", "echo $HASH_LOGIN")
+	cmd := exec.Command(binPath, "-l", "-c", "echo $HASH_LOGIN")
 	cmd.Stdout = &stdout
 	cmd.Env = os.Environ()
 
@@ -139,17 +108,11 @@ func TestMain_LoginFlag(t *testing.T) {
 }
 
 func TestMain_LoginFlag_Long(t *testing.T) {
-	tmpDir := t.TempDir()
-	binPath := filepath.Join(tmpDir, "hash_test")
-
-	cmd := exec.Command("go", "build", "-o", binPath, ".")
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("failed to build: %v", err)
-	}
+	binPath := hashBinary(t)
 
 	// Test --login flag
 	var stdout bytes.Buffer
-	cmd = exec.Command(binPath, "--login", "-c", "echo $HASH_LOGIN")
+	cmd := exec.Command(binPath, "--login", "-c", "echo $HASH_LOGIN")
 	cmd.Stdout = &stdout
 	cmd.Env = os.Environ()
 
@@ -166,13 +129,8 @@ func TestMain_LoginFlag_Long(t *testing.T) {
 
 func TestMain_Argv0Login(t *testing.T) {
 	tmpDir := t.TempDir()
-	binPath := filepath.Join(tmpDir, "hash_test")
+	binPath := hashBinary(t)
 	loginBinPath := filepath.Join(tmpDir, "-hash")
-
-	cmd := exec.Command("go", "build", "-o", binPath, ".")
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("failed to build: %v", err)
-	}
 
 	// Create symlink with leading dash
 	if err := os.Symlink(binPath, loginBinPath); err != nil {
@@ -181,7 +139,7 @@ func TestMain_Argv0Login(t *testing.T) {
 
 	// Test argv[0] with leading - sets login mode
 	var stdout bytes.Buffer
-	cmd = exec.Command(loginBinPath, "-c", "echo $HASH_LOGIN")
+	cmd := exec.Command(loginBinPath, "-c", "echo $HASH_LOGIN")
 	cmd.Stdout = &stdout
 	cmd.Env = os.Environ()
 
@@ -197,13 +155,7 @@ func TestMain_Argv0Login(t *testing.T) {
 }
 
 func TestMain_VersionSubcommand(t *testing.T) {
-	tmpDir := t.TempDir()
-	binPath := filepath.Join(tmpDir, "hash_test")
-
-	cmd := exec.Command("go", "build", "-o", binPath, ".")
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("failed to build: %v", err)
-	}
+	binPath := hashBinary(t)
 
 	// `hash version` (bare subcommand) must print the version and exit, like
 	// `git version` / `go version`, not fall through and start a shell.
@@ -230,17 +182,11 @@ func TestMain_VersionSubcommand(t *testing.T) {
 }
 
 func TestMain_CFlag_PositionalArgs(t *testing.T) {
-	tmpDir := t.TempDir()
-	binPath := filepath.Join(tmpDir, "hash_test")
-
-	cmd := exec.Command("go", "build", "-o", binPath, ".")
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("failed to build: %v", err)
-	}
+	binPath := hashBinary(t)
 
 	// Test: hash -c 'echo $0 $1 $2' myarg0 arg1 arg2
 	var stdout bytes.Buffer
-	cmd = exec.Command(binPath, "-c", "echo $0 $1 $2", "myarg0", "arg1", "arg2")
+	cmd := exec.Command(binPath, "-c", "echo $0 $1 $2", "myarg0", "arg1", "arg2")
 	cmd.Stdout = &stdout
 	cmd.Env = os.Environ()
 
@@ -260,10 +206,7 @@ func TestMain_CFlag_PositionalArgs(t *testing.T) {
 // 126 when it exists but cannot be executed.
 func TestMain_CFlag_RefusedCommandExitCodes(t *testing.T) {
 	tmpDir := t.TempDir()
-	binPath := filepath.Join(tmpDir, "hash_test")
-	if err := exec.Command("go", "build", "-o", binPath, ".").Run(); err != nil {
-		t.Fatalf("failed to build: %v", err)
-	}
+	binPath := hashBinary(t)
 	script := filepath.Join(tmpDir, "deploy.sh")
 	if err := os.WriteFile(script, []byte("#!/bin/sh\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -295,11 +238,7 @@ func TestMain_CFlag_RefusedCommandExitCodes(t *testing.T) {
 }
 
 func TestMain_CFlag_RefusalKeepsLineRunning(t *testing.T) {
-	tmpDir := t.TempDir()
-	binPath := filepath.Join(tmpDir, "hash_test")
-	if err := exec.Command("go", "build", "-o", binPath, ".").Run(); err != nil {
-		t.Fatalf("failed to build: %v", err)
-	}
+	binPath := hashBinary(t)
 
 	var stdout, stderr bytes.Buffer
 	cmd := exec.Command(binPath, "-c", "nosuchcmd-hash-test || echo fallback")
@@ -313,5 +252,22 @@ func TestMain_CFlag_RefusalKeepsLineRunning(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "command not found") {
 		t.Errorf("stderr = %q, want the refusal message", stderr.String())
+	}
+}
+
+// hash -c runs the EXIT trap when the command ends, also after `exit`, and
+// keeps the command's status.
+func TestMain_CFlag_ExitTrap(t *testing.T) {
+	binPath := hashBinary(t)
+	var stdout bytes.Buffer
+	cmd := exec.Command(binPath, "-c", `trap 'echo bye' EXIT; echo hi; exit 3; echo no`)
+	cmd.Stdout = &stdout
+	err := cmd.Run()
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok || exitErr.ExitCode() != 3 {
+		t.Fatalf("exit = %v, want status 3", err)
+	}
+	if stdout.String() != "hi\nbye\n" {
+		t.Fatalf("stdout = %q, want hi then bye", stdout.String())
 	}
 }

@@ -5,21 +5,39 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/mattn/go-runewidth"
 	"github.com/tfcace/hash/internal/clipboard"
 	"github.com/tfcace/hash/internal/prompt"
+	"github.com/tfcace/hash/internal/termtext"
 	sysClipboard "golang.design/x/clipboard"
 )
 
 const (
 	maxVisibleResults = 10
 	debounceDelay     = 50 * time.Millisecond
-	statusDuration    = 1500 * time.Millisecond
+)
+
+// searchOutcome is how the search ended, apart from what is selected.
+type searchOutcome int
+
+const (
+	searchOpen     searchOutcome = iota // still running
+	searchAccepted                      // Enter: run the selected command
+	searchCanceled                      // Esc / Ctrl+C: choose nothing
 )
 
 // SearchUI provides Ctrl+R style interactive search.
+//
+// Every query edit bumps debounceID; results record the debounceID of the
+// query that produced them (resultsID), so results for an older query are
+// recognizable as stale. Stale rows stay on screen, dimmed, until the newer
+// results land (no flicker while typing), but they are never highlighted,
+// previewed or chosen: a key that acts on the selection (Enter, Up/Down,
+// the copy keys) first brings the results up to the query (fresh).
 type SearchUI struct {
 	store        *Store
 	clipboardBuf *clipboard.Buffer
@@ -27,12 +45,14 @@ type SearchUI struct {
 
 	query         string
 	results       []Command
+	resultsID     int // debounceID of the query results came from
 	totalResults  int
-	selected      int
+	selected      int // index into results; meaningful only when results is non-empty
 	scrollOffset  int
 	width         int
 	height        int
 	debounceID    int
+	outcome       searchOutcome
 	statusMessage string
 }
 
@@ -51,21 +71,26 @@ func (ui *SearchUI) SetClipboard(buf *clipboard.Buffer) {
 	ui.clipboardBuf = buf
 }
 
-// Run starts the interactive search and returns the selected command.
-func (ui *SearchUI) Run() (string, error) {
+// Run starts the interactive search and returns the selected command. It
+// ends with ctx (the shell ending), with an error.
+func (ui *SearchUI) Run(ctx context.Context) (string, error) {
 	// No alt-screen: inline rendering
-	p := tea.NewProgram(ui)
+	p := tea.NewProgram(ui, tea.WithContext(ctx))
 	model, err := p.Run()
 	if err != nil {
 		return "", err
 	}
 
-	finalUI := model.(*SearchUI)
-	if finalUI.selected >= 0 && finalUI.selected < len(finalUI.results) {
-		return finalUI.results[finalUI.selected].Command, nil
-	}
+	return model.(*SearchUI).chosen(), nil
+}
 
-	return "", nil
+// chosen is the command the search ended on: the selection if accepted,
+// nothing otherwise.
+func (ui *SearchUI) chosen() string {
+	if ui.outcome != searchAccepted || ui.selected < 0 || ui.selected >= len(ui.results) {
+		return ""
+	}
+	return ui.results[ui.selected].Command
 }
 
 // Init implements tea.Model.
@@ -85,13 +110,10 @@ func (ui *SearchUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		ui.height = msg.Height
 
 	case searchResultMsg:
-		ui.results = msg.results
-		ui.totalResults = msg.total
-		if len(ui.results) > 0 && ui.selected < 0 {
-			ui.selected = 0
-		}
-		if ui.selected >= len(ui.results) {
-			ui.selected = len(ui.results) - 1
+		// Only results for the typed query, and only if no key already
+		// searched for it (and maybe moved the highlight since).
+		if msg.id == ui.debounceID && ui.stale() {
+			ui.setResults(msg.id, msg.results)
 		}
 
 	case debounceMsg:
@@ -99,9 +121,6 @@ func (ui *SearchUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmd := ui.search()
 			return ui, cmd
 		}
-
-	case clearStatusMsg:
-		ui.statusMessage = ""
 	}
 
 	return ui, nil
@@ -113,29 +132,35 @@ func (ui *SearchUI) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	switch msg.String() {
 	case "ctrl+c", "esc":
-		ui.selected = -1
+		ui.outcome = searchCanceled
 		return ui, tea.Quit
 
 	case "enter":
+		ui.fresh()
+		ui.outcome = searchAccepted
 		return ui, tea.Quit
 
 	case "up", "ctrl+p", "shift+tab":
+		ui.fresh()
 		if ui.selected > 0 {
 			ui.selected--
 			ui.adjustScroll()
 		}
 
 	case "down", "ctrl+n", "tab":
+		ui.fresh()
 		if ui.selected < len(ui.results)-1 {
 			ui.selected++
 			ui.adjustScroll()
 		}
 
 	case "ctrl+y":
+		ui.fresh()
 		cmd := ui.copyCommand()
 		return ui, cmd
 
 	case "ctrl+o":
+		ui.fresh()
 		cmd := ui.copyOutput()
 		return ui, cmd
 
@@ -148,27 +173,22 @@ func (ui *SearchUI) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 }
 
 func (ui *SearchUI) handleQueryEdit(msg tea.KeyPressMsg) tea.Cmd {
-	switch msg.String() {
-	case "backspace":
+	switch {
+	case msg.String() == "backspace":
 		if ui.query != "" {
-			ui.query = ui.query[:len(ui.query)-1]
+			_, size := utf8.DecodeLastRuneInString(ui.query)
+			ui.query = ui.query[:len(ui.query)-size]
 			return ui.resetAndSearch()
 		}
-	case "space":
-		ui.query += " "
+	case msg.Text != "" && msg.Mod&(tea.ModCtrl|tea.ModAlt) == 0:
+		// Printable input, space and multibyte characters included
+		ui.query += msg.Text
 		return ui.resetAndSearch()
-	default:
-		if len(msg.String()) == 1 && msg.String()[0] >= 32 {
-			ui.query += msg.String()
-			return ui.resetAndSearch()
-		}
 	}
 	return nil
 }
 
 func (ui *SearchUI) resetAndSearch() tea.Cmd {
-	ui.selected = 0
-	ui.scrollOffset = 0
 	ui.debounceID++
 	return ui.debounceSearch(ui.debounceID)
 }
@@ -183,8 +203,19 @@ func (ui *SearchUI) adjustScroll() {
 	}
 }
 
-// View implements tea.Model.
+// View implements tea.Model. Once the search ended its frame is empty:
+// bubbletea leaves an inline program's last frame on the screen, and the
+// prompt that comes next draws where the search was.
 func (ui *SearchUI) View() tea.View {
+	if ui.outcome != searchOpen {
+		return ui.view("")
+	}
+	return ui.view(ui.frame())
+}
+
+// frame draws the open search: the query box, the results, the preview and
+// the footer.
+func (ui *SearchUI) frame() string {
 	var b strings.Builder
 
 	// Styles
@@ -208,7 +239,7 @@ func (ui *SearchUI) View() tea.View {
 		Bold(true).
 		Render("Search")
 
-	queryDisplay := ui.query
+	queryDisplay := termtext.OneLine(ui.query)
 	if queryDisplay == "" {
 		queryDisplay = dimStyle.Render("type to search...")
 	}
@@ -219,9 +250,13 @@ func (ui *SearchUI) View() tea.View {
 
 	// Results
 	if len(ui.results) == 0 {
-		if ui.query != "" {
+		switch {
+		case ui.stale():
+			// The typed query has not been searched: nothing is known yet
+			b.WriteString(dimStyle.Render("  searching..."))
+		case ui.query != "":
 			b.WriteString(dimStyle.Render("  No matches"))
-		} else {
+		default:
 			b.WriteString(dimStyle.Render("  No history"))
 		}
 		b.WriteString("\n")
@@ -233,49 +268,29 @@ func (ui *SearchUI) View() tea.View {
 
 		for i := ui.scrollOffset; i < visibleEnd; i++ {
 			cmd := ui.results[i]
-			line := ui.formatResultLine(cmd, i, selectedStyle, normalStyle, dimStyle, errorStyle)
+			var line string
+			if ui.stale() {
+				// Waiting for the typed query: the old rows hold the space, dimmed
+				line = "  " + dimStyle.Render(ui.truncateCommand(cmd.Command))
+			} else {
+				line = ui.formatResultLine(cmd, i, selectedStyle, normalStyle, dimStyle, errorStyle)
+			}
 			b.WriteString(line)
 			b.WriteString("\n")
 		}
 	}
 
 	// Preview pane for selected command
-	if ui.selected >= 0 && ui.selected < len(ui.results) {
-		cmd := ui.results[ui.selected]
-
-		b.WriteString("\n")
-		b.WriteString(dimStyle.Render("─── Preview ───"))
-		b.WriteString("\n")
-
-		// Full command (not truncated)
-		b.WriteString(normalStyle.Render(cmd.Command))
-		b.WriteString("\n")
-
-		// The question behind a command the agent produced
-		if ui.store != nil {
-			if question, ok := ui.store.AgentPromptForCommand(cmd.ID); ok {
-				b.WriteString(dimStyle.Render("?? " + question))
-				b.WriteString("\n")
-			}
-		}
-
-		// Metadata line
-		meta := fmt.Sprintf("%s │ %s", cmd.Timestamp.Format("2006-01-02 15:04"), cmd.Cwd)
-		if cmd.GitBranch != "" {
-			meta += fmt.Sprintf(" │ %s", cmd.GitBranch)
-		}
-		if cmd.ExitCode != 0 {
-			meta += fmt.Sprintf(" │ ✗%d", cmd.ExitCode)
-		} else {
-			meta += " │ ✓"
-		}
-		b.WriteString(dimStyle.Render(meta))
-		b.WriteString("\n")
+	if !ui.stale() && ui.selected >= 0 && ui.selected < len(ui.results) {
+		ui.writePreview(&b, ui.results[ui.selected], normalStyle, dimStyle)
 	}
 
 	// Result count (bottom right)
 	if len(ui.results) > 0 {
 		countStr := fmt.Sprintf("result %d of %d", ui.selected+1, ui.totalResults)
+		if ui.stale() {
+			countStr = "searching..."
+		}
 		padding := ui.width - len(countStr) - 2
 		if padding > 0 {
 			b.WriteString(strings.Repeat(" ", padding))
@@ -293,14 +308,54 @@ func (ui *SearchUI) View() tea.View {
 	// Help footer
 	help := "  ↑/↓ navigate  enter select  ctrl+y copy cmd  ctrl+o copy output  esc cancel"
 	b.WriteString(dimStyle.Render(help))
+	return b.String()
+}
 
-	v := tea.NewView(b.String())
+// view is the frame that draws content.
+func (ui *SearchUI) view(content string) tea.View {
+	v := tea.NewView(content)
 	// Disable bracketed paste to prevent DECRQM queries on shutdown.
 	// Bubbletea queries modes 2026/2027 at exit; the terminal responses
 	// arrive on stdin after bubbletea's input reader closes, leaking
 	// characters like [?2027;1$y into the next editor session.
 	v.DisableBracketedPasteMode = true
 	return v
+}
+
+// writePreview shows the selected command in full with its metadata.
+func (ui *SearchUI) writePreview(b *strings.Builder, cmd Command, normalStyle, dimStyle lipgloss.Style) {
+	b.WriteString("\n")
+	b.WriteString(dimStyle.Render("─── Preview ───"))
+	b.WriteString("\n")
+
+	// Full command (not truncated), each of its lines drawn inert
+	lines := strings.Split(cmd.Command, "\n")
+	for i, line := range lines {
+		lines[i] = termtext.Inert(line)
+	}
+	b.WriteString(normalStyle.Render(strings.Join(lines, "\n")))
+	b.WriteString("\n")
+
+	// The question behind a command the agent produced
+	if ui.store != nil {
+		if question, ok := ui.store.AgentPromptForCommand(cmd.ID); ok {
+			b.WriteString(dimStyle.Render("?? " + termtext.OneLine(question)))
+			b.WriteString("\n")
+		}
+	}
+
+	// Metadata line
+	meta := fmt.Sprintf("%s │ %s", cmd.Timestamp.Format("2006-01-02 15:04"), cmd.Cwd)
+	if cmd.GitBranch != "" {
+		meta += fmt.Sprintf(" │ %s", cmd.GitBranch)
+	}
+	if cmd.ExitCode != 0 {
+		meta += fmt.Sprintf(" │ ✗%d", cmd.ExitCode)
+	} else {
+		meta += " │ ✓"
+	}
+	b.WriteString(dimStyle.Render(termtext.OneLine(meta)))
+	b.WriteString("\n")
 }
 
 func (ui *SearchUI) formatResultLine(cmd Command, idx int, selected, normal, dim, errStyle lipgloss.Style) string {
@@ -313,12 +368,7 @@ func (ui *SearchUI) formatResultLine(cmd Command, idx int, selected, normal, dim
 		b.WriteString("  ")
 	}
 
-	// Command text (truncate if needed)
-	maxCmdWidth := ui.width - 25 // Leave room for metadata
-	cmdText := cmd.Command
-	if len(cmdText) > maxCmdWidth && maxCmdWidth > 3 {
-		cmdText = cmdText[:maxCmdWidth-3] + "..."
-	}
+	cmdText := ui.truncateCommand(cmd.Command)
 
 	if idx == ui.selected {
 		b.WriteString(selected.Render(cmdText))
@@ -329,12 +379,12 @@ func (ui *SearchUI) formatResultLine(cmd Command, idx int, selected, normal, dim
 	// Right-align metadata with indicator before it
 	meta := ui.formatTimestamp(cmd.Timestamp)
 	if cmd.GitBranch != "" {
-		meta += " " + cmd.GitBranch
+		meta += " " + termtext.OneLine(cmd.GitBranch)
 	}
 
 	// Calculate padding (indicator goes between padding and metadata)
-	currentLen := 2 + len(cmdText)
-	padding := ui.width - currentLen - len(meta) - 4 // -2 for indicator, -2 for margins
+	currentLen := 2 + runewidth.StringWidth(cmdText)
+	padding := ui.width - currentLen - runewidth.StringWidth(meta) - 4 // -2 for indicator, -2 for margins
 	if padding > 0 {
 		b.WriteString(strings.Repeat(" ", padding))
 	}
@@ -349,6 +399,16 @@ func (ui *SearchUI) formatResultLine(cmd Command, idx int, selected, normal, dim
 	b.WriteString(dim.Render(meta))
 
 	return b.String()
+}
+
+// truncateCommand fits a command into its column, measured in terminal
+// columns, leaving room for the metadata. It is drawn inert on one row.
+func (ui *SearchUI) truncateCommand(command string) string {
+	command = termtext.OneLine(command)
+	if maxCmdWidth := ui.width - 25; maxCmdWidth > 3 {
+		return termtext.Truncate(command, maxCmdWidth, "...")
+	}
+	return command
 }
 
 func (ui *SearchUI) formatTimestamp(t time.Time) string {
@@ -379,38 +439,56 @@ func (ui *SearchUI) formatTimestamp(t time.Time) string {
 
 // Messages
 type searchResultMsg struct {
+	id      int // debounceID of the query searched
 	results []Command
-	total   int
 }
 
 type debounceMsg struct {
 	id int
 }
 
-type clearStatusMsg struct{}
+// searchLimit fetches more than are visible, for scrolling.
+const searchLimit = 100
 
+// search returns a command that searches for the current query off the
+// update loop. It captures the query and its id: the model itself belongs to
+// Update and is never read from the command's goroutine.
 func (ui *SearchUI) search() tea.Cmd {
+	store, query, id := ui.store, ui.query, ui.debounceID
 	return func() tea.Msg {
-		results, _ := ui.store.Search(SearchOptions{
-			Query: ui.query,
-			Limit: 100, // Get more for scrolling
-		})
-		return searchResultMsg{results: results, total: len(results)}
+		results, _ := store.Search(SearchOptions{Query: query, Limit: searchLimit, Unique: true})
+		return searchResultMsg{id: id, results: results}
 	}
 }
 
-func (ui *SearchUI) searchNow() {
-	results, _ := ui.store.Search(SearchOptions{
-		Query: ui.query,
-		Limit: 100,
-	})
-	ui.results = results
-	ui.totalResults = len(results)
-	if len(ui.results) > 0 {
-		ui.selected = 0
-	} else {
-		ui.selected = -1
+// stale reports whether the results are for an older query than the one
+// typed (its debounced search has not landed yet).
+func (ui *SearchUI) stale() bool {
+	return ui.resultsID != ui.debounceID
+}
+
+// fresh brings stale results up to the typed query, so a key acting on the
+// selection acts on a row of this query's results.
+func (ui *SearchUI) fresh() {
+	if ui.stale() {
+		ui.searchNow()
 	}
+}
+
+// searchNow searches for the current query synchronously.
+func (ui *SearchUI) searchNow() {
+	results, _ := ui.store.Search(SearchOptions{Query: ui.query, Limit: searchLimit, Unique: true})
+	ui.setResults(ui.debounceID, results)
+}
+
+// setResults shows the results for the query with the given id and selects
+// the first.
+func (ui *SearchUI) setResults(id int, results []Command) {
+	ui.results = results
+	ui.resultsID = id
+	ui.totalResults = len(results)
+	ui.selected = 0
+	ui.scrollOffset = 0
 }
 
 func (ui *SearchUI) debounceSearch(id int) tea.Cmd {
@@ -449,8 +527,10 @@ func (ui *SearchUI) copyOutput() tea.Cmd {
 	}
 
 	cmd := ui.results[ui.selected].Command
-	output := ui.findOutputForCommand(cmd)
-	if output == "" {
+	output, state := ui.findOutputForCommand(cmd)
+	if state == clipboard.OutputUncaptured {
+		ui.statusMessage = "It wrote straight to the terminal: no output kept"
+	} else if output == "" {
 		ui.statusMessage = "No output available"
 	} else if err := ui.copyToClipboard(output); err != nil {
 		ui.statusMessage = "Clipboard error"
@@ -460,31 +540,17 @@ func (ui *SearchUI) copyOutput() tea.Cmd {
 	return nil
 }
 
-func (ui *SearchUI) findOutputForCommand(cmd string) string {
+// findOutputForCommand is the output the clipboard buffer kept for the
+// last run of cmd, and what became of it.
+func (ui *SearchUI) findOutputForCommand(cmd string) (string, clipboard.OutputState) {
 	if ui.clipboardBuf == nil {
-		return ""
+		return "", clipboard.OutputNone
 	}
 
 	for i := 0; i < ui.clipboardBuf.Len(); i++ {
 		if ui.clipboardBuf.GetCommand(i) == cmd {
-			return ui.clipboardBuf.GetOutput(i)
+			return ui.clipboardBuf.GetOutput(i), ui.clipboardBuf.OutputState(i)
 		}
 	}
-	return ""
-}
-
-// filterCommands filters commands by query (for testing).
-func filterCommands(commands []Command, query string) []Command {
-	if query == "" {
-		return commands
-	}
-
-	query = strings.ToLower(query)
-	var filtered []Command
-	for i := range commands {
-		if strings.Contains(strings.ToLower(commands[i].Command), query) {
-			filtered = append(filtered, commands[i])
-		}
-	}
-	return filtered
+	return "", clipboard.OutputNone
 }

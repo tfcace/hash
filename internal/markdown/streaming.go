@@ -11,15 +11,54 @@ const codeLinePrefix = gray + "  "
 
 // StreamingRenderer processes markdown text chunk-by-chunk and emits
 // ANSI-styled output as patterns complete.
+//
+// Inline state: inline says where the text is (plain, after a lone "*"
+// that may still become "**", or in a code span, where everything but the
+// closing backtick is literal); inBold may enclose a code span but never
+// opens or closes inside one.
+//
+// Line state: phase says whether the current line's start (indent, header,
+// list marker, fence) has been rendered. lineBuffer holds the bytes of the
+// line not rendered yet; at lineOpening that may be a start still too short
+// to tell what it opens (held by Flush), at lineOpen a continuation.
+//
+// Table state: table holds the lines of a table still arriving (or one
+// line that may turn out to head a table), drawn when a line that is not
+// the table's arrives or the stream ends.
 type StreamingRenderer struct {
-	inCodeBlock   bool
-	codeBlockLang string
-	lineBuffer    strings.Builder
-	inBold        bool
-	inCode        bool
-	pending       string // partial marker (e.g., single "*" or "`")
-	midLine       bool   // a partial fragment of the current line was already emitted
+	// Width is the columns a table may take; below 1 is no limit.
+	Width int
+
+	table     []string
+	tableOpen bool // the last held line had no newline
+
+	inCodeBlock bool
+	lineBuffer  strings.Builder
+	phase       linePhase
+	inBold      bool
+	inline      inlineState
 }
+
+// linePhase is how far the current line has been rendered.
+type linePhase int
+
+const (
+	// lineOpening: nothing of the line is rendered yet; its first fragment
+	// decides how it opens.
+	lineOpening linePhase = iota
+	// lineOpen: a fragment was flushed, so the line's start is decided and
+	// what follows renders as its continuation, up to the newline.
+	lineOpen
+)
+
+// inlineState is where processInline is within a line's inline markup.
+type inlineState int
+
+const (
+	inlinePlain inlineState = iota
+	inlineStar              // a lone "*": literal unless the next rune is "*" too
+	inlineCode              // inside a `code span`
+)
 
 // NewStreamingRenderer creates a new streaming markdown renderer.
 func NewStreamingRenderer() *StreamingRenderer {
@@ -63,7 +102,7 @@ func (r *StreamingRenderer) flushPartial() string {
 	r.lineBuffer.Reset()
 
 	out := r.processLine(line)
-	r.midLine = true
+	r.phase = lineOpen
 	return out
 }
 
@@ -75,7 +114,7 @@ var orderedPrefixRe = regexp.MustCompile(`^\d+\.?$`)
 // turn out to be a fence, header or list item. processLine decides how a
 // line opens from its first fragment only, so such a fragment must wait.
 func (r *StreamingRenderer) lineStartUndecided(fragment string) bool {
-	if r.midLine {
+	if r.phase == lineOpen {
 		return false
 	}
 	// A fence line renders nothing and its language follows the backticks:
@@ -92,6 +131,10 @@ func (r *StreamingRenderer) lineStartUndecided(fragment string) bool {
 		return true
 	}
 	trimmed := strings.TrimLeft(fragment, " \t")
+	// A table line is drawn when its table ends.
+	if strings.HasPrefix(trimmed, "|") {
+		return true
+	}
 	return trimmed == "" || trimmed == "-" || trimmed == "*" || orderedPrefixRe.MatchString(trimmed)
 }
 
@@ -102,28 +145,20 @@ func (r *StreamingRenderer) Finish() string {
 	if r.lineBuffer.Len() > 0 {
 		out = r.flushPartial()
 	}
-	if r.pending == "*" {
+	out += r.endTable()
+	if r.inline == inlineStar {
 		out += "*"
-		r.pending = ""
 	}
-	if r.inCode || r.inBold || (r.midLine && r.inCodeBlock) {
+	if r.inline == inlineCode || r.inBold || (r.phase == lineOpen && r.inCodeBlock) {
 		out += reset
 	}
-	r.inCode = false
-	r.inBold = false
-	r.midLine = false
+	r.Reset() // the stream is over: the next one starts outside any block
 	return out
 }
 
 // Reset clears all state for reuse.
 func (r *StreamingRenderer) Reset() {
-	r.inCodeBlock = false
-	r.codeBlockLang = ""
-	r.lineBuffer.Reset()
-	r.inBold = false
-	r.inCode = false
-	r.pending = ""
-	r.midLine = false
+	*r = StreamingRenderer{Width: r.Width}
 }
 
 // processLine handles a line or, after a Flush, a fragment of one.
@@ -133,9 +168,18 @@ func (r *StreamingRenderer) processLine(line string) string {
 	// Preserve the newline if present
 	hasNewline := strings.HasSuffix(line, "\n")
 	content := strings.TrimSuffix(line, "\n")
-	continuation := r.midLine
+	continuation := r.phase == lineOpen
 	if hasNewline {
-		r.midLine = false
+		r.phase = lineOpening // the next line starts fresh
+	}
+
+	// A table's lines are held until a line that is not the table's.
+	var before string
+	if !continuation {
+		if !r.inCodeBlock && isTableLine(content) {
+			return r.holdTableLine(content, hasNewline)
+		}
+		before = r.endTable()
 	}
 
 	var result string
@@ -143,7 +187,7 @@ func (r *StreamingRenderer) processLine(line string) string {
 
 	// 1. Code block markers
 	if !continuation && strings.HasPrefix(content, "```") {
-		result = r.handleCodeBlockMarker(content)
+		result = r.handleCodeBlockMarker()
 		fenceMarker = true
 	} else if r.inCodeBlock {
 		// 2. Inside code block - just indent, no dim (dim causes visual artifacts)
@@ -169,9 +213,9 @@ func (r *StreamingRenderer) processLine(line string) string {
 	// A fence marker line is invisible: it must not leave behind its own
 	// newline, or code blocks gain a blank line above and below.
 	if hasNewline && !fenceMarker {
-		return result + "\n"
+		return before + result + "\n"
 	}
-	return result
+	return before + result
 }
 
 // tryHeaderAt suppresses header detection on continuation fragments.
@@ -190,19 +234,11 @@ func (r *StreamingRenderer) tryListAt(content string, continuation, complete boo
 	return r.tryList(content, complete)
 }
 
-// handleCodeBlockMarker toggles code block state and returns styled output.
-func (r *StreamingRenderer) handleCodeBlockMarker(line string) string {
-	if !r.inCodeBlock {
-		// Opening marker — absorb silently (no header line)
-		r.inCodeBlock = true
-		r.codeBlockLang = strings.TrimPrefix(line, "```")
-		r.codeBlockLang = strings.TrimSpace(r.codeBlockLang)
-		return ""
-	}
-	// Closing marker
-	r.inCodeBlock = false
-	r.codeBlockLang = ""
-	return "" // No output for closing ```
+// handleCodeBlockMarker toggles code block state. Fence lines (and the
+// opening fence's language) render nothing.
+func (r *StreamingRenderer) handleCodeBlockMarker() string {
+	r.inCodeBlock = !r.inCodeBlock
+	return ""
 }
 
 // tryHeader checks if line is a header and returns styled output, or empty string.
@@ -258,57 +294,9 @@ func (r *StreamingRenderer) tryList(line string, complete bool) string {
 // and open styling carry over to the fragment that continues the line.
 func (r *StreamingRenderer) processInline(text string, complete bool) string {
 	var result strings.Builder
-	runes := []rune(text)
-	i := 0
 
-	for i < len(runes) {
-		char := runes[i]
-
-		// Handle backtick for inline code
-		if char == '`' {
-			if r.inCode {
-				// End inline code
-				result.WriteString(reset)
-				r.inCode = false
-			} else {
-				// Start inline code
-				result.WriteString(cyan)
-				r.inCode = true
-			}
-			i++
-			continue
-		}
-
-		// Handle asterisk for bold
-		if char == '*' {
-			if r.pending == "*" {
-				// Second asterisk - toggle bold
-				r.pending = ""
-				if r.inBold {
-					result.WriteString(reset)
-					r.inBold = false
-				} else {
-					result.WriteString(bold)
-					r.inBold = true
-				}
-				i++
-				continue
-			}
-			// First asterisk - mark as pending
-			r.pending = "*"
-			i++
-			continue
-		}
-
-		// If we have a pending asterisk and this isn't another asterisk,
-		// output it as literal (single * in MVP is literal)
-		if r.pending == "*" {
-			result.WriteRune('*')
-			r.pending = ""
-		}
-
-		result.WriteRune(char)
-		i++
+	for _, char := range text {
+		r.inlineRune(&result, char)
 	}
 
 	// Mid-line fragment: leave pending markers and styling open for the
@@ -318,21 +306,71 @@ func (r *StreamingRenderer) processInline(text string, complete bool) string {
 	}
 
 	// Flush any remaining pending marker at end of line
-	if r.pending == "*" {
+	if r.inline == inlineStar {
 		result.WriteRune('*')
-		r.pending = ""
 	}
 
 	// Close any open formatting at end of line
 	// (prevents formatting from bleeding across lines unexpectedly)
-	if r.inCode {
+	if r.inline == inlineCode || r.inBold {
 		result.WriteString(reset)
-		r.inCode = false
 	}
-	if r.inBold {
-		result.WriteString(reset)
-		r.inBold = false
-	}
+	r.inline, r.inBold = inlinePlain, false
 
 	return result.String()
+}
+
+// inlineRune feeds one rune of a line's text through the inline markup.
+func (r *StreamingRenderer) inlineRune(out *strings.Builder, char rune) {
+	switch r.inline {
+	case inlineCode:
+		// Code spans are literal up to the closing backtick.
+		if char == '`' {
+			r.inline = inlinePlain
+			out.WriteString(reset + r.openStyles())
+		} else {
+			out.WriteRune(char)
+		}
+		return
+	case inlineStar:
+		r.inline = inlinePlain
+		if char == '*' {
+			r.toggleBold(out) // "**"
+			return
+		}
+		out.WriteByte('*') // a lone asterisk is literal
+	}
+
+	switch char {
+	case '*':
+		r.inline = inlineStar
+	case '`':
+		r.inline = inlineCode
+		out.WriteString(cyan)
+	default:
+		out.WriteRune(char)
+	}
+}
+
+// toggleBold opens or closes bold. Closing resets every SGR attribute, so the
+// styles still open are re-emitted after the reset.
+func (r *StreamingRenderer) toggleBold(out *strings.Builder) {
+	r.inBold = !r.inBold
+	if r.inBold {
+		out.WriteString(bold)
+		return
+	}
+	out.WriteString(reset + r.openStyles())
+}
+
+// openStyles returns the escape codes for the inline styles still open.
+func (r *StreamingRenderer) openStyles() string {
+	var s string
+	if r.inBold {
+		s += bold
+	}
+	if r.inline == inlineCode {
+		s += cyan
+	}
+	return s
 }

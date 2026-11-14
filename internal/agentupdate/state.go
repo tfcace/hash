@@ -11,7 +11,7 @@ import (
 // shared by every hash session on the machine, which is what throttles the
 // registry to one request a day however many shells are open.
 type State struct {
-	CheckedAt       time.Time `json:"checked_at"`
+	CheckedAt       time.Time `json:"checked_at"` // when the registry was last asked, answered or not
 	Latest          string    `json:"latest,omitempty"`
 	NotifiedAt      time.Time `json:"notified_at"`
 	NotifiedVersion string    `json:"notified_version,omitempty"`

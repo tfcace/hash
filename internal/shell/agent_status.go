@@ -9,15 +9,13 @@ import (
 
 // agentStatus reports the ?? turn to the terminal with the Program Status
 // Protocol (OSC 7501), on the root record: while a turn runs, hash is the
-// program in the foreground. It remembers the last report so finish can end
-// a turn no other path ended, and the prompt so a permission prompt can
-// hand back to working. Methods are safe to call from the permission
-// handler's goroutine, and on a nil receiver, which reports nothing.
+// program in the foreground. The turn decides what to report from its phase
+// (see liveTurn); this only writes it. Methods are safe to call from the
+// permission handler's goroutine, and on a nil receiver, which reports
+// nothing.
 type agentStatus struct {
-	mu     sync.Mutex
-	r      *programstatus.Reporter
-	last   programstatus.State
-	prompt string
+	mu sync.Mutex
+	r  *programstatus.Reporter
 }
 
 func newAgentStatus(r *programstatus.Reporter) *agentStatus {
@@ -30,29 +28,11 @@ func (a *agentStatus) report(state programstatus.State, kind programstatus.Kind,
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.last = state
 	a.r.Report(programstatus.Report{State: state, Kind: kind, App: "hash", Msg: msg})
 }
 
-// working starts a turn on prompt.
+// working says the agent works on prompt.
 func (a *agentStatus) working(prompt string) {
-	if a == nil {
-		return
-	}
-	a.mu.Lock()
-	a.prompt = prompt
-	a.mu.Unlock()
-	a.report(programstatus.Working, "", prompt)
-}
-
-// resume returns to working on the turn's prompt once a prompt is answered.
-func (a *agentStatus) resume() {
-	if a == nil {
-		return
-	}
-	a.mu.Lock()
-	prompt := a.prompt
-	a.mu.Unlock()
 	a.report(programstatus.Working, "", prompt)
 }
 
@@ -75,20 +55,6 @@ func (a *agentStatus) failed(msg string) {
 // over and reports for itself.
 func (a *agentStatus) idle() {
 	a.report(programstatus.Idle, "", "")
-}
-
-// finish ends a turn still working or blocked with idle, so no path leaves
-// a stale record. A done or error stays: it is meant to outlive the turn.
-func (a *agentStatus) finish() {
-	if a == nil {
-		return
-	}
-	a.mu.Lock()
-	open := a.last == programstatus.Working || a.last == programstatus.Blocked
-	a.mu.Unlock()
-	if open {
-		a.idle()
-	}
 }
 
 // reportConfirmationWait tells the terminal what the confirmation hint

@@ -1,10 +1,5 @@
 package context
 
-import (
-	"fmt"
-	"strings"
-)
-
 // Category defines context item types.
 type Category int
 
@@ -30,6 +25,9 @@ func (c Category) String() string {
 	}
 }
 
+// categoryOrder is the order categories are shown in.
+var categoryOrder = []Category{CategoryAutoDetect, CategoryHistory, CategoryEnv, CategoryCustom}
+
 // Item represents a single context item.
 type Item struct {
 	Category  Category
@@ -50,6 +48,20 @@ func NewCollection() *Collection {
 	return &Collection{
 		MaxSizeBytes: 8 * 1024, // 8KB default
 	}
+}
+
+// displayOrder returns item indices in the order they are shown: grouped by
+// category in categoryOrder, insertion order within a category.
+func (c *Collection) displayOrder() []int {
+	order := make([]int, 0, len(c.Items))
+	for _, cat := range categoryOrder {
+		for i, item := range c.Items {
+			if item.Category == cat {
+				order = append(order, i)
+			}
+		}
+	}
+	return order
 }
 
 // Add adds an item to the collection.
@@ -85,39 +97,6 @@ func (c *Collection) Toggle(index int) {
 	if index >= 0 && index < len(c.Items) {
 		c.Items[index].Selected = !c.Items[index].Selected
 	}
-}
-
-// Serialize returns the selected context as a string.
-func (c *Collection) Serialize() string {
-	var b strings.Builder
-
-	// Group by category
-	categories := make(map[Category][]Item)
-	for _, item := range c.Items {
-		if item.Selected {
-			categories[item.Category] = append(categories[item.Category], item)
-		}
-	}
-
-	// Output in order
-	for _, cat := range []Category{CategoryAutoDetect, CategoryHistory, CategoryEnv, CategoryCustom} {
-		items := categories[cat]
-		if len(items) == 0 {
-			continue
-		}
-
-		fmt.Fprintf(&b, "## %s\n", cat.String())
-		for _, item := range items {
-			if item.Key != "" {
-				fmt.Fprintf(&b, "- %s: %s\n", item.Key, item.Value)
-			} else {
-				fmt.Fprintf(&b, "- %s\n", item.Value)
-			}
-		}
-		fmt.Fprintln(&b)
-	}
-
-	return b.String()
 }
 
 // SizeStatus returns a status indicator for the current size.

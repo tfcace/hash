@@ -32,7 +32,9 @@ func NewFixStore(dbPath string) (*FixStore, error) {
 		return nil, fmt.Errorf("create learning dir: %w", err)
 	}
 
-	db, err := sql.Open("sqlite3", dbPath)
+	// Several shells share this database: wait for a writer instead of
+	// failing with "database is locked".
+	db, err := sql.Open("sqlite3", dbPath+"?_busy_timeout=5000")
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
 	}
@@ -68,79 +70,80 @@ func (s *FixStore) migrate() error {
 	return err
 }
 
-// RecordFix records a fix attempt (success or failure).
+// RecordFix records a fix attempt (success or failure). It is a single
+// upsert, so shells sharing the database cannot race between an update that
+// found no row and an insert that hits the UNIQUE constraint.
 func (s *FixStore) RecordFix(pattern Pattern, fix string, success bool) error {
-	// Try to update existing
-	var result sql.Result
-	var err error
-
+	successCount, failureCount := 0, 1
 	if success {
-		result, err = s.db.Exec(`
-			UPDATE fixes
-			SET success_count = success_count + 1, last_used = CURRENT_TIMESTAMP
-			WHERE command_pattern = ? AND error_pattern = ? AND exit_code = ? AND fix = ?
-		`, pattern.CommandPattern, pattern.ErrorPattern, pattern.ExitCode, fix)
-	} else {
-		result, err = s.db.Exec(`
-			UPDATE fixes
-			SET failure_count = failure_count + 1, last_used = CURRENT_TIMESTAMP
-			WHERE command_pattern = ? AND error_pattern = ? AND exit_code = ? AND fix = ?
-		`, pattern.CommandPattern, pattern.ErrorPattern, pattern.ExitCode, fix)
+		successCount, failureCount = 1, 0
 	}
-
-	if err != nil {
-		return err
-	}
-
-	rowsAffected, _ := result.RowsAffected()
-	if rowsAffected > 0 {
-		return nil
-	}
-
-	// Insert new
-	successCount := 0
-	failureCount := 0
-	if success {
-		successCount = 1
-	} else {
-		failureCount = 1
-	}
-
-	_, err = s.db.Exec(`
+	_, err := s.db.Exec(`
 		INSERT INTO fixes (command_pattern, error_pattern, exit_code, fix, success_count, failure_count)
 		VALUES (?, ?, ?, ?, ?, ?)
+		ON CONFLICT(command_pattern, error_pattern, exit_code, fix) DO UPDATE SET
+			success_count = success_count + excluded.success_count,
+			failure_count = failure_count + excluded.failure_count,
+			last_used = CURRENT_TIMESTAMP
 	`, pattern.CommandPattern, pattern.ErrorPattern, pattern.ExitCode, fix, successCount, failureCount)
-
 	return err
 }
 
-// GetFix retrieves the best fix for a pattern.
+// GetFix retrieves the highest-scoring fix for a pattern.
 func (s *FixStore) GetFix(pattern Pattern) (Fix, bool) {
-	row := s.db.QueryRow(`
+	return s.bestFix(pattern, func(string) bool { return true })
+}
+
+// GetRelatedFix retrieves the highest-scoring fix for a pattern that is
+// Related to the failed command, skipping better-scored fixes that are not.
+func (s *FixStore) GetRelatedFix(pattern Pattern, failed string) (Fix, bool) {
+	return s.bestFix(pattern, func(fix string) bool { return Related(failed, fix) })
+}
+
+// bestFix ranks every accepted candidate with calculateScore, the same score
+// callers compare against their thresholds.
+func (s *FixStore) bestFix(pattern Pattern, accept func(fix string) bool) (Fix, bool) {
+	rows, err := s.db.Query(`
 		SELECT fix, success_count, failure_count, last_used
 		FROM fixes
 		WHERE command_pattern = ? AND error_pattern = ? AND exit_code = ?
-		ORDER BY
-			(success_count * 1.0 / (success_count + failure_count + 1)) DESC,
-			success_count DESC
-		LIMIT 1
 	`, pattern.CommandPattern, pattern.ErrorPattern, pattern.ExitCode)
-
-	var fix Fix
-	fix.Pattern = pattern
-
-	err := row.Scan(&fix.Fix, &fix.SuccessCount, &fix.FailureCount, &fix.LastUsed)
-	if err == sql.ErrNoRows {
-		return Fix{}, false
-	}
 	if err != nil {
 		return Fix{}, false
 	}
+	defer rows.Close()
 
-	// Calculate score
-	fix.Score = calculateScore(fix.SuccessCount, fix.FailureCount, fix.LastUsed)
+	var best Fix
+	found := false
+	for rows.Next() {
+		fix := Fix{Pattern: pattern}
+		if err := rows.Scan(&fix.Fix, &fix.SuccessCount, &fix.FailureCount, &fix.LastUsed); err != nil {
+			return Fix{}, false
+		}
+		if !accept(fix.Fix) {
+			continue
+		}
+		fix.Score = calculateScore(fix.SuccessCount, fix.FailureCount, fix.LastUsed)
+		if !found || betterFix(fix, best) {
+			best, found = fix, true
+		}
+	}
+	if rows.Err() != nil {
+		return Fix{}, false
+	}
+	return best, found
+}
 
-	return fix, true
+// betterFix orders by score, then success count, then fix text so the
+// choice is deterministic.
+func betterFix(a, b Fix) bool {
+	if a.Score != b.Score {
+		return a.Score > b.Score
+	}
+	if a.SuccessCount != b.SuccessCount {
+		return a.SuccessCount > b.SuccessCount
+	}
+	return a.Fix < b.Fix
 }
 
 // calculateScore computes the reliability score for a fix.

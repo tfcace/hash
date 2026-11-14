@@ -1,7 +1,9 @@
 package prediction
 
 import (
+	"fmt"
 	"path/filepath"
+	"sync"
 	"testing"
 )
 
@@ -23,9 +25,9 @@ func TestStore_RecordAndGetSequence(t *testing.T) {
 	store.RecordSequence("git pull", "npm test", "/project")
 
 	// Get sequences
-	seqs, err := store.GetSequences("git pull", "/project")
+	seqs, err := store.RankSequences("git pull", "/project", 24, 10)
 	if err != nil {
-		t.Fatalf("GetSequences error: %v", err)
+		t.Fatalf("RankSequences error: %v", err)
 	}
 
 	if len(seqs) != 1 {
@@ -36,30 +38,37 @@ func TestStore_RecordAndGetSequence(t *testing.T) {
 	}
 }
 
-func TestStore_RecordAndGetPathUsage(t *testing.T) {
-	tmpDir := t.TempDir()
-	store, err := NewStore(filepath.Join(tmpDir, "prediction.db"))
-	if err != nil {
-		t.Fatalf("NewStore error: %v", err)
+// Two shells write the same prediction database at once; a writer waits for
+// the other's lock instead of failing with "database is locked" (go-sqlite3
+// sets a 5s busy timeout on every connection unless the DSN says otherwise).
+func TestStore_ConcurrentWritersWait(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "predictions.db")
+	var stores []*Store
+	for range 2 {
+		s, err := NewStore(dbPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer s.Close()
+		stores = append(stores, s)
 	}
-	defer store.Close()
-
-	// Record path usage
-	store.RecordPathUsage("vim", "src/main.go", "/project")
-	store.RecordPathUsage("vim", "src/main.go", "/project")
-	store.RecordPathUsage("vim", "src/config.go", "/project")
-
-	// Get paths for vim
-	paths, err := store.GetPathsForCommand("vim", "/project")
-	if err != nil {
-		t.Fatalf("GetPathsForCommand error: %v", err)
+	var wg sync.WaitGroup
+	errs := make(chan error, 400)
+	for i := range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			s := stores[i%2]
+			for j := range 50 {
+				if err := s.RecordSequence(fmt.Sprintf("a%d", i), fmt.Sprintf("b%d", j), "/x"); err != nil {
+					errs <- err
+				}
+			}
+		}()
 	}
-
-	if len(paths) != 2 {
-		t.Fatalf("Expected 2 paths, got %d", len(paths))
-	}
-	// First should be most used
-	if paths[0].Path != "src/main.go" {
-		t.Errorf("First path = %q, want src/main.go", paths[0].Path)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatalf("concurrent write failed: %v", err)
 	}
 }

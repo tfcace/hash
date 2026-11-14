@@ -2,6 +2,7 @@ package shell
 
 import (
 	"context"
+	"errors"
 	"os"
 	"strings"
 	"time"
@@ -38,6 +39,17 @@ func paceAgentEvents(
 	go func() {
 		defer close(out)
 		defer close(outErrs)
+		// A request that timed out ends here before the agent says so: name
+		// the timeout, or the closed stream reads as an empty reply. A
+		// cancel is the turn's own, seen on its context.
+		defer func() {
+			if err := ctx.Err(); errors.Is(err, context.DeadlineExceeded) {
+				select {
+				case outErrs <- err:
+				default:
+				}
+			}
+		}()
 
 		var ticker *time.Ticker
 		ticks := opts.ticks
@@ -85,8 +97,8 @@ func paceAgentEvents(
 				}
 				if event.Type == agent.StreamEventText {
 					pending.WriteString(event.Text)
-					if strings.Contains(event.Text, "\n") {
-						flush()
+					if strings.Contains(event.Text, "\n") && !flush() {
+						return
 					}
 					continue
 				}
@@ -117,42 +129,59 @@ func paceAgentEvents(
 
 // textStreamFromEvents adapts paced events for editor ghost completion. Tool
 // events are intentionally not inserted into the editable command text, but
-// their transient status remains visible in the ghost area.
+// their transient status remains visible in the ghost area. The text is the
+// fill without the backticks or code fence a model may wrap it in. ended,
+// when set, is told how the stream ended (the whole fill, and the error the
+// editor was given, nil when the reply completed) before the editor sees the
+// channels close.
 //
 //nolint:gocritic,gocyclo // coordinated event, cancellation, and error state machine
-func textStreamFromEvents(ctx context.Context, events <-chan agent.StreamEvent, errs <-chan error) (<-chan editor.GhostStreamUpdate, <-chan error) {
+func textStreamFromEvents(ctx context.Context, events <-chan agent.StreamEvent, errs <-chan error, ended func(fill string, err error)) (<-chan editor.GhostStreamUpdate, <-chan error) {
 	updates := make(chan editor.GhostStreamUpdate)
 	errCh := make(chan error, 1)
 	go func() {
+		var shown strings.Builder // the fill as the ghost text has it
+		var endErr error
 		defer close(updates)
 		defer close(errCh)
+		defer func() {
+			if ended != nil {
+				ended(shown.String(), endErr)
+			}
+		}()
 		sendUpdate := func(update editor.GhostStreamUpdate) bool {
 			select {
 			case updates <- update:
+				shown.WriteString(update.Text)
 				return true
 			case <-ctx.Done():
+				endErr = context.Cause(ctx)
 				return false
 			}
 		}
+		var fill inlineFill
 		for events != nil || errs != nil {
 			select {
 			case <-ctx.Done():
 				// The request ended before the stream did (timeout or cancel):
-				// tell the editor instead of closing the channels silently.
-				if err := ctx.Err(); err != nil {
-					select {
-					case errCh <- err:
-					default:
-					}
+				// tell the editor instead of closing the channels silently,
+				// with the reason it ended (an inline tool denied).
+				endErr = context.Cause(ctx)
+				select {
+				case errCh <- endErr:
+				default:
 				}
 				return
 			case event, ok := <-events:
 				if !ok {
 					events = nil
+					if rest := fill.end(); rest != "" && !sendUpdate(editor.GhostStreamUpdate{Text: rest}) {
+						return
+					}
 					continue
 				}
 				if event.Type == agent.StreamEventText && event.Text != "" {
-					if !sendUpdate(editor.GhostStreamUpdate{Text: event.Text}) {
+					if text := fill.write(event.Text); text != "" && !sendUpdate(editor.GhostStreamUpdate{Text: text}) {
 						return
 					}
 				} else if event.Type == agent.StreamEventToolCall {
@@ -173,7 +202,16 @@ func textStreamFromEvents(ctx context.Context, events <-chan agent.StreamEvent, 
 					continue
 				}
 				if err != nil {
-					errCh <- err
+					if ctx.Err() != nil {
+						err = context.Cause(ctx) // the stream's own error for its end is just "canceled"
+					}
+					err = readableAgentErr(err) // the ghost's notice says it in one line
+					endErr = err
+					select {
+					case errCh <- err:
+					case <-ctx.Done():
+						return
+					}
 				}
 			}
 		}
@@ -190,11 +228,9 @@ func inlineToolActivityLabel(update agent.ToolCallUpdate) string {
 }
 
 type agentStreamCollectionOptions struct {
-	onFirstChunk       func()
-	writeRendered      func(rendered string)
-	flushDelay         time.Duration
-	trimLeadingNewline bool
-	wrapWidth          int // columns to word-wrap the reply to; 0 leaves it to the terminal
+	beforeText    func() // before each text is drawn
+	writeRendered func(rendered string)
+	wrapWidth     int // columns to word-wrap the reply to; 0 leaves it to the terminal
 }
 
 // replyWidth is the width a reply is wrapped to, less the columns a prefix
@@ -214,117 +250,6 @@ type agentStreamCollectionResult struct {
 	canceled     bool
 }
 
-// collectAgentStream handles streaming collection, optional partial-line flushes,
-// and markdown rendering for agent requests.
-//
-//nolint:gocyclo // streaming state machine with select loop
-func (s *Shell) collectAgentStream(
-	ctx context.Context,
-	textCh <-chan string,
-	errCh <-chan error,
-	opts agentStreamCollectionOptions,
-) agentStreamCollectionResult {
-	var result agentStreamCollectionResult
-
-	var response strings.Builder
-	renderer := markdown.NewStreamingRenderer()
-	sanitizer := newLegacyAgentMarkerSanitizer()
-
-	firstChunkSeen := false
-	trimLeadingResponse := opts.trimLeadingNewline
-
-	var flushTimer *time.Timer
-	var flushTimerC <-chan time.Time
-	if opts.flushDelay > 0 {
-		flushTimer = time.NewTimer(opts.flushDelay)
-		if !flushTimer.Stop() {
-			select {
-			case <-flushTimer.C:
-			default:
-			}
-		}
-		flushTimerC = flushTimer.C
-		defer flushTimer.Stop()
-	}
-
-	writeRendered := func(text string) {
-		if text == "" || opts.writeRendered == nil {
-			return
-		}
-		opts.writeRendered(text)
-	}
-
-	appendResponse := func(text string) {
-		if text == "" {
-			return
-		}
-		response.WriteString(text)
-		result.lineCount += strings.Count(text, "\n")
-	}
-
-collectLoop:
-	for {
-		select {
-		case <-ctx.Done():
-			result.canceled = true
-			result.responseText = response.String()
-			return result
-
-		case err, ok := <-errCh:
-			if !ok {
-				errCh = nil // Stop selecting on closed channel
-				continue
-			}
-			if err != nil {
-				result.streamErr = err
-			}
-
-		case <-flushTimerC:
-			// Flush incomplete markdown lines so long partial chunks are visible
-			// before things like permission prompts change the screen.
-			writeRendered(renderer.Flush())
-
-		case text, ok := <-textCh:
-			if !ok {
-				break collectLoop
-			}
-
-			if !firstChunkSeen {
-				firstChunkSeen = true
-				if opts.onFirstChunk != nil {
-					opts.onFirstChunk()
-				}
-			}
-
-			responseText := trimLeadingSingleNewline(text, &trimLeadingResponse)
-			cleanText := sanitizer.Write(responseText)
-			appendResponse(cleanText)
-			writeRendered(renderer.Write(cleanText))
-
-			if flushTimer != nil {
-				resetStreamFlushTimer(flushTimer, opts.flushDelay)
-			}
-		}
-	}
-
-	cleanTail := sanitizer.Flush()
-	appendResponse(cleanTail)
-	writeRendered(renderer.Write(cleanTail))
-
-	// Drain any pending error after text channel closed
-	select {
-	case err := <-errCh:
-		if err != nil {
-			result.streamErr = err
-		}
-	default:
-	}
-
-	writeRendered(renderer.Finish())
-	result.responseText = response.String()
-	return result
-}
-
 // collectAgentEventStream collects a frame-paced event stream. Text frames are
 // flushed immediately because pacing has already bounded their latency; tool
 // events force a boundary so activity rows never splice into markdown output.
@@ -340,9 +265,8 @@ func (s *Shell) collectAgentEventStream(
 	var result agentStreamCollectionResult
 	var response strings.Builder
 	renderer := markdown.NewStreamingRenderer()
+	renderer.Width = opts.wrapWidth
 	sanitizer := newLegacyAgentMarkerSanitizer()
-	trimLeadingResponse := opts.trimLeadingNewline
-	firstRender := false
 	wrapper := markdown.NewWrapper(opts.wrapWidth)
 
 	// The turn's trace pairs each raw chunk with what hash drew for it, so a
@@ -376,11 +300,10 @@ func (s *Shell) collectAgentEventStream(
 		if text == "" || opts.writeRendered == nil {
 			return
 		}
-		if !firstRender {
-			firstRender = true
-			if opts.onFirstChunk != nil {
-				opts.onFirstChunk()
-			}
+		// Every time, not once: text that follows a tool call takes the
+		// screen back from the spinner the tool started.
+		if opts.beforeText != nil {
+			opts.beforeText()
 		}
 		opts.writeRendered(text)
 	}
@@ -412,8 +335,7 @@ func (s *Shell) collectAgentEventStream(
 			}
 			switch event.Type {
 			case agent.StreamEventText:
-				text := trimLeadingSingleNewline(event.Text, &trimLeadingResponse)
-				cleanText := sanitizer.Write(text)
+				cleanText := sanitizer.Write(event.Text)
 				appendResponse(cleanText)
 				chunkRendered.Reset()
 				writeRendered(wrapper.Write(renderer.Write(cleanText) + renderer.Flush()))
@@ -433,7 +355,9 @@ func (s *Shell) collectAgentEventStream(
 					"title":  event.ToolCall.Title,
 					"status": string(event.ToolCall.Status),
 				})
-				writeRendered(wrapper.Write(renderer.Flush()) + wrapper.Flush())
+				// The reply does not continue across a tool row: what the
+				// renderer holds (a table, a line start) is drawn before it.
+				writeRendered(wrapper.Write(renderer.Finish()) + wrapper.Flush())
 				if response.Len() > 0 && !strings.HasSuffix(response.String(), "\n") {
 					writeRendered(wrapper.Write("\n"))
 				}
@@ -444,6 +368,14 @@ func (s *Shell) collectAgentEventStream(
 		}
 	}
 
+	// Canceling the turn also closes its stream: when the collector saw the
+	// close first, the request was still canceled, not an empty reply.
+	if ctx.Err() != nil {
+		result.canceled = true
+		result.responseText = response.String()
+		return result
+	}
+
 	chunkRendered.Reset()
 	cleanTail := sanitizer.Flush()
 	appendResponse(cleanTail)
@@ -451,31 +383,4 @@ func (s *Shell) collectAgentEventStream(
 	result.lineCount += wrapper.SoftRows()
 	result.responseText = response.String()
 	return result
-}
-
-func resetStreamFlushTimer(timer *time.Timer, delay time.Duration) {
-	if !timer.Stop() {
-		select {
-		case <-timer.C:
-		default:
-		}
-	}
-	timer.Reset(delay)
-}
-
-func trimLeadingSingleNewline(text string, pending *bool) string {
-	if !*pending || text == "" {
-		return text
-	}
-	switch {
-	case strings.HasPrefix(text, "\r\n"):
-		*pending = false
-		return text[2:]
-	case strings.HasPrefix(text, "\n"), strings.HasPrefix(text, "\r"):
-		*pending = false
-		return text[1:]
-	default:
-		*pending = false
-		return text
-	}
 }

@@ -9,10 +9,9 @@ import (
 // Enter on a finished agent ghost must accept the fill and submit the
 // completed line, matching the "[enter]run" hint.
 func TestHandleKeyEvent_EnterRunsAgentGhostCompletion(t *testing.T) {
-	ed := New(Config{Keybindings: "emacs"}, strings.NewReader(""), io.Discard)
+	ed := New(Config{}, strings.NewReader(""), io.Discard)
 	ed.SetInitialText("git log --format=")
-	ed.ghost.Set("'%h %s'")
-	ed.ghost.FromAgent = true
+	setAgentGhost(ed.ghost, "'%h %s'", false)
 
 	result, done := ed.handleKeyEvent(Key{Special: KeyEnter})
 
@@ -27,11 +26,9 @@ func TestHandleKeyEvent_EnterRunsAgentGhostCompletion(t *testing.T) {
 // While the agent completion is still streaming there is no run hint,
 // so Enter must not submit a partial or bare command.
 func TestHandleKeyEvent_EnterDuringAgentStreamingIsNoOp(t *testing.T) {
-	ed := New(Config{Keybindings: "emacs"}, strings.NewReader(""), io.Discard)
+	ed := New(Config{}, strings.NewReader(""), io.Discard)
 	ed.SetInitialText("git log --format=")
-	ed.ghost.Set("'%h")
-	ed.ghost.FromAgent = true
-	ed.ghost.SetStreaming(true)
+	setAgentGhost(ed.ghost, "'%h", true)
 
 	_, done := ed.handleKeyEvent(Key{Special: KeyEnter})
 
@@ -41,7 +38,7 @@ func TestHandleKeyEvent_EnterDuringAgentStreamingIsNoOp(t *testing.T) {
 	if got := ed.state.Buffer.Content(); got != "git log --format=" {
 		t.Errorf("buffer = %q, want unchanged prefix", got)
 	}
-	if !ed.ghost.Active {
+	if !ed.ghost.streaming() {
 		t.Error("ghost should remain active while streaming")
 	}
 }
@@ -49,7 +46,7 @@ func TestHandleKeyEvent_EnterDuringAgentStreamingIsNoOp(t *testing.T) {
 // History predictions keep fish-shell semantics: Enter dismisses the
 // ghost and submits only what was typed.
 func TestHandleKeyEvent_EnterDismissesPredictionGhost(t *testing.T) {
-	ed := New(Config{Keybindings: "emacs"}, strings.NewReader(""), io.Discard)
+	ed := New(Config{}, strings.NewReader(""), io.Discard)
 	ed.SetInitialText("git sta")
 	ed.ghost.Set("tus")
 

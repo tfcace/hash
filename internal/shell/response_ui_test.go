@@ -4,62 +4,7 @@ import (
 	"bytes"
 	"strings"
 	"testing"
-	"time"
-
-	"github.com/tfcace/hash/internal/agent"
 )
-
-func TestResponseUI_FormatCommand(t *testing.T) {
-	var buf bytes.Buffer
-	ui := NewResponseUI(&buf)
-
-	resp := agent.Response{
-		Type:    agent.ResponseTypeCommand,
-		Command: "find . -size +100M",
-	}
-
-	ui.ShowResponse(resp)
-	output := buf.String()
-
-	// Should contain the command
-	if !bytes.Contains(buf.Bytes(), []byte("find . -size +100M")) {
-		t.Errorf("Output missing command, got: %s", output)
-	}
-}
-
-func TestResponseUI_FormatExplanation(t *testing.T) {
-	var buf bytes.Buffer
-	ui := NewResponseUI(&buf)
-
-	resp := agent.Response{
-		Type:        agent.ResponseTypeExplanation,
-		Explanation: "This finds large files",
-	}
-
-	ui.ShowResponse(resp)
-	output := buf.String()
-
-	if !bytes.Contains(buf.Bytes(), []byte("This finds large files")) {
-		t.Errorf("Output missing explanation, got: %s", output)
-	}
-}
-
-func TestResponseUI_FormatError(t *testing.T) {
-	var buf bytes.Buffer
-	ui := NewResponseUI(&buf)
-
-	resp := agent.Response{
-		Type:  agent.ResponseTypeError,
-		Error: "Connection failed",
-	}
-
-	ui.ShowResponse(resp)
-	output := buf.String()
-
-	if !bytes.Contains(buf.Bytes(), []byte("Connection failed")) {
-		t.Errorf("Output missing error, got: %s", output)
-	}
-}
 
 func TestResponseUI_ShowAgentHintIncludesACPInstallCommand(t *testing.T) {
 	var buf bytes.Buffer
@@ -73,45 +18,6 @@ func TestResponseUI_ShowAgentHintIncludesACPInstallCommand(t *testing.T) {
 	}
 	if !strings.Contains(output, "which claude-agent-acp") {
 		t.Fatalf("expected PATH hint for claude-agent-acp, got:\n%s", output)
-	}
-}
-
-func TestResponseUI_LoadingStates(t *testing.T) {
-	var buf bytes.Buffer
-	ui := NewResponseUI(&buf)
-
-	// Helper to wait for spinner output and stop it
-	waitForSpinner := func() {
-		time.Sleep(100 * time.Millisecond) // Wait for at least one spinner frame
-		ui.StopSpinner()
-	}
-
-	// Test different states
-	ui.ShowState(AgentStateConnecting)
-	waitForSpinner()
-	if !bytes.Contains(buf.Bytes(), []byte("agent · connecting")) {
-		t.Errorf("Should show Connecting state, got: %s", buf.String())
-	}
-
-	buf.Reset()
-	ui.ShowState(AgentStateSending)
-	waitForSpinner()
-	if !bytes.Contains(buf.Bytes(), []byte("agent · sending context")) {
-		t.Errorf("Should show Sending state, got: %s", buf.String())
-	}
-
-	buf.Reset()
-	ui.ShowState(AgentStateThinking)
-	waitForSpinner()
-	if !bytes.Contains(buf.Bytes(), []byte("thinking")) {
-		t.Errorf("Should show Thinking state, got: %s", buf.String())
-	}
-
-	buf.Reset()
-	ui.ShowState(AgentStateReceiving)
-	waitForSpinner()
-	if !bytes.Contains(buf.Bytes(), []byte("agent · receiving")) {
-		t.Errorf("Should show Receiving state, got: %s", buf.String())
 	}
 }
 
@@ -227,4 +133,16 @@ func (s *scriptedIntn) Intn(n int) int {
 	value := s.values[0]
 	s.values = s.values[1:]
 	return value % n
+}
+
+// An agent's error message is drawn inert: an escape sequence in it shows
+// as text instead of driving the terminal (clearing the screen, setting
+// the title). Its lines stay lines.
+func TestResponseUI_ShowErrorDrawsTheMessageInert(t *testing.T) {
+	var buf bytes.Buffer
+	NewResponseUI(&buf).ShowError("rpc failed\x1b[2J\x1b]0;pwned\x07\nsecond line")
+	got := buf.String()
+	if want := "\033[31m✗ rpc failed^[[2J^[]0;pwned^G\nsecond line\033[0m\n"; got != want {
+		t.Errorf("ShowError wrote %q, want %q", got, want)
+	}
 }

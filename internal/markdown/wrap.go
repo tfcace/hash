@@ -32,9 +32,8 @@ type Wrapper struct {
 	indent  int             // continuation indent of the logical line
 	measure bool            // indent not yet measured for this line
 
-	head     strings.Builder // start of a line, held until it is known whether it opens code
-	deciding bool            // at a line start, head still matches codeLinePrefix
-	code     bool            // the current line is code: drawn unwrapped
+	mode lineMode
+	head strings.Builder // lineDeciding: the line's start, held until it shows whether it opens code
 
 	spaces    int  // pending spaces before the next word
 	rowUsed   bool // a word is already on the current row
@@ -48,10 +47,21 @@ type Wrapper struct {
 	soft int    // rows the terminal added by wrapping overlong rows
 }
 
+// lineMode is how the wrapper treats the current line.
+type lineMode int
+
+const (
+	// lineDeciding: at a line start whose text so far still matches
+	// codeLinePrefix; it is held in head until it shows which line it is.
+	lineDeciding lineMode = iota
+	lineText              // wrapped text
+	lineCode              // a code line: drawn unwrapped
+)
+
 // NewWrapper creates a wrapper for the given width. A width below 1 passes
 // text through unchanged.
 func NewWrapper(width int) *Wrapper {
-	return &Wrapper{width: width, measure: true, deciding: true}
+	return &Wrapper{width: width, measure: true}
 }
 
 // SoftRows is how many rows the terminal added wrapping what hash left
@@ -81,7 +91,11 @@ func (w *Wrapper) Flush() string {
 		return ""
 	}
 	var out strings.Builder
-	w.decide(&out, false)
+	if w.head.Len() > 0 {
+		// A held line start cannot continue past this boundary. An empty
+		// one holds nothing, and the next line must still be checked.
+		w.decide(&out, lineText)
+	}
 	w.flushWord(&out)
 	w.spaces = 0
 	return out.String()
@@ -90,34 +104,32 @@ func (w *Wrapper) Flush() string {
 // rune routes one rune: through the line-start check, then as code or as
 // wrapped text.
 func (w *Wrapper) rune(out *strings.Builder, r rune) {
-	if w.deciding {
+	switch w.mode {
+	case lineDeciding:
 		w.head.WriteRune(r)
 		head := w.head.String()
 		switch {
 		case head == codeLinePrefix:
-			w.decide(out, true)
+			w.decide(out, lineCode)
 		case !strings.HasPrefix(codeLinePrefix, head):
-			w.decide(out, false)
+			w.decide(out, lineText)
 		}
-		return
-	}
-	if w.code {
+	case lineCode:
 		w.codeRune(out, r)
-		return
+	default:
+		w.textRune(out, r)
 	}
-	w.textRune(out, r)
 }
 
-// decide ends the line-start check and replays what it held.
-func (w *Wrapper) decide(out *strings.Builder, code bool) {
-	if !w.deciding {
+// decide ends the line-start check as mode and replays what it held.
+func (w *Wrapper) decide(out *strings.Builder, mode lineMode) {
+	if w.mode != lineDeciding {
 		return
 	}
-	w.deciding = false
-	w.code = code
+	w.mode = mode
 	head := w.head.String()
 	w.head.Reset()
-	if code {
+	if mode == lineCode {
 		w.emit(out, head)
 		w.col = runewidth.StringWidth(strings.TrimPrefix(head, gray))
 		return
@@ -198,8 +210,7 @@ func (w *Wrapper) endLine(out *strings.Builder) {
 	w.rowUsed = false
 	w.line.Reset()
 	w.measure = true
-	w.code = false
-	w.deciding = true
+	w.mode = lineDeciding
 }
 
 // countSoftRows adds the rows the terminal takes for the current row when

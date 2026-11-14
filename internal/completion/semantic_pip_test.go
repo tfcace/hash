@@ -3,6 +3,7 @@ package completion
 import (
 	"context"
 	"errors"
+	"os"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -179,7 +180,8 @@ func TestPipHandler_ReturnsWhenFreezeCommandIgnoresContext(t *testing.T) {
 	}
 }
 
-func TestPipHandler_CoalescesFreshBlockedFreezeAndRetriesWhenStale(t *testing.T) {
+// A blocked lookup is joined rather than duplicated.
+func TestPipHandler_CoalescesBlockedFreezeAndRefetchesAfterItLands(t *testing.T) {
 	release := make(chan struct{})
 	defer close(release)
 	var calls atomic.Int32
@@ -206,13 +208,16 @@ func TestPipHandler_CoalescesFreshBlockedFreezeAndRetriesWhenStale(t *testing.T)
 		t.Fatalf("expected second blocked freeze completion to coalesce, got %d calls", got)
 	}
 
-	time.Sleep(90 * time.Millisecond)
+	// The blocked lookup lands; with no cache TTL its answer went to its
+	// waiters only, so the next Tab queries again.
+	release <- struct{}{}
+	time.Sleep(20 * time.Millisecond)
 	result := h.Complete(context.Background(), []string{"uninstall"}, "")
 	if got := calls.Load(); got != 2 {
-		t.Fatalf("expected stale blocked freeze to be retried, got %d calls", got)
+		t.Fatalf("expected blocked freeze to run again after it landed, got %d calls", got)
 	}
 	if len(result.Items) != 1 || result.Items[0].Value != "fresh" {
-		t.Fatalf("expected fresh pip package after stale retry, got %#v", result.Items)
+		t.Fatalf("expected fresh pip package after the blocked lookup landed, got %#v", result.Items)
 	}
 }
 
@@ -246,5 +251,28 @@ func TestPipHandler_DoesNotCacheCanceledPackageLookup(t *testing.T) {
 	result = h.Complete(context.Background(), []string{"uninstall"}, "")
 	if len(result.Items) != 1 || result.Items[0].Value != "requests" {
 		t.Fatalf("canceled lookup should not cache an empty result, got %#v", result.Items)
+	}
+}
+
+// Activating a venv changes PATH and with it which pip runs: the packages
+// of the environment that was active before must not stand in for the new
+// one's.
+func TestPipHandler_ListsAgainWhenPATHChanges(t *testing.T) {
+	h := NewPipHandler("pip3")
+	h.runCommand = func(ctx context.Context, name string, args ...string) ([]string, error) {
+		return []string{"from-" + os.Getenv("PATH") + "==1.0"}, nil
+	}
+	tab := func() []Item {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		return h.Complete(ctx, []string{"uninstall"}, "").Items
+	}
+	t.Setenv("PATH", "/system/bin")
+	if items := tab(); len(items) != 1 || items[0].Value != "from-/system/bin" {
+		t.Fatalf("before activating = %#v", items)
+	}
+	t.Setenv("PATH", "/venv/bin:/system/bin")
+	if items := tab(); len(items) != 1 || items[0].Value != "from-/venv/bin:/system/bin" {
+		t.Fatalf("after activating a venv = %#v, want the venv's packages", items)
 	}
 }

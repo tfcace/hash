@@ -2,6 +2,7 @@ package completion
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -141,31 +142,6 @@ func TestRouter_CompleteBoundedDoesNotPileUpStuckWorkers(t *testing.T) {
 	}
 }
 
-func TestRouter_CompleteBoundedRetriesStaleStuckWorker(t *testing.T) {
-	release := make(chan struct{})
-	defer close(release)
-	blocking := &blockingCountingCompleter{release: release}
-
-	router := NewRouter()
-	router.Register(blocking, PriorityFilesystem)
-
-	ctx1, cancel1 := context.WithTimeout(context.Background(), 10*time.Millisecond)
-	_, _ = router.CompleteBounded(ctx1, "cat ", len("cat "))
-	cancel1()
-	if got := blocking.calls.Load(); got != 1 {
-		t.Fatalf("expected first bounded completion to start one worker, got %d", got)
-	}
-
-	time.Sleep(90 * time.Millisecond)
-
-	ctx2, cancel2 := context.WithTimeout(context.Background(), 10*time.Millisecond)
-	_, _ = router.CompleteBounded(ctx2, "cat ", len("cat "))
-	cancel2()
-	if got := blocking.calls.Load(); got != 2 {
-		t.Fatalf("expected stale stuck worker to be retried, got %d calls", got)
-	}
-}
-
 func TestRouter_CompleteBoundedUsesFallbackWhileEarlierCompleterIsStuck(t *testing.T) {
 	release := make(chan struct{})
 	defer close(release)
@@ -188,7 +164,7 @@ func TestRouter_CompleteBoundedUsesFallbackWhileEarlierCompleterIsStuck(t *testi
 		t.Fatalf("expected first bounded completion to call stuck completer once, got %d", blocking.calls.Load())
 	}
 
-	result, err := completeBoundedWithTestTimeout(t, router, context.Background(), "cat ", len("cat "))
+	result, err := completeBoundedWithTestTimeout(t, router, context.Background(), "cat x", len("cat x"))
 	if err != nil {
 		t.Fatalf("CompleteBounded() error = %v", err)
 	}
@@ -252,7 +228,7 @@ func TestRouter_CompleteSkipsAlreadyStuckCompleterAndUsesFallback(t *testing.T) 
 		t.Fatalf("expected background completion to call stuck completer once, got %d", blocking.calls.Load())
 	}
 
-	result, err := completeWithTestTimeout(t, router, context.Background(), "cat ", len("cat "))
+	result, err := completeWithTestTimeout(t, router, context.Background(), "cat x", len("cat x"))
 	if err != nil {
 		t.Fatalf("Complete() error = %v", err)
 	}
@@ -289,7 +265,7 @@ func TestRouter_StuckCompleterDoesNotSkipDistinctCompleterWithSameNameAndPriorit
 		t.Fatalf("expected background completion to call stuck completer once, got %d", blocking.calls.Load())
 	}
 
-	result, err := completeWithTestTimeout(t, router, context.Background(), "cat ", len("cat "))
+	result, err := completeWithTestTimeout(t, router, context.Background(), "cat x", len("cat x"))
 	if err != nil {
 		t.Fatalf("Complete() error = %v", err)
 	}
@@ -339,31 +315,6 @@ func TestRouter_PrefetchBoundedDoesNotPileUpStuckWorkers(t *testing.T) {
 	router.PrefetchBounded("kubectl get ", len("kubectl get "))
 	if got := blocking.calls.Load(); got != 1 {
 		t.Fatalf("expected second bounded prefetch not to start duplicate stuck worker, got %d calls", got)
-	}
-}
-
-func TestRouter_PrefetchBoundedRetriesStaleStuckWorker(t *testing.T) {
-	release := make(chan struct{})
-	defer close(release)
-	blocking := &blockingPrefetchCompleter{release: release}
-
-	router := NewRouter()
-	router.Register(blocking, PriorityToolNative)
-
-	router.PrefetchBounded("kubectl ", len("kubectl "))
-	if !eventuallyTrue(100*time.Millisecond, func() bool {
-		return blocking.calls.Load() == 1
-	}) {
-		t.Fatalf("expected first bounded prefetch to start one worker, got %d", blocking.calls.Load())
-	}
-
-	time.Sleep(90 * time.Millisecond)
-
-	router.PrefetchBounded("kubectl get ", len("kubectl get "))
-	if !eventuallyTrue(100*time.Millisecond, func() bool {
-		return blocking.calls.Load() == 2
-	}) {
-		t.Fatalf("expected stale stuck prefetch worker to be retried, got %d calls", blocking.calls.Load())
 	}
 }
 
@@ -806,7 +757,7 @@ type pendingCompleter struct{}
 
 func (pendingCompleter) Name() string { return "pending" }
 func (pendingCompleter) Complete(ctx context.Context, line string, pos int) (Result, error) {
-	return Result{Pending: true}, nil
+	return pendingResult(), nil
 }
 
 // itemsCompleter always answers, standing in for the filesystem fallback.
@@ -832,7 +783,7 @@ func TestRouter_PendingCompleterStopsFallthrough(t *testing.T) {
 	if len(result.Items) != 0 {
 		t.Errorf("items = %+v, want none while a matching completer is pending", result.Items)
 	}
-	if !result.Pending {
+	if result.Outcome() != OutcomePending {
 		t.Error("router should report pending so the UI can say fetching")
 	}
 }
@@ -842,13 +793,13 @@ type handledCompleter struct{}
 
 func (handledCompleter) Name() string { return "handled" }
 func (handledCompleter) Complete(ctx context.Context, line string, pos int) (Result, error) {
-	return Result{Handled: true}, nil
+	return ownedResult(nil), nil
 }
 
 // A completer that matched and answered with zero candidates still owns the
 // argument: docker rm with no containers must say "no matches", not offer
 // filenames that are invalid for that argument.
-func TestRouter_HandledEmptyResultStopsFallthrough(t *testing.T) {
+func TestRouter_NoMatchesResultStopsFallthrough(t *testing.T) {
 	r := NewRouter()
 	r.Register(itemsCompleter{items: []Item{{Value: "some-file.go"}}}, PriorityFilesystem)
 	r.Register(handledCompleter{}, PriorityPlugin)
@@ -860,8 +811,8 @@ func TestRouter_HandledEmptyResultStopsFallthrough(t *testing.T) {
 	if len(result.Items) != 0 {
 		t.Errorf("items = %+v, want none when the owner answered empty", result.Items)
 	}
-	if result.Pending {
-		t.Error("a handled empty result is final, not pending")
+	if result.Outcome() != OutcomeNoMatches {
+		t.Errorf("outcome = %v, want no_matches carried through the router", result.Outcome())
 	}
 }
 
@@ -877,5 +828,29 @@ func TestRouter_FallsThroughWhenNothingPending(t *testing.T) {
 	}
 	if len(result.Items) != 1 {
 		t.Errorf("items = %+v, want the fallback result", result.Items)
+	}
+}
+
+// A menu cut at its item limit says how many more were not shown, whether
+// the router cut the list or its filter kept the best.
+func TestRouter_SaysMoreNotShownPastTheItemLimit(t *testing.T) {
+	entries := make([]os.DirEntry, 300)
+	for i := range entries {
+		entries[i] = panicInfoDirEntry{name: fmt.Sprintf("file%03d", i)}
+	}
+	for _, fuzzy := range []bool{false, true} {
+		for line, more := range map[string]int{"cat ": 100, "cat file": 100, "cat file1": 0} {
+			c := NewFileCompleter()
+			c.SetFuzzyMode(fuzzy)
+			c.getwd = func() string { return "/w" }
+			c.readDir = func(string) ([]os.DirEntry, error) { return entries, nil }
+			r := NewRouter()
+			r.SetFuzzy(fuzzy)
+			r.Register(c, PriorityFilesystem)
+			got, err := r.Complete(context.Background(), line, len(line))
+			if err != nil || len(got.Items) > completionItemLimit || got.Hidden() != (Hidden{More: more}) {
+				t.Errorf("fuzzy %v, %q: %d items, hidden %+v (err %v), want more %v", fuzzy, line, len(got.Items), got.Hidden(), err, more)
+			}
+		}
 	}
 }

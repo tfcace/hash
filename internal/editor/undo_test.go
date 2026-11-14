@@ -3,6 +3,8 @@ package editor
 
 import "testing"
 
+func snap(s string) Snapshot { return snapshotOf(NewBufferFromString(s), NewCursor()) }
+
 func TestUndoStack_Empty(t *testing.T) {
 	u := NewUndoStack()
 	if u.CanUndo() {
@@ -13,61 +15,43 @@ func TestUndoStack_Empty(t *testing.T) {
 	}
 }
 
-func TestUndoStack_PushAndUndo(t *testing.T) {
+func TestUndoStack_UndoRedoRoundTrip(t *testing.T) {
 	u := NewUndoStack()
+	u.Push(snap(""))      // before typing "hello"
+	u.Push(snap("hello")) // before typing " world"
 
-	buf1 := NewBufferFromString("hello")
-	cur1 := NewCursor()
-	u.Push(buf1, cur1)
-
-	buf2 := NewBufferFromString("hello world")
-	cur2 := NewCursor()
-	cur2.MoveTo(0, 11)
-	u.Push(buf2, cur2)
-
-	if !u.CanUndo() {
-		t.Error("CanUndo() = false after push")
+	got, ok := u.Undo(snap("hello world"))
+	if !ok || got.Buffer.Content() != "hello" {
+		t.Fatalf("Undo = %q, %v; want hello", got.Buffer.Content(), ok)
+	}
+	got, ok = u.Undo(got)
+	if !ok || got.Buffer.Content() != "" {
+		t.Fatalf("second Undo = %q, %v; want empty", got.Buffer.Content(), ok)
+	}
+	if u.CanUndo() {
+		t.Error("CanUndo() after undoing everything")
 	}
 
-	buf, cur := u.Undo()
-	if buf.Content() != "hello" {
-		t.Errorf("Undo content = %q, want %q", buf.Content(), "hello")
+	got, ok = u.Redo(got)
+	if !ok || got.Buffer.Content() != "hello" {
+		t.Fatalf("Redo = %q, %v; want hello", got.Buffer.Content(), ok)
 	}
-	if cur.Pos.Col != 0 {
-		t.Errorf("Undo cursor col = %d, want 0", cur.Pos.Col)
+	got, ok = u.Redo(got)
+	if !ok || got.Buffer.Content() != "hello world" {
+		t.Fatalf("second Redo = %q, %v; want hello world", got.Buffer.Content(), ok)
 	}
-}
-
-func TestUndoStack_Redo(t *testing.T) {
-	u := NewUndoStack()
-
-	buf1 := NewBufferFromString("hello")
-	u.Push(buf1, NewCursor())
-
-	buf2 := NewBufferFromString("hello world")
-	u.Push(buf2, NewCursor())
-
-	u.Undo()
-
-	if !u.CanRedo() {
-		t.Error("CanRedo() = false after undo")
-	}
-
-	buf, _ := u.Redo()
-	if buf.Content() != "hello world" {
-		t.Errorf("Redo content = %q, want %q", buf.Content(), "hello world")
+	if u.CanRedo() {
+		t.Error("CanRedo() after redoing everything")
 	}
 }
 
 func TestUndoStack_PushClearsRedo(t *testing.T) {
 	u := NewUndoStack()
-
-	u.Push(NewBufferFromString("a"), NewCursor())
-	u.Push(NewBufferFromString("b"), NewCursor())
-	u.Undo()
+	u.Push(snap("a"))
+	u.Undo(snap("b"))
 
 	// New push should clear redo history
-	u.Push(NewBufferFromString("c"), NewCursor())
+	u.Push(snap("a"))
 
 	if u.CanRedo() {
 		t.Error("CanRedo() = true after push (should be cleared)")

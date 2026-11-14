@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -33,6 +34,19 @@ func TestDeterministicACPHelper(t *testing.T) {
 }
 
 func TestACPEventTerminalUX(t *testing.T) {
+	runACPEventTerminalUX(t)
+}
+
+func TestACPEventTerminalUX_HungKubeContext(t *testing.T) {
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "kubectl"), []byte("#!/bin/sh\nexec /bin/sleep 6\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runACPEventTerminalUX(t, "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+func runACPEventTerminalUX(t *testing.T, extraEnv ...string) {
+	t.Helper()
 	repoRoot, err := filepath.Abs("..")
 	if err != nil {
 		t.Fatal(err)
@@ -91,28 +105,46 @@ interactive = []
 		"XDG_DATA_HOME="+dataDir,
 		"TERM=xterm-256color",
 	)
+	cmd.Env = append(cmd.Env, extraEnv...)
 	terminal, err := pty.Start(cmd)
 	if err != nil {
 		t.Fatal(err)
 	}
+	transcript := newPTYTranscript(terminal)
+	exited := make(chan struct{})
+	go func() {
+		_ = cmd.Wait()
+		close(exited)
+	}()
 	defer func() {
+		if t.Failed() {
+			_ = cmd.Process.Signal(syscall.SIGABRT)
+			select {
+			case <-exited:
+			case <-time.After(2 * time.Second):
+			}
+		}
 		_ = terminal.Close()
 		if cmd.Process != nil {
 			_ = cmd.Process.Kill()
 		}
-		_ = cmd.Wait()
+		<-exited
+		if t.Failed() {
+			t.Logf("terminal output at shutdown:\n%s", stripTerminalANSI(transcript.String()))
+		}
 	}()
 
-	transcript := newPTYTranscript(terminal)
-	transcript.waitFor(t, "hash", 5*time.Second)
+	// The built-in prompt need not contain "hash": it shows the working
+	// directory, whose name depends on where the repository was checked out.
+	transcript.waitFor(t, "❯ ", 5*time.Second)
 	if _, err := io.WriteString(terminal, "?? deterministic ACP UX test\r"); err != nil {
 		t.Fatal(err)
 	}
 	transcript.waitFor(t, "Agent wants to run", 5*time.Second)
-	// The permission reader deliberately drains the command submission's
-	// trailing newline before it accepts an answer. Give it time to enter raw
-	// mode so this approval is not classified as stale input.
-	time.Sleep(50 * time.Millisecond)
+	// A question takes only a key typed once the keys settled: one typed
+	// sooner (the submission's keys still arriving) is "too quick". Answer
+	// as a person would, after the question showed and the keys settled.
+	time.Sleep(400 * time.Millisecond)
 	if _, err := io.WriteString(terminal, "y\r"); err != nil {
 		t.Fatal(err)
 	}

@@ -3,10 +3,12 @@ package shell
 import (
 	"bytes"
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/tfcace/hash/internal/compat"
 	"github.com/tfcace/hash/internal/config"
@@ -166,25 +168,6 @@ func TestStartup_NonInteractive_SkipsRC(t *testing.T) {
 	}
 }
 
-func TestStartup_FirstRunMigration(t *testing.T) {
-	// This test verifies the integration point exists
-	// Full first-run testing requires interactive input
-
-	tmpDir := t.TempDir()
-
-	// Create a .zshrc in tmp
-	os.WriteFile(filepath.Join(tmpDir, ".zshrc"), []byte("alias ll='ls -la'\n"), 0644)
-
-	// Mock the check - just verify the function exists and is callable
-	shouldShow, shell, rcFile := compat.ShouldShowMigrationPrompt()
-
-	// In test environment, this depends on actual home dir state
-	// Just verify it doesn't panic
-	_ = shouldShow
-	_ = shell
-	_ = rcFile
-}
-
 func TestStartup_SourceMigrationFilesUsesZshDialect(t *testing.T) {
 	const envName = "HASH_TEST_ZSH_MIGRATION_MARKER"
 	tmpDir := t.TempDir()
@@ -202,9 +185,10 @@ export ` + envName + `=loaded
 	}
 
 	state := &compat.State{
-		SourceFile:  zshrc,
-		SourceFiles: []string{zshrc},
+		Status:      compat.StatusImported,
 		SourceShell: "zsh",
+		Paths:       []string{zshrc},
+		Import:      &compat.ImportRecord{},
 	}
 	if err := state.Save(compat.DefaultStatePath()); err != nil {
 		t.Fatalf("failed to save migration state: %v", err)
@@ -222,7 +206,7 @@ export ` + envName + `=loaded
 	}
 	defer sh.Close()
 
-	sh.sourceMigrationFiles(context.Background())
+	sh.runMigration(context.Background(), sh.startup(), compat.LineReader(strings.NewReader("")), io.Discard)
 
 	var stdout, stderr bytes.Buffer
 	if _, err := sh.executor.Execute(context.Background(), `echo "$`+envName+`"`, &stdout, &stderr); err != nil {
@@ -247,7 +231,7 @@ export ` + envName + `=loaded
 	if err := os.WriteFile(zshrc, []byte(content), 0o644); err != nil {
 		t.Fatalf("failed to write zshrc: %v", err)
 	}
-	if err := (&compat.State{Declined: true}).Save(compat.DefaultStatePath()); err != nil {
+	if err := (&compat.State{Status: compat.StatusDeclined}).Save(compat.DefaultStatePath()); err != nil {
 		t.Fatalf("failed to save migration state: %v", err)
 	}
 
@@ -293,7 +277,7 @@ export ` + envName + `=loaded
 	if err := os.WriteFile(zshrc, []byte(content), 0o644); err != nil {
 		t.Fatalf("failed to write zshrc: %v", err)
 	}
-	if err := (&compat.State{Declined: true}).Save(compat.DefaultStatePath()); err != nil {
+	if err := (&compat.State{Status: compat.StatusDeclined}).Save(compat.DefaultStatePath()); err != nil {
 		t.Fatalf("failed to save migration state: %v", err)
 	}
 
@@ -318,5 +302,157 @@ export ` + envName + `=loaded
 	}
 	if got := strings.TrimSpace(stdout.String()); got != "loaded" {
 		t.Fatalf("startup export = %q, want loaded", got)
+	}
+}
+
+// migrationShell returns an interactive shell in an isolated HOME with the
+// given previous-shell files, and the migration state path.
+func migrationShell(t *testing.T, shellEnv string, files map[string]string) (*Shell, string, string) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_DATA_HOME", filepath.Join(home, "data"))
+	t.Setenv("SHELL", shellEnv)
+	for name, content := range files {
+		if err := os.WriteFile(filepath.Join(home, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := config.Default()
+	cfg.Shell.StartupFiles.Login = nil
+	cfg.Shell.InitCommands = nil
+	sh, err := NewWithMode(cfg, Mode{Interactive: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { sh.Close() })
+	return sh, home, compat.DefaultStatePath()
+}
+
+func shellVar(t *testing.T, sh *Shell, name string) string {
+	t.Helper()
+	var stdout, stderr bytes.Buffer
+	if _, err := sh.executor.Execute(context.Background(), `echo "$`+name+`"`, &stdout, &stderr); err != nil {
+		t.Fatalf("echo failed: %v, stderr: %s", err, stderr.String())
+	}
+	return strings.TrimSpace(stdout.String())
+}
+
+// Accepting the first-run prompt must source the files once: importing used
+// to source them and then the re-source step sourced them again.
+func TestStartup_FirstRunImportSourcesOnce(t *testing.T) {
+	sh, home, statePath := migrationShell(t, "/bin/zsh", map[string]string{
+		".zshrc": "HASH_TEST_SOURCE_COUNT=\"${HASH_TEST_SOURCE_COUNT}x\"\n",
+	})
+
+	var out bytes.Buffer
+	sh.runMigration(context.Background(), sh.startup(), compat.LineReader(strings.NewReader("y\n")), &out)
+
+	if got := shellVar(t, sh, "HASH_TEST_SOURCE_COUNT"); got != "x" {
+		t.Fatalf("rc sourced %d times (%q), want once", len(got), got)
+	}
+	state, err := compat.LoadState(statePath)
+	if err != nil || state.Status != compat.StatusImported {
+		t.Fatalf("state = %+v err = %v, want imported", state, err)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".hashrc")); err != nil {
+		t.Errorf("first-run import should create .hashrc: %v", err)
+	}
+
+	// Next launch re-sources once, without a change notice.
+	sh2, err := NewWithMode(sh.config, Mode{Interactive: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sh2.Close()
+	out.Reset()
+	sh2.runMigration(context.Background(), sh2.startup(), compat.LineReader(strings.NewReader("")), &out)
+	if got := shellVar(t, sh2, "HASH_TEST_SOURCE_COUNT"); got != "x" {
+		t.Errorf("second launch sourced %q, want x", got)
+	}
+	if strings.Contains(out.String(), "changed") {
+		t.Errorf("unexpected change notice: %q", out.String())
+	}
+}
+
+// A declined single-file migration had a zero mtime, so every startup
+// reported the file as changed.
+func TestStartup_DeclinedMigrationIsQuiet(t *testing.T) {
+	sh, _, statePath := migrationShell(t, "/bin/bash", map[string]string{
+		".bashrc": "HASH_TEST_DECLINED=loaded\n",
+	})
+
+	var out bytes.Buffer
+	sh.runMigration(context.Background(), sh.startup(), compat.LineReader(strings.NewReader("n\n")), &out)
+	state, err := compat.LoadState(statePath)
+	if err != nil || state.Status != compat.StatusDeclined {
+		t.Fatalf("state = %+v err = %v, want declined", state, err)
+	}
+
+	out.Reset()
+	sh.runMigration(context.Background(), sh.startup(), compat.LineReader(strings.NewReader("")), &out)
+	if out.Len() != 0 {
+		t.Errorf("declined startup printed %q, want nothing", out.String())
+	}
+	if got := shellVar(t, sh, "HASH_TEST_DECLINED"); got != "" {
+		t.Errorf("declined migration was sourced: %q", got)
+	}
+}
+
+// No answer (EOF, e.g. Ctrl-D) means "ask later": nothing is saved.
+func TestStartup_FirstRunEOFAsksAgainLater(t *testing.T) {
+	sh, _, statePath := migrationShell(t, "/bin/zsh", map[string]string{".zshrc": "alias ll='ls -la'\n"})
+
+	var out bytes.Buffer
+	sh.runMigration(context.Background(), sh.startup(), compat.LineReader(strings.NewReader("")), &out)
+	if _, err := os.Stat(statePath); !os.IsNotExist(err) {
+		t.Fatalf("EOF should save no state, stat err = %v", err)
+	}
+	state, err := compat.ReadMigration(statePath)
+	if err != nil || state.Status != compat.StatusFirstRun {
+		t.Fatalf("state = %+v err = %v, want first-run", state, err)
+	}
+}
+
+// The change notice is printed once per change, then the new mtime is recorded.
+func TestStartup_ChangeNoticeShownOnce(t *testing.T) {
+	sh, home, _ := migrationShell(t, "/bin/zsh", map[string]string{
+		".zprofile": "export HASH_TEST_PROFILE=1\n",
+		".zshrc":    "alias ll='ls -la'\n",
+	})
+	var out bytes.Buffer
+	sh.runMigration(context.Background(), sh.startup(), compat.LineReader(strings.NewReader("y\n")), &out)
+
+	zshrc := filepath.Join(home, ".zshrc")
+	if err := os.WriteFile(zshrc, []byte("alias ll='ls -la'\nsetopt autocd\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	future := time.Now().Add(time.Hour)
+	if err := os.Chtimes(zshrc, future, future); err != nil {
+		t.Fatal(err)
+	}
+
+	out.Reset()
+	sh.runMigration(context.Background(), sh.startup(), compat.LineReader(strings.NewReader("")), &out)
+	if !strings.Contains(out.String(), "~/.zshrc changed: 1 item skipped") {
+		t.Fatalf("notice = %q, want ~/.zshrc changed with the fresh skipped count", out.String())
+	}
+
+	out.Reset()
+	sh.runMigration(context.Background(), sh.startup(), compat.LineReader(strings.NewReader("")), &out)
+	if out.Len() != 0 {
+		t.Errorf("notice repeated on the next startup: %q", out.String())
+	}
+}
+
+// ~name is name's home directory, not a directory called name in $HOME.
+func TestSourceFile_TildeUserIsNotUnderHome(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.MkdirAll(filepath.Join(home, "hash_no_such_user", "rc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := startupFile("~hash_no_such_user/rc"); !os.IsNotExist(err) {
+		t.Errorf("startupFile(~hash_no_such_user/rc) = %v, want a not-exist error", err)
 	}
 }

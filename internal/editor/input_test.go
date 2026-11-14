@@ -119,25 +119,6 @@ func TestIsPasteStart(t *testing.T) {
 	}
 }
 
-func TestIsPasteEnd(t *testing.T) {
-	tests := []struct {
-		input []byte
-		want  bool
-	}{
-		{[]byte{0x1b, '[', '2', '0', '1', '~'}, true},
-		{[]byte("hello" + string([]byte{0x1b, '[', '2', '0', '1', '~'})), true},
-		{[]byte{0x1b, '[', '2', '0', '0', '~'}, false},
-		{[]byte{0x1b, '[', 'A'}, false},
-		{[]byte{0x1b}, false},
-	}
-	for _, tt := range tests {
-		got := isPasteEnd(tt.input)
-		if got != tt.want {
-			t.Errorf("isPasteEnd(%v) = %v, want %v", tt.input, got, tt.want)
-		}
-	}
-}
-
 func TestInputReader_ReadKey_BracketedPaste_LargeContent(t *testing.T) {
 	// Test that large paste content is truncated to maxPasteSize
 	// Use a smaller test size to avoid allocating 10MB in tests

@@ -2,8 +2,11 @@ package completion
 
 import (
 	"context"
+	"fmt"
 	"os"
+	"slices"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -47,7 +50,7 @@ func TestExecutableCompleter_CommandPosition(t *testing.T) {
 // against PATH executables of the same name, and prefix-filtered.
 func TestExecutableCompleter_CompletesBuiltins(t *testing.T) {
 	c := NewExecutableCompleter()
-	c.scanExecutables = func() []string { return []string{"completions", "compgen", "ls"} }
+	c.scanPath = func(string) []string { return []string{"completions", "compgen", "ls"} }
 	c.SetBuiltins([]string{"completions", "cd"})
 	ctx := context.Background()
 
@@ -138,8 +141,8 @@ func TestExecutableCompleter_ReturnsPromptlyWhenColdScanIsSlow(t *testing.T) {
 	c := NewExecutableCompleter()
 	scanStarted := make(chan struct{})
 	releaseScan := make(chan struct{})
-	c.coldScanWait = 5 * time.Millisecond
-	c.scanExecutables = func() []string {
+	c.policy.wait = 5 * time.Millisecond
+	c.scanPath = func(string) []string {
 		close(scanStarted)
 		<-releaseScan
 		return []string{"slowcmd"}
@@ -166,15 +169,37 @@ func TestExecutableCompleter_ReturnsPromptlyWhenColdScanIsSlow(t *testing.T) {
 	}
 }
 
+// A slow completer earlier in the router can eat most of the Tab budget, so
+// the deadline may pass while a cold scan is waited on. The scan still
+// runs and will notify ready: that is pending, not a context error the
+// router drops.
+func TestExecutableCompleter_ReportsPendingWhenTheDeadlinePassesDuringAColdScan(t *testing.T) {
+	c := NewExecutableCompleter()
+	release := make(chan struct{})
+	defer close(release)
+	c.scanPath = func(string) []string {
+		<-release
+		return []string{"slowcmd"}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
+	defer cancel()
+
+	result, err := c.Complete(ctx, "sl", len("sl"))
+	if err != nil || result.Outcome() != OutcomePending {
+		t.Fatalf("Complete = %v (err %v), want pending with no error", result.Outcome(), err)
+	}
+}
+
 func TestExecutableCompleter_ReturnsEmptyWhenContextCanceledBeforeFiltering(t *testing.T) {
 	c := NewExecutableCompleter()
-	c.cacheTTL = time.Minute
 	executables := make([]string, 5000)
 	for i := range executables {
 		executables[i] = "cmd-" + strconv.Itoa(i)
 	}
-	c.cache = executables
-	c.cacheTime = time.Now()
+	c.scanPath = func(string) []string { return executables }
+	if _, st := c.getExecutables(context.Background()); st != lookupFresh {
+		t.Fatalf("seeding scan = %v, want fresh", st)
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -188,45 +213,37 @@ func TestExecutableCompleter_ReturnsEmptyWhenContextCanceledBeforeFiltering(t *t
 	}
 }
 
-func TestExecutableCompleter_StartsFreshRefreshAfterStaleScan(t *testing.T) {
+// A scan that outlives its timeout (directory reads cannot be canceled)
+// fails, but is not doubled by a rescan that would hang on the same mount.
+// When it finally returns, its listing answers.
+func TestExecutableCompleter_HungScanIsNotRelaunchedAndItsLateListingAnswers(t *testing.T) {
 	c := NewExecutableCompleter()
+	c.policy.timeout = 50 * time.Millisecond
+	c.policy.failureTTL = 10 * time.Millisecond
+	c.policy.wait = 5 * time.Millisecond
 	var calls atomic.Int32
-	firstStarted := make(chan struct{})
-	releaseFirst := make(chan struct{})
-	c.coldScanWait = 5 * time.Millisecond
-	c.scanExecutables = func() []string {
-		if calls.Add(1) == 1 {
-			close(firstStarted)
-			<-releaseFirst
-			return []string{"stalecmd"}
-		}
-		return []string{"freshcmd"}
-	}
-	defer close(releaseFirst)
-
-	result, err := c.Complete(context.Background(), "fresh", len("fresh"))
-	if err != nil {
-		t.Fatalf("first Complete() error = %v", err)
-	}
-	if len(result.Items) != 0 {
-		t.Fatalf("first slow scan should not return items, got %#v", result.Items)
-	}
-	select {
-	case <-firstStarted:
-	case <-time.After(100 * time.Millisecond):
-		t.Fatal("expected first executable refresh to start")
+	release := make(chan struct{})
+	c.scanPath = func(string) []string {
+		calls.Add(1)
+		<-release
+		return []string{"latecmd"}
 	}
 
-	time.Sleep(90 * time.Millisecond)
-	result, err = c.Complete(context.Background(), "fresh", len("fresh"))
-	if err != nil {
-		t.Fatalf("second Complete() error = %v", err)
+	for range 10 {
+		_, _ = c.Complete(context.Background(), "late", len("late"))
+		time.Sleep(20 * time.Millisecond)
 	}
-	if got := calls.Load(); got != 2 {
-		t.Fatalf("expected stale executable refresh to be retried, got %d scan calls", got)
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("hung scan launched %d times, want 1", got)
 	}
-	if len(result.Items) != 1 || result.Items[0].Value != "freshcmd" {
-		t.Fatalf("second Complete() items = %#v, want freshcmd", result.Items)
+
+	close(release)
+	var result Result
+	if !eventuallyTrue(time.Second, func() bool {
+		result, _ = c.Complete(context.Background(), "late", len("late"))
+		return len(result.Items) > 0
+	}) || result.Items[0].Value != "latecmd" {
+		t.Fatalf("after the hung scan returned: items = %#v, want latecmd", result.Items)
 	}
 }
 
@@ -242,73 +259,187 @@ func TestExecutableCompleter_ScanDoesNotStatPathEntries(t *testing.T) {
 		}, nil
 	}
 
-	executables := c.scanPATHExecutables()
+	executables := c.scanPATHExecutables(os.Getenv("PATH"))
 	if len(executables) != 1 || executables[0] != "slow-tool" {
 		t.Fatalf("scanPATHExecutables() = %#v, want slow-tool", executables)
 	}
 }
 
-func TestExtractPipeContext(t *testing.T) {
-	tests := []struct {
-		name     string
-		line     string
-		pos      int
-		wantLine string
-		wantPos  int
-	}{
-		{
-			name:     "no pipe",
-			line:     "ls -la",
-			pos:      6,
-			wantLine: "ls -la",
-			wantPos:  6,
-		},
-		{
-			name:     "single pipe",
-			line:     "cat file | grep",
-			pos:      15,
-			wantLine: "grep",
-			wantPos:  4,
-		},
-		{
-			name:     "pipe with spaces",
-			line:     "cat file |   gr",
-			pos:      15,
-			wantLine: "gr",
-			wantPos:  2,
-		},
-		{
-			name:     "multiple pipes",
-			line:     "cat file | grep foo | wc",
-			pos:      24,
-			wantLine: "wc",
-			wantPos:  2,
-		},
-		{
-			name:     "cursor before pipe",
-			line:     "cat f | grep",
-			pos:      5,
-			wantLine: "cat f | grep",
-			wantPos:  5,
-		},
-		{
-			name:     "empty after pipe",
-			line:     "cat file | ",
-			pos:      11,
-			wantLine: "",
-			wantPos:  0,
-		},
-	}
+// A PATH directory whose read never returns (dead NFS or sshfs mount) must
+// not leave command-position completion pending forever: the scan fails at
+// its timeout and the UI is told.
+func TestExecutableCompleter_HungPATHScanEndsPending(t *testing.T) {
+	block := make(chan struct{})
+	defer close(block)
+	c := NewExecutableCompleter()
+	c.policy.timeout = 50 * time.Millisecond
+	c.policy.wait = 5 * time.Millisecond
+	c.scanPath = func(string) []string { <-block; return nil }
+	ready := make(chan struct{}, 4)
+	c.SetOnReady(func() { ready <- struct{}{} })
 
+	if r, _ := c.Complete(context.Background(), "zz", 2); r.Outcome() != OutcomePending {
+		t.Fatalf("cold Tab = %v, want pending", r.Outcome())
+	}
+	select {
+	case <-ready:
+	case <-time.After(time.Second):
+		t.Fatal("no ready notification when the hung scan timed out")
+	}
+	if r, _ := c.Complete(context.Background(), "zz", 2); r.Outcome() == OutcomePending {
+		t.Fatal("Tab after the scan timed out is still pending")
+	}
+}
+
+// A hung PATH scan must not hide the builtins for good: once the scan has
+// timed out, the builtins are offered (the ready notification makes the
+// "fetching" menu retry by itself). While the scan is still within its
+// timeout the Tab stays pending: answering with builtins alone would put a
+// lone builtin in place ("his" -> "history") over PATH matches the scan has
+// not delivered yet, and nothing would correct it.
+func TestExecutableCompleter_OffersBuiltinsOnceHungPATHScanTimesOut(t *testing.T) {
+	block := make(chan struct{})
+	defer close(block)
+	c := NewExecutableCompleter()
+	c.SetBuiltins([]string{"history"})
+	c.policy.timeout = 50 * time.Millisecond
+	c.policy.wait = 5 * time.Millisecond
+	c.scanPath = func(string) []string { <-block; return nil }
+
+	if r, _ := c.Complete(context.Background(), "his", 3); r.Outcome() != OutcomePending {
+		t.Fatalf("Tab while the scan runs = %v %#v, want pending", r.Outcome(), r.Items)
+	}
+	var r Result
+	if !eventuallyTrue(time.Second, func() bool {
+		r, _ = c.Complete(context.Background(), "his", 3)
+		return len(r.Items) > 0
+	}) {
+		t.Fatalf("after the scan timed out: %v %#v, want the history builtin", r.Outcome(), r.Items)
+	}
+	if len(r.Items) != 1 || r.Items[0].Value != "history" {
+		t.Fatalf("items = %#v, want history", r.Items)
+	}
+}
+
+// A function or alias sharing a prefix with PATH executables must not hide
+// them: with a function gitlog, Tab on "gi" offering only gitlog put it in
+// place of the git the user was typing.
+func TestExecutableCompleter_OffersFunctionsAlongsideExecutables(t *testing.T) {
+	exe := NewExecutableCompleter()
+	exe.scanPath = func(string) []string { return []string{"git", "gitk"} }
+	exe.SetBuiltins([]string{"history"})
+	exe.SetFunctions(&mockFunctionProvider{functions: []string{"gitlog", "git", "ll"}})
+	router := NewRouter()
+	router.Register(exe, PriorityExecutable)
+
+	result, _ := router.Complete(context.Background(), "gi", 2)
+	var got []string
+	for _, item := range result.Items {
+		got = append(got, item.Value+":"+item.Description)
+	}
+	want := []string{"git:function", "gitlog:function", "gitk:"}
+	if strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Fatalf("Tab on gi = %q, want %q (functions first, then executables they do not shadow)", got, want)
+	}
+	if r, _ := exe.Complete(context.Background(), "ls l", 4); r.Outcome() != OutcomeNotMine {
+		t.Fatalf("functions offered in argument position: %#v", r.Items)
+	}
+}
+
+// mockFunctionProvider implements FunctionProvider for tests.
+type mockFunctionProvider struct {
+	functions []string
+}
+
+func (m *mockFunctionProvider) Functions() []string {
+	return m.functions
+}
+
+// Functions match as the shell defines them, case-sensitively, in command
+// position only (after a pipe too), and a long list is capped.
+func TestExecutableCompleter_FunctionMatching(t *testing.T) {
+	many := make([]string, 5000)
+	for i := range many {
+		many[i] = "fn-" + strconv.Itoa(i)
+	}
+	tests := []struct {
+		name      string
+		functions []string
+		line      string
+		want      int
+	}{
+		{"case-sensitive", []string{"MyFunc", "myfunc"}, "my", 1},
+		{"after a pipe", []string{"myfunc", "other"}, "echo hi | my", 1},
+		{"not an argument", []string{"site", "serve"}, "cd si", 0},
+		{"capped", many, "fn-", completionItemLimit},
+	}
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			gotLine, gotPos := ExtractPipeContext(tt.line, tt.pos)
-			if gotLine != tt.wantLine {
-				t.Errorf("ExtractPipeContext() line = %q, want %q", gotLine, tt.wantLine)
-			}
-			if gotPos != tt.wantPos {
-				t.Errorf("ExtractPipeContext() pos = %d, want %d", gotPos, tt.wantPos)
-			}
-		})
+		exe := NewExecutableCompleter()
+		exe.scanPath = func(string) []string { return nil }
+		exe.SetFunctions(&mockFunctionProvider{functions: tt.functions})
+		result, _ := exe.Complete(context.Background(), tt.line, len(tt.line))
+		if len(result.Items) != tt.want {
+			t.Errorf("%s: Complete(%q) = %d items, want %d", tt.name, tt.line, len(result.Items), tt.want)
+		}
+	}
+}
+
+// Functions come in name order whatever order the shell lists them in (a
+// map's), so the menu is the same on every Tab.
+func TestExecutableCompleter_OffersFunctionsInNameOrder(t *testing.T) {
+	c := NewExecutableCompleter()
+	c.scanPath = func(string) []string { return nil }
+	c.SetFunctions(&mockFunctionProvider{functions: []string{"gitlog", "gitb", "gita"}})
+	result, _ := c.Complete(context.Background(), "git", len("git"))
+	var got []string
+	for _, item := range result.Items {
+		got = append(got, item.Value)
+	}
+	if want := []string{"gita", "gitb", "gitlog"}; !slices.Equal(got, want) {
+		t.Fatalf("items = %q, want %q", got, want)
+	}
+}
+
+// The executable limit counts PATH executables only: the functions and
+// builtins listed before them do not crowd them out, and the menu says how
+// many it left out.
+func TestExecutableCompleter_LimitCountsExecutablesAfterTheFunctions(t *testing.T) {
+	var functions, exes []string
+	for i := range 60 {
+		functions = append(functions, fmt.Sprintf("tool-fn-%02d", i))
+	}
+	for i := range 80 {
+		exes = append(exes, fmt.Sprintf("tool-%02d", i))
+	}
+	exe := NewExecutableCompleter()
+	exe.scanPath = func(string) []string { return exes }
+	exe.SetFunctions(&mockFunctionProvider{functions: functions})
+	result, _ := exe.Complete(context.Background(), "tool-", len("tool-"))
+	listed := 0
+	for _, item := range result.Items {
+		if item.Description != "function" {
+			listed++
+		}
+	}
+	if listed != executableItemLimit || result.Hidden() != (Hidden{More: 80 - executableItemLimit}) {
+		t.Errorf("Complete(tool-) = %d executables, hidden %+v, want %d and %d more", listed, result.Hidden(), executableItemLimit, 80-executableItemLimit)
+	}
+}
+
+// The executables offered in command position stop at a limit, saying
+// more were not shown.
+func TestExecutableCompleter_SaysMoreNotShownPastItsLimit(t *testing.T) {
+	var many []string
+	for i := range 80 {
+		many = append(many, fmt.Sprintf("tool-%02d", i))
+	}
+	exe := NewExecutableCompleter()
+	exe.scanPath = func(string) []string { return many }
+	exe.SetFunctions(&mockFunctionProvider{})
+	for line, more := range map[string]bool{"tool-": true, "tool-1": false} {
+		result, _ := exe.Complete(context.Background(), line, len(line))
+		if result.Hidden().NotShown() != more || len(result.Items) == 0 {
+			t.Errorf("Complete(%q) = %d items, hidden %+v, want more %v", line, len(result.Items), result.Hidden(), more)
+		}
 	}
 }

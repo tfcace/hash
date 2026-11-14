@@ -206,6 +206,20 @@ func (c *Client) Close() error {
 	return c.transport.Close()
 }
 
+// Restart closes the transport and connects it again, so a freshly
+// installed agent answers. A transport whose Close is final (ACP) reopens
+// through its own Restart.
+func (c *Client) Restart(ctx context.Context) error {
+	if c == nil || c.transport == nil {
+		return fmt.Errorf("no agent configured")
+	}
+	if r, ok := c.transport.(interface{ Restart(context.Context) error }); ok {
+		return r.Restart(ctx)
+	}
+	_ = c.transport.Close()
+	return c.transport.EnsureModelInfo(ctx)
+}
+
 // CurrentModel returns the active model's display name, or "" if unavailable.
 func (c *Client) CurrentModel() string {
 	if c == nil || c.transport == nil {

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/tfcace/hash/internal/clipboard"
 	"github.com/tfcace/hash/internal/prompt"
 )
 
@@ -17,20 +18,6 @@ func TestSearchUI_Create(t *testing.T) {
 	ui := NewSearchUI(store, prompt.DefaultPalette())
 	if ui == nil {
 		t.Fatal("NewSearchUI() returned nil")
-	}
-}
-
-func TestSearchUI_FilterCommands(t *testing.T) {
-	commands := []Command{
-		{Command: "kubectl get pods"},
-		{Command: "docker ps"},
-		{Command: "kubectl get services"},
-	}
-
-	filtered := filterCommands(commands, "kubectl")
-
-	if len(filtered) != 2 {
-		t.Errorf("Count = %d, want 2", len(filtered))
 	}
 }
 
@@ -173,26 +160,6 @@ func TestSearchUI_NoResults(t *testing.T) {
 	// Should show header and footer even with no results
 	if !strings.Contains(view, "Search") {
 		t.Error("SearchUI missing header with no results")
-	}
-}
-
-// Edge Case 5: Case insensitive filtering
-func TestSearchUI_CaseInsensitiveFilter(t *testing.T) {
-	commands := []Command{
-		{Command: "KUBECTL get pods"},
-		{Command: "Docker ps"},
-		{Command: "python script.py"},
-	}
-
-	// Filter should be case insensitive
-	filtered := filterCommands(commands, "kubectl")
-	if len(filtered) != 1 {
-		t.Errorf("Case insensitive filter: expected 1 result, got %d", len(filtered))
-	}
-
-	filtered = filterCommands(commands, "DOCKER")
-	if len(filtered) != 1 {
-		t.Errorf("Case insensitive filter (uppercase): expected 1 result, got %d", len(filtered))
 	}
 }
 
@@ -508,5 +475,24 @@ func TestSearchUI_PreviewShowsTheQuestionBehindACommand(t *testing.T) {
 	view := ui.View().Content
 	if !strings.Contains(view, "?? count lines in go files") {
 		t.Errorf("preview should show the question behind the command, got:\n%s", view)
+	}
+}
+
+// Ctrl+O on a command whose output went straight to the terminal says so,
+// not that there is no output.
+func TestSearchUI_CopyOutputThatWentStraightToTheTerminal(t *testing.T) {
+	store, _ := NewStore(":memory:")
+	defer store.Close()
+	store.Add(Command{Command: "ls | less", Timestamp: time.Now()})
+	buf := clipboard.NewBuffer(10)
+	buf.AddCommand("ls | less")
+	buf.SetUncaptured()
+
+	ui := NewSearchUI(store, prompt.DefaultPalette())
+	ui.SetClipboard(buf)
+	ui.searchNow()
+	ui.copyOutput()
+	if !strings.Contains(ui.statusMessage, "straight to the terminal") {
+		t.Errorf("status = %q, want it to say the output went straight to the terminal", ui.statusMessage)
 	}
 }

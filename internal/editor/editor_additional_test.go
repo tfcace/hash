@@ -131,83 +131,34 @@ func TestCursor_Clone(t *testing.T) {
 // TestUndoStack_Empty_SafeOperations tests safe operations on empty stack.
 func TestUndoStack_Empty_SafeOperations(t *testing.T) {
 	u := NewUndoStack()
+	cur := snapshotOf(NewBuffer(), NewCursor())
 
-	if u.CanUndo() {
-		t.Error("CanUndo() should be false on empty stack")
+	if _, ok := u.Undo(cur); ok {
+		t.Error("Undo() on empty stack should report nothing to undo")
+	}
+	if _, ok := u.Redo(cur); ok {
+		t.Error("Redo() on empty stack should report nothing to redo")
 	}
 	if u.CanRedo() {
-		t.Error("CanRedo() should be false on empty stack")
-	}
-
-	// Should not panic
-	buf, cur := u.Undo()
-	if buf != nil || cur != nil {
-		t.Error("Undo() on empty stack should return nil")
-	}
-	buf, cur = u.Redo()
-	if buf != nil || cur != nil {
-		t.Error("Redo() on empty stack should return nil")
-	}
-}
-
-// TestUndoStack_PushAndUndo_StateRecovery tests state recovery through undo.
-func TestUndoStack_PushAndUndo_StateRecovery(t *testing.T) {
-	u := NewUndoStack()
-	buf1 := NewBufferFromString("hello")
-	cur := NewCursor()
-
-	// First push - sets initial state
-	u.Push(buf1, cur)
-
-	// Can't undo after first push (no previous state)
-	if u.CanUndo() {
-		t.Error("CanUndo() should be false after first push (no previous state)")
-	}
-
-	// Create second state
-	buf2 := NewBufferFromString("hello world")
-	u.Push(buf2, cur)
-
-	// Now we can undo
-	if !u.CanUndo() {
-		t.Error("CanUndo() should be true after second push")
-	}
-
-	// Undo should return previous state
-	oldBuf, _ := u.Undo()
-	if oldBuf == nil {
-		t.Fatal("Undo() returned nil buffer")
-	}
-	if oldBuf.Content() != "hello" {
-		t.Errorf("Undo buffer content = %q, want %q", oldBuf.Content(), "hello")
+		t.Error("a failed Undo must not create redo history")
 	}
 }
 
 // TestUndoStack_RedoTruncation tests that new push truncates redo history.
 func TestUndoStack_RedoTruncation(t *testing.T) {
 	u := NewUndoStack()
-	buf := NewBufferFromString("a")
-	cur := NewCursor()
+	snap := func(s string) Snapshot { return snapshotOf(NewBufferFromString(s), NewCursor()) }
 
-	u.Push(buf, cur)
-	buf = NewBufferFromString("ab")
-	u.Push(buf, cur)
-	buf = NewBufferFromString("abc")
-	u.Push(buf, cur)
+	u.Push(snap("a"))
+	u.Push(snap("ab"))
+	u.Undo(snap("abc"))
+	u.Undo(snap("ab"))
 
-	// Undo twice
-	u.Undo()
-	u.Undo()
-
-	// Should have redo available
 	if !u.CanRedo() {
 		t.Error("CanRedo() should be true after undo")
 	}
 
-	// Push new state - should truncate redo history
-	buf = NewBufferFromString("new")
-	u.Push(buf, cur)
-
+	u.Push(snap("a"))
 	if u.CanRedo() {
 		t.Error("CanRedo() should be false after new push")
 	}
@@ -308,7 +259,7 @@ func TestCursor_SelectionRange_MultiLine(t *testing.T) {
 	c.StartSelection()
 	c.MoveTo(2, 3)
 
-	start, end := c.SelectionRange()
+	start, end := c.SelectionRange(NewBuffer())
 	if start.Row != 0 || start.Col != 5 {
 		t.Errorf("start = %+v, want {0, 5}", start)
 	}
@@ -324,7 +275,7 @@ func TestCursor_SelectionRange_MultiLineReversed(t *testing.T) {
 	c.StartSelection()
 	c.MoveTo(0, 5)
 
-	start, end := c.SelectionRange()
+	start, end := c.SelectionRange(NewBuffer())
 	// Should be normalized
 	if start.Row != 0 || start.Col != 5 {
 		t.Errorf("start = %+v, want {0, 5}", start)
@@ -334,19 +285,22 @@ func TestCursor_SelectionRange_MultiLineReversed(t *testing.T) {
 	}
 }
 
-// TestGhostText_FromAgent tests the FromAgent flag.
+// TestGhostText_FromAgent tests which states count as agent fills.
 func TestGhostText_FromAgent(t *testing.T) {
 	g := NewGhostText()
 	g.Set("suggestion")
-	g.FromAgent = true
+	if g.fromAgent() {
+		t.Error("a prediction is not an agent fill")
+	}
 
-	if !g.FromAgent {
-		t.Error("FromAgent should be true")
+	setAgentGhost(g, "suggestion", false)
+	if !g.fromAgent() {
+		t.Error("fromAgent should be true for a finished agent fill")
 	}
 
 	g.Clear()
-	if g.FromAgent {
-		t.Error("FromAgent should be false after Clear")
+	if g.fromAgent() {
+		t.Error("fromAgent should be false after Clear")
 	}
 }
 
@@ -366,7 +320,7 @@ func TestSuggestionFunc_SetsGhostText(t *testing.T) {
 
 	ed.updateSuggestion()
 
-	if !ed.ghost.Active {
+	if !ed.ghost.visible() {
 		t.Fatal("ghost should be active")
 	}
 	if ed.ghost.Remaining() != "sh origin main" {
@@ -383,11 +337,10 @@ func TestSuggestionFunc_NoMatchClearsGhost(t *testing.T) {
 	ed.state.Buffer = NewBufferFromString("xyz")
 	ed.state.Cursor.MoveTo(0, 3)
 	ed.ghost.Set("old suggestion")
-	ed.ghost.FromAgent = false
 
 	ed.updateSuggestion()
 
-	if ed.ghost.Active {
+	if ed.ghost.visible() {
 		t.Error("ghost should be cleared when no match")
 	}
 }
@@ -440,8 +393,7 @@ func TestSuggestionFunc_SkipsAgentGhost(t *testing.T) {
 	ed := New(cfg, nil, io.Discard)
 	ed.state.Buffer = NewBufferFromString("gi")
 	ed.state.Cursor.MoveTo(0, 2)
-	ed.ghost.Set("agent suggestion")
-	ed.ghost.FromAgent = true
+	setAgentGhost(ed.ghost, "agent suggestion", false)
 
 	ed.updateSuggestion()
 

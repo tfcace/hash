@@ -404,3 +404,41 @@ func TestBuiltinSetupZoxide_DoesNotDisableCdWhenHashrcUpdateFails(t *testing.T) 
 		t.Error("config.toml should not be written when hashrc update fails")
 	}
 }
+
+// With a config.toml that did not load cleanly, the shell's config holds
+// defaults for the broken parts; writing it back would replace the user's
+// file. setup-zoxide refuses and changes nothing.
+func TestBuiltinSetupZoxide_RefusesConfigWithLoadIssue(t *testing.T) {
+	binDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(binDir, "zoxide"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	home := t.TempDir()
+	configDir := filepath.Join(home, "cfg")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	broken := "[shell]\ndisable_builtins = [\"ls\"]\ndialect = 5\n\n[prompt]\nmode = \"built-in\"\n"
+	configPath := filepath.Join(configDir, "config.toml")
+	if err := os.WriteFile(configPath, []byte(broken), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir)
+	t.Setenv("HOME", home)
+	t.Setenv("HASH_CONFIG_DIR", configDir)
+
+	cfg := config.Load(configDir)
+	if cfg.LoadIssue == nil {
+		t.Fatal("test config should not load cleanly")
+	}
+	s := &Shell{config: cfg}
+	if err := s.builtinSetupZoxide(context.Background(), nil); err == nil {
+		t.Error("setup-zoxide should fail while config.toml has a load error")
+	}
+	if data, _ := os.ReadFile(configPath); string(data) != broken {
+		t.Errorf("config.toml was rewritten:\n%s", data)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".hashrc")); !os.IsNotExist(err) {
+		t.Errorf("~/.hashrc was changed (stat err %v)", err)
+	}
+}

@@ -123,8 +123,9 @@ func TestShell_ChpwdHook(t *testing.T) {
 	if err := os.Chdir(tmpDir); err != nil {
 		t.Fatalf("chdir failed: %v", err)
 	}
-	e.SetExportedEnv("PWD", tmpDir)
-	e.SyncRunnerDir()
+	if _, err := e.Execute(ctx, "cd '"+tmpDir+"'", io.Discard, io.Discard); err != nil {
+		t.Fatal(err)
+	}
 
 	// Now hook should fire
 	sh.runChpwdHook(ctx)
@@ -189,7 +190,7 @@ func TestShell_ZoxideWorksWithDisabledCdBuiltin(t *testing.T) {
 		t.Fatalf("failed to initialize zoxide: %v", err)
 	}
 
-	if err := sh.executeRegularCommand(ctx, "z ~"); err != nil {
+	if _, err := sh.runShellLine(ctx, "z ~"); err != nil {
 		t.Fatalf("z command failed: %v", err)
 	}
 
@@ -259,9 +260,6 @@ func TestShell_HandleToolPermission_RefreshesProjectAllowlist(t *testing.T) {
 		agentOutput:  NewAgentOutputCoordinator(io.Discard),
 		responseUI:   NewResponseUI(io.Discard),
 		colorPalette: prompt.DefaultPalette(),
-		readKey: func(context.Context) byte {
-			return 'n'
-		},
 	}
 
 	if err := os.Chdir(projectB); err != nil {
@@ -292,59 +290,29 @@ func TestShell_ExecuteRegularCommand_BuiltinFailureUpdatesLastError(t *testing.T
 	}
 
 	sh := &Shell{
-		config:       config.Default(),
-		executor:     executor.New(),
-		lastCommand:  "echo ok",
-		lastStderr:   "old stderr",
-		lastExitCode: 7,
+		config:   config.Default(),
+		executor: executor.New(),
+		last:     commandOutcome{command: "echo ok", stderr: "old stderr", exitCode: 7},
 	}
 
 	missingDir := filepath.Join(storeDir, "missing")
 	command := "cd " + missingDir
-	if err := sh.executeRegularCommand(context.Background(), command); err != nil {
-		t.Fatalf("executeRegularCommand(): %v", err)
+	if _, err := sh.runShellLine(context.Background(), command); err != nil {
+		t.Fatalf("runShellLine(): %v", err)
 	}
 
-	if sh.lastExitCode != 1 {
-		t.Fatalf("lastExitCode = %d, want 1", sh.lastExitCode)
+	if sh.last.exitCode != 1 {
+		t.Fatalf("lastExitCode = %d, want 1", sh.last.exitCode)
 	}
-	if sh.lastCommand != command {
-		t.Fatalf("lastCommand = %q, want %q", sh.lastCommand, command)
+	if sh.last.command != command {
+		t.Fatalf("lastCommand = %q, want %q", sh.last.command, command)
 	}
-	if !strings.Contains(sh.lastStderr, "no such file or directory") {
-		t.Fatalf("lastStderr = %q, want builtin failure message", sh.lastStderr)
+	if !strings.Contains(sh.last.stderr, "cd: "+missingDir+": No such file or directory") {
+		t.Fatalf("lastStderr = %q, want cd's message", sh.last.stderr)
 	}
-	lastCwdResolved, _ := filepath.EvalSymlinks(sh.lastCwd)
+	lastCwdResolved, _ := filepath.EvalSymlinks(sh.last.cwd)
 	storeDirResolved, _ := filepath.EvalSymlinks(storeDir)
 	if lastCwdResolved != storeDirResolved {
-		t.Fatalf("lastCwd = %q, want %q", sh.lastCwd, storeDir)
+		t.Fatalf("lastCwd = %q, want %q", sh.last.cwd, storeDir)
 	}
-}
-
-func TestConfirmationTypeForAgentResponse(t *testing.T) {
-	t.Run("command requires confirmation", func(t *testing.T) {
-		confirmType, ok := confirmationTypeForAgentResponse(agent.Response{Type: agent.ResponseTypeCommand}, false)
-		if !ok {
-			t.Fatal("expected command response to require confirmation")
-		}
-		if confirmType != ConfirmTypeCommand {
-			t.Fatalf("confirmType = %v, want %v", confirmType, ConfirmTypeCommand)
-		}
-	})
-
-	t.Run("explanation skips confirmation without reply", func(t *testing.T) {
-		if _, ok := confirmationTypeForAgentResponse(agent.Response{Type: agent.ResponseTypeExplanation}, false); ok {
-			t.Fatal("expected explanation response to skip confirmation")
-		}
-	})
-
-	t.Run("explanation can request reply confirmation", func(t *testing.T) {
-		confirmType, ok := confirmationTypeForAgentResponse(agent.Response{Type: agent.ResponseTypeExplanation}, true)
-		if !ok {
-			t.Fatal("expected explanation response to require confirmation when reply is allowed")
-		}
-		if confirmType != ConfirmTypeExplanation {
-			t.Fatalf("confirmType = %v, want %v", confirmType, ConfirmTypeExplanation)
-		}
-	})
 }

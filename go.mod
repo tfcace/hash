@@ -5,11 +5,11 @@ go 1.26.0
 require (
 	charm.land/bubbletea/v2 v2.1.1
 	charm.land/lipgloss/v2 v2.0.6
-	github.com/chzyer/readline v1.5.1
 	github.com/creack/pty v1.1.24
 	github.com/mattn/go-runewidth v0.0.31
 	github.com/mattn/go-sqlite3 v1.14.52
 	github.com/pelletier/go-toml/v2 v2.4.3
+	github.com/rivo/uniseg v0.4.7
 	golang.design/x/clipboard v0.11.0
 	golang.org/x/sys v0.49.0
 	golang.org/x/term v0.47.0
@@ -28,7 +28,6 @@ require (
 	github.com/ebitengine/purego v0.10.1 // indirect
 	github.com/lucasb-eyer/go-colorful v1.4.1 // indirect
 	github.com/muesli/cancelreader v0.2.2 // indirect
-	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/xo/terminfo v1.0.0 // indirect
 	golang.design/x/x11 v0.2.0 // indirect
 	golang.org/x/exp/shiny v0.0.0-20250606033433-dcc06ee1d476 // indirect

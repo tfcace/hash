@@ -159,3 +159,22 @@ func TestRender_PreservesText(t *testing.T) {
 		t.Errorf("Text should be preserved, got: %q", result)
 	}
 }
+
+// A code span inside bold ends with a full reset; the rest of the bold span
+// must be bold again.
+func TestRender_BoldSurvivesNestedCode(t *testing.T) {
+	got := Render("**bold `code` still bold**")
+	want := bold + "bold " + cyan + "code" + reset + bold + " still bold" + reset
+	if got != want {
+		t.Fatalf("got  %q\nwant %q", got, want)
+	}
+}
+
+// Spans that follow each other inside an outer span each reopen it.
+func TestRender_LinkInsideBoldKeepsBold(t *testing.T) {
+	got := Render("**see [x](u) here**")
+	want := bold + "see " + underline + blue + "x" + reset + bold + gray + " (u)" + reset + bold + " here" + reset
+	if got != want {
+		t.Fatalf("got  %q\nwant %q", got, want)
+	}
+}

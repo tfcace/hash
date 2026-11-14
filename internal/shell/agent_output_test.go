@@ -15,7 +15,7 @@ import (
 func TestAgentOutputCoordinator_ToolLifecycleFinalizesOnce(t *testing.T) {
 	var buf bytes.Buffer
 	aoc := NewAgentOutputCoordinator(&buf)
-	aoc.BeginToolTurn()
+	aoc.BeginRequest()
 
 	if update, final := aoc.RecordToolUpdate(agent.ToolCallUpdate{ID: "1", Title: "pwd", Kind: "execute", Status: agent.ToolCallPending}); final || update.Title != "pwd" {
 		t.Fatalf("pending result = %#v, final=%v", update, final)
@@ -37,7 +37,7 @@ func TestAgentOutputCoordinator_ToolLifecycleFinalizesOnce(t *testing.T) {
 func TestAgentOutputCoordinator_DeniedToolRendersSingleSafeRow(t *testing.T) {
 	var buf bytes.Buffer
 	aoc := NewAgentOutputCoordinator(&buf)
-	aoc.BeginToolTurn()
+	aoc.BeginRequest()
 	aoc.RecordToolUpdate(agent.ToolCallUpdate{ID: "1", Title: "bad\n\x1b[31m", Kind: "execute", Status: agent.ToolCallPending})
 	update, final := aoc.ResolveToolPermission("1", false)
 	if !final {
@@ -50,12 +50,19 @@ func TestAgentOutputCoordinator_DeniedToolRendersSingleSafeRow(t *testing.T) {
 	}
 }
 
+// promptUp reports whether a permission prompt is on screen.
+func promptUp(aoc *AgentOutputCoordinator) bool {
+	aoc.mu.Lock()
+	defer aoc.mu.Unlock()
+	return aoc.prompt != nil
+}
+
 func TestAgentOutputCoordinator_InitialState(t *testing.T) {
 	var buf bytes.Buffer
 	aoc := NewAgentOutputCoordinator(&buf)
 
-	if aoc.State() != AgentOutputStateIdle {
-		t.Errorf("expected initial state IDLE, got %v", aoc.State())
+	if promptUp(aoc) {
+		t.Errorf("want no prompt up")
 	}
 }
 
@@ -63,17 +70,15 @@ func TestAgentOutputCoordinator_StreamingState(t *testing.T) {
 	var buf bytes.Buffer
 	aoc := NewAgentOutputCoordinator(&buf)
 
-	aoc.StartStreaming()
-	if aoc.State() != AgentOutputStateStreaming {
-		t.Errorf("expected STREAMING state, got %v", aoc.State())
+	if promptUp(aoc) {
+		t.Errorf("want no prompt up")
 	}
 
 	aoc.WriteStream("hello ")
 	aoc.WriteStream("world")
-	aoc.EndStreaming()
 
-	if aoc.State() != AgentOutputStateIdle {
-		t.Errorf("expected IDLE state after end, got %v", aoc.State())
+	if promptUp(aoc) {
+		t.Errorf("want no prompt up")
 	}
 
 	output := buf.String()
@@ -86,26 +91,24 @@ func TestAgentOutputCoordinator_PermissionPausesStreaming(t *testing.T) {
 	var buf bytes.Buffer
 	aoc := NewAgentOutputCoordinator(&buf)
 
-	aoc.StartStreaming()
 	aoc.WriteStream("before ")
 
 	// Permission request arrives
-	aoc.EnterPermission()
-	if aoc.State() != AgentOutputStatePermission {
-		t.Errorf("expected PERMISSION state, got %v", aoc.State())
+	aoc.RenderPermissionPrompt("ls", "", "")
+	if !promptUp(aoc) {
+		t.Errorf("want the permission prompt up")
 	}
 
 	// Text arriving during permission should be buffered
 	aoc.WriteStream("during ")
 
 	// Permission resolved
-	aoc.ExitPermission()
-	if aoc.State() != AgentOutputStateStreaming {
-		t.Errorf("expected STREAMING state after permission, got %v", aoc.State())
+	aoc.ClearPermissionPrompt()
+	if promptUp(aoc) {
+		t.Errorf("want no prompt up")
 	}
 
 	aoc.WriteStream("after")
-	aoc.EndStreaming()
 
 	output := buf.String()
 	// Should see: "before " (written) + clear line + "during after" (buffered + resumed)
@@ -125,8 +128,6 @@ func TestAgentOutputCoordinator_ConcurrentAccess(t *testing.T) {
 	var buf bytes.Buffer
 	aoc := NewAgentOutputCoordinator(&buf)
 
-	aoc.StartStreaming()
-
 	// Simulate concurrent permission request during streaming
 	var wg sync.WaitGroup
 
@@ -145,13 +146,12 @@ func TestAgentOutputCoordinator_ConcurrentAccess(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		time.Sleep(50 * time.Microsecond) // Let some chunks through
-		aoc.EnterPermission()
+		aoc.RenderPermissionPrompt("ls", "", "")
 		time.Sleep(100 * time.Microsecond) // Hold permission
-		aoc.ExitPermission()
+		aoc.ClearPermissionPrompt()
 	}()
 
 	wg.Wait()
-	aoc.EndStreaming()
 
 	// Verify no panics occurred and output contains data
 	output := buf.String()
@@ -164,23 +164,21 @@ func TestAgentOutputCoordinator_MultiplePermissionRequests(t *testing.T) {
 	var buf bytes.Buffer
 	aoc := NewAgentOutputCoordinator(&buf)
 
-	aoc.StartStreaming()
 	aoc.WriteStream("start ")
 
 	// First permission
-	aoc.EnterPermission()
+	aoc.RenderPermissionPrompt("ls", "", "")
 	aoc.WriteStream("buffered1 ")
-	aoc.ExitPermission()
+	aoc.ClearPermissionPrompt()
 
 	aoc.WriteStream("middle ")
 
 	// Second permission
-	aoc.EnterPermission()
+	aoc.RenderPermissionPrompt("ls", "", "")
 	aoc.WriteStream("buffered2 ")
-	aoc.ExitPermission()
+	aoc.ClearPermissionPrompt()
 
 	aoc.WriteStream("end")
-	aoc.EndStreaming()
 
 	output := buf.String()
 
@@ -196,7 +194,6 @@ func TestAgentOutputCoordinator_RenderPermission(t *testing.T) {
 	var buf bytes.Buffer
 	aoc := NewAgentOutputCoordinator(&buf)
 
-	aoc.StartStreaming()
 	aoc.WriteStream("response text\n")
 
 	// Render permission prompt
@@ -218,8 +215,6 @@ func TestAgentOutputCoordinator_RenderPermissionWithToolName(t *testing.T) {
 	var buf bytes.Buffer
 	aoc := NewAgentOutputCoordinator(&buf)
 
-	aoc.StartStreaming()
-
 	// Render permission prompt with a tool name
 	aoc.RenderPermissionPrompt("cat /etc/hosts", "Read", "#00ff00")
 
@@ -238,8 +233,6 @@ func TestAgentOutputCoordinator_RenderPermissionWithToolName(t *testing.T) {
 func TestAgentOutputCoordinator_RenderPermissionWithoutToolName(t *testing.T) {
 	var buf bytes.Buffer
 	aoc := NewAgentOutputCoordinator(&buf)
-
-	aoc.StartStreaming()
 
 	// Render permission prompt without a tool name — should not show parentheses
 	aoc.RenderPermissionPrompt("ls -la", "", "#00ff00")
@@ -275,30 +268,21 @@ func TestAgentOutputCoordinator_RenderPermission_SanitizesControlChars(t *testin
 	}
 }
 
+// Clearing an answered prompt erases its five rows and adds none: the
+// tool's lifecycle row says whether it ran.
 func TestAgentOutputCoordinator_ClearPermission(t *testing.T) {
 	var buf bytes.Buffer
 	aoc := NewAgentOutputCoordinator(&buf)
 
-	aoc.StartStreaming()
 	aoc.RenderPermissionPrompt("ls -la", "", "")
+	buf.Reset()
+	aoc.ClearPermissionPrompt()
 
-	initialLen := buf.Len()
-
-	aoc.ClearPermissionPrompt(true)
-
-	// Should have added cursor-up and clear-line sequences plus feedback
-	if buf.Len() <= initialLen {
-		t.Error("expected clear sequences to be written")
+	if got := buf.String(); got != clearPermissionRows {
+		t.Errorf("clear wrote %q, want just the prompt's rows erased", got)
 	}
-
-	output := buf.String()
-	// Should contain cursor up sequences (4 lines - we clear current line first)
-	if strings.Count(output, "\033[1A") < 4 {
-		t.Errorf("expected 4 cursor-up sequences, got fewer in: %q", output)
-	}
-	// Should show allowed feedback with the command
-	if !strings.Contains(output, "✓") || !strings.Contains(output, "ls -la") {
-		t.Errorf("expected allowed feedback with command, got: %q", output)
+	if promptUp(aoc) {
+		t.Error("prompt still up after clear")
 	}
 }
 
@@ -318,7 +302,6 @@ func TestAgentOutputCoordinator_ShowHints(t *testing.T) {
 			var buf bytes.Buffer
 			aoc := NewAgentOutputCoordinator(&buf)
 
-			aoc.EnterConfirming()
 			aoc.ShowHints(tt.hintType)
 
 			output := buf.String()
@@ -331,33 +314,24 @@ func TestAgentOutputCoordinator_ShowHints(t *testing.T) {
 	}
 }
 
-func TestAgentOutputCoordinator_HintsOnlyInConfirmingState(t *testing.T) {
+func TestAgentOutputCoordinator_DismissDuringPermission(t *testing.T) {
 	var buf bytes.Buffer
 	aoc := NewAgentOutputCoordinator(&buf)
 
-	// Should not show hints when not in confirming state
-	aoc.ShowHints(ConfirmTypeCommand)
-
-	if strings.Contains(buf.String(), "[Enter:") {
-		t.Error("hints should not appear when not in confirming state")
-	}
-}
-
-func TestAgentOutputCoordinator_CancelDuringPermission(t *testing.T) {
-	var buf bytes.Buffer
-	aoc := NewAgentOutputCoordinator(&buf)
-
-	aoc.StartStreaming()
 	aoc.WriteStream("partial response")
 
-	aoc.EnterPermission()
+	aoc.RenderPermissionPrompt("ls", "", "")
 	aoc.WriteStream("buffered text") // Would be buffered
 
-	// Simulate cancel - should clean up and not crash
-	aoc.Cancel()
+	// The request ended under the prompt: its rows go, and what it held
+	// goes with the rest of the reply.
+	aoc.DismissPermissionPrompt()
 
-	if aoc.State() != AgentOutputStateIdle {
-		t.Errorf("expected IDLE after cancel, got %v", aoc.State())
+	if promptUp(aoc) {
+		t.Error("prompt still up after dismiss")
+	}
+	if strings.Contains(buf.String(), "buffered text") {
+		t.Errorf("held text drawn after dismiss: %q", buf.String())
 	}
 }
 
@@ -373,40 +347,35 @@ func TestAgentOutputCoordinator_PermissionWithoutStreaming(t *testing.T) {
 		t.Errorf("permission prompt should still render: %q", output)
 	}
 
-	aoc.ClearPermissionPrompt(true)
+	aoc.ClearPermissionPrompt()
 
-	if aoc.State() != AgentOutputStateIdle {
-		t.Errorf("should return to IDLE, got %v", aoc.State())
+	if promptUp(aoc) {
+		t.Errorf("want no prompt up")
 	}
 }
 
-func TestAgentOutputCoordinator_StartStreamingDuringPermission(t *testing.T) {
+func TestAgentOutputCoordinator_FirstChunkDuringPermission(t *testing.T) {
 	var buf bytes.Buffer
 	aoc := NewAgentOutputCoordinator(&buf)
 
 	// Permission prompt is active before any text has streamed
 	// (agent requested a tool around its first text chunk).
-	aoc.EnterPermission()
+	aoc.RenderPermissionPrompt("ls", "", "")
 
-	// First chunk arrives while the prompt is up and the terminal is in raw
-	// mode: StartStreaming must not clobber the permission state, and the
-	// chunk must be buffered, not written.
-	aoc.StartStreaming()
-	if aoc.State() != AgentOutputStatePermission {
-		t.Fatalf("expected PERMISSION state preserved, got %v", aoc.State())
-	}
+	// First chunk arrives while the prompt is up: it must be held, not
+	// written.
 	aoc.WriteStream("chunk during prompt")
 	if strings.Contains(buf.String(), "chunk during prompt") {
 		t.Fatalf("text written to terminal during permission prompt: %q", buf.String())
 	}
 
 	// Answering the prompt flushes the buffer and resumes streaming.
-	aoc.ClearPermissionPrompt(true)
+	aoc.ClearPermissionPrompt()
 	if !strings.Contains(buf.String(), "chunk during prompt") {
 		t.Fatalf("buffered text not flushed after permission cleared: %q", buf.String())
 	}
-	if aoc.State() != AgentOutputStateStreaming {
-		t.Fatalf("expected STREAMING state after clear, got %v", aoc.State())
+	if promptUp(aoc) {
+		t.Fatalf("want no prompt up")
 	}
 
 	// Subsequent chunks must not be dropped.
@@ -416,75 +385,32 @@ func TestAgentOutputCoordinator_StartStreamingDuringPermission(t *testing.T) {
 	}
 }
 
-func TestAgentOutputCoordinator_ClearPermissionPromptAfterCancel(t *testing.T) {
+func TestAgentOutputCoordinator_ClearPermissionPromptAfterDismiss(t *testing.T) {
 	var buf bytes.Buffer
 	aoc := NewAgentOutputCoordinator(&buf)
 
 	aoc.RenderPermissionPrompt("rm -rf /tmp/x", "Bash", "")
-	aoc.Cancel() // Ctrl+C while the prompt is pending
+	aoc.DismissPermissionPrompt() // Ctrl+C while the prompt is pending
 	buf.Reset()
 
 	// The prompt reader resolves later; it must not clear lines that no
 	// longer belong to the prompt.
-	aoc.ClearPermissionPrompt(false)
+	aoc.ClearPermissionPrompt()
 	if got := buf.String(); got != "" {
 		t.Fatalf("expected no output after canceled prompt, got %q", got)
 	}
 }
 
-func TestAgentOutputCoordinator_ClearActiveLine(t *testing.T) {
-	var buf bytes.Buffer
-	aoc := NewAgentOutputCoordinator(&buf)
-
-	// Normally clears the current line (used to erase the spinner).
-	aoc.StartStreaming()
-	aoc.ClearActiveLine()
-	if got := buf.String(); got != "\r\x1b[K" {
-		t.Fatalf("expected clear-line sequence, got %q", got)
-	}
-
-	// While a permission prompt owns the screen, clearing would erase the
-	// prompt's last line, so it must be skipped.
-	buf.Reset()
-	aoc.EnterPermission()
-	aoc.ClearActiveLine()
-	if got := buf.String(); got != "" {
-		t.Fatalf("expected no output during permission prompt, got %q", got)
-	}
-}
-
-func TestAgentOutputCoordinator_ClearPermission_Denied(t *testing.T) {
-	var buf bytes.Buffer
-	aoc := NewAgentOutputCoordinator(&buf)
-
-	aoc.StartStreaming()
-	aoc.RenderPermissionPrompt("rm -rf /", "", "")
-
-	initialLen := buf.Len()
-
-	aoc.ClearPermissionPrompt(false)
-
-	// Should have added cursor-up and clear-line sequences plus feedback
-	if buf.Len() <= initialLen {
-		t.Error("expected clear sequences to be written")
-	}
-
-	output := buf.String()
-	// Should show denied feedback with the command
-	if !strings.Contains(output, "✗") || !strings.Contains(output, "rm -rf /") {
-		t.Errorf("expected denied feedback with command, got: %q", output)
-	}
-}
-
-// A prompt drawn on a free row (the spinner's, just cleared) gives that row
-// back when it clears: the cursor ends where the prompt began, so the tool
-// row that follows takes the spinner's place.
+// A prompt drawn on the spinner's row (cleared) gives that row back when
+// it clears: the cursor ends where the prompt began, so the tool row that
+// follows takes the spinner's place.
 func TestAgentOutputCoordinator_PermissionPromptOnFreeRowReturnsToIt(t *testing.T) {
-	var buf bytes.Buffer
+	var buf lockedBuffer
 	aoc := NewAgentOutputCoordinator(&buf)
 
-	aoc.RenderPermissionPromptOnRow("ls -la", "", "", true)
-	aoc.ClearPermissionPromptSilently(true)
+	aoc.ShowState(AgentStateThinking)
+	aoc.RenderPermissionPrompt("ls -la", "", "")
+	aoc.ClearPermissionPrompt()
 
 	out := buf.String()
 	if down, up := strings.Count(out, "\n"), strings.Count(out, ansiCursorUp); down != up {
@@ -525,35 +451,69 @@ var testSGRRe = regexp.MustCompile(`\x1b\[[0-9;]*m`)
 
 func stripANSI(s string) string { return testSGRRe.ReplaceAllString(s, "") }
 
-// Canceling mid-stream keeps the half-drawn row: it is reply text the user
-// was reading, not leftover output.
-func TestAgentOutputCoordinator_CancelKeepsStreamedRow(t *testing.T) {
-	var buf bytes.Buffer
-	aoc := NewAgentOutputCoordinator(&buf)
-	aoc.StartStreaming()
-	aoc.WriteStream("12. Use set -e so")
-	buf.Reset()
-
-	aoc.Cancel()
-	if strings.Contains(buf.String(), "\x1b[K") {
-		t.Errorf("cancel erased the streamed row: %q", buf.String())
-	}
-	if !aoc.EndsMidRow() {
-		t.Error("EndsMidRow() = false after a row without a newline")
-	}
-}
-
 // Text held during a permission prompt and drawn after it counts toward the
 // row state, so the footer neither doubles a newline nor joins the row.
 func TestAgentOutputCoordinator_BufferedTextSetsRowState(t *testing.T) {
 	var buf bytes.Buffer
 	aoc := NewAgentOutputCoordinator(&buf)
-	aoc.StartStreaming()
 	aoc.WriteStream("line one\n")
 	aoc.RenderPermissionPrompt("ls", "", "")
 	aoc.WriteStream("half a row")
-	aoc.ClearPermissionPromptSilently(true)
-	if !aoc.EndsMidRow() {
-		t.Error("EndsMidRow() = false after buffered text without a newline")
+	aoc.ClearPermissionPrompt()
+	if rowOf(aoc) != rowMidReply {
+		t.Error("the row is not mid-reply after buffered text without a newline")
 	}
+}
+
+// A turn canceled before any text read the previous turn's unfinished row
+// and ended a row that was not there: a stray blank row before "canceled".
+func TestAgentOutputCoordinator_NewTurnForgetsThePreviousTurnsRow(t *testing.T) {
+	aoc := NewAgentOutputCoordinator(&bytes.Buffer{})
+	aoc.BeginTurn()
+	aoc.WriteStream("a reply that ends mid-row")
+
+	aoc.BeginTurn() // the next turn, canceled before its first chunk
+	if rowOf(aoc) == rowMidReply {
+		t.Error("a new turn reports the previous turn's reply as unfinished")
+	}
+}
+
+// A turn's retry is a new ACP prompt, whose tool IDs may repeat the failed
+// one's: a tool finished there must not keep the retry's from finishing.
+func TestAgentOutputCoordinator_EachRequestHasItsOwnTools(t *testing.T) {
+	aoc := NewAgentOutputCoordinator(&bytes.Buffer{})
+	aoc.BeginTurn()
+	for i := range 2 {
+		aoc.BeginRequest()
+		if _, final := aoc.RecordToolUpdate(agent.ToolCallUpdate{ID: "1", Status: agent.ToolCallCompleted}); !final {
+			t.Errorf("request %d: tool 1 did not finish", i+1)
+		}
+	}
+}
+
+// A finished tool's row that lands while a permission prompt owns the
+// screen waits behind the prompt, then shows once it clears, even when no
+// reply had streamed yet.
+func TestAgentOutputCoordinator_ToolRowDuringAPromptWaitsForIt(t *testing.T) {
+	var buf bytes.Buffer
+	aoc := NewAgentOutputCoordinator(&buf)
+	aoc.RenderPermissionPrompt("rm -rf build", "Bash", "")
+	aoc.RenderToolResult(agent.ToolCallUpdate{Title: "ls", Kind: "execute", Status: agent.ToolCallCompleted}, "")
+	if strings.Contains(buf.String(), "execute") {
+		t.Fatalf("tool row drawn over the prompt: %q", buf.String())
+	}
+	aoc.ClearPermissionPrompt()
+	if !strings.Contains(buf.String(), "execute · ls") {
+		t.Errorf("tool row lost once the prompt cleared: %q", buf.String())
+	}
+	if promptUp(aoc) {
+		t.Errorf("want no prompt up")
+	}
+}
+
+// rowOf reports what the coordinator says the cursor's row holds.
+func rowOf(aoc *AgentOutputCoordinator) replyRow {
+	aoc.mu.Lock()
+	defer aoc.mu.Unlock()
+	return aoc.row
 }

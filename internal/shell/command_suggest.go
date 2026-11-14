@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"unicode"
 
 	"github.com/tfcace/hash/internal/history"
 )
@@ -16,8 +17,10 @@ import (
 // CommandSuggestor finds similar commands for typos.
 type CommandSuggestor struct {
 	pathCache      []string
+	pathFor        string // the PATH pathCache lists, so a changed PATH is rescanned
 	pathCacheReady atomic.Bool
 	pathCacheMu    sync.RWMutex
+	pathFunc       func() string // the PATH commands run with; nil = the process's
 	historyStore   *history.Store
 	packageManager string
 	pmOnce         sync.Once
@@ -29,16 +32,22 @@ func NewCommandSuggestor(historyStore *history.Store) *CommandSuggestor {
 		historyStore: historyStore,
 		// packageManager detected lazily to allow PATH to be set up first
 	}
-	go s.buildPathCache()
+	path := os.Getenv("PATH")
+	go s.buildPathCache(path)
 	return s
+}
+
+// currentPath is the PATH a typed command is looked up in now: rc files
+// may have changed it since the suggestor started.
+func (s *CommandSuggestor) currentPath() string {
+	if s.pathFunc != nil {
+		return s.pathFunc()
+	}
+	return os.Getenv("PATH")
 }
 
 // getPackageManager returns the detected package manager, detecting lazily on first call.
 func (s *CommandSuggestor) getPackageManager() string {
-	if s.packageManager != "" {
-		return s.packageManager
-	}
-
 	s.pmOnce.Do(func() {
 		if s.packageManager == "" {
 			s.packageManager = detectPackageManager()
@@ -58,17 +67,31 @@ func (s *CommandSuggestor) Suggest(cmd string) []string {
 		}
 	}
 
-	// Priority 2: PATH cache (if ready)
+	// Priority 2: PATH cache, once the startup scan is in; rescanned when
+	// PATH changed since (rc files set it after the suggestor starts)
 	if s.pathCacheReady.Load() {
+		if path := s.currentPath(); path != s.cachedPath() {
+			s.buildPathCache(path)
+		}
 		s.pathCacheMu.RLock()
 		candidates = append(candidates, s.pathCache...)
 		s.pathCacheMu.RUnlock()
 	}
 
-	// Deduplicate
-	candidates = dedupe(candidates)
+	return findSimilar(cmd, worthSuggesting(dedupe(candidates)), 3)
+}
 
-	return findSimilar(cmd, candidates, 3)
+// worthSuggesting keeps the names a typo may be corrected to: those with a
+// letter or a digit. A name of punctuation alone (`[`, `[[`, `:`, `.`) is
+// one edit from any short typo and is never what the user meant.
+func worthSuggesting(names []string) []string {
+	kept := names[:0]
+	for _, name := range names {
+		if strings.IndexFunc(name, func(r rune) bool { return unicode.IsLetter(r) || unicode.IsDigit(r) }) >= 0 {
+			kept = append(kept, name)
+		}
+	}
+	return kept
 }
 
 // InstallHint returns install instructions if known, empty otherwise.
@@ -92,10 +115,18 @@ func (s *CommandSuggestor) InstallHint(cmd string) string {
 	}
 }
 
-// buildPathCache scans PATH directories for executables.
-func (s *CommandSuggestor) buildPathCache() {
-	pathEnv := os.Getenv("PATH")
+func (s *CommandSuggestor) cachedPath() string {
+	s.pathCacheMu.RLock()
+	defer s.pathCacheMu.RUnlock()
+	return s.pathFor
+}
+
+// buildPathCache scans the directories of pathEnv for executables.
+func (s *CommandSuggestor) buildPathCache(pathEnv string) {
 	if pathEnv == "" {
+		s.pathCacheMu.Lock()
+		s.pathCache, s.pathFor = nil, ""
+		s.pathCacheMu.Unlock()
 		s.pathCacheReady.Store(true)
 		return
 	}
@@ -131,7 +162,7 @@ func (s *CommandSuggestor) buildPathCache() {
 	}
 
 	s.pathCacheMu.Lock()
-	s.pathCache = executables
+	s.pathCache, s.pathFor = executables, pathEnv
 	s.pathCacheMu.Unlock()
 	s.pathCacheReady.Store(true)
 }
@@ -149,18 +180,26 @@ func (s *CommandSuggestor) getHistoryCommands() []string {
 		if cmds[i].ExitCode != 0 {
 			continue // a command that failed is not a correction
 		}
-		parts := strings.Fields(cmds[i].Command)
-		if len(parts) == 0 {
-			continue
-		}
-		name := parts[0]
-		if seen[name] {
+		name := commandName(cmds[i].Command)
+		if name == "" || seen[name] {
 			continue
 		}
 		seen[name] = true
 		result = append(result, name)
 	}
 	return result
+}
+
+// commandName is the name a history line starts with: its first word up to
+// any separator or quote that touches it ("wwkk; echo b" -> "wwkk", "ls|wc"
+// -> "ls"), or "" when the line starts with one.
+func commandName(line string) string {
+	line = strings.TrimLeft(line, " \t\n")
+	end := 0
+	for end < len(line) && !isShellWordBoundary(line[end]) {
+		end++
+	}
+	return line[:end]
 }
 
 // damerauLevenshtein calculates the Damerau-Levenshtein distance between two strings.

@@ -19,7 +19,7 @@ func TestTab_LoneDirectoryCompletesInline(t *testing.T) {
 		}
 		return nil
 	}
-	ed := New(Config{Keybindings: "emacs", CompleteFunc: complete}, strings.NewReader(""), io.Discard)
+	ed := New(Config{CompleteOutcomeFunc: itemsOnly(complete)}, strings.NewReader(""), io.Discard)
 	ed.state.Buffer = NewBufferFromString("ls inte")
 	ed.state.Cursor.MoveTo(0, 7)
 
@@ -28,14 +28,14 @@ func TestTab_LoneDirectoryCompletesInline(t *testing.T) {
 	if got := ed.state.Buffer.Content(); got != "ls internal/" {
 		t.Fatalf("buffer = %q, want %q", got, "ls internal/")
 	}
-	if ed.completionActive {
+	if ed.menu != nil {
 		t.Fatal("a lone directory should complete inline, not open a one-row menu")
 	}
 
 	ed.handleKeyEvent(Key{Special: KeyTab})
 
-	if !ed.completionActive || len(ed.completionItems) != 2 {
-		t.Fatalf("second Tab should list the children: active=%v items=%d", ed.completionActive, len(ed.completionItems))
+	if ed.menu == nil || len(ed.menu.items) != 2 {
+		t.Fatalf("second Tab should list the children: active=%v items=%d", ed.menu != nil, len(ed.menu.items))
 	}
 	if got := ed.state.Buffer.Content(); got != "ls internal/" {
 		t.Errorf("buffer = %q after listing children, want unchanged", got)

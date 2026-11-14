@@ -34,15 +34,16 @@ func newHistoryShell(t *testing.T, commands ...string) *Shell {
 	return sh
 }
 
-// captureStdout runs fn with os.Stdout redirected and returns what was written.
-func captureStdout(t *testing.T, fn func()) string {
+// captureStdout runs fn with sh's stdout redirected and returns what was
+// written. Nothing of the process changes, so tests run side by side.
+func captureStdout(t *testing.T, sh *Shell, fn func()) string {
 	t.Helper()
 	r, w, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
 	}
-	orig := os.Stdout
-	os.Stdout = w
+	orig := sh.stdout
+	sh.stdout = w
 	done := make(chan string)
 	go func() {
 		var b bytes.Buffer
@@ -50,7 +51,7 @@ func captureStdout(t *testing.T, fn func()) string {
 		done <- b.String()
 	}()
 	fn()
-	os.Stdout = orig
+	sh.stdout = orig
 	_ = w.Close()
 	out := <-done
 	_ = r.Close()
@@ -59,9 +60,9 @@ func captureStdout(t *testing.T, fn func()) string {
 
 func TestExecuteRegularCommand_HistoryPipesThroughGrep(t *testing.T) {
 	sh := newHistoryShell(t, "ls -la", "jj new", "git status", "jj log")
-	out := captureStdout(t, func() {
-		if err := sh.executeRegularCommand(context.Background(), "history | grep jj"); err != nil {
-			t.Fatalf("executeRegularCommand: %v", err)
+	out := captureStdout(t, sh, func() {
+		if _, err := sh.runShellLine(context.Background(), "history | grep jj"); err != nil {
+			t.Fatalf("runShellLine: %v", err)
 		}
 	})
 	if !strings.Contains(out, "jj new") || !strings.Contains(out, "jj log") {
@@ -74,9 +75,9 @@ func TestExecuteRegularCommand_HistoryPipesThroughGrep(t *testing.T) {
 
 func TestExecuteRegularCommand_HistoryListsRecent(t *testing.T) {
 	sh := newHistoryShell(t, "ls -la", "jj new")
-	out := captureStdout(t, func() {
-		if err := sh.executeRegularCommand(context.Background(), "history"); err != nil {
-			t.Fatalf("executeRegularCommand: %v", err)
+	out := captureStdout(t, sh, func() {
+		if _, err := sh.runShellLine(context.Background(), "history"); err != nil {
+			t.Fatalf("runShellLine: %v", err)
 		}
 	})
 	if !strings.Contains(out, "jj new") || !strings.Contains(out, "ls -la") {
@@ -98,9 +99,9 @@ func TestExecuteRegularCommand_CdWithAndRunsBothCommands(t *testing.T) {
 	sh := newHistoryShell(t)
 	dir := t.TempDir()
 	t.Chdir(t.TempDir())
-	out := captureStdout(t, func() {
-		if err := sh.executeRegularCommand(context.Background(), "cd "+dir+" && echo moved"); err != nil {
-			t.Fatalf("executeRegularCommand: %v", err)
+	out := captureStdout(t, sh, func() {
+		if _, err := sh.runShellLine(context.Background(), "cd "+dir+" && echo moved"); err != nil {
+			t.Fatalf("runShellLine: %v", err)
 		}
 	})
 	if !strings.Contains(out, "moved") {
@@ -120,9 +121,9 @@ func TestExecuteRegularCommand_HistoryListsEverythingOldestFirst(t *testing.T) {
 		cmds = append(cmds, fmt.Sprintf("cmd%02d", i))
 	}
 	sh := newHistoryShell(t, cmds...)
-	out := captureStdout(t, func() {
-		if err := sh.executeRegularCommand(context.Background(), "history"); err != nil {
-			t.Fatalf("executeRegularCommand: %v", err)
+	out := captureStdout(t, sh, func() {
+		if _, err := sh.runShellLine(context.Background(), "history"); err != nil {
+			t.Fatalf("runShellLine: %v", err)
 		}
 	})
 	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")

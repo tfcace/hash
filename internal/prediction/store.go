@@ -35,6 +35,10 @@ func NewStore(dbPath string) (*Store, error) {
 	return store, nil
 }
 
+// migrate creates the schema. Databases written by older versions also hold
+// path_usage and path_sequences tables for path prediction, which was never
+// wired up; they are left in place (an older hash on the same file would
+// recreate them anyway) and no longer read or written.
 func (s *Store) migrate() error {
 	schema := `
 	CREATE TABLE IF NOT EXISTS command_sequences (
@@ -47,28 +51,7 @@ func (s *Store) migrate() error {
 		UNIQUE(prev_command, next_command, cwd_pattern)
 	);
 
-	CREATE TABLE IF NOT EXISTS path_usage (
-		id        INTEGER PRIMARY KEY AUTOINCREMENT,
-		command   TEXT NOT NULL,
-		path      TEXT NOT NULL,
-		cwd       TEXT,
-		count     INTEGER DEFAULT 1,
-		last_used DATETIME DEFAULT CURRENT_TIMESTAMP,
-		UNIQUE(command, path, cwd)
-	);
-
-	CREATE TABLE IF NOT EXISTS path_sequences (
-		id           INTEGER PRIMARY KEY AUTOINCREMENT,
-		prev_command TEXT NOT NULL,
-		path         TEXT NOT NULL,
-		count        INTEGER DEFAULT 1,
-		last_used    DATETIME DEFAULT CURRENT_TIMESTAMP,
-		UNIQUE(prev_command, path)
-	);
-
 	CREATE INDEX IF NOT EXISTS idx_seq_prev ON command_sequences(prev_command);
-	CREATE INDEX IF NOT EXISTS idx_path_cmd ON path_usage(command);
-	CREATE INDEX IF NOT EXISTS idx_pathseq_prev ON path_sequences(prev_command);
 	`
 	_, err := s.db.Exec(schema)
 	return err
@@ -86,108 +69,45 @@ func (s *Store) RecordSequence(prevCmd, nextCmd, cwd string) error {
 	return err
 }
 
-// GetSequences returns sequences for a previous command.
-func (s *Store) GetSequences(prevCmd, cwd string) ([]CommandSequence, error) {
+// RankedSequence is a recorded sequence with its prediction score.
+type RankedSequence struct {
+	CommandSequence
+	Score float64
+}
+
+// RankSequences returns the limit best-scored sequences after prevCmd in cwd.
+// The score is ranked in SQL, so only those rows are read: a frequency share
+// count/(count+5) weighted 0.7 plus a recency 1/(1+hours/windowHours) weighted
+// 0.3. A window <= 0 falls back to the default, and a use in the future
+// (clock skew) counts as now, so scores stay within [0, 1].
+func (s *Store) RankSequences(prevCmd, cwd string, windowHours, limit int) ([]RankedSequence, error) {
+	if windowHours <= 0 {
+		windowHours = DefaultConfig().RecencyWindowHours
+	}
 	rows, err := s.db.Query(`
-		SELECT id, prev_command, next_command, cwd_pattern, count, last_used
+		SELECT id, prev_command, next_command, cwd_pattern, count, last_used,
+			count * 1.0 / (count + 5.0) * 0.7
+			+ 0.3 / (1.0 + MAX(0.0, (julianday('now') - julianday(last_used)) * 24.0) / ?) AS score
 		FROM command_sequences
-		WHERE prev_command = ? AND (cwd_pattern IS NULL OR cwd_pattern = ?)
-		ORDER BY count DESC, last_used DESC
-		LIMIT 10
-	`, prevCmd, cwd)
+		WHERE prev_command = ? AND cwd_pattern = ?
+		ORDER BY score DESC, last_used DESC
+		LIMIT ?
+	`, windowHours, prevCmd, cwd, limit)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	var seqs []CommandSequence
+	var seqs []RankedSequence
 	for rows.Next() {
-		var seq CommandSequence
+		var seq RankedSequence
 		var cwdPattern sql.NullString
-		err := rows.Scan(&seq.ID, &seq.PrevCommand, &seq.NextCommand, &cwdPattern, &seq.Count, &seq.LastUsed)
+		err := rows.Scan(&seq.ID, &seq.PrevCommand, &seq.NextCommand, &cwdPattern, &seq.Count, &seq.LastUsed, &seq.Score)
 		if err != nil {
 			return nil, err
 		}
 		seq.CwdPattern = cwdPattern.String
 		seqs = append(seqs, seq)
-	}
-	return seqs, rows.Err()
-}
-
-// RecordPathUsage records a path usage with a command.
-func (s *Store) RecordPathUsage(cmd, path, cwd string) error {
-	_, err := s.db.Exec(`
-		INSERT INTO path_usage (command, path, cwd, count, last_used)
-		VALUES (?, ?, ?, 1, CURRENT_TIMESTAMP)
-		ON CONFLICT(command, path, cwd) DO UPDATE SET
-			count = count + 1,
-			last_used = CURRENT_TIMESTAMP
-	`, cmd, path, cwd)
-	return err
-}
-
-// GetPathsForCommand returns frequently used paths for a command.
-func (s *Store) GetPathsForCommand(cmd, cwd string) ([]PathUsage, error) {
-	rows, err := s.db.Query(`
-		SELECT id, command, path, cwd, count, last_used
-		FROM path_usage
-		WHERE command = ? AND (cwd IS NULL OR cwd = ?)
-		ORDER BY count DESC, last_used DESC
-		LIMIT 10
-	`, cmd, cwd)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var paths []PathUsage
-	for rows.Next() {
-		var pu PathUsage
-		var cwdVal sql.NullString
-		err := rows.Scan(&pu.ID, &pu.Command, &pu.Path, &cwdVal, &pu.Count, &pu.LastUsed)
-		if err != nil {
-			return nil, err
-		}
-		pu.Cwd = cwdVal.String
-		paths = append(paths, pu)
-	}
-	return paths, rows.Err()
-}
-
-// RecordPathSequence records a path used after a command.
-func (s *Store) RecordPathSequence(prevCmd, path string) error {
-	_, err := s.db.Exec(`
-		INSERT INTO path_sequences (prev_command, path, count, last_used)
-		VALUES (?, ?, 1, CURRENT_TIMESTAMP)
-		ON CONFLICT(prev_command, path) DO UPDATE SET
-			count = count + 1,
-			last_used = CURRENT_TIMESTAMP
-	`, prevCmd, path)
-	return err
-}
-
-// GetPathsAfterCommand returns paths frequently used after a command.
-func (s *Store) GetPathsAfterCommand(prevCmd string) ([]PathSequence, error) {
-	rows, err := s.db.Query(`
-		SELECT id, prev_command, path, count, last_used
-		FROM path_sequences
-		WHERE prev_command = ?
-		ORDER BY count DESC, last_used DESC
-		LIMIT 10
-	`, prevCmd)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var seqs []PathSequence
-	for rows.Next() {
-		var ps PathSequence
-		err := rows.Scan(&ps.ID, &ps.PrevCommand, &ps.Path, &ps.Count, &ps.LastUsed)
-		if err != nil {
-			return nil, err
-		}
-		seqs = append(seqs, ps)
 	}
 	return seqs, rows.Err()
 }
