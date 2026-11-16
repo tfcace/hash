@@ -66,7 +66,7 @@ func TestInteractive_StartupGuardsForAnInteractiveShell(t *testing.T) {
 	s := startTTYWith(t, env)
 	s.waitFor(0, "Load these settings now?", 10*time.Second)
 	s.answer("y\r")
-	s.waitFor(0, "Loaded from", 10*time.Second)
+	s.waitFor(0, "loaded from", 10*time.Second)
 	time.Sleep(500 * time.Millisecond) // the prompt
 	from := len(s.output())
 	s.typeString("ll; echo \"done=$RC_DONE\"\r")

@@ -14,6 +14,8 @@ import (
 	"github.com/mattn/go-runewidth"
 
 	"github.com/tfcace/hash/internal/agent"
+	"github.com/tfcace/hash/internal/markdown"
+	"github.com/tfcace/hash/internal/prompt"
 )
 
 // AgentOutputCoordinator draws a ?? turn's output: the spinner, the
@@ -26,16 +28,19 @@ import (
 //
 // Other TUI components (ContextPicker, History search) are not managed here.
 type AgentOutputCoordinator struct {
-	mu            sync.Mutex
-	out           io.Writer
-	row           replyRow                    // what the cursor's row holds
-	spinner       *spinnerRun                 // the spinner drawing the row, set only while row is rowSpinner
-	spinnerRand   agentStatusRandom           // the spinner's motion
-	agentModel    string                      // active model shown in spinner labels, "" hides it
-	prompt        *permissionPrompt           // the prompt on screen, nil when there is none
-	accentColorFn func() string               // Callback to get current accent color
-	tools         map[string]toolDisplayState // this request's tools, by ACP tool ID
-	toolSeq       int
+	mu           sync.Mutex
+	out          io.Writer
+	row          replyRow                    // what the cursor's row holds
+	spinner      *spinnerRun                 // the spinner drawing the row, set only while row is rowSpinner
+	spinnerRand  agentStatusRandom           // the spinner's noise
+	spinnerFrame int                         // where the spinner's animation is: it carries on across runs in a turn
+	agentModel   string                      // active model shown in spinner labels, "" hides it
+	prompt       *permissionPrompt           // the prompt on screen, nil when there is none
+	paletteFn    func() prompt.Palette       // the interface's colors as they are now; nil before the shell sets it
+	rowHead      strings.Builder             // how the reply row being drawn starts, as far as a code row's opening
+	codeOpen     bool                        // the reply's last row was a code block's: its frame is still open
+	tools        map[string]toolDisplayState // this request's tools, by ACP tool ID
+	toolSeq      int
 }
 
 // replyRow is what the cursor's row holds while a turn draws.
@@ -59,7 +64,6 @@ type spinnerRun struct {
 // meanwhile.
 type permissionPrompt struct {
 	held strings.Builder // reply text and tool rows that arrived behind the prompt
-	bar  string          // the accent bar its rows start with
 }
 
 type toolDisplayState struct {
@@ -75,12 +79,12 @@ func NewAgentOutputCoordinator(out io.Writer) *AgentOutputCoordinator {
 	}
 }
 
-// SetAccentColorFunc sets a callback to get the current accent color.
-// This allows the color to be updated dynamically (e.g., after starship extraction).
-func (aoc *AgentOutputCoordinator) SetAccentColorFunc(fn func() string) {
+// SetPaletteFunc sets a callback for the interface's colors as they are
+// when a row is drawn: the palette changes once the prompt has been read.
+func (aoc *AgentOutputCoordinator) SetPaletteFunc(fn func() prompt.Palette) {
 	aoc.mu.Lock()
 	defer aoc.mu.Unlock()
-	aoc.accentColorFn = fn
+	aoc.paletteFn = fn
 }
 
 // BeginTurn starts a ?? turn's output on the fresh row the user's line left:
@@ -94,6 +98,9 @@ func (aoc *AgentOutputCoordinator) BeginTurn() {
 		aoc.takeRowLocked()
 	}
 	aoc.row = rowFree
+	aoc.spinnerFrame = 0
+	aoc.codeOpen = false
+	aoc.rowHead.Reset()
 }
 
 // SetAgentModel sets the model name shown in spinner labels. Pass "" to
@@ -138,7 +145,7 @@ func (aoc *AgentOutputCoordinator) showSpinnerLocked(text string) {
 func (aoc *AgentOutputCoordinator) runSpinner(run *spinnerRun) {
 	ticker := time.NewTicker(80 * time.Millisecond)
 	defer ticker.Stop()
-	for frame := 0; ; frame++ {
+	for {
 		select {
 		case <-run.stop:
 			return
@@ -149,10 +156,29 @@ func (aoc *AgentOutputCoordinator) runSpinner(run *spinnerRun) {
 			aoc.mu.Unlock()
 			return
 		}
-		motion := selectAgentStatusMotion(frame, aoc.spinnerRand)
-		fmt.Fprintf(aoc.out, "\r\033[K%s", spinnerFrame(run.text, motion))
+		cells := spinnerCells(aoc.spinnerFrame, aoc.spinnerRand)
+		aoc.spinnerFrame++
+		fmt.Fprintf(aoc.out, "\r\033[K%s", spinnerFrame(run.text, cells, aoc.accentLocked()))
 		aoc.mu.Unlock()
 	}
+}
+
+// accentLocked is the interface's current accent color, "" before one is
+// known.
+func (aoc *AgentOutputCoordinator) accentLocked() string {
+	if aoc.paletteFn == nil {
+		return ""
+	}
+	return aoc.paletteFn().Primary
+}
+
+// paletteLocked is the interface's colors, the default ones before the
+// shell has set any.
+func (aoc *AgentOutputCoordinator) paletteLocked() prompt.Palette {
+	if aoc.paletteFn == nil {
+		return prompt.DefaultPalette()
+	}
+	return aoc.paletteFn()
 }
 
 // TakeRow frees the cursor's row for a status or error row: the spinner's
@@ -175,6 +201,7 @@ func (aoc *AgentOutputCoordinator) takeRowLocked() (was replyRow) {
 		fmt.Fprint(aoc.out, "\r\033[K")
 	case rowMidReply:
 		fmt.Fprint(aoc.out, "\n")
+		aoc.endRowLocked()
 	}
 	aoc.row = rowFree
 	return was
@@ -261,13 +288,13 @@ func (aoc *AgentOutputCoordinator) RenderToolResult(update agent.ToolCallUpdate,
 	}
 	title = truncateTerminalText(title, 96)
 
-	icon, label, color := "✓", kind, "\x1b[32m"
+	icon, label, failed := "✓", kind, false
 	if update.PermissionDenied {
-		icon, label, color = "–", "denied", "\x1b[33m"
+		icon, label = "–", "denied"
 	} else if update.Status != agent.ToolCallCompleted {
 		// The red mark says it failed; the row still names the tool and,
 		// when the agent sent one, why.
-		icon, color = "✗", "\x1b[31m"
+		icon, failed = "✗", true
 		if reason := toolFailureReason(update.Content); reason != "" {
 			title += " · " + reason
 		}
@@ -279,15 +306,25 @@ func (aoc *AgentOutputCoordinator) RenderToolResult(update agent.ToolCallUpdate,
 		title = fitText(title, max(budget-used, 1))
 	}
 
-	row := fmt.Sprintf("%s  %s%s\x1b[0m \x1b[90m%s · %s\x1b[0m\n", prefix, color, icon, label, title)
 	aoc.mu.Lock()
 	defer aoc.mu.Unlock()
+	// The mark is a status, in the theme's color for it.
+	palette := aoc.paletteLocked()
+	color := fgCode(palette.Success)
+	switch {
+	case update.PermissionDenied:
+		color = fgCode(palette.Warning)
+	case failed:
+		color = fgCode(palette.Error)
+	}
+	row := fmt.Sprintf("%s  %s%s\x1b[0m \x1b[90m%s · %s\x1b[0m\n", prefix, color, icon, label, title)
 	if aoc.prompt != nil {
 		aoc.prompt.held.WriteString(row) // shown once the prompt clears
 		return
 	}
 	aoc.takeRowLocked()
 	fmt.Fprint(aoc.out, row)
+	aoc.codeOpen = false // a tool row ends the frame of a code block above it
 }
 
 var toolMarkupRe = regexp.MustCompile(`</?[a-z_]+>`)
@@ -334,10 +371,9 @@ func (aoc *AgentOutputCoordinator) WriteStream(text string) {
 const (
 	ansiReset     = "\x1b[0m"
 	ansiBold      = "\x1b[1m"
-	ansiDim       = "\x1b[2m"
+	ansiFaint     = "\x1b[2m"
 	ansiClearLine = "\x1b[2K"
 	ansiCursorUp  = "\x1b[1A"
-	permissionPad = "  "
 )
 
 // RenderPermissionPrompt draws the permission request and holds the reply
@@ -361,51 +397,29 @@ func (aoc *AgentOutputCoordinator) RenderPermissionPrompt(command, toolName, acc
 		takenRow = aoc.takeRowLocked() != rowFree
 	}
 
-	// The prompt is erased as five rows, so none of them may wrap. The bar
-	// and pad take four columns.
+	// The prompt is erased as four rows, so none of them may wrap. The bar
+	// and its space take two columns.
 	width := terminalColumns()
-	rowWidth := 0
-	if budget := rowBudget(width); budget > 4 {
-		rowWidth = budget - 4
+	if budget := rowBudget(width); budget > 2 {
+		safeCommand = fitText(safeCommand, budget-2)
+		safeToolName = fitText(safeToolName, max(budget-len("┌ permission · "), 1))
 	}
-	safeCommand = fitText(safeCommand, rowWidth)
-	if rowWidth > 0 {
-		safeToolName = fitText(safeToolName, max(rowWidth-len("Agent wants to run ():"), 1))
-	}
-	keys := permissionKeysRow("", width)
 
-	// Use callback for accent color if available, otherwise use passed-in color
+	// The live accent wins over the one passed in.
 	color := accentColor
-	if aoc.accentColorFn != nil {
-		if c := aoc.accentColorFn(); c != "" {
-			color = c
-		}
+	if c := aoc.accentLocked(); c != "" {
+		color = c
+	}
+	accentCode := fgCode(color)
+	if accentCode == "" {
+		accentCode = fgCode("6") // cyan, when the palette has no readable accent
 	}
 
-	// Build accent color ANSI code
-	accentCode := "\x1b[36m" // Default to cyan
-	if color != "" && len(color) == 7 && color[0] == '#' {
-		var r, g, b int
-		if _, err := fmt.Sscanf(color[1:], "%02x%02x%02x", &r, &g, &b); err == nil {
-			accentCode = fmt.Sprintf("\x1b[38;2;%d;%d;%dm", r, g, b)
-		}
-	}
-
-	// Build the header line with optional tool name context
-	header := ansiBold + "Agent wants to run:" + ansiReset
-	if safeToolName != "" {
-		header = ansiBold + "Agent wants to run " + ansiReset + "\x1b[90m(" + safeToolName + ")\x1b[0m" + ansiReset + ":"
-	}
-
-	// Render the prompt box with colored bar
-	barStyle := accentCode + ansiBold
-	aoc.prompt.bar = barStyle + "│" + ansiReset + " " + permissionPad
 	lines := []string{
 		"",
-		barStyle + "│" + ansiReset + " " + permissionPad + header,
-		barStyle + "│" + ansiReset + " " + permissionPad + accentCode + ansiBold + safeCommand + ansiReset,
-		barStyle + "│" + ansiReset + " " + permissionPad,
-		aoc.prompt.bar + keys,
+		frameTop("permission", safeToolName, accentCode),
+		frameRow(ansiBold + safeCommand + ansiReset),
+		permissionFoot("", width),
 	}
 
 	var sb strings.Builder
@@ -422,16 +436,14 @@ func (aoc *AgentOutputCoordinator) RenderPermissionPrompt(command, toolName, acc
 	aoc.out.Write([]byte(sb.String()))
 }
 
-// permissionKeysRow is the prompt's last row, the keys that answer it, fit
-// to width; a note, when set, comes first, dim, and stays when keys do not
-// fit.
-func permissionKeysRow(note string, width int) string {
+// permissionFoot is the prompt's last row, the keys that answer it, fit to
+// width; a note, when set, comes first and stays when keys do not fit.
+func permissionFoot(note string, width int) string {
 	hints := []string{"y to allow", "n or esc to deny", "a to always allow", "ctrl+c to cancel"}
-	if note == "" {
-		return fitHint("", "", hints, max(width-4, 0))
+	if note != "" {
+		hints = append([]string{note}, hints...)
 	}
-	row := fitHint("", "", append([]string{note}, hints...), max(width-4, 0))
-	return ansiDim + note + ansiReset + strings.TrimPrefix(row, note)
+	return frameGray + fitHint("└─ ", "", hints, width) + ansiReset
 }
 
 // NoteTooQuick redraws the permission prompt's keys row with tooQuickNote
@@ -443,7 +455,7 @@ func (aoc *AgentOutputCoordinator) NoteTooQuick() {
 	if aoc.prompt == nil {
 		return
 	}
-	row := "\r" + ansiClearLine + aoc.prompt.bar + permissionKeysRow(tooQuickNote, terminalColumns())
+	row := "\r" + ansiClearLine + permissionFoot(tooQuickNote, terminalColumns())
 	aoc.out.Write([]byte(row))
 	aoc.flushLocked()
 }
@@ -510,9 +522,9 @@ func (aoc *AgentOutputCoordinator) DismissPermissionPrompt() {
 	aoc.flushLocked()
 }
 
-// clearPermissionRows erases the five rows of a permission prompt, the
-// cursor on its last: that row, then four up.
-var clearPermissionRows = "\r" + ansiClearLine + strings.Repeat(ansiCursorUp+"\r"+ansiClearLine, 4)
+// clearPermissionRows erases the four rows of a permission prompt, the
+// cursor on its last: that row, then three up.
+var clearPermissionRows = "\r" + ansiClearLine + strings.Repeat(ansiCursorUp+"\r"+ansiClearLine, 3)
 
 // flushLocked flushes the output if it supports syncing.
 // Must be called with mu held.
@@ -528,8 +540,15 @@ func (aoc *AgentOutputCoordinator) ShowHints(ct ConfirmationType) {
 	defer aoc.mu.Unlock()
 
 	// Fitted to the pane: the hint is erased as one row when the user acts.
+	// Under a code block the keys close its frame; under anything else they
+	// are a row of their own, labeled with what they act on.
 	scope, hints := confirmationHints(ct)
-	fmt.Fprintf(aoc.out, "\x1b[90m%s\x1b[0m\n", fitHint("  ", scope, hints, terminalColumns()))
+	row := fitHint("  ", scope, hints, terminalColumns())
+	// A failed turn's keys sit under its error row, which closed nothing.
+	if aoc.codeOpen && ct != ConfirmTypeError {
+		row = fitHint("└─ ", "", hints, terminalColumns())
+	}
+	fmt.Fprintf(aoc.out, "%s%s%s\n", frameGray, row, ansiReset)
 }
 
 // drawStreamLocked writes reply text, taking the row back from the
@@ -543,8 +562,33 @@ func (aoc *AgentOutputCoordinator) drawStreamLocked(text string) {
 		aoc.takeRowLocked()
 	}
 	fmt.Fprint(aoc.out, text)
+	aoc.noteRowsLocked(text)
 	aoc.row = rowFree
 	if !strings.HasSuffix(text, "\n") {
 		aoc.row = rowMidReply
 	}
+}
+
+// noteRowsLocked follows the reply as it is drawn, to know whether its last
+// row is a code block's. A blank row changes nothing. Must be called with
+// mu held.
+func (aoc *AgentOutputCoordinator) noteRowsLocked(text string) {
+	for _, part := range strings.SplitAfter(text, "\n") {
+		row, ended := strings.CutSuffix(part, "\n")
+		if room := len(markdown.CodeLinePrefix) - aoc.rowHead.Len(); room > 0 {
+			aoc.rowHead.WriteString(row[:min(room, len(row))])
+		}
+		if ended {
+			aoc.endRowLocked()
+		}
+	}
+}
+
+// endRowLocked settles the reply row that just ended, by its newline or by
+// something taking the row. Must be called with mu held.
+func (aoc *AgentOutputCoordinator) endRowLocked() {
+	if head := aoc.rowHead.String(); head != "" {
+		aoc.codeOpen = head == markdown.CodeLinePrefix
+	}
+	aoc.rowHead.Reset()
 }

@@ -17,6 +17,7 @@ type Palette struct {
 	Secondary string // Secondary foreground color
 	Success   string // Success indicator (prompt char on exit 0, typically green)
 	Error     string // Error indicator (prompt char on exit 1, typically red)
+	Warning   string // Warning indicator; a prompt has none, so it is the default or derived
 	Dim       string // Dimmed/secondary text (gray)
 	InputBg   string // Background color for command input highlight
 }
@@ -27,7 +28,8 @@ func DefaultPalette() Palette {
 		Primary: "#06B6D4", // Cyan
 		Success: "#22C55E", // Green
 		Error:   "#EF4444", // Red
-		Dim:     "#6B7280", // Gray
+		Warning: "#EAB308", // Yellow
+		Dim:     "8",       // the terminal's own gray (bright black), so it follows its theme
 		InputBg: "#1a1f2c", // Subtle dark background for input highlight
 	}
 }

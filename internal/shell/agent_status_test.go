@@ -157,7 +157,7 @@ func TestHandleToolPermission_ClearsSpinnerRow(t *testing.T) {
 	sh.agentOutput.TakeRow()
 
 	out := ui.String()
-	prompt := strings.Index(out, "Agent wants to run")
+	prompt := strings.Index(out, permissionTitle)
 	if prompt < 0 {
 		t.Fatalf("no permission prompt in %q", out)
 	}
@@ -195,7 +195,7 @@ func TestTurn_OffATerminalAToolIsDeniedWithoutAPrompt(t *testing.T) {
 		t.Errorf("permission = %v, %v; want denied", allow, always)
 	}
 	out := screen.String()
-	if strings.Contains(out, "Agent wants to run") {
+	if strings.Contains(out, permissionTitle) {
 		t.Errorf("drew a permission prompt nobody can answer: %q", out)
 	}
 	if !strings.Contains(out, "denied") || !strings.Contains(out, "no terminal") {
@@ -218,7 +218,7 @@ func TestTurn_AnInlineToolIsDeniedWithoutAPrompt(t *testing.T) {
 	if allow, _ := sh.handleToolPermission(context.Background(), agent.ToolPermissionRequest{Command: "ls", ToolName: "Bash"}); allow {
 		t.Error("an inline request's tool was allowed")
 	}
-	if strings.Contains(screen.String(), "Agent wants to run") || turn.Phase() != turnFailed {
+	if strings.Contains(screen.String(), permissionTitle) || turn.Phase() != turnFailed {
 		t.Errorf("phase %v, screen %q; want failed with no prompt", turn.Phase(), screen.String())
 	}
 	if want := rootReport(programstatus.Error, "", inlineToolDenied("ls").Error()); lastStatus(status) != want {

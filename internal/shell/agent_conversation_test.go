@@ -66,43 +66,39 @@ func TestAgentConversationReplyPromptLabelsUser(t *testing.T) {
 	}
 }
 
-func TestAgentConversationRailsUseLiveRailColor(t *testing.T) {
-	goldSolidRail := agentConversationLiveRailStyle + "│\x1b[0m"
-	goldDashedRail := agentConversationLiveRailStyle + "┆\x1b[0m"
-	goldHeaderRail := agentConversationLiveRailStyle + "╭─ conversation\x1b[0m"
+// The conversation is drawn on the shared frame: gray rails, the title and
+// the agent's label in the accent color.
+func TestAgentConversationIsDrawnOnTheFrameInTheAccentColor(t *testing.T) {
+	const accent = "\x1b[38;2;1;2;3m"
+	solidRail := frameGray + "│" + ansiReset
+	dashedRail := frameGray + "┆" + ansiReset
 
-	frame := agentConversationInputFrame(true)
-	for _, tt := range []struct {
-		name string
-		text string
-		want string
-	}{
-		{name: "committed user prompt", text: frame.Prefix, want: goldSolidRail},
-		{name: "live user prompt", text: frame.LivePrefix, want: goldDashedRail},
-		{name: "live top line", text: frame.LiveTopLine, want: goldDashedRail},
-		{name: "header rail", text: frame.TopLine, want: goldHeaderRail},
+	frame := agentConversationInputFrame(true, accent)
+	for name, tt := range map[string]struct{ text, want string }{
+		"committed user prompt": {frame.Prefix, solidRail + " " + ansiBold + "you" + ansiReset + " › "},
+		"live user prompt":      {frame.LivePrefix, dashedRail + " " + ansiBold + "you" + ansiReset + " › "},
+		"live top line":         {frame.LiveTopLine, dashedRail},
+		"title":                 {frame.TopLine, frameGray + "┌ " + ansiReset + ansiBold + accent + "conversation" + ansiReset},
 	} {
-		t.Run(tt.name, func(t *testing.T) {
-			if !strings.Contains(tt.text, tt.want) {
-				t.Fatalf("%s = %q, want gold rail sequence %q", tt.name, tt.text, tt.want)
-			}
-		})
+		if !strings.HasPrefix(tt.text, tt.want) {
+			t.Errorf("%s = %q, want it to start %q", name, tt.text, tt.want)
+		}
+	}
+	if got := stripANSI(frame.TopLine); got != "┌ conversation · enter to send · esc to leave · /exit to end" {
+		t.Errorf("title row reads %q", got)
 	}
 
 	var buf strings.Builder
-	prefixer := newAgentConversationRailPrefixer(func(text string) {
-		buf.WriteString(text)
-	})
+	prefixer := newAgentConversationRailPrefixer(func(text string) { buf.WriteString(text) }, accent)
 	prefixer.Write("Question 1:\nYes or no?")
-
-	output := buf.String()
-	if got := strings.Count(output, goldSolidRail); got != 2 {
-		t.Fatalf("agent output should color every solid rail gold, got %d gold rails in %q", got, output)
+	want := solidRail + " " + ansiBold + accent + "agent" + ansiReset + " › Question 1:\n" + solidRail + "         Yes or no?"
+	if got := buf.String(); got != want {
+		t.Errorf("agent rows = %q, want %q", got, want)
 	}
 }
 
 func TestAgentConversationInputFrame(t *testing.T) {
-	frame := agentConversationInputFrame(true)
+	frame := agentConversationInputFrame(true, "")
 	if frame.Prefix != agentConversationReplyPrompt {
 		t.Fatalf("frame prefix = %q, want reply prompt %q", frame.Prefix, agentConversationReplyPrompt)
 	}
@@ -127,9 +123,6 @@ func TestAgentConversationInputFrame(t *testing.T) {
 	if !strings.Contains(frame.TopLine, "conversation") {
 		t.Fatalf("frame top line should label conversation mode, got %q", frame.TopLine)
 	}
-	if !strings.Contains(frame.TopLine, agentConversationLiveRailStyle+"╭─ conversation\033[0m") {
-		t.Fatalf("frame top line should use live rail color for header, got %q", frame.TopLine)
-	}
 	if !strings.Contains(frame.TopLine, "/exit") {
 		t.Fatalf("frame top line should show exit affordance, got %q", frame.TopLine)
 	}
@@ -145,7 +138,7 @@ func TestAgentConversationInputFrame(t *testing.T) {
 
 func TestAgentConversationEditorConfigCancelsOnEscape(t *testing.T) {
 	base := editor.Config{Gutter: true}
-	cfg := agentConversationEditorConfig(base, true)
+	cfg := agentConversationEditorConfig(base, true, "")
 	if cfg.Decline != editor.DeclineEraseRow {
 		t.Fatal("conversation reply editor should let Escape leave the conversation")
 	}
@@ -155,7 +148,7 @@ func TestAgentConversationEditorConfigCancelsOnEscape(t *testing.T) {
 }
 
 func TestAgentConversationInputFrame_ContinuationDoesNotReopenRail(t *testing.T) {
-	frame := agentConversationInputFrame(false)
+	frame := agentConversationInputFrame(false, "")
 	if frame.TopLine != "" {
 		t.Fatalf("continuation frame should not repeat top line, got %q", frame.TopLine)
 	}
@@ -168,7 +161,7 @@ func TestAgentConversationRailPrefixer_ThreadsAgentOutput(t *testing.T) {
 	var buf strings.Builder
 	prefixer := newAgentConversationRailPrefixer(func(text string) {
 		buf.WriteString(text)
-	})
+	}, "")
 
 	prefixer.Write("Question 1:")
 	prefixer.Write(" Is it physical?\nYes or no?")
@@ -177,7 +170,7 @@ func TestAgentConversationRailPrefixer_ThreadsAgentOutput(t *testing.T) {
 
 	output := buf.String()
 	for _, expected := range []string{
-		agentConversationAgentPrefix + "Question 1:",
+		agentConversationAgentPrefix("") + "Question 1:",
 		"\n" + agentConversationAgentContinuation + "Yes or no?",
 		"\n" + agentConversationAgentContinuation + "Answer yes/no.",
 	} {
@@ -185,10 +178,10 @@ func TestAgentConversationRailPrefixer_ThreadsAgentOutput(t *testing.T) {
 			t.Fatalf("expected %q in threaded output, got %q", expected, output)
 		}
 	}
-	if strings.Contains(output, "\n"+agentConversationAgentPrefix+"Yes or no?") {
+	if strings.Contains(output, "\n"+agentConversationAgentPrefix("")+"Yes or no?") {
 		t.Fatalf("continuation lines should align under the agent message, got %q", output)
 	}
-	if strings.Contains(output, "\n"+agentConversationAgentPrefix+"Answer yes/no.") {
+	if strings.Contains(output, "\n"+agentConversationAgentPrefix("")+"Answer yes/no.") {
 		t.Fatalf("new chunks after a newline should stay under the same agent turn, got %q", output)
 	}
 }
@@ -338,14 +331,14 @@ func TestStreamAgentFollowUpTurn_FirstChunkDuringPermissionPrompt(t *testing.T) 
 	sh, screen, _, tt = newTurnShellOn(t, tr)
 	tt.answerPermissions("") // the test answers
 	go func() {
-		waitFor(t, func() bool { return strings.Contains(screen.String(), "Agent wants to run") })
+		waitFor(t, func() bool { return strings.Contains(screen.String(), permissionTitle) })
 		close(prompted)
 		time.Sleep(100 * time.Millisecond) // the chunk lands behind the prompt
 		out := screen.String()
 		if strings.Contains(out, "All done.") {
 			t.Errorf("chunk written to terminal while permission prompt active:\n%q", out)
 		}
-		if tail := out[strings.Index(out, "Agent wants to run"):]; strings.Contains(tail, "\r\x1b[K") {
+		if tail := out[strings.Index(out, permissionTitle):]; strings.Contains(tail, "\r\x1b[K") {
 			t.Errorf("a clear-line erased the prompt's key line: %q", tail)
 		}
 		tt.typeKeys("y")
@@ -565,7 +558,7 @@ func TestAgentConversationEditorConfigDisablesShellCompletion(t *testing.T) {
 			return editor.MenuOutcome([]editor.Completion{{Text: "github"}}, 0)
 		},
 	}
-	cfg := agentConversationEditorConfig(base, true)
+	cfg := agentConversationEditorConfig(base, true, "")
 	cfg.InputFrame = nil
 
 	in := strings.NewReader("gi\t\r")

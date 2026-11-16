@@ -67,7 +67,7 @@ func TestFitText(t *testing.T) {
 // stale row behind.
 func TestSpinnerFrameFitsPane(t *testing.T) {
 	withColumns(t, 50)
-	frame := spinnerFrame("agent · running · sleep 3; ls -la internal/shell internal/editor internal/agent | head -n 3", "░")
+	frame := spinnerFrame("agent · running · sleep 3; ls -la internal/shell internal/editor internal/agent | head -n 3", spinnerCells(21, nil), "#06B6D4")
 	assertRowsFit(t, frame, 50)
 	if !strings.Contains(stripANSI(frame), "…") {
 		t.Errorf("truncated frame should end in an ellipsis: %q", frame)
@@ -87,7 +87,7 @@ func TestHintRowsFitPane(t *testing.T) {
 	}
 }
 
-// The prompt is erased by a fixed count of five rows: a command that wraps
+// The prompt is erased by a fixed count of four rows: a command that wraps
 // added rows the erase never reached.
 func TestPermissionPromptFitsPane(t *testing.T) {
 	withColumns(t, 50)
@@ -95,14 +95,14 @@ func TestPermissionPromptFitsPane(t *testing.T) {
 	aoc := NewAgentOutputCoordinator(&buf)
 	aoc.RenderPermissionPrompt("mkdir -p /tmp/hash-fuzz-permission-test-directory-with-a-long-name", "execute", "")
 	assertRowsFit(t, buf.String(), 50)
-	if strings.Count(buf.String(), "\r\n") != 5 {
-		t.Errorf("prompt should draw five rows, got %q", buf.String())
+	if strings.Count(buf.String(), "\r\n") != 4 {
+		t.Errorf("prompt should draw four rows, got %q", buf.String())
 	}
 }
 
 func TestConversationHeaderFitsPane(t *testing.T) {
 	withColumns(t, 50)
-	frame := agentConversationInputFrame(true)
+	frame := agentConversationInputFrame(true, "")
 	assertRowsFit(t, frame.TopLine, 50)
 	if !strings.Contains(frame.TopLine, "enter to send") {
 		t.Errorf("header lost its first key: %q", frame.TopLine)

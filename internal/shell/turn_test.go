@@ -357,11 +357,11 @@ func TestTurn_TimeoutDuringPermissionKeepsTheErrorAndClearsThePrompt(t *testing.
 		t.Errorf("last status = %q, want the timeout error to stay", got)
 	}
 	out := screen.String()
-	prompt := strings.Index(out, "Agent wants to run")
+	prompt := strings.Index(out, permissionTitle)
 	if prompt < 0 {
 		t.Fatalf("permission prompt never drawn: %q", out)
 	}
-	if !strings.Contains(out[prompt:], strings.Repeat(ansiCursorUp+"\r"+ansiClearLine, 4)) {
+	if !strings.Contains(out[prompt:], clearPermissionRows) {
 		t.Errorf("permission prompt rows left on screen: %q", out[prompt:])
 	}
 }
@@ -443,7 +443,7 @@ func TestTurn_LatePermissionIsDeniedWithoutAPrompt(t *testing.T) {
 			if allow || always {
 				t.Errorf("late permission = %v, %v; want denied", allow, always)
 			}
-			if strings.Contains(screen.String(), "Agent wants to run") {
+			if strings.Contains(screen.String(), permissionTitle) {
 				t.Errorf("late permission drew a prompt: %q", screen.String())
 			}
 		})
@@ -455,7 +455,7 @@ func TestTurn_LatePermissionIsDeniedWithoutAPrompt(t *testing.T) {
 func TestHandleToolPermission_OutsideATurnReportsNothing(t *testing.T) {
 	sh, screen, status := newTurnShell(t, &scriptedTransport{})
 	sh.handleToolPermission(context.Background(), agent.ToolPermissionRequest{Command: "tool --help", ToolName: "Bash"})
-	if !strings.Contains(screen.String(), "Agent wants to run") {
+	if !strings.Contains(screen.String(), permissionTitle) {
 		t.Errorf("no prompt drawn: %q", screen.String())
 	}
 	if status.String() != "" {
@@ -502,7 +502,7 @@ func TestTurn_CtrlCAtAPermissionPromptCancelsTheTurn(t *testing.T) {
 	tt.answerPermissions("") // Ctrl+C is SIGINT while the turn watches the keys
 	sh.config.Agent.Timeout = "2s"
 	go func() {
-		for !strings.Contains(screen.String(), "Agent wants to run") {
+		for !strings.Contains(screen.String(), permissionTitle) {
 			time.Sleep(time.Millisecond)
 		}
 		sh.interrupts.fire()
@@ -515,7 +515,7 @@ func TestTurn_CtrlCAtAPermissionPromptCancelsTheTurn(t *testing.T) {
 		t.Error("Ctrl+C allowed the tool")
 	}
 	out := screen.String()
-	prompt := strings.Index(out, "Agent wants to run")
+	prompt := strings.Index(out, permissionTitle)
 	if prompt < 0 {
 		t.Fatalf("permission prompt never drawn: %q", out)
 	}

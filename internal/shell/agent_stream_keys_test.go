@@ -441,7 +441,7 @@ func TestTurn_PermissionPromptLeavesTheTerminalAsItFoundIt(t *testing.T) {
 		defer close(answered)
 		sh.handleToolPermission(ctx, agent.ToolPermissionRequest{Command: "rm -rf build", ToolName: "Bash", ToolCallID: "t1"})
 	}()
-	waitFor(t, func() bool { return strings.Contains(screen.String(), "Agent wants to run") })
+	waitFor(t, func() bool { return strings.Contains(screen.String(), permissionTitle) })
 	time.Sleep(30 * time.Millisecond) // the prompt is reading its key
 
 	timeout()          // the request timed out under the prompt
@@ -469,7 +469,7 @@ type typeOnPrompt struct {
 
 func (s *typeOnPrompt) Write(p []byte) (int, error) {
 	n, err := s.lockedBuffer.Write(p)
-	if strings.Contains(string(p), "Agent wants to run") && s.typed.CompareAndSwap(false, true) {
+	if strings.Contains(string(p), permissionTitle) && s.typed.CompareAndSwap(false, true) {
 		s.typing.WriteString("y")
 		deadline := time.Now().Add(time.Second)
 		for time.Now().Before(deadline) {

@@ -137,7 +137,7 @@ func TestStartupHome_RealWorldLayouts(t *testing.T) {
 			notLoaded: []string{"hash: ~/.local/share/zinit/zinit.git/zinit.zsh: not loaded"},
 			// The consequences of zinit not loading (the backlog: they print
 			// before the not-loaded line).
-			also:  `✗ zinit: command not found`,
+			also:  `┌ ✗ zinit · command not found`,
 			check: `echo "$ZINITRC_RAN"; zz`,
 			want:  "1\nzinit-alias\n",
 		},

@@ -414,7 +414,9 @@ func (s *Shell) builtinModel(ctx context.Context, args []string) error {
 	}
 
 	// No args: open the picker.
-	value, ok, err := modelpicker.NewPickerUI(models, current).Run(ctx)
+	picker := modelpicker.NewPickerUI(models, current)
+	picker.Palette = s.colorPalette
+	value, ok, err := picker.Run(ctx)
 	if err != nil {
 		return fmt.Errorf("model picker: %w", err)
 	}

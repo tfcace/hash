@@ -42,7 +42,7 @@ func TestEditorIncomplete_ShellLinesInTheExecutorsDialect(t *testing.T) {
 				t.Errorf("%s: Incomplete(%q) = %v, want %v", dialect, text, got, want)
 			}
 		}
-		if reply := agentConversationEditorConfig(sh.editorCfg, false); reply.Incomplete != nil {
+		if reply := agentConversationEditorConfig(sh.editorCfg, false, ""); reply.Incomplete != nil {
 			t.Errorf("%s: the conversation's reply box reads its text as shell", dialect)
 		}
 		if edit := sh.agentTextEditorConfig(); edit.Incomplete == nil {

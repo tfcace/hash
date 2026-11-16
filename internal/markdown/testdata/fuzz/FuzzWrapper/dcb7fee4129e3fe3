@@ -1,0 +1,4 @@
+go test fuzz v1
+string("│ 000")
+byte('\x01')
+uint(5)

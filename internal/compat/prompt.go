@@ -6,103 +6,101 @@ import (
 	"strings"
 
 	"charm.land/lipgloss/v2"
+
+	"github.com/tfcace/hash/internal/prompt"
+	"github.com/tfcace/hash/internal/termtext"
 	"github.com/tfcace/hash/internal/tilde"
 )
 
-var (
-	titleStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6"))
-	dimStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
-	successStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
-	warnStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
-)
+// migrationFrame draws rows on the frame every hash surface shares: a
+// title row, the rows behind a bar (one that starts a section draws its
+// own "├"), and the foot.
+type migrationFrame struct {
+	accent, dim, success, warning lipgloss.Style
+	rows                          []string
+}
 
-// FormatWelcomePromptFiles returns the welcome message showing all detected config files.
-func FormatWelcomePromptFiles(files ShellFiles) string {
-	var b strings.Builder
-
-	b.WriteString(titleStyle.Render("Welcome to Hash!"))
-	b.WriteString("\n\n")
-
-	fmt.Fprintf(&b, "Detected %s config files:\n", files.Shell)
-	for _, f := range files.Files() {
-		fmt.Fprintf(&b, "  %s\n", lipgloss.NewStyle().Bold(true).Render(tilde.Abbrev(f)))
+func newMigrationFrame(p prompt.Palette, summary string) *migrationFrame {
+	f := &migrationFrame{
+		accent:  lipgloss.NewStyle().Foreground(lipgloss.Color(p.Primary)),
+		dim:     lipgloss.NewStyle().Foreground(lipgloss.Color(p.Dim)),
+		success: lipgloss.NewStyle().Foreground(lipgloss.Color(p.Success)),
+		warning: lipgloss.NewStyle().Foreground(lipgloss.Color(p.Warning)),
 	}
-	b.WriteString("\nWould you like to load compatible settings?\n\n")
+	f.rows = []string{f.dim.Render("┌ ") + f.accent.Bold(true).Render("migrate") + f.dim.Render(" · ") + summary}
+	return f
+}
 
-	b.WriteString("  [Y] Yes, load settings\n")
-	b.WriteString("  [n] No, start fresh\n")
-	b.WriteString("  [?] What does this do?\n\n")
+func (f *migrationFrame) row(text string)     { f.rows = append(f.rows, f.dim.Render("│")+" "+text) }
+func (f *migrationFrame) section(name string) { f.rows = append(f.rows, f.dim.Render("├ "+name)) }
+
+// foot closes the frame with its hints and returns it, with no newline
+// after its last row.
+func (f *migrationFrame) foot(hints ...string) string {
+	return strings.Join(append(f.rows, f.dim.Render("└─ "+strings.Join(hints, " · "))), "\n")
+}
+
+// FormatWelcomePromptFiles returns the offer to load the detected config
+// files, drawn in the colors of p. The question itself is AskMigration's.
+func FormatWelcomePromptFiles(files ShellFiles, p prompt.Palette) string {
+	f := newMigrationFrame(p, files.Shell+" settings found")
+	for _, file := range files.Files() {
+		f.row(lipgloss.NewStyle().Bold(true).Render(termtext.OneLine(tilde.Abbrev(file))))
+	}
+	f.row("Load the settings hash understands? Your files stay as they are.")
 
 	other := "bash"
 	if files.Shell == "bash" {
 		other = "zsh"
 	}
-	b.WriteString(dimStyle.Render(
-		"(To load from a different shell later: hash migrate --from " + other + ")"))
-
-	return b.String()
+	return f.foot("y load", "n start fresh", "? what this does", "later: hash migrate --from "+other)
 }
 
-// FormatImportSummary returns a formatted summary of the migration: what
-// loaded, or, when it loads later (not into the shell that imports it),
-// what will load.
-func FormatImportSummary(report *Report, later bool) string {
-	var b strings.Builder
+// skippedShown is how many skipped items the summary lists.
+const skippedShown = 3
 
+// FormatImportSummary returns a summary of the migration, drawn in the
+// colors of p: what loaded, or, when it loads later (not into the shell
+// that imports it), what will load.
+func FormatImportSummary(report *Report, later bool, p prompt.Palette) string {
 	names := make([]string, len(report.Files))
-	for i, f := range report.Files {
-		names[i] = tilde.Abbrev(f)
+	for i, file := range report.Files {
+		names[i] = termtext.OneLine(tilde.Abbrev(file))
 	}
-	heading := "Loaded from"
+	heading := "loaded from "
 	if later {
-		heading = "Will load from"
+		heading = "will load from "
 	}
-	fmt.Fprintf(&b, "%s %s:\n", heading, strings.Join(names, " + "))
+	f := newMigrationFrame(p, heading+strings.Join(names, " + "))
 
-	if report.Summary.Aliases > 0 {
-		b.WriteString("  ")
-		b.WriteString(successStyle.Render("✓ " + Count(report.Summary.Aliases, "alias", "aliases")))
-		b.WriteString("\n")
-	}
-	if report.Summary.Exports > 0 {
-		b.WriteString("  ")
-		b.WriteString(successStyle.Render("✓ " + Count(report.Summary.Exports, "environment variable", "environment variables")))
-		b.WriteString("\n")
-	}
-	if report.Summary.Functions > 0 {
-		b.WriteString("  ")
-		b.WriteString(successStyle.Render("✓ " + Count(report.Summary.Functions, "function", "functions")))
-		b.WriteString("\n")
+	for _, kind := range []struct {
+		n            int
+		one, several string
+	}{
+		{report.Summary.Aliases, "alias", "aliases"},
+		{report.Summary.Exports, "environment variable", "environment variables"},
+		{report.Summary.Functions, "function", "functions"},
+	} {
+		if kind.n > 0 {
+			f.row(f.success.Render("✓") + " " + Count(kind.n, kind.one, kind.several))
+		}
 	}
 
 	if report.Summary.Skipped > 0 {
-		b.WriteString("\n")
-		b.WriteString(warnStyle.Render("Skipped " + Count(report.Summary.Skipped, "item", "items") + ":"))
-		b.WriteString("\n")
-
-		// Show first 3 skipped items
-		shown := 0
-		for _, item := range report.SkippedItems {
-			if shown >= 3 {
-				remaining := len(report.SkippedItems) - shown
-				b.WriteString("  ")
-				b.WriteString(dimStyle.Render(fmt.Sprintf("... (%d more, run 'hash migrate status' for full list)", remaining)))
-				b.WriteString("\n")
+		f.section("skipped " + Count(report.Summary.Skipped, "item", "items"))
+		for i, item := range report.SkippedItems {
+			if i == skippedShown {
+				f.row(f.dim.Render(fmt.Sprintf("… %d more", len(report.SkippedItems)-skippedShown)))
 				break
 			}
-			b.WriteString("  ")
-			b.WriteString(dimStyle.Render(fmt.Sprintf("Line %d: %s", item.Line, truncate(item.Content, 50))))
-			b.WriteString("\n")
-			shown++
+			// A config file's own text: drawn inert, on one row.
+			f.row(f.dim.Render(fmt.Sprintf("line %d: %s", item.Line, termtext.Truncate(termtext.OneLine(item.Content), 50, "..."))))
 		}
 	}
 	for _, n := range report.NotLoaded {
-		b.WriteString("\n")
-		b.WriteString(warnStyle.Render(n.String()))
-		b.WriteString("\n")
+		f.row(f.warning.Render(termtext.OneLine(n.String())))
 	}
-
-	return b.String()
+	return f.foot("hash migrate status for the full list")
 }
 
 // The generated header of ~/.hashrc starts and ends with these lines; the
@@ -129,11 +127,4 @@ func FormatHashrcCommentFiles(files []string) string {
 	b.WriteString(hashrcHeaderEnd)
 
 	return b.String()
-}
-
-func truncate(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
-	}
-	return s[:maxLen-3] + "..."
 }

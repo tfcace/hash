@@ -140,7 +140,7 @@ interactive = []
 	if _, err := io.WriteString(terminal, "?? deterministic ACP UX test\r"); err != nil {
 		t.Fatal(err)
 	}
-	transcript.waitFor(t, "Agent wants to run", 5*time.Second)
+	transcript.waitFor(t, "permission · ", 5*time.Second)
 	// A question takes only a key typed once the keys settled: one typed
 	// sooner (the submission's keys still arriving) is "too quick". Answer
 	// as a person would, after the question showed and the keys settled.

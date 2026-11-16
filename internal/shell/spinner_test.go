@@ -73,3 +73,33 @@ func TestSpinner_ShowsEachState(t *testing.T) {
 		}
 	}
 }
+
+// A tool row interrupts the spinner many times in a turn. The animation
+// carries on from where it was, or the name would never finish resolving.
+func TestSpinner_CarriesOnWhereItWasAfterARowInterruptsIt(t *testing.T) {
+	t.Parallel()
+	var screen lockedBuffer
+	aoc := NewAgentOutputCoordinator(&screen)
+	aoc.ShowState(AgentStateThinking)
+	aoc.mu.Lock()
+	aoc.spinnerFrame = spinnerFirstLetter + 3*spinnerLetterStep // the whole name is settled
+	aoc.mu.Unlock()
+	aoc.TakeRow()
+	drawn := len(screen.String())
+	aoc.ShowState(AgentStateThinking)
+	time.Sleep(100 * time.Millisecond) // a frame
+	aoc.TakeRow()
+	if after := stripANSI(screen.String()[drawn:]); !strings.Contains(after, " hash agent · thinking") {
+		t.Errorf("the restarted spinner drew %q, want the settled name", after)
+	}
+}
+
+func TestSpinner_StartsFromNoiseOnANewTurn(t *testing.T) {
+	var screen lockedBuffer
+	aoc := NewAgentOutputCoordinator(&screen)
+	aoc.spinnerFrame = 30
+	aoc.BeginTurn()
+	if aoc.spinnerFrame != 0 {
+		t.Errorf("a new turn starts the spinner at frame %d, want 0", aoc.spinnerFrame)
+	}
+}

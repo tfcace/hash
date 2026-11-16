@@ -12,17 +12,13 @@ type agentConversationMessage struct {
 }
 
 const (
-	agentConversationLiveRailStyle     = "\x1b[1;38;2;255;209;102m"
-	agentConversationLabelStyle        = "\x1b[1;38;2;94;234;212m"
-	agentConversationSolidRail         = agentConversationLiveRailStyle + "│\x1b[0m"
-	agentConversationDashedRail        = agentConversationLiveRailStyle + "┆\x1b[0m"
-	agentConversationUserLabel         = agentConversationLabelStyle + "you\x1b[0m"
-	agentConversationAgentLabel        = agentConversationLabelStyle + "agent\x1b[0m"
+	agentConversationSolidRail         = frameGray + "│" + ansiReset
+	agentConversationDashedRail        = frameGray + "┆" + ansiReset
+	agentConversationUserLabel         = ansiBold + "you" + ansiReset
 	agentConversationReplyPrompt       = agentConversationSolidRail + " " + agentConversationUserLabel + " › "
 	agentConversationLiveRailLine      = agentConversationDashedRail
 	agentConversationLiveReplyPrompt   = agentConversationDashedRail + " " + agentConversationUserLabel + " › "
 	agentConversationReplyPromptWidth  = 8
-	agentConversationAgentPrefix       = agentConversationSolidRail + " " + agentConversationAgentLabel + " › "
 	agentConversationAgentContinuation = agentConversationSolidRail + "         "
 	agentConversationAgentPrefixWidth  = 10 // "│ agent › " and its continuation
 	emptyAgentResponseMessage          = "agent ended the turn without text"
@@ -31,7 +27,16 @@ const (
 	legacyMarkerTailBytes              = len(legacyAwaitingInputMarker) - 1
 )
 
-func agentConversationInputFrame(openRail bool) *editor.InputFrame {
+// agentConversationAgentPrefix opens the agent's first row: its label, in
+// the accent color (an escape sequence, "" for none).
+func agentConversationAgentPrefix(accent string) string {
+	return agentConversationSolidRail + " " + ansiBold + accent + "agent" + ansiReset + " › "
+}
+
+// agentConversationInputFrame is the reply box. Opening the rail draws the
+// conversation's title row, with the keys as its summary: the frame stays
+// open across turns, so it has no last row to put them on.
+func agentConversationInputFrame(openRail bool, accent string) *editor.InputFrame {
 	frame := &editor.InputFrame{
 		Prefix:      agentConversationReplyPrompt,
 		LiveTopLine: agentConversationLiveRailLine,
@@ -39,14 +44,14 @@ func agentConversationInputFrame(openRail bool) *editor.InputFrame {
 		PrefixWidth: agentConversationReplyPromptWidth,
 	}
 	if openRail {
-		const title = "╭─ conversation "
+		const title = "┌ conversation · "
 		hints := fitHint("", "", []string{"enter to send", "esc to leave", "/exit to end"}, max(terminalColumns()-len([]rune(title)), 0))
-		frame.TopLine = agentConversationLiveRailStyle + strings.TrimSuffix(title, " ") + "\x1b[0m \x1b[90m" + hints + "\x1b[0m"
+		frame.TopLine = frameTop("conversation", frameGray+hints+ansiReset, accent)
 	}
 	return frame
 }
 
-func agentConversationEditorConfig(base editor.Config, openRail bool) editor.Config {
+func agentConversationEditorConfig(base editor.Config, openRail bool, accent string) editor.Config {
 	cfg := base
 	cfg.Prompt = agentConversationReplyPrompt
 	cfg.CompleteOutcomeFunc = nil
@@ -54,7 +59,7 @@ func agentConversationEditorConfig(base editor.Config, openRail bool) editor.Con
 	cfg.PrefetchFunc = nil
 	cfg.SuggestionFunc = nil
 	cfg.Gutter = false
-	cfg.InputFrame = agentConversationInputFrame(openRail)
+	cfg.InputFrame = agentConversationInputFrame(openRail, accent)
 	cfg.DisableHistorySearch = true
 	cfg.DisableContextPicker = true
 	cfg.DisableLineContinuation = true
@@ -65,13 +70,15 @@ func agentConversationEditorConfig(base editor.Config, openRail bool) editor.Con
 
 type agentConversationRailPrefixer struct {
 	write       func(string)
+	first       string // what the agent's first row opens with
 	atLineStart bool
 	started     bool
 }
 
-func newAgentConversationRailPrefixer(write func(string)) *agentConversationRailPrefixer {
+func newAgentConversationRailPrefixer(write func(string), accent string) *agentConversationRailPrefixer {
 	return &agentConversationRailPrefixer{
 		write:       write,
+		first:       agentConversationAgentPrefix(accent),
 		atLineStart: true,
 	}
 }
@@ -86,7 +93,7 @@ func (p *agentConversationRailPrefixer) Write(text string) {
 			if p.started {
 				p.write(agentConversationAgentContinuation)
 			} else {
-				p.write(agentConversationAgentPrefix)
+				p.write(p.first)
 				p.started = true
 			}
 			p.atLineStart = false

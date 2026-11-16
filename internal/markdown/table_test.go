@@ -84,7 +84,7 @@ func TestTable_LinesWithPipesThatAreNoTableStayText(t *testing.T) {
 
 func TestTable_InsideACodeBlockIsCode(t *testing.T) {
 	got := drawn(t, "```\n| a | b |\n|---|---|\n```\n", 80, 1)
-	if want := "  | a | b |\n  |---|---|\n"; got != want {
+	if want := "│ | a | b |\n│ |---|---|\n"; got != want {
 		t.Errorf("got %q, want %q", got, want)
 	}
 }

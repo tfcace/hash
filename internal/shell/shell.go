@@ -363,9 +363,10 @@ func New(cfg *config.Config) (*Shell, error) {
 
 	// Set accent color callback for permission prompts
 	// This allows the permission prompt to use the dynamically-updated colorPalette
-	shell.agentOutput.SetAccentColorFunc(func() string {
-		return shell.colorPalette.Primary
-	})
+	shell.agentOutput.SetPaletteFunc(func() prompt.Palette { return shell.colorPalette })
+
+	// Banners follow the palette as it is, not as it was at startup.
+	shell.errors.palette = func() prompt.Palette { return shell.colorPalette }
 
 	// A refused command (not found, not executable) gets its banner at the
 	// point of failure while the line keeps running with the right status.
@@ -522,7 +523,9 @@ func (s *Shell) runOnboarding() {
 	}
 	configPath := filepath.Join(getConfigDir(), "config.toml")
 	agents := onboarding.Detect(exec.LookPath)
-	chosen, ok, err := onboarding.New(agents, version.Version).Run()
+	welcome := onboarding.New(agents, version.Version)
+	welcome.Palette = s.colorPalette
+	chosen, ok, err := welcome.Run()
 	if err != nil {
 		return
 	}
@@ -770,9 +773,12 @@ func (s *Shell) onLine(lc *lineContext, run func(ctx context.Context) (*executor
 // handleExecutionResult turns an external line's result into its outcome.
 func (s *Shell) handleExecutionResult(line string, result *executor.Result, err error, stderrCap *stderrCapture) {
 	o := commandOutcome{command: line}
-	if err != nil {
+	switch {
+	case err != nil && s.errorHandler().HandleSyntaxError(line, err):
+		o.exitCode = 1
+	case err != nil:
 		o.exitCode = s.showRefusal(err)
-	} else {
+	default:
 		o.exitCode = result.ExitCode
 		o.duration = result.Duration
 	}
@@ -1103,7 +1109,9 @@ func (s *Shell) runHistoryPicker(ctx context.Context) string {
 // runContextPicker launches the context picker TUI on the current picks
 // and remembers what the user picked.
 func (s *Shell) runContextPicker(ctx context.Context) {
-	picks, err := hashcontext.NewPickerUI(s.pickedContext()).Run(ctx)
+	picker := hashcontext.NewPickerUI(s.pickedContext())
+	picker.Palette = s.colorPalette
+	picks, err := picker.Run(ctx)
 	if err != nil {
 		// Picker canceled, errored or ended with the shell: keep the
 		// existing selection
@@ -1547,7 +1555,7 @@ func (s *Shell) runAgentConversationLoop(t *liveTurn, transcript []agentConversa
 }
 
 func (s *Shell) readAgentConversationReply(ctx context.Context, openRail bool) (string, bool) {
-	cfg := agentConversationEditorConfig(s.editorCfg, openRail)
+	cfg := agentConversationEditorConfig(s.editorCfg, openRail, fgCode(s.colorPalette.Primary))
 	s.historyNav.reset() // Up recalls from the newest entry, not where the prompt left off
 
 	ed := editor.New(cfg, s.in(), s.out())
@@ -1570,7 +1578,7 @@ func (s *Shell) streamAgentFollowUpTurn(
 	transcript []agentConversationMessage,
 ) (responseText string, ok bool) {
 	for {
-		railPrefixer := newAgentConversationRailPrefixer(s.agentOutput.WriteStream)
+		railPrefixer := newAgentConversationRailPrefixer(s.agentOutput.WriteStream, fgCode(s.colorPalette.Primary))
 		streamResult := s.streamTurnRequest(t, reply, func(ctx context.Context) (<-chan agent.StreamEvent, <-chan error) {
 			return s.agentHandler.StreamFollowUpEvents(ctx, reply, transcript, t.facts)
 		}, agentConversationAgentContinuation, replyWidth(agentConversationAgentPrefixWidth), railPrefixer.Write)
@@ -1933,12 +1941,18 @@ func (s *Shell) initPromptAndPalette() string {
 	}
 
 	// Extract palette from the outputs we already have
-	newPalette := prompt.ExtractPaletteFromOutputs(successOutput, errorOutput)
-	if newPalette.Primary != prompt.DefaultPalette().Primary {
-		s.colorPalette = newPalette
-		s.editorCfg.ScrollbarColor = newPalette.Primary
-	}
+	s.adoptPalette(prompt.ExtractPaletteFromOutputs(successOutput, errorOutput))
 	return full
+}
+
+// adoptPalette makes a palette extracted from the prompt the interface's
+// colors. One that found nothing in the prompt changes nothing.
+func (s *Shell) adoptPalette(extracted prompt.Palette) {
+	if extracted == prompt.DefaultPalette() {
+		return
+	}
+	s.colorPalette = extracted
+	s.editorCfg.ScrollbarColor = extracted.Primary
 }
 
 // printPromptInfoBar prints the rows of a multi-line prompt above its input

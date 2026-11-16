@@ -337,7 +337,7 @@ func (s *Shell) firstRunMigration(ctx context.Context, st *Startup, statePath st
 		return StepOutcome{}
 	}
 
-	fmt.Fprintln(out, compat.FormatWelcomePromptFiles(shellFiles))
+	fmt.Fprintln(out, compat.FormatWelcomePromptFiles(shellFiles, s.colorPalette))
 	switch compat.AskMigration(readLine, out, "Load these settings now?", firstRunMigrationHelp) {
 	case compat.DecisionImport:
 		return s.importFirstRunMigration(ctx, st, statePath, shellFiles.Shell, paths, out)
@@ -364,7 +364,7 @@ func (s *Shell) importFirstRunMigration(ctx context.Context, st *Startup, stateP
 
 	fmt.Fprintln(out, "done!")
 	fmt.Fprintln(out)
-	fmt.Fprintln(out, compat.FormatImportSummary(report, false))
+	fmt.Fprintln(out, compat.FormatImportSummary(report, false, s.colorPalette))
 
 	_, hashrcErr, err := compat.RecordImport(statePath, shell, files, report)
 	switch {

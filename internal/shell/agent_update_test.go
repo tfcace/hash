@@ -55,8 +55,8 @@ func TestShell_UpdateBannerOffersModelUpdate(t *testing.T) {
 
 	s.flushUpdateNotice(now)
 
-	out := banner.String()
-	for _, want := range []string{"✦ Claude Agent update available", "→\033[0m model update", "0.42.0 → 0.88.0", "installed 4 months ago", "→ to accept at prompt"} {
+	out := stripANSI(banner.String())
+	for _, want := range []string{"┌ update · Claude Agent 0.42.0 → 0.88.0 · installed 4 months ago", "│ → model update", "→ to accept at prompt"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("banner missing %q:\n%s", want, out)
 		}
@@ -130,7 +130,7 @@ func TestShell_UpdateNoticeWaitsBehindLearnedFix(t *testing.T) {
 	if got := s.promptGhost(); got != "chmod +x deploy.sh" {
 		t.Errorf("promptGhost() = %q, want the learned fix to win", got)
 	}
-	if strings.Contains(banner.String(), "update available") {
+	if strings.Contains(stripANSI(banner.String()), "┌ update") {
 		t.Error("update banner shown while a fix is pending")
 	}
 	if len(s.updateNotices) != 1 {

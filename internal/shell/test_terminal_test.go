@@ -75,7 +75,7 @@ func (tt *testTerminal) answerHints(screen *lockedBuffer, answers ...string) {
 			case <-time.After(time.Millisecond):
 			}
 			out := screen.String()
-			if n := strings.Count(out, "Agent wants to run"); n > prompts {
+			if n := strings.Count(out, permissionTitle); n > prompts {
 				// The watcher asks for the key before the prompt is drawn.
 				prompts = n
 				tt.mu.Lock()

@@ -2,11 +2,20 @@
 package compat
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/tfcace/hash/internal/prompt"
 )
+
+var sgr = regexp.MustCompile(`\x1b\[[0-9;]*m`)
+
+// plain is s without its styling.
+func plain(s string) string { return sgr.ReplaceAllString(s, "") }
 
 func TestFormatWelcomePromptFiles(t *testing.T) {
 	home := t.TempDir()
@@ -15,12 +24,14 @@ func TestFormatWelcomePromptFiles(t *testing.T) {
 	if err := os.WriteFile(rc, []byte("alias ll='ls -la'\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	output := FormatWelcomePromptFiles(ShellFiles{Shell: "zsh", RCFile: rc})
+	output := plain(FormatWelcomePromptFiles(ShellFiles{Shell: "zsh", RCFile: rc}, prompt.Palette{}))
 
-	for _, want := range []string{"Welcome to Hash", "zsh", "~/.zshrc", "load"} {
-		if !strings.Contains(output, want) {
-			t.Errorf("welcome prompt lacks %q:\n%s", want, output)
-		}
+	want := "┌ migrate · zsh settings found\n" +
+		"│ ~/.zshrc\n" +
+		"│ Load the settings hash understands? Your files stay as they are.\n" +
+		"└─ y load · n start fresh · ? what this does · later: hash migrate --from bash"
+	if output != want {
+		t.Errorf("got:\n%s\nwant:\n%s", output, want)
 	}
 }
 
@@ -31,19 +42,16 @@ func TestFormatImportSummary(t *testing.T) {
 	report.AddImported(ItemExport, "EDITOR", "vim")
 	report.AddSkipped(12, "bindkey", "zsh-specific")
 
-	output := FormatImportSummary(report, false)
+	output := plain(FormatImportSummary(report, false, prompt.Palette{}))
 
-	if !strings.Contains(output, "Loaded from") {
-		t.Errorf("expected 'Loaded from' in output: %s", output)
-	}
-	if !strings.Contains(output, "2 aliases") {
-		t.Errorf("expected '2 aliases' in output: %s", output)
-	}
-	if !strings.Contains(output, "1 environment") {
-		t.Errorf("expected '1 environment' in output: %s", output)
-	}
-	if !strings.Contains(output, "1 item") || !strings.Contains(output, "Skipped") {
-		t.Errorf("expected skipped count in output: %s", output)
+	want := "┌ migrate · loaded from ~/.zshrc\n" +
+		"│ ✓ 2 aliases\n" +
+		"│ ✓ 1 environment variable\n" +
+		"├ skipped 1 item\n" +
+		"│ line 12: bindkey\n" +
+		"└─ hash migrate status for the full list"
+	if output != want {
+		t.Errorf("got:\n%s\nwant:\n%s", output, want)
 	}
 }
 
@@ -59,7 +67,7 @@ func TestFormat_HomePrefixIsNotHome(t *testing.T) {
 		}
 		writeFile(t, p, "")
 	}
-	welcome := FormatWelcomePromptFiles(ShellFiles{Shell: "zsh", RCFile: other})
+	welcome := plain(FormatWelcomePromptFiles(ShellFiles{Shell: "zsh", RCFile: other}, prompt.Palette{}))
 	header := FormatHashrcCommentFiles([]string{other, mine})
 	notice := FormatChangeNotice([]string{other}, 0)
 	for name, got := range map[string]string{"welcome": welcome, "header": header, "notice": notice} {
@@ -77,8 +85,8 @@ func TestFormat_HomePrefixIsNotHome(t *testing.T) {
 func TestFormatImportSummary_WritesHomeAsTilde(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	got := FormatImportSummary(NewReport(filepath.Join(home, ".zshrc"), "zsh"), false)
-	if !strings.Contains(got, "Loaded from ~/.zshrc:") {
+	got := plain(FormatImportSummary(NewReport(filepath.Join(home, ".zshrc"), "zsh"), false, prompt.Palette{}))
+	if !strings.HasPrefix(got, "┌ migrate · loaded from ~/.zshrc\n") {
 		t.Errorf("summary = %q, want the file as ~/.zshrc", got)
 	}
 }
@@ -95,7 +103,7 @@ func TestFormatImportSummary_WritesEveryFileAsTilde(t *testing.T) {
 	if len(errs) != 0 || report == nil {
 		t.Fatalf("FilterFiles: %v", errs)
 	}
-	if got := FormatImportSummary(report, false); !strings.Contains(got, "Loaded from ~/.zprofile + ~/.zshrc:") {
+	if got := plain(FormatImportSummary(report, false, prompt.Palette{})); !strings.HasPrefix(got, "┌ migrate · loaded from ~/.zprofile + ~/.zshrc\n") {
 		t.Errorf("summary = %q, want both files as ~", got)
 	}
 }
@@ -103,8 +111,8 @@ func TestFormatImportSummary_WritesEveryFileAsTilde(t *testing.T) {
 // The welcome offers to load from the shell it did not detect.
 func TestFormatWelcomePromptFiles_OffersTheOtherShell(t *testing.T) {
 	for shell, other := range map[string]string{"bash": "zsh", "zsh": "bash"} {
-		got := FormatWelcomePromptFiles(ShellFiles{Shell: shell})
-		if !strings.Contains(got, "hash migrate --from "+other+")") {
+		got := plain(FormatWelcomePromptFiles(ShellFiles{Shell: shell}, prompt.Palette{}))
+		if !strings.HasSuffix(got, "later: hash migrate --from "+other) {
 			t.Errorf("welcome for %s = %q, want it to offer --from %s", shell, got, other)
 		}
 	}
@@ -120,7 +128,53 @@ func TestFormatImportSummary_SaysWhatDidNotLoad(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := FormatImportSummary(report, false); !strings.Contains(got, "~/.bashrc: not loaded: line 2: ") {
+	if got := plain(FormatImportSummary(report, false, prompt.Palette{})); !strings.Contains(got, "│ ~/.bashrc: not loaded: line 2: ") {
 		t.Errorf("summary = %q, want it to say ~/.bashrc did not load", got)
+	}
+}
+
+// A summary of what loads later says so, and more skipped items than it
+// lists are counted.
+func TestFormatImportSummary_LaterAndManySkipped(t *testing.T) {
+	report := NewReport("/etc/zshrc", "zsh")
+	for i := range 5 {
+		report.AddSkipped(i+1, fmt.Sprintf("setopt opt%d", i), "zsh-specific")
+	}
+	got := plain(FormatImportSummary(report, true, prompt.Palette{}))
+	want := "┌ migrate · will load from /etc/zshrc\n" +
+		"├ skipped 5 items\n" +
+		"│ line 1: setopt opt0\n" +
+		"│ line 2: setopt opt1\n" +
+		"│ line 3: setopt opt2\n" +
+		"│ … 2 more\n" +
+		"└─ hash migrate status for the full list"
+	if got != want {
+		t.Errorf("got:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+func TestMigrationFrames_ColorsComeFromThePalette(t *testing.T) {
+	p := prompt.Palette{Primary: "#010203", Success: "#040506", Dim: "8"}
+	report := NewReport("/etc/zshrc", "zsh")
+	report.AddImported(ItemAlias, "ll", "ls -la")
+	for name, got := range map[string]string{
+		"welcome": FormatWelcomePromptFiles(ShellFiles{Shell: "zsh"}, p),
+		"summary": FormatImportSummary(report, false, p),
+	} {
+		if !strings.Contains(got, "38;2;1;2;3mmigrate") || !strings.Contains(got, "\x1b[90m┌") {
+			t.Errorf("%s: title is not in the accent on gray chrome: %q", name, got)
+		}
+	}
+	if got := FormatImportSummary(report, false, p); !strings.Contains(got, "38;2;4;5;6m✓") {
+		t.Errorf("no success-colored mark: %q", got)
+	}
+}
+
+// What a config file's skipped line says is drawn inert.
+func TestFormatImportSummary_DrawsSkippedLinesInert(t *testing.T) {
+	report := NewReport("/etc/zshrc", "zsh")
+	report.AddSkipped(1, "x\x1b]0;pwned\x07y", "zsh-specific")
+	if got := plain(FormatImportSummary(report, false, prompt.Palette{})); strings.Contains(got, "\x1b]0;pwned") || strings.Contains(got, "\x07") {
+		t.Errorf("drawn raw: %q", got)
 	}
 }

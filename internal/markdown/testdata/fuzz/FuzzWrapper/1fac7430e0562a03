@@ -1,0 +1,4 @@
+go test fuzz v1
+string("│\x13 0000000")
+byte('\b')
+uint(18)

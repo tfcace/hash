@@ -5,9 +5,23 @@ import (
 	"strings"
 )
 
-// codeLinePrefix opens every rendered code block line. The wrapper knows a
+// CodeLinePrefix opens every rendered code block line. The wrapper knows a
 // code line by it and leaves the line unwrapped.
-const codeLinePrefix = gray + "  "
+const CodeLinePrefix = gray + "│" + reset + " "
+
+// Theme is the escape sequences the reply's colors are drawn with. An empty
+// one draws that role in the terminal's own foreground.
+type Theme struct {
+	Accent  string // list markers, code spans, headers, notes
+	Success string // added lines
+	Error   string // removed lines, cautions
+	Warning string // warnings
+}
+
+// DefaultTheme is the theme of a renderer that was given none.
+func DefaultTheme() Theme {
+	return Theme{Accent: cyan, Success: green, Error: red, Warning: yellow}
+}
 
 // StreamingRenderer processes markdown text chunk-by-chunk and emits
 // ANSI-styled output as patterns complete.
@@ -22,17 +36,27 @@ const codeLinePrefix = gray + "  "
 // line not rendered yet; at lineOpening that may be a start still too short
 // to tell what it opens (held by Flush), at lineOpen a continuation.
 //
+// Block state: diff says the open code block is a diff; inCallout and
+// callout carry a callout's color down the quote lines that follow its
+// marker; dimLine says the line's text is drawn dim (a done checklist item).
+//
 // Table state: table holds the lines of a table still arriving (or one
 // line that may turn out to head a table), drawn when a line that is not
 // the table's arrives or the stream ends.
 type StreamingRenderer struct {
 	// Width is the columns a table may take; below 1 is no limit.
 	Width int
+	// Theme colors the reply. NewStreamingRenderer sets DefaultTheme.
+	Theme Theme
 
 	table     []string
 	tableOpen bool // the last held line had no newline
 
 	inCodeBlock bool
+	diff        bool
+	inCallout   bool
+	callout     string
+	dimLine     bool
 	lineBuffer  strings.Builder
 	phase       linePhase
 	inBold      bool
@@ -62,7 +86,7 @@ const (
 
 // NewStreamingRenderer creates a new streaming markdown renderer.
 func NewStreamingRenderer() *StreamingRenderer {
-	return &StreamingRenderer{}
+	return &StreamingRenderer{Theme: DefaultTheme()}
 }
 
 // Write processes a chunk of text and returns rendered output.
@@ -130,7 +154,15 @@ func (r *StreamingRenderer) lineStartUndecided(fragment string) bool {
 	if strings.HasPrefix(fragment, "#") {
 		return true
 	}
+	// A quote may still open a callout, whose marker line is drawn whole.
+	if strings.HasPrefix(calloutOpening, fragment) || strings.HasPrefix(fragment, calloutOpening) {
+		return true
+	}
 	trimmed := strings.TrimLeft(fragment, " \t")
+	if strings.HasPrefix(trimmed, "- ") || strings.HasPrefix(trimmed, "* ") {
+		// A list item may still open with a checkbox.
+		return checkboxArriving(trimmed[2:])
+	}
 	// A table line is drawn when its table ends.
 	if strings.HasPrefix(trimmed, "|") {
 		return true
@@ -149,7 +181,7 @@ func (r *StreamingRenderer) Finish() string {
 	if r.inline == inlineStar {
 		out += "*"
 	}
-	if r.inline == inlineCode || r.inBold || (r.phase == lineOpen && r.inCodeBlock) {
+	if r.inline == inlineCode || r.inBold || r.dimLine || (r.phase == lineOpen && r.inCodeBlock) {
 		out += reset
 	}
 	r.Reset() // the stream is over: the next one starts outside any block
@@ -158,7 +190,7 @@ func (r *StreamingRenderer) Finish() string {
 
 // Reset clears all state for reuse.
 func (r *StreamingRenderer) Reset() {
-	*r = StreamingRenderer{Width: r.Width}
+	*r = StreamingRenderer{Width: r.Width, Theme: r.Theme}
 }
 
 // processLine handles a line or, after a Flush, a fragment of one.
@@ -173,6 +205,10 @@ func (r *StreamingRenderer) processLine(line string) string {
 		r.phase = lineOpening // the next line starts fresh
 	}
 
+	if !continuation && (r.inCodeBlock || !strings.HasPrefix(content, ">")) {
+		r.inCallout = false // a callout ends with its quote
+	}
+
 	// A table's lines are held until a line that is not the table's.
 	var before string
 	if !continuation {
@@ -182,33 +218,7 @@ func (r *StreamingRenderer) processLine(line string) string {
 		before = r.endTable()
 	}
 
-	var result string
-	fenceMarker := false
-
-	// 1. Code block markers
-	if !continuation && strings.HasPrefix(content, "```") {
-		result = r.handleCodeBlockMarker()
-		fenceMarker = true
-	} else if r.inCodeBlock {
-		// 2. Inside code block - just indent, no dim (dim causes visual artifacts)
-		// Open the color and indent once per line; close at the real line end.
-		result = content
-		if !continuation {
-			result = codeLinePrefix + result
-		}
-		if hasNewline {
-			result += reset
-		}
-	} else if header := r.tryHeaderAt(content, continuation); header != "" {
-		// 3. Headers
-		result = header
-	} else if list := r.tryListAt(content, continuation, hasNewline); list != "" {
-		// 4. Lists
-		result = list
-	} else {
-		// 5. Regular line - inline processing
-		result = r.processInline(content, hasNewline)
-	}
+	result, fenceMarker := r.lineBody(content, continuation, hasNewline)
 
 	// A fence marker line is invisible: it must not leave behind its own
 	// newline, or code blocks gain a blank line above and below.
@@ -218,27 +228,136 @@ func (r *StreamingRenderer) processLine(line string) string {
 	return before + result
 }
 
-// tryHeaderAt suppresses header detection on continuation fragments.
-func (r *StreamingRenderer) tryHeaderAt(content string, continuation bool) string {
+// lineBody renders a line that is not a table's, or a fragment of one, and
+// reports whether it was a fence marker.
+func (r *StreamingRenderer) lineBody(content string, continuation, complete bool) (body string, fenceMarker bool) {
 	if continuation {
-		return ""
+		if r.inCodeBlock {
+			if complete {
+				content += reset
+			}
+			return content, false
+		}
+		return r.processInline(content, complete), false
 	}
-	return r.tryHeader(content)
+	if strings.HasPrefix(content, "```") {
+		return r.handleCodeBlockMarker(content), true
+	}
+	if r.inCodeBlock {
+		// Behind the block's bar, a diff's added and removed lines colored.
+		// The bar and color open once per line and close at its real end.
+		body = CodeLinePrefix + r.diffColor(content) + content
+		if complete {
+			body += reset
+		}
+		return body, false
+	}
+	if strings.HasPrefix(content, ">") {
+		return r.quoteLine(content, complete), false
+	}
+	if header := r.tryHeader(content); header != "" {
+		return header, false
+	}
+	if list := r.tryList(content, complete); list != "" {
+		return list, false
+	}
+	return r.processInline(content, complete), false
 }
 
-// tryListAt suppresses list detection on continuation fragments.
-func (r *StreamingRenderer) tryListAt(content string, continuation, complete bool) string {
-	if continuation {
-		return ""
-	}
-	return r.tryList(content, complete)
-}
-
-// handleCodeBlockMarker toggles code block state. Fence lines (and the
-// opening fence's language) render nothing.
-func (r *StreamingRenderer) handleCodeBlockMarker() string {
+// handleCodeBlockMarker toggles code block state. A closing fence renders
+// nothing; an opening one renders a title row when it names a language.
+func (r *StreamingRenderer) handleCodeBlockMarker(fence string) string {
 	r.inCodeBlock = !r.inCodeBlock
+	r.diff = false
+	if !r.inCodeBlock {
+		return ""
+	}
+	info := strings.Fields(strings.TrimLeft(fence, "`"))
+	if len(info) == 0 {
+		return ""
+	}
+	r.diff = strings.EqualFold(info[0], "diff")
+	title := info[0]
+	if len(info) > 1 {
+		title += " · " + strings.Join(info[1:], " ")
+	}
+	return gray + "┌ " + title + reset + "\n"
+}
+
+// diffColor is the color a diff's line opens with.
+func (r *StreamingRenderer) diffColor(line string) string {
+	switch {
+	case !r.diff:
+		return ""
+	case strings.HasPrefix(line, "+"):
+		return r.Theme.Success
+	case strings.HasPrefix(line, "-"):
+		return r.Theme.Error
+	}
 	return ""
+}
+
+// calloutOpening is how a callout's marker line starts: "> [!WARNING]".
+const calloutOpening = "> [!"
+
+var calloutRe = regexp.MustCompile(`^\[!([A-Za-z]+)\]\s*$`)
+
+// calloutColor is the color of a callout kind, and whether it is one.
+func (r *StreamingRenderer) calloutColor(kind string) (string, bool) {
+	switch kind {
+	case "note", "tip", "important":
+		return r.Theme.Accent, true
+	case "warning":
+		return r.Theme.Warning, true
+	case "caution":
+		return r.Theme.Error, true
+	}
+	return "", false
+}
+
+// quoteLine renders a "> " line: a callout's marker as its title row, the
+// lines under one behind a bar of its color, any other quote behind a gray
+// bar.
+func (r *StreamingRenderer) quoteLine(line string, complete bool) string {
+	text := strings.TrimPrefix(strings.TrimPrefix(line, ">"), " ")
+	if m := calloutRe.FindStringSubmatch(text); m != nil {
+		kind := strings.ToLower(m[1])
+		if color, ok := r.calloutColor(kind); ok {
+			r.inCallout, r.callout = true, color
+			return color + "┌ " + kind + reset
+		}
+	}
+	if !r.inCallout {
+		return gray + "│ " + reset + r.processInline(text, complete)
+	}
+	bar := r.callout + "│" + reset
+	if text == "" {
+		return bar
+	}
+	return bar + " " + r.processInline(text, complete)
+}
+
+// checkboxArriving reports whether the start of a list item's text may
+// still become a checkbox: "[x] " or "[ ] " less its last characters.
+func checkboxArriving(text string) bool {
+	if len(text) > 3 {
+		return false
+	}
+	for i := range len(text) {
+		if !strings.ContainsRune([]string{"[", "xX ", "]"}[i], rune(text[i])) {
+			return false
+		}
+	}
+	return true
+}
+
+// checkbox splits a checklist item's text into whether it is done and what
+// follows the box.
+func checkbox(text string) (done bool, rest string, ok bool) {
+	if len(text) < 4 || !checkboxArriving(text[:3]) || text[3] != ' ' {
+		return false, "", false
+	}
+	return text[1] != ' ', text[4:], true
 }
 
 // tryHeader checks if line is a header and returns styled output, or empty string.
@@ -247,13 +366,13 @@ func (r *StreamingRenderer) tryHeader(line string) string {
 		return bold + strings.TrimPrefix(line, "#### ") + reset
 	}
 	if strings.HasPrefix(line, "### ") {
-		return bold + cyan + strings.TrimPrefix(line, "### ") + reset
+		return bold + r.Theme.Accent + strings.TrimPrefix(line, "### ") + reset
 	}
 	if strings.HasPrefix(line, "## ") {
-		return bold + blue + strings.TrimPrefix(line, "## ") + reset
+		return bold + r.Theme.Accent + strings.TrimPrefix(line, "## ") + reset
 	}
 	if strings.HasPrefix(line, "# ") {
-		return bold + magenta + strings.TrimPrefix(line, "# ") + reset
+		return bold + r.Theme.Accent + strings.TrimPrefix(line, "# ") + reset
 	}
 	return ""
 }
@@ -267,14 +386,18 @@ func (r *StreamingRenderer) tryList(line string, complete bool) string {
 	trimmed := strings.TrimLeft(line, " \t")
 	indent := line[:len(line)-len(trimmed)]
 
-	// Unordered lists
-	if strings.HasPrefix(trimmed, "- ") {
-		content := r.processInline(trimmed[2:], complete)
-		return indent + cyan + "•" + reset + " " + content
-	}
-	if strings.HasPrefix(trimmed, "* ") {
-		content := r.processInline(trimmed[2:], complete)
-		return indent + cyan + "•" + reset + " " + content
+	// Unordered lists, and checklists: a done item is a filled circle with
+	// its text dim, one still to do an open circle.
+	if strings.HasPrefix(trimmed, "- ") || strings.HasPrefix(trimmed, "* ") {
+		done, text, isBox := checkbox(trimmed[2:])
+		switch {
+		case !isBox:
+			return indent + r.Theme.Accent + "•" + reset + " " + r.processInline(trimmed[2:], complete)
+		case !done:
+			return indent + "○ " + r.processInline(text, complete)
+		}
+		r.dimLine = true
+		return indent + r.Theme.Accent + "●" + reset + " " + dim + r.processInline(text, complete)
 	}
 
 	// Ordered lists
@@ -283,7 +406,7 @@ func (r *StreamingRenderer) tryList(line string, complete bool) string {
 		num := matches[2]
 		text := matches[3]
 		content := r.processInline(text, complete)
-		return indent + cyan + num + "." + reset + " " + content
+		return indent + r.Theme.Accent + num + "." + reset + " " + content
 	}
 
 	return ""
@@ -312,10 +435,10 @@ func (r *StreamingRenderer) processInline(text string, complete bool) string {
 
 	// Close any open formatting at end of line
 	// (prevents formatting from bleeding across lines unexpectedly)
-	if r.inline == inlineCode || r.inBold {
+	if r.inline == inlineCode || r.inBold || r.dimLine {
 		result.WriteString(reset)
 	}
-	r.inline, r.inBold = inlinePlain, false
+	r.inline, r.inBold, r.dimLine = inlinePlain, false, false
 
 	return result.String()
 }
@@ -346,7 +469,7 @@ func (r *StreamingRenderer) inlineRune(out *strings.Builder, char rune) {
 		r.inline = inlineStar
 	case '`':
 		r.inline = inlineCode
-		out.WriteString(cyan)
+		out.WriteString(r.Theme.Accent)
 	default:
 		out.WriteRune(char)
 	}
@@ -366,11 +489,14 @@ func (r *StreamingRenderer) toggleBold(out *strings.Builder) {
 // openStyles returns the escape codes for the inline styles still open.
 func (r *StreamingRenderer) openStyles() string {
 	var s string
+	if r.dimLine {
+		s += dim
+	}
 	if r.inBold {
 		s += bold
 	}
 	if r.inline == inlineCode {
-		s += cyan
+		s += r.Theme.Accent
 	}
 	return s
 }

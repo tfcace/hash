@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/tfcace/hash/internal/prompt"
 )
 
 // TestFirstWord tests the firstWord helper function.
@@ -85,32 +87,6 @@ func TestShouldSkipLine(t *testing.T) {
 				t.Errorf("shouldSkipLine(%q) reason = %q, want containing %q", tt.line, reason, tt.wantReason)
 			}
 		})
-	}
-}
-
-// TestTruncate tests the truncate helper in prompt.go.
-// Note: truncate assumes maxLen >= 4 when truncation is needed.
-// Smaller maxLen values with long strings would panic.
-func TestTruncate(t *testing.T) {
-	tests := []struct {
-		input  string
-		maxLen int
-		want   string
-	}{
-		{"hello", 10, "hello"},         // under limit
-		{"hello", 5, "hello"},          // at limit
-		{"hello world", 8, "hello..."}, // over limit
-		{"hello world", 4, "h..."},     // minimum with ellipsis
-		{"", 10, ""},                   // empty string
-		{"a", 1, "a"},                  // single char under limit
-		{"ab", 2, "ab"},                // at limit
-	}
-
-	for _, tt := range tests {
-		got := truncate(tt.input, tt.maxLen)
-		if got != tt.want {
-			t.Errorf("truncate(%q, %d) = %q, want %q", tt.input, tt.maxLen, got, tt.want)
-		}
 	}
 }
 
@@ -407,7 +383,7 @@ func TestFormatImportSummary_Contents(t *testing.T) {
 	r.AddImported(ItemExport, "EDITOR", "vim")
 	r.AddSkipped(10, "bindkey '^R' history", "zsh-specific")
 
-	summary := FormatImportSummary(r, false)
+	summary := FormatImportSummary(r, false, prompt.Palette{})
 
 	// Should contain source file
 	if !strings.Contains(summary, ".zshrc") {
@@ -433,7 +409,7 @@ func TestFormatImportSummary_ManySkipped(t *testing.T) {
 		r.AddSkipped(i+1, "skipped line", "reason")
 	}
 
-	summary := FormatImportSummary(r, false)
+	summary := FormatImportSummary(r, false, prompt.Palette{})
 
 	// Should mention "more"
 	if !strings.Contains(summary, "more") {

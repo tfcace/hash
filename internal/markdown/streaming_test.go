@@ -48,8 +48,8 @@ func TestStreamingRenderer_Headers(t *testing.T) {
 		input    string
 		contains string
 	}{
-		{"# Title\n", magenta},
-		{"## Subtitle\n", blue},
+		{"# Title\n", bold + cyan},
+		{"## Subtitle\n", bold + cyan},
 		{"### Section\n", cyan},
 		{"#### Subsection\n", bold},
 	}
@@ -133,24 +133,14 @@ func TestStreamingRenderer_CodeBlockNoLanguage(t *testing.T) {
 	}
 }
 
-// Fenced code-block markers must not emit stray blank lines. The streaming
-// renderer must match the non-streaming Render, which drops ``` marker lines
-// entirely (a 1-blank-line gap stays 1 blank line, not 2).
+// Fenced code-block markers must not emit stray blank lines: a fence line
+// without a language draws nothing (a 1-blank-line gap stays 1 blank line,
+// not 2).
 func TestStreamingRenderer_FenceMarkersProduceNoBlankLines(t *testing.T) {
-	input := "before:\n\n```\njj git import\n```\n\nafter\n"
-
 	r := NewStreamingRenderer()
-	var out strings.Builder
-	out.WriteString(r.Write(input))
-	out.WriteString(r.Finish())
-
-	got := stripAnsi(out.String())
-	want := stripAnsi(Render(input))
-	if got != want {
-		t.Errorf("streaming render = %q\n    want (Render) = %q", got, want)
-	}
-	if want != "before:\n\n  jj git import\n\nafter\n" {
-		t.Fatalf("Render baseline changed unexpectedly: %q", want)
+	got := stripAnsi(r.Write("before:\n\n```\njj git import\n```\n\nafter\n") + r.Finish())
+	if want := "before:\n\n│ jj git import\n\nafter\n"; got != want {
+		t.Errorf("streaming render = %q, want %q", got, want)
 	}
 }
 
@@ -254,7 +244,7 @@ func TestStreamingRenderer_MultipleLines(t *testing.T) {
 	result := r.Write("# Header\n\nParagraph with **bold**.\n\n- item 1\n- item 2\n")
 
 	// Should have header
-	if !strings.Contains(result, magenta) {
+	if !strings.Contains(result, bold+cyan) {
 		t.Error("expected header formatting")
 	}
 	// Should have bold

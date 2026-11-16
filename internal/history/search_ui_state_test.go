@@ -119,7 +119,7 @@ func TestSearchUI_MultibyteQuery(t *testing.T) {
 func TestSearchUI_TruncatesByDisplayWidth(t *testing.T) {
 	ui := newStateSearchUI(t, "ls "+strings.Repeat("日本", 60))
 	ui.width = 60
-	line := ui.formatResultLine(ui.results[0], 1, lipgloss.NewStyle(), lipgloss.NewStyle(), lipgloss.NewStyle(), lipgloss.NewStyle())
+	line := "│ " + ui.resultRow(ui.results[0], false, lipgloss.NewStyle(), lipgloss.NewStyle())
 	if !utf8.ValidString(line) {
 		t.Fatalf("row is not valid UTF-8: %q", line)
 	}
@@ -131,7 +131,7 @@ func TestSearchUI_TruncatesByDisplayWidth(t *testing.T) {
 // highlighted is the command the view marks as selected, or "" for none.
 func highlighted(ui *SearchUI) string {
 	for _, line := range strings.Split(ui.View().Content, "\n") {
-		if rest, ok := strings.CutPrefix(stripANSI(line), "> "); ok {
+		if rest, ok := strings.CutPrefix(stripANSI(line), "│ › "); ok {
 			for _, c := range ui.results {
 				if strings.HasPrefix(rest, c.Command) {
 					return c.Command
@@ -163,7 +163,7 @@ func TestSearchUI_StaleRowsAreNotSelectable(t *testing.T) {
 	if got := highlighted(ui); got != "" {
 		t.Errorf("a stale row is highlighted: %q", got)
 	}
-	if strings.Contains(ui.View().Content, "Preview") {
+	if strings.Contains(stripANSI(ui.View().Content), "├ 1 of ") {
 		t.Error("a stale row is previewed")
 	}
 }
