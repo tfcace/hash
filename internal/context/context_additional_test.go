@@ -171,45 +171,6 @@ func TestBuilder_WithHistoryLimit_EdgeCases(t *testing.T) {
 	})
 }
 
-// TestCollection_SizeStatus_Boundaries tests size status thresholds.
-func TestCollection_SizeStatus_Boundaries(t *testing.T) {
-	tests := []struct {
-		name       string
-		maxSize    int
-		itemSize   int
-		wantStatus string
-	}{
-		{"0% is green", 100, 0, "green"},
-		{"49% is green", 100, 49, "green"},
-		{"50% is yellow", 100, 50, "yellow"},
-		{"79% is yellow", 100, 79, "yellow"},
-		{"80% is red", 100, 80, "red"},
-		{"100% is red", 100, 100, "red"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			c := NewCollection()
-			c.MaxSizeBytes = tt.maxSize
-			if tt.itemSize > 0 {
-				// Add an item with the specified size
-				c.Add(Item{
-					Category: CategoryCustom,
-					Key:      "test",
-					Value:    strings.Repeat("x", tt.itemSize),
-					Selected: true,
-				})
-			}
-
-			got := c.SizeStatus()
-			if got != tt.wantStatus {
-				t.Errorf("SizeStatus() = %q, want %q (size=%d, max=%d)",
-					got, tt.wantStatus, c.SelectedSize(), c.MaxSizeBytes)
-			}
-		})
-	}
-}
-
 // TestCollection_Toggle_Bounds tests toggle with out of bounds index.
 func TestCollection_Toggle_Bounds(t *testing.T) {
 	c := NewCollection()

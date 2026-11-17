@@ -43,6 +43,9 @@ type Wrapper struct {
 	esc   strings.Builder // escape sequence being read
 	inEsc bool
 
+	bar    string // the bar's styling, when the line opens with one
+	hasBar bool   // the line opens with a "│" bar, repeated on every wrapped row
+
 	sgr  string // styling active at the output position
 	soft int    // rows the terminal added by wrapping overlong rows
 }
@@ -52,7 +55,7 @@ type lineMode int
 
 const (
 	// lineDeciding: at a line start whose text so far still matches
-	// codeLinePrefix; it is held in head until it shows which line it is.
+	// CodeLinePrefix; it is held in head until it shows which line it is.
 	lineDeciding lineMode = iota
 	lineText              // wrapped text
 	lineCode              // a code line: drawn unwrapped
@@ -109,9 +112,9 @@ func (w *Wrapper) rune(out *strings.Builder, r rune) {
 		w.head.WriteRune(r)
 		head := w.head.String()
 		switch {
-		case head == codeLinePrefix:
+		case head == CodeLinePrefix:
 			w.decide(out, lineCode)
-		case !strings.HasPrefix(codeLinePrefix, head):
+		case !strings.HasPrefix(CodeLinePrefix, head):
 			w.decide(out, lineText)
 		}
 	case lineCode:
@@ -131,7 +134,7 @@ func (w *Wrapper) decide(out *strings.Builder, mode lineMode) {
 	w.head.Reset()
 	if mode == lineCode {
 		w.emit(out, head)
-		w.col = runewidth.StringWidth(strings.TrimPrefix(head, gray))
+		w.col = 2 // the bar and a space
 		return
 	}
 	for _, r := range head {
@@ -210,6 +213,7 @@ func (w *Wrapper) endLine(out *strings.Builder) {
 	w.rowUsed = false
 	w.line.Reset()
 	w.measure = true
+	w.hasBar, w.bar = false, ""
 	w.mode = lineDeciding
 }
 
@@ -236,11 +240,23 @@ func (w *Wrapper) flushWord(out *strings.Builder) {
 	if len(w.word) == 0 {
 		return
 	}
+	// A line whose first word is a bar alone is a quote's: the bar opens
+	// every row of it, in the styling it arrived with.
+	isBar := w.measure && !w.hasBar && w.line.String() == "│"
+	if isBar {
+		w.hasBar, w.bar = true, w.sgr
+		for _, tok := range w.word {
+			if tok.text == "│" {
+				break
+			}
+			w.bar += tok.text
+		}
+	}
 	if w.rowUsed && w.col+w.spaces+w.wordWidth > w.width {
 		w.breakRow(out)
 	} else {
 		// Indentation alone must leave a column for the text.
-		w.spaces = min(w.spaces, w.width-w.col-1)
+		w.spaces = max(0, min(w.spaces, w.width-w.col-1))
 		w.emit(out, strings.Repeat(" ", w.spaces))
 		w.col += w.spaces
 	}
@@ -250,7 +266,7 @@ func (w *Wrapper) flushWord(out *strings.Builder) {
 		w.emit(out, tok.text)
 		w.col += tok.width
 	}
-	w.rowUsed = true
+	w.rowUsed = !isBar // a bar alone does not use up its row
 	w.word = w.word[:0]
 	w.wordWidth = 0
 }
@@ -267,8 +283,17 @@ func (w *Wrapper) breakRow(out *strings.Builder) {
 	if style != "" {
 		w.emit(out, reset)
 	}
-	w.emit(out, "\n"+strings.Repeat(" ", w.indent)+style)
-	w.col = w.indent
+	if w.hasBar {
+		bar := "│"
+		if w.bar != "" {
+			bar = w.bar + "│" + reset
+		}
+		w.emit(out, "\n"+bar+" "+style)
+		w.col = 2
+	} else {
+		w.emit(out, "\n"+strings.Repeat(" ", w.indent)+style)
+		w.col = w.indent
+	}
 	w.rowUsed = false
 }
 
@@ -296,7 +321,7 @@ func lineIndent(line string, width int) int {
 	rest := strings.TrimLeft(line, " ")
 	indent := len(line) - len(rest)
 	switch {
-	case strings.HasPrefix(rest, "• "):
+	case strings.HasPrefix(rest, "• "), strings.HasPrefix(rest, "● "), strings.HasPrefix(rest, "○ "):
 		indent += 2
 	case orderedMarkerRe.MatchString(rest):
 		indent += len(orderedMarkerRe.FindString(rest))
@@ -318,9 +343,4 @@ func escapeDone(seq string) bool {
 	}
 	last := seq[len(seq)-1]
 	return len(seq) > 2 && last >= 0x40 && last <= 0x7e
-}
-
-// displayWidth is the number of columns s occupies.
-func displayWidth(s string) int {
-	return runewidth.StringWidth(s)
 }

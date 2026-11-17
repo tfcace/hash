@@ -68,10 +68,7 @@ func TestPickerUI_TruncatesKeyByDisplayWidth(t *testing.T) {
 		t.Fatalf("view is not valid UTF-8")
 	}
 	for _, line := range strings.Split(view, "\n") {
-		if !strings.Contains(line, "[ ]") {
-			continue // header and footer are fixed text
-		}
-		if w := runewidth.StringWidth(ansiStrip(line)); w > ui.width {
+		if w := runewidth.StringWidth(ansiStrip(line)); w >= ui.width {
 			t.Fatalf("row %q is %d columns, want at most %d", line, w, ui.width)
 		}
 	}

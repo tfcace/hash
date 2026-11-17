@@ -266,6 +266,7 @@ func (s *Shell) collectAgentEventStream(
 	var response strings.Builder
 	renderer := markdown.NewStreamingRenderer()
 	renderer.Width = opts.wrapWidth
+	renderer.Theme = markdownTheme(s.colorPalette)
 	sanitizer := newLegacyAgentMarkerSanitizer()
 	wrapper := markdown.NewWrapper(opts.wrapWidth)
 

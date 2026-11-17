@@ -53,7 +53,7 @@ func TestAgentOutputCoordinator_FullAgentFlow(t *testing.T) {
 	// Verify key content is present
 	mustContain := []string{
 		"find large files",
-		"Agent wants to run",
+		permissionTitle,
 		"find . -size +100M",
 		"y to allow",
 	}

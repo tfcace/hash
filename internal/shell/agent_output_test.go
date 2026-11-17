@@ -200,7 +200,7 @@ func TestAgentOutputCoordinator_RenderPermission(t *testing.T) {
 	aoc.RenderPermissionPrompt("kubectl get pods", "", "#00ff00")
 
 	output := buf.String()
-	if !strings.Contains(output, "Agent wants to run") {
+	if !strings.Contains(output, permissionTitle) {
 		t.Errorf("missing permission header in output: %q", output)
 	}
 	if !strings.Contains(output, "kubectl get pods") {
@@ -219,10 +219,10 @@ func TestAgentOutputCoordinator_RenderPermissionWithToolName(t *testing.T) {
 	aoc.RenderPermissionPrompt("cat /etc/hosts", "Read", "#00ff00")
 
 	output := buf.String()
-	if !strings.Contains(output, "(Read)") {
+	if !strings.Contains(stripANSI(output), "┌ permission · Read\r\n") {
 		t.Errorf("missing tool name context in output: %q", output)
 	}
-	if !strings.Contains(output, "Agent wants to run") {
+	if !strings.Contains(output, permissionTitle) {
 		t.Errorf("missing permission header in output: %q", output)
 	}
 	if !strings.Contains(output, "cat /etc/hosts") {
@@ -238,8 +238,8 @@ func TestAgentOutputCoordinator_RenderPermissionWithoutToolName(t *testing.T) {
 	aoc.RenderPermissionPrompt("ls -la", "", "#00ff00")
 
 	output := buf.String()
-	if strings.Contains(output, "(") {
-		t.Errorf("should not contain parentheses when no tool name: %q", output)
+	if !strings.Contains(stripANSI(output), "┌ permission\r\n") {
+		t.Errorf("a prompt without a tool name has a summary: %q", output)
 	}
 }
 
@@ -254,13 +254,13 @@ func TestAgentOutputCoordinator_RenderPermission_SanitizesControlChars(t *testin
 	if strings.Contains(output, "literal\n\x1b[31mowned") {
 		t.Fatalf("raw command control characters leaked into prompt: %q", output)
 	}
-	if strings.Contains(output, "(Read\nWrite)") {
+	if strings.Contains(output, "Read\nWrite") {
 		t.Fatalf("raw tool name newline leaked into prompt: %q", output)
 	}
 	if !strings.Contains(output, `literal\n\x1b[31mowned`) {
 		t.Fatalf("sanitized command missing from prompt: %q", output)
 	}
-	if !strings.Contains(output, `(Read\nWrite)`) {
+	if !strings.Contains(output, `Read\nWrite`) {
 		t.Fatalf("sanitized tool name missing from prompt: %q", output)
 	}
 	if strings.Contains(output, "\x1b[31mowned") {
@@ -268,7 +268,7 @@ func TestAgentOutputCoordinator_RenderPermission_SanitizesControlChars(t *testin
 	}
 }
 
-// Clearing an answered prompt erases its five rows and adds none: the
+// Clearing an answered prompt erases its four rows and adds none: the
 // tool's lifecycle row says whether it ran.
 func TestAgentOutputCoordinator_ClearPermission(t *testing.T) {
 	var buf bytes.Buffer

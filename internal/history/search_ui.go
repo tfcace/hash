@@ -11,13 +11,19 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/mattn/go-runewidth"
 	"github.com/tfcace/hash/internal/clipboard"
+	"github.com/tfcace/hash/internal/listui"
 	"github.com/tfcace/hash/internal/prompt"
 	"github.com/tfcace/hash/internal/termtext"
+	"github.com/tfcace/hash/internal/tilde"
 	sysClipboard "golang.design/x/clipboard"
 )
 
 const (
-	maxVisibleResults = 10
+	// defaultVisibleResults is how many results are listed before the
+	// pane's height is known.
+	defaultVisibleResults = 10
+	// minVisibleResults are listed however short the pane is.
+	minVisibleResults = 3
 	debounceDelay     = 50 * time.Millisecond
 )
 
@@ -108,6 +114,7 @@ func (ui *SearchUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		ui.width = msg.Width
 		ui.height = msg.Height
+		ui.adjustScroll()
 
 	case searchResultMsg:
 		// Only results for the typed query, and only if no key already
@@ -154,6 +161,21 @@ func (ui *SearchUI) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			ui.adjustScroll()
 		}
 
+	case "pgup", "pgdown", "home", "end":
+		ui.fresh()
+		switch page := ui.visibleResults(); msg.String() {
+		case "pgup":
+			ui.selected -= page
+		case "pgdown":
+			ui.selected += page
+		case "home":
+			ui.selected = 0
+		case "end":
+			ui.selected = len(ui.results) - 1
+		}
+		ui.selected = max(min(ui.selected, len(ui.results)-1), 0)
+		ui.adjustScroll()
+
 	case "ctrl+y":
 		ui.fresh()
 		cmd := ui.copyCommand()
@@ -198,9 +220,29 @@ func (ui *SearchUI) adjustScroll() {
 	if ui.selected < ui.scrollOffset {
 		ui.scrollOffset = ui.selected
 	}
-	if ui.selected >= ui.scrollOffset+maxVisibleResults {
-		ui.scrollOffset = ui.selected - maxVisibleResults + 1
+	if visible := ui.visibleResults(); ui.selected >= ui.scrollOffset+visible {
+		ui.scrollOffset = ui.selected - visible + 1
 	}
+}
+
+// visibleResults is how many results the frame lists: what its share of
+// the pane leaves beside its other rows.
+func (ui *SearchUI) visibleResults() int {
+	limit := listui.FrameRows(ui.height)
+	if limit == 0 {
+		return defaultVisibleResults
+	}
+	other := 2 // the title and the foot
+	if len(ui.results) > 0 {
+		other++ // the selected result's row, or "searching..."
+	}
+	if ui.selected >= 0 && ui.selected < len(ui.results) && !ui.stale() {
+		other += len(ui.whole(ui.results[ui.selected], lipgloss.NewStyle()))
+	}
+	if ui.statusMessage != "" {
+		other++
+	}
+	return max(limit-other, minVisibleResults)
 }
 
 // View implements tea.Model. Once the search ended its frame is empty:
@@ -213,102 +255,80 @@ func (ui *SearchUI) View() tea.View {
 	return ui.view(ui.frame())
 }
 
-// frame draws the open search: the query box, the results, the preview and
-// the footer.
+// searchKeys are the keys the search answers to, most needed first: the
+// foot shows the ones that fit.
+var searchKeys = []string{"↑/↓", "pgup/pgdn", "enter select", searchWayOut, "ctrl+y copy cmd", "ctrl+o copy output"}
+
+// searchWayOut is the one key that always applies.
+const searchWayOut = "esc cancel"
+
+// frame draws the open search on the frame every hash surface shares: a
+// title row with the query, the results and the selected one's preview
+// behind a bar, and the keys on the last row.
 func (ui *SearchUI) frame() string {
-	var b strings.Builder
+	accent := lipgloss.NewStyle().Foreground(lipgloss.Color(ui.palette.Primary))
+	dim := lipgloss.NewStyle().Foreground(lipgloss.Color(ui.palette.Dim))
+	bar := dim.Render("│") + " "
 
-	// Styles
-	borderColor := lipgloss.Color(ui.palette.Primary)
-	selectedStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color(ui.palette.Success)).
-		Bold(true)
-	normalStyle := lipgloss.NewStyle()
-	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(ui.palette.Dim))
-	errorStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(ui.palette.Error))
-
-	// Header box
-	headerBorder := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(borderColor).
-		Padding(0, 1).
-		Width(ui.width - 2)
-
-	headerLabel := lipgloss.NewStyle().
-		Foreground(borderColor).
-		Bold(true).
-		Render("Search")
-
-	queryDisplay := termtext.OneLine(ui.query)
-	if queryDisplay == "" {
-		queryDisplay = dimStyle.Render("type to search...")
+	query := termtext.OneLine(ui.query)
+	if query == "" {
+		query = dim.Render("type to search...")
+	} else if room := ui.width - len("┌ history · ") - 1; room > 3 {
+		query = termtext.Truncate(query, room, "...")
 	}
+	rows := []string{dim.Render("┌ ") + accent.Bold(true).Render("history") + dim.Render(" · ") + query}
 
-	header := fmt.Sprintf("%s %s", headerLabel, queryDisplay)
-	b.WriteString(headerBorder.Render(header))
-	b.WriteString("\n")
-
-	// Results
-	if len(ui.results) == 0 {
-		switch {
-		case ui.stale():
-			// The typed query has not been searched: nothing is known yet
-			b.WriteString(dimStyle.Render("  searching..."))
-		case ui.query != "":
-			b.WriteString(dimStyle.Render("  No matches"))
-		default:
-			b.WriteString(dimStyle.Render("  No history"))
-		}
-		b.WriteString("\n")
-	} else {
-		visibleEnd := ui.scrollOffset + maxVisibleResults
-		if visibleEnd > len(ui.results) {
-			visibleEnd = len(ui.results)
-		}
-
-		for i := ui.scrollOffset; i < visibleEnd; i++ {
-			cmd := ui.results[i]
-			var line string
+	switch {
+	case len(ui.results) > 0:
+		last := min(ui.scrollOffset+ui.visibleResults(), len(ui.results))
+		for i := ui.scrollOffset; i < last; i++ {
 			if ui.stale() {
 				// Waiting for the typed query: the old rows hold the space, dimmed
-				line = "  " + dimStyle.Render(ui.truncateCommand(cmd.Command))
-			} else {
-				line = ui.formatResultLine(cmd, i, selectedStyle, normalStyle, dimStyle, errorStyle)
+				rows = append(rows, bar+"  "+dim.Render(ui.fitCommand(ui.results[i].Command, ui.width-7)))
+				continue
 			}
-			b.WriteString(line)
-			b.WriteString("\n")
+			rows = append(rows, bar+ui.resultRow(ui.results[i], i == ui.selected, accent, dim))
+		}
+	case ui.stale():
+		// The typed query has not been searched: nothing is known yet
+		rows = append(rows, bar+dim.Render("searching..."))
+	case ui.query != "":
+		rows = append(rows, bar+dim.Render("No matches"))
+	default:
+		rows = append(rows, bar+dim.Render("No history"))
+	}
+
+	switch {
+	case len(ui.results) == 0:
+	case ui.stale():
+		rows = append(rows, dim.Render("├ searching..."))
+	case ui.selected >= 0 && ui.selected < len(ui.results):
+		rows = append(rows, dim.Render(ui.about(ui.results[ui.selected])))
+		for _, line := range ui.whole(ui.results[ui.selected], dim) {
+			rows = append(rows, bar+line)
 		}
 	}
 
-	// Preview pane for selected command
-	if !ui.stale() && ui.selected >= 0 && ui.selected < len(ui.results) {
-		ui.writePreview(&b, ui.results[ui.selected], normalStyle, dimStyle)
-	}
-
-	// Result count (bottom right)
-	if len(ui.results) > 0 {
-		countStr := fmt.Sprintf("result %d of %d", ui.selected+1, ui.totalResults)
-		if ui.stale() {
-			countStr = "searching..."
-		}
-		padding := ui.width - len(countStr) - 2
-		if padding > 0 {
-			b.WriteString(strings.Repeat(" ", padding))
-		}
-		b.WriteString(dimStyle.Render(countStr))
-		b.WriteString("\n")
-	}
-
-	// Status message (if any)
 	if ui.statusMessage != "" {
-		b.WriteString(selectedStyle.Render(ui.statusMessage))
-		b.WriteString("\n")
+		ok := lipgloss.NewStyle().Foreground(lipgloss.Color(ui.palette.Success))
+		rows = append(rows, bar+ok.Render(ui.statusMessage))
 	}
+	return strings.Join(append(rows, dim.Render(ui.foot())), "\n")
+}
 
-	// Help footer
-	help := "  ↑/↓ navigate  enter select  ctrl+y copy cmd  ctrl+o copy output  esc cancel"
-	b.WriteString(dimStyle.Render(help))
-	return b.String()
+// foot is the frame's last row: the keys, as many whole ones as fit.
+func (ui *SearchUI) foot() string {
+	keys := searchKeys
+	if len(ui.results) == 0 {
+		// Nothing to move through, select or copy: only the way out.
+		keys = []string{searchWayOut}
+	}
+	for n := len(keys); ; n-- {
+		row := "└─ " + strings.Join(keys[:n], " · ")
+		if n == 1 || runewidth.StringWidth(row) < ui.width {
+			return row
+		}
+	}
 }
 
 // view is the frame that draws content.
@@ -322,94 +342,180 @@ func (ui *SearchUI) view(content string) tea.View {
 	return v
 }
 
-// writePreview shows the selected command in full with its metadata.
-func (ui *SearchUI) writePreview(b *strings.Builder, cmd Command, normalStyle, dimStyle lipgloss.Style) {
-	b.WriteString("\n")
-	b.WriteString(dimStyle.Render("─── Preview ───"))
-	b.WriteString("\n")
+// about is the row under the list for the selected result: which one it
+// is, and when and where it ran.
+func (ui *SearchUI) about(cmd Command) string {
+	room := ui.width - 1 // a column short of the pane
 
-	// Full command (not truncated), each of its lines drawn inert
-	lines := strings.Split(cmd.Command, "\n")
-	for i, line := range lines {
-		lines[i] = termtext.Inert(line)
+	status := "✓"
+	if cmd.ExitCode != 0 {
+		status = fmt.Sprintf("✗%d", cmd.ExitCode)
 	}
-	b.WriteString(normalStyle.Render(strings.Join(lines, "\n")))
-	b.WriteString("\n")
+	head := []string{fmt.Sprintf("├ %d of %d", ui.selected+1, ui.totalResults), cmd.Timestamp.Format("2006-01-02 15:04")}
+	tail := []string{status}
+	if cmd.GitBranch != "" {
+		tail = []string{fit(termtext.OneLine(cmd.GitBranch), maxBranchColumns), status}
+	}
+	// The folder takes what the rest leaves, keeping its end: the part
+	// that tells one folder from another.
+	cwd := termtext.OneLine(tilde.Abbrev(cmd.Cwd))
+	if room > 0 {
+		rest := runewidth.StringWidth(strings.Join(append(head, tail...), " · ")) + len(" · ")
+		cwd = fitEnd(cwd, room-rest)
+	}
+	if cwd != "" {
+		head = append(head, cwd)
+	}
+	return fit(strings.Join(append(head, tail...), " · "), room)
+}
 
-	// The question behind a command the agent produced
-	if ui.store != nil {
-		if question, ok := ui.store.AgentPromptForCommand(cmd.ID); ok {
-			b.WriteString(dimStyle.Render("?? " + termtext.OneLine(question)))
-			b.WriteString("\n")
+// maxWholeRows is how many rows the selected command may take under the
+// list: the results above it are what is being searched.
+const maxWholeRows = 3
+
+// whole is the rows under the list for what the selected result's own row
+// could not show: the command, when its row cut it or it has more lines
+// than one, and the question behind a command the agent produced.
+func (ui *SearchUI) whole(cmd Command, dim lipgloss.Style) []string {
+	room := ui.width - 3 // behind the bar, a column short of the pane
+
+	var rows []string
+	_, commandRoom := ui.rowLayout(cmd)
+	if strings.Contains(cmd.Command, "\n") || (ui.width > 0 && runewidth.StringWidth(termtext.OneLine(cmd.Command)) > commandRoom) {
+		for _, line := range strings.Split(cmd.Command, "\n") {
+			rows = append(rows, breakColumns(termtext.Inert(line), room)...)
+		}
+		if len(rows) > maxWholeRows {
+			rows = append(rows[:maxWholeRows-1], dim.Render(fmt.Sprintf("… %d more lines", len(rows)-maxWholeRows+1)))
 		}
 	}
-
-	// Metadata line
-	meta := fmt.Sprintf("%s │ %s", cmd.Timestamp.Format("2006-01-02 15:04"), cmd.Cwd)
-	if cmd.GitBranch != "" {
-		meta += fmt.Sprintf(" │ %s", cmd.GitBranch)
+	if ui.store != nil {
+		if question, ok := ui.store.AgentPromptForCommand(cmd.ID); ok {
+			rows = append(rows, dim.Render(fit("?? "+termtext.OneLine(question), room)))
+		}
 	}
-	if cmd.ExitCode != 0 {
-		meta += fmt.Sprintf(" │ ✗%d", cmd.ExitCode)
-	} else {
-		meta += " │ ✓"
-	}
-	b.WriteString(dimStyle.Render(termtext.OneLine(meta)))
-	b.WriteString("\n")
+	return rows
 }
 
-func (ui *SearchUI) formatResultLine(cmd Command, idx int, selected, normal, dim, errStyle lipgloss.Style) string {
-	var b strings.Builder
+// maxBranchColumns is how much of a branch name a row shows.
+const maxBranchColumns = 24
 
-	// Selection indicator
-	if idx == ui.selected {
-		b.WriteString(selected.Render("> "))
-	} else {
-		b.WriteString("  ")
+// fit is s in at most width columns, cut with an ellipsis. A width below 1
+// is no limit.
+func fit(s string, width int) string {
+	if width < 1 {
+		return s
 	}
-
-	cmdText := ui.truncateCommand(cmd.Command)
-
-	if idx == ui.selected {
-		b.WriteString(selected.Render(cmdText))
-	} else {
-		b.WriteString(normal.Render(cmdText))
-	}
-
-	// Right-align metadata with indicator before it
-	meta := ui.formatTimestamp(cmd.Timestamp)
-	if cmd.GitBranch != "" {
-		meta += " " + termtext.OneLine(cmd.GitBranch)
-	}
-
-	// Calculate padding (indicator goes between padding and metadata)
-	currentLen := 2 + runewidth.StringWidth(cmdText)
-	padding := ui.width - currentLen - runewidth.StringWidth(meta) - 4 // -2 for indicator, -2 for margins
-	if padding > 0 {
-		b.WriteString(strings.Repeat(" ", padding))
-	}
-
-	// Status indicator before metadata - ensures right edge alignment
-	if cmd.ExitCode != 0 {
-		b.WriteString(errStyle.Render("x "))
-	} else {
-		b.WriteString("  ")
-	}
-
-	b.WriteString(dim.Render(meta))
-
-	return b.String()
+	return termtext.Truncate(s, width, "…")
 }
 
-// truncateCommand fits a command into its column, measured in terminal
-// columns, leaving room for the metadata. It is drawn inert on one row.
-func (ui *SearchUI) truncateCommand(command string) string {
+// fitEnd is the end of s in at most width columns, behind an ellipsis, or
+// nothing when there is no room for any of it.
+func fitEnd(s string, width int) string {
+	if runewidth.StringWidth(s) <= width {
+		return s
+	}
+	if width < 4 {
+		return ""
+	}
+	runes := []rune(s)
+	start := len(runes)
+	for used := 1; start > 0; start-- {
+		used += runewidth.RuneWidth(runes[start-1])
+		if used > width {
+			break
+		}
+	}
+	return "…" + string(runes[start:])
+}
+
+// breakColumns breaks s into rows of at most width columns, between words
+// where it can and inside a word longer than a row. A width below 1 is no
+// limit.
+func breakColumns(s string, width int) []string {
+	if width < 1 || runewidth.StringWidth(s) <= width {
+		return []string{s}
+	}
+	var rows []string
+	row, used := "", 0
+	for _, word := range strings.Split(s, " ") {
+		w := runewidth.StringWidth(word)
+		if used > 0 && used+1+w <= width {
+			row, used = row+" "+word, used+1+w
+			continue
+		}
+		if used > 0 {
+			rows = append(rows, row)
+		}
+		// A word longer than a row fills rows until its rest fits one.
+		for w > width {
+			head := runewidth.Truncate(word, width, "")
+			rows = append(rows, head)
+			word = word[len(head):]
+			w = runewidth.StringWidth(word)
+		}
+		row, used = word, w
+	}
+	return append(rows, row)
+}
+
+// resultRow is one result: a cursor on the current one, the command, and
+// when it ran, right-aligned behind a mark if it failed.
+func (ui *SearchUI) resultRow(cmd Command, current bool, accent, dim lipgloss.Style) string {
+	meta, commandRoom := ui.rowLayout(cmd)
+	room := ui.width - 7
+	cmdText := ui.fitCommand(cmd.Command, commandRoom)
+	row := "  " + cmdText
+	if current {
+		row = accent.Render("›") + " " + lipgloss.NewStyle().Bold(true).Render(cmdText)
+	}
+	if padding := room - runewidth.StringWidth(cmdText) - runewidth.StringWidth(meta); padding > 0 {
+		row += strings.Repeat(" ", padding)
+	}
+	mark := "  "
+	if cmd.ExitCode != 0 {
+		mark = lipgloss.NewStyle().Foreground(lipgloss.Color(ui.palette.Error)).Render("✗") + " "
+	}
+	return row + mark + dim.Render(meta)
+}
+
+// fitCommand is a command on one inert row of at most room columns. Before
+// the pane's width is known it is left whole.
+func (ui *SearchUI) fitCommand(command string, room int) string {
 	command = termtext.OneLine(command)
-	if maxCmdWidth := ui.width - 25; maxCmdWidth > 3 {
-		return termtext.Truncate(command, maxCmdWidth, "...")
+	if ui.width <= 0 {
+		return command
 	}
-	return command
+	return termtext.Truncate(command, max(room, 1), "...")
 }
+
+// rowLayout is what sits beside a result's command on its row, and the
+// columns that leaves the command. The command comes first: the branch,
+// then when it ran, give way to it.
+func (ui *SearchUI) rowLayout(cmd Command) (meta string, commandRoom int) {
+	// The bar, the cursor and the mark take two columns each; the row stops
+	// a column short of the pane.
+	room := ui.width - 7
+
+	when := ui.formatTimestamp(cmd.Timestamp)
+	meta = when
+	if cmd.GitBranch != "" {
+		meta += " · " + fit(termtext.OneLine(cmd.GitBranch), maxBranchColumns)
+	}
+	if ui.width > 0 {
+		for _, shorter := range []string{when, ""} {
+			if room-runewidth.StringWidth(meta) >= minCommandColumns {
+				break
+			}
+			meta = shorter
+		}
+	}
+	return meta, room - runewidth.StringWidth(meta) - 1
+}
+
+// minCommandColumns is the least room a result's command is left with
+// before what sits beside it is dropped.
+const minCommandColumns = 16
 
 func (ui *SearchUI) formatTimestamp(t time.Time) string {
 	now := time.Now()

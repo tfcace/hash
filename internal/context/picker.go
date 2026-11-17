@@ -39,6 +39,11 @@ func (p *Picker) MoveDown() {
 	}
 }
 
+// MoveTo moves the cursor to row, or to the nearest row there is.
+func (p *Picker) MoveTo(row int) {
+	p.cursor = max(min(row, len(p.collection.Items)-1), 0)
+}
+
 // current returns the Items index under the cursor, or -1 if empty.
 func (p *Picker) current() int {
 	order := p.collection.displayOrder()
@@ -87,9 +92,4 @@ func (p *Picker) DeselectAll() {
 // SelectedSize returns the size of selected items.
 func (p *Picker) SelectedSize() int {
 	return p.collection.SelectedSize()
-}
-
-// SizeStatus returns the size status indicator.
-func (p *Picker) SizeStatus() string {
-	return p.collection.SizeStatus()
 }

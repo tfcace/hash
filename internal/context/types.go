@@ -99,20 +99,6 @@ func (c *Collection) Toggle(index int) {
 	}
 }
 
-// SizeStatus returns a status indicator for the current size.
-// Returns "green", "yellow", or "red".
-func (c *Collection) SizeStatus() string {
-	size := c.SelectedSize()
-	ratio := float64(size) / float64(c.MaxSizeBytes)
-
-	if ratio < 0.5 {
-		return "green"
-	} else if ratio < 0.8 {
-		return "yellow"
-	}
-	return "red"
-}
-
 // Clear removes all items from the collection.
 func (c *Collection) Clear() {
 	c.Items = nil

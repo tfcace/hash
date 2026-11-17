@@ -13,7 +13,7 @@ func stripAnsi(s string) string {
 }
 
 // A code-block line split by a partial-line Flush must not get the
-// two-space indent injected again mid-line ("wc -l" became "wc -  l").
+// line's bar injected again mid-line.
 func TestStreamingRenderer_FlushDoesNotReindentCodeLine(t *testing.T) {
 	r := NewStreamingRenderer()
 	var out strings.Builder
@@ -24,7 +24,7 @@ func TestStreamingRenderer_FlushDoesNotReindentCodeLine(t *testing.T) {
 	out.WriteString(r.Write(" f -mmin -60\n"))
 
 	got := stripAnsi(out.String())
-	want := "  find . -type f -mmin -60\n"
+	want := "│ find . -type f -mmin -60\n"
 	if got != want {
 		t.Errorf("rendered = %q, want %q", got, want)
 	}
@@ -96,7 +96,7 @@ func TestStreamingRenderer_FinishClosesOpenStyling(t *testing.T) {
 	if !strings.HasSuffix(got, reset) {
 		t.Errorf("Finish output %q does not close styling with reset", got)
 	}
-	if want := "  ls -l"; stripAnsi(out.String()) != want {
+	if want := "│ ls -l"; stripAnsi(out.String()) != want {
 		t.Errorf("rendered = %q, want %q", stripAnsi(out.String()), want)
 	}
 }

@@ -13,6 +13,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/tfcace/hash/internal/compat"
 	"github.com/tfcace/hash/internal/config"
+	"github.com/tfcace/hash/internal/prompt"
 	"github.com/tfcace/hash/internal/tilde"
 )
 
@@ -162,7 +163,7 @@ func migrateInteractive(in io.Reader, out io.Writer, statePath string) int {
 		return 0
 	}
 
-	_, _ = lipgloss.Fprintln(out, compat.FormatWelcomePromptFiles(shellFiles))
+	_, _ = lipgloss.Fprintln(out, compat.FormatWelcomePromptFiles(shellFiles, prompt.DefaultPalette()))
 
 	switch compat.AskMigration(compat.LineReader(in), out, "Choice", migrateHelp) {
 	case compat.DecisionImport:
@@ -203,7 +204,7 @@ func importMigration(out io.Writer, statePath, shell string, paths []string) int
 	fmt.Fprintln(out, "done!")
 	fmt.Fprintln(out)
 	inHash := os.Getenv("HASH_SHELL") == "1"
-	_, _ = lipgloss.Fprintln(out, compat.FormatImportSummary(report, inHash))
+	_, _ = lipgloss.Fprintln(out, compat.FormatImportSummary(report, inHash, prompt.DefaultPalette()))
 
 	created, hashrcErr, err := compat.RecordImport(statePath, shell, files, report)
 	if err != nil {

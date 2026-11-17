@@ -158,7 +158,7 @@ func TestSearchUI_NoResults(t *testing.T) {
 	}
 
 	// Should show header and footer even with no results
-	if !strings.Contains(view, "Search") {
+	if !strings.Contains(view, "history") {
 		t.Error("SearchUI missing header with no results")
 	}
 }
@@ -288,8 +288,8 @@ func TestSearchUI_ViewRendering(t *testing.T) {
 	view := ui.View().Content
 
 	// Should contain header
-	if !strings.Contains(view, "Search") {
-		t.Error("View should contain Search header")
+	if !strings.Contains(view, "history") {
+		t.Error("View should contain the history header")
 	}
 
 	// Should contain commands
@@ -298,12 +298,12 @@ func TestSearchUI_ViewRendering(t *testing.T) {
 	}
 
 	// Should contain help footer
-	if !strings.Contains(view, "navigate") {
+	if !strings.Contains(view, "enter select") {
 		t.Error("View should contain navigation help")
 	}
 
 	// Should show error indicator for failed command
-	if !strings.Contains(view, "x ") {
+	if !strings.Contains(view, "✗") {
 		t.Error("View should show error indicator for failed command")
 	}
 
@@ -347,7 +347,7 @@ func TestSearchUI_Scrolling(t *testing.T) {
 	}
 
 	// Selected item should still be within visible range
-	if ui.selected < ui.scrollOffset || ui.selected >= ui.scrollOffset+10 {
+	if ui.selected < ui.scrollOffset || ui.selected >= ui.scrollOffset+ui.visibleResults() {
 		t.Error("Selected item should be within visible range")
 	}
 }
@@ -417,12 +417,8 @@ func TestSearchUI_ResultCountFormat(t *testing.T) {
 
 	view := ui.View().Content
 
-	// Should use "result X of Y" format, not "[X/Y]"
-	if strings.Contains(view, "[1/5]") {
-		t.Error("Should not use [X/Y] format")
-	}
-	if !strings.Contains(view, "result 1 of 5") {
-		t.Error("Should use 'result X of Y' format")
+	if !strings.Contains(stripANSI(view), "├ 1 of 5 · ") {
+		t.Error("the row under the list should count the results")
 	}
 }
 
@@ -444,14 +440,14 @@ func TestSearchUI_PreviewPane(t *testing.T) {
 
 	view := ui.View().Content
 
-	// Should contain preview section
-	if !strings.Contains(view, "Preview") {
-		t.Error("View should contain Preview section")
+	// Where and when it ran, and on which branch
+	if !strings.Contains(stripANSI(view), " · /home/user/projects · main · ✓") {
+		t.Errorf("no row saying where the command ran:\n%s", stripANSI(view))
 	}
 
-	// Should show full command in preview (not truncated)
+	// The whole command is on screen
 	if !strings.Contains(view, "kubectl get pods -n staging --sort-by='.status.startTime'") {
-		t.Error("Preview should show full command")
+		t.Error("the whole command should be shown")
 	}
 }
 

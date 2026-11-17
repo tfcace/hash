@@ -118,7 +118,7 @@ func TestMigrate_InHashSaysItLoadsInNewSessions(t *testing.T) {
 		t.Fatalf("exit = %d", code)
 	}
 	got := out.String()
-	if strings.Contains(got, "Loaded from") || !strings.Contains(got, "Will load from ~/.zshrc:") ||
+	if strings.Contains(got, "· loaded from") || !strings.Contains(got, "· will load from ~/.zshrc\n") ||
 		!strings.Contains(got, "Loads in new hash sessions: open a new tab, or run 'exec hash -l'.") {
 		t.Errorf("output does not say the import loads in new sessions:\n%s", got)
 	}
@@ -131,7 +131,7 @@ func TestMigrate_OutsideHashSaysLoaded(t *testing.T) {
 	if code := migrateInteractive(strings.NewReader("y\n"), &out, statePath); code != 0 {
 		t.Fatalf("exit = %d", code)
 	}
-	if got := out.String(); !strings.Contains(got, "Loaded from ~/.zshrc:") || strings.Contains(got, "new hash sessions") {
+	if got := out.String(); !strings.Contains(got, "· loaded from ~/.zshrc\n") || strings.Contains(got, "new hash sessions") {
 		t.Errorf("output:\n%s", got)
 	}
 }

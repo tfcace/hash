@@ -98,7 +98,7 @@ func TestEmptyStateEnterChoosesNothing(t *testing.T) {
 // The panel always carries the orientation content and a docs pointer.
 func TestViewContainsTipsAndDocs(t *testing.T) {
 	view := New(nil, "0.6.2").render()
-	for _, want := range []string{"??", "Ctrl+R", "runhash.dev/docs"} {
+	for _, want := range []string{"??", "ctrl+r", "runhash.dev/docs"} {
 		if !strings.Contains(view, want) {
 			t.Errorf("view missing %q", want)
 		}
@@ -117,7 +117,7 @@ func TestEmptyStateViewMentionsNoAgent(t *testing.T) {
 func TestViewScopesTheCopyKeysToThePicker(t *testing.T) {
 	for _, m := range []*Model{New(nil, "0.6.2"), New(two(), "0.6.2")} {
 		for _, line := range strings.Split(m.render(), "\n") {
-			if (strings.Contains(line, "Ctrl+Y") || strings.Contains(line, "Ctrl+O")) && !strings.Contains(line, "Ctrl+R") {
+			if (strings.Contains(line, "ctrl+y") || strings.Contains(line, "ctrl+o")) && !strings.Contains(line, "ctrl+r") {
 				t.Errorf("the panel offers a picker key at the prompt: %q", line)
 			}
 		}

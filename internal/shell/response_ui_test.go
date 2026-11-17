@@ -2,8 +2,12 @@ package shell
 
 import (
 	"bytes"
+	"math/rand"
 	"strings"
 	"testing"
+
+	"github.com/charmbracelet/colorprofile"
+	"github.com/mattn/go-runewidth"
 )
 
 func TestResponseUI_ShowAgentHintIncludesACPInstallCommand(t *testing.T) {
@@ -31,81 +35,130 @@ func TestAgentStateStringUsesScopedConversationStyle(t *testing.T) {
 	}
 }
 
-func TestAgentStatusMotionUsesReplacementGlyphs(t *testing.T) {
-	motion := selectAgentStatusMotion(0, &scriptedIntn{values: []int{0}})
-	line := formatAgentStatusMotion("agent · thinking", motion)
-	if !bytes.Contains([]byte(line), []byte("agent · thinking")) {
-		t.Fatalf("status line should include state text, got %q", line)
+func spinnerGlyphs(cells []spinnerCell) string {
+	var b strings.Builder
+	for _, c := range cells {
+		b.WriteString(c.glyph)
 	}
-	if !strings.HasPrefix(line, " \033[") {
-		t.Fatalf("status line should be indented by one space, got %q", line)
-	}
-	for _, motion := range agentStatusReplacementPool {
-		if got := len([]rune(motion)); got != 1 {
-			t.Fatalf("status motion frame should stay compact, frame %q has width %d", motion, got)
+	return b.String()
+}
+
+// settledMask shows which cells have resolved: "ha.." is two letters in.
+func settledMask(cells []spinnerCell) string {
+	var b strings.Builder
+	for _, c := range cells {
+		if c.settled {
+			b.WriteString(c.glyph)
+		} else {
+			b.WriteString(".")
 		}
 	}
-	for _, want := range []string{"h", "a", "s", "/"} {
-		if !containsString(agentStatusReplacementPool, want) {
-			t.Fatalf("status replacement pool should include %q", want)
+	return b.String()
+}
+
+func TestSpinnerResolvesTheNameLeftToRight(t *testing.T) {
+	for frame, want := range map[int]string{
+		0: "....", 5: "....", 6: "h...", 11: "ha..", 16: "has.", 21: "hash", 37: "hash",
+	} {
+		if got := settledMask(spinnerCells(frame, nil)); got != want {
+			t.Errorf("frame %d: settled %q, want %q", frame, got, want)
 		}
-	}
-	for _, want := range []string{"-", "\\", "|", "+", "*"} {
-		if !containsString(agentStatusReplacementPool, want) {
-			t.Fatalf("status replacement pool should include post-style glyph %q", want)
-		}
-	}
-	for _, want := range []string{"░", "▒", "▓", "█"} {
-		if !containsString(agentStatusReplacementPool, want) {
-			t.Fatalf("status replacement pool should include post block glyph %q", want)
-		}
-	}
-	for _, quadrant := range []string{"▖", "▘", "▝", "▗"} {
-		if containsString(agentStatusReplacementPool, quadrant) {
-			t.Fatalf("status replacement pool should avoid quadrant glyph %q", quadrant)
-		}
-	}
-	if bytes.Contains([]byte(line), []byte("⠋")) {
-		t.Fatalf("status motion should not use braille spinner frames, got %q", line)
 	}
 }
 
-func TestAgentStatusMotionRandomlySelectsFromReplacementPool(t *testing.T) {
-	motion := selectAgentStatusMotion(0, &scriptedIntn{values: []int{indexString(agentStatusReplacementPool, "/")}})
-	if motion != "/" {
-		t.Fatalf("status motion should use random glyphs from the replacement pool, got %q", motion)
+func TestSpinnerDissolvesAndStartsOver(t *testing.T) {
+	for frame, want := range map[int]string{38: "▓▓▓▓", 40: "▒▒▒▒", 42: "░░░░", 44: "    ", 45: "    "} {
+		cells := spinnerCells(frame, nil)
+		if got := spinnerGlyphs(cells); got != want {
+			t.Errorf("frame %d: glyphs %q, want %q", frame, got, want)
+		}
+		if got := settledMask(cells); got != "...." {
+			t.Errorf("frame %d: a dissolving cell is drawn as settled: %q", frame, got)
+		}
 	}
-
-	motion = selectAgentStatusMotion(0, &scriptedIntn{values: []int{indexString(agentStatusReplacementPool, "s")}})
-	if motion != "s" {
-		t.Fatalf("status motion should use random letters from hash in the replacement pool, got %q", motion)
+	if got := settledMask(spinnerCells(spinnerCycle, nil)); got != "...." {
+		t.Errorf("the cycle does not start over with noise: %q", got)
 	}
-	line := formatAgentStatusMotion("bot · ok", motion)
-	if !bytes.Contains([]byte(line), []byte("s")) {
-		t.Fatalf("status line should render the selected hash letter, got %q", line)
-	}
-}
-
-func TestAgentStatusMotionGlyphUsesLiveRailColor(t *testing.T) {
-	line := formatAgentStatusMotion("agent · thinking", "█")
-	wantGlyph := agentConversationLiveRailStyle + "█\033[0m"
-	if !strings.Contains(line, wantGlyph) {
-		t.Fatalf("status motion glyph should use live rail color, got %q", line)
-	}
-	wantText := "\033[90magent · thinking\033[0m"
-	if !strings.Contains(line, wantText) {
-		t.Fatalf("status text should stay dim, got %q", line)
-	}
-	if strings.Contains(line, agentConversationLiveRailStyle+"agent · thinking") {
-		t.Fatalf("live rail color should apply only to status glyph, got %q", line)
+	if got := settledMask(spinnerCells(spinnerCycle+6, nil)); got != "h..." {
+		t.Errorf("the second cycle does not resolve again: %q", got)
 	}
 }
 
-func TestAgentStatusMotionAnimatesFrames(t *testing.T) {
-	first := formatAgentStatusMotion("agent · thinking", selectAgentStatusMotion(0, nil))
-	second := formatAgentStatusMotion("agent · thinking", selectAgentStatusMotion(1, nil))
-	if first == second {
-		t.Fatalf("status motion should change across frames, got %q", first)
+func TestSpinnerNoiseComesFromTheGlyphPoolAndNeverSpellsALetter(t *testing.T) {
+	rng := rand.New(rand.NewSource(7)) //nolint:gosec // test animation
+	for frame := 0; frame < 6; frame++ {
+		for _, c := range spinnerCells(frame, rng) {
+			if !containsString(spinnerNoise, c.glyph) {
+				t.Errorf("frame %d: noise glyph %q is not in the pool", frame, c.glyph)
+			}
+		}
+	}
+	for _, g := range spinnerNoise {
+		if strings.Contains(spinnerName, g) {
+			t.Errorf("noise glyph %q would read as a letter of the name", g)
+		}
+		if runewidth.StringWidth(g) != 1 {
+			t.Errorf("noise glyph %q is not one column wide", g)
+		}
+	}
+	for _, want := range []string{"░", "▒", "▓", "█", "-", "\\", "|", "/", "+", "*", "$", "#"} {
+		if !containsString(spinnerNoise, want) {
+			t.Errorf("the noise pool lost %q", want)
+		}
+	}
+}
+
+func TestSpinnerNoiseChangesFromFrameToFrameWithoutARandomSource(t *testing.T) {
+	if spinnerGlyphs(spinnerCells(0, nil)) == spinnerGlyphs(spinnerCells(1, nil)) {
+		t.Error("two noise frames in a row are identical")
+	}
+}
+
+// The label must not shift as the spinner animates.
+func TestSpinnerAlwaysTakesFourColumns(t *testing.T) {
+	rng := rand.New(rand.NewSource(7)) //nolint:gosec // test animation
+	for frame := 0; frame < 2*spinnerCycle; frame++ {
+		if got := runewidth.StringWidth(spinnerGlyphs(spinnerCells(frame, rng))); got != 4 {
+			t.Fatalf("frame %d is %d columns wide, want 4", frame, got)
+		}
+	}
+}
+
+func TestSpinnerLettersAreBoldAccentAndNoiseFaintAccent(t *testing.T) {
+	setColorProfile(t, colorprofile.TrueColor)
+	line := formatSpinner("agent · thinking", spinnerCells(6, nil), "#06B6D4")
+
+	const accent = "\x1b[38;2;6;182;212m"
+	if want := ansiBold + accent + "h" + ansiReset; !strings.Contains(line, want) {
+		t.Errorf("the settled letter is not bold accent: %q", line)
+	}
+	if want := ansiFaint + accent; strings.Count(line, want) != 3 {
+		t.Errorf("the three noise cells are not faint accent: %q", line)
+	}
+	if want := "\033[90magent · thinking\033[0m"; !strings.HasSuffix(line, want) {
+		t.Errorf("the label is not dim: %q", line)
+	}
+	if !strings.HasPrefix(line, " ") {
+		t.Errorf("the row is not indented by one space: %q", line)
+	}
+}
+
+func TestSpinnerWithoutAReadableAccentIsCyan(t *testing.T) {
+	setColorProfile(t, colorprofile.TrueColor)
+	line := formatSpinner("agent · thinking", spinnerCells(21, nil), "")
+	if !strings.Contains(line, ansiBold+"\x1b[36m"+"h") {
+		t.Errorf("no cyan fallback: %q", line)
+	}
+}
+
+func TestSpinnerKeepsItsShapeOnATerminalWithoutColor(t *testing.T) {
+	setColorProfile(t, colorprofile.ASCII)
+	line := formatSpinner("agent · thinking", spinnerCells(21, nil), "#06B6D4")
+	if strings.Contains(line, "38;") || strings.Contains(line, "[36m") {
+		t.Errorf("accent color on a terminal without color: %q", line)
+	}
+	if got := stripANSI(line); got != " hash agent · thinking" {
+		t.Errorf("row reads %q", got)
 	}
 }
 
@@ -120,19 +173,6 @@ func indexString(values []string, want string) int {
 		}
 	}
 	return -1
-}
-
-type scriptedIntn struct {
-	values []int
-}
-
-func (s *scriptedIntn) Intn(n int) int {
-	if s == nil || len(s.values) == 0 {
-		return 0
-	}
-	value := s.values[0]
-	s.values = s.values[1:]
-	return value % n
 }
 
 // An agent's error message is drawn inert: an escape sequence in it shows

@@ -5,28 +5,32 @@ import (
 	"io"
 	"strings"
 
-	"github.com/mattn/go-runewidth"
-
 	"github.com/tfcace/hash/internal/termtext"
 )
 
-var agentStatusReplacementPool = []string{
-	"░",
-	"▒",
-	"▓",
-	"█",
-	"-",
-	"\\",
-	"|",
-	"/",
-	"+",
-	"*",
-	"h",
-	"a",
-	"s",
-	"h",
-	"$",
-	"#",
+// The spinner is four cells in which noise resolves, left to right, into the
+// shell's name, holds, dissolves, and starts over.
+const (
+	spinnerName = "hash"
+
+	spinnerFirstLetter = 6  // frames of pure noise before the first letter settles
+	spinnerLetterStep  = 5  // frames between one letter settling and the next
+	spinnerDissolveAt  = 38 // frame the settled name starts to dissolve
+	spinnerCycle       = 46 // frames in one whole cycle, about 3.7s at 80ms a frame
+)
+
+// spinnerNoise is what a cell shows before its letter settles. No glyph is a
+// letter of the name, so noise never reads as a settled cell.
+var spinnerNoise = []string{"░", "▒", "▓", "█", "-", "\\", "|", "/", "+", "*", "$", "#"}
+
+// spinnerDissolve is what every cell shows, two frames each, as the name
+// fades before the next cycle.
+var spinnerDissolve = []string{"▓", "▒", "░", " "}
+
+// spinnerCell is one column of the spinner: settled once it shows its letter.
+type spinnerCell struct {
+	glyph   string
+	settled bool
 }
 
 type agentStatusRandom interface {
@@ -118,34 +122,55 @@ func NewResponseUI(out io.Writer) *ResponseUI {
 	}
 }
 
-func selectAgentStatusMotion(frame int, rng agentStatusRandom) string {
-	if len(agentStatusReplacementPool) == 0 {
-		return ""
+// spinnerCells is the spinner at a frame. Noise is picked by rng, or by the
+// frame when there is none.
+func spinnerCells(frame int, rng agentStatusRandom) []spinnerCell {
+	at := frame % spinnerCycle
+	cells := make([]spinnerCell, 0, len(spinnerName))
+	for i, letter := range spinnerName {
+		switch {
+		case at >= spinnerDissolveAt:
+			step := min((at-spinnerDissolveAt)/2, len(spinnerDissolve)-1)
+			cells = append(cells, spinnerCell{glyph: spinnerDissolve[step]})
+		case at >= spinnerFirstLetter+i*spinnerLetterStep:
+			cells = append(cells, spinnerCell{glyph: string(letter), settled: true})
+		case rng != nil:
+			cells = append(cells, spinnerCell{glyph: spinnerNoise[rng.Intn(len(spinnerNoise))]})
+		default:
+			cells = append(cells, spinnerCell{glyph: spinnerNoise[(frame*7+i*5)%len(spinnerNoise)]})
+		}
 	}
-	if rng != nil {
-		return agentStatusReplacementPool[rng.Intn(len(agentStatusReplacementPool))]
-	}
-	return agentStatusReplacementPool[frame%len(agentStatusReplacementPool)]
+	return cells
 }
 
 // spinnerFrame is one spinner frame fitted to the pane. The frame is
 // redrawn with \r every tick; one that wraps leaves a row behind each time.
-func spinnerFrame(text, motion string) string {
+func spinnerFrame(text string, cells []spinnerCell, accent string) string {
 	if budget := rowBudget(terminalColumns()); budget > 0 {
-		used := 1 // leading space
-		if motion != "" {
-			used += runewidth.StringWidth(motion) + 1
-		}
-		text = fitText(text, budget-used)
+		text = fitText(text, budget-len(cells)-2) // the leading space, the cells, a space
 	}
-	return formatAgentStatusMotion(text, motion)
+	return formatSpinner(text, cells, accent)
 }
 
-func formatAgentStatusMotion(text, motion string) string {
-	if motion == "" {
-		return fmt.Sprintf(" \033[90m%s\033[0m", text)
+// formatSpinner draws the cells and the label: settled letters in the bold
+// accent, noise in the same accent drawn faint, the label gray. An accent the terminal
+// cannot be given (none extracted yet) falls back to cyan.
+func formatSpinner(text string, cells []spinnerCell, accent string) string {
+	color := fgCode(accent)
+	if color == "" {
+		color = fgCode("6")
 	}
-	return fmt.Sprintf(" %s%s\033[0m \033[90m%s\033[0m", agentConversationLiveRailStyle, motion, text)
+	var b strings.Builder
+	b.WriteString(" ")
+	for _, c := range cells {
+		if c.settled {
+			b.WriteString(ansiBold + color + c.glyph + ansiReset)
+		} else {
+			b.WriteString(ansiFaint + color + c.glyph + ansiReset)
+		}
+	}
+	b.WriteString(" \033[90m" + text + "\033[0m")
+	return b.String()
 }
 
 // StartProgress starts the OSC 9;4 progress bar without showing text.

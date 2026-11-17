@@ -68,29 +68,6 @@ func TestContextCollection_SelectedItems(t *testing.T) {
 	}
 }
 
-func TestContextCollection_SizeStatus(t *testing.T) {
-	tests := []struct {
-		selected int
-		max      int
-		want     string
-	}{
-		{1000, 8192, "green"},  // < 50%
-		{5000, 8192, "yellow"}, // 50-80%
-		{7000, 8192, "red"},    // > 80%
-	}
-
-	for _, tt := range tests {
-		collection := &Collection{
-			Items:        []Item{{SizeBytes: tt.selected, Selected: true}},
-			MaxSizeBytes: tt.max,
-		}
-		got := collection.SizeStatus()
-		if got != tt.want {
-			t.Errorf("SizeStatus() with %d/%d = %q, want %q", tt.selected, tt.max, got, tt.want)
-		}
-	}
-}
-
 func TestCategory_String(t *testing.T) {
 	tests := []struct {
 		cat  Category

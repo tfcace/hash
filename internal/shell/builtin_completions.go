@@ -8,10 +8,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/tfcace/hash/internal/completion"
+	"github.com/tfcace/hash/internal/table"
+	"github.com/tfcace/hash/internal/termtext"
 	"github.com/tfcace/hash/internal/tilde"
 )
 
@@ -81,20 +84,24 @@ func (s *Shell) completionsList() error {
 		return nil
 	}
 
-	fmt.Fprintln(s.out(), "Completion plugins:")
+	fmt.Fprintln(s.out(), completionsTable(infos, rowBudget(terminalColumns())))
+	fmt.Fprintf(s.out(), "\nUser plugins live in %s\n", completionsSpecsDirDisplay())
+	return nil
+}
+
+// completionsTable draws the registered plugins as a table at most width
+// columns wide (below 1: no limit), as a reply draws its tables.
+func completionsTable(infos []completion.PluginInfo, width int) string {
+	rows := [][]string{{"Command", "Spec", "Origin", "Rules"}}
 	for _, info := range infos {
 		origin := "user"
 		if info.Builtin {
 			origin = "built-in"
 		}
-		rules := "rule"
-		if info.Rules != 1 {
-			rules = "rules"
-		}
-		fmt.Fprintf(s.out(), "  %-14s %s (%s, %d %s)\n", info.Command, info.SpecName, origin, info.Rules, rules)
+		// A user's spec names its commands: its text is drawn inert.
+		rows = append(rows, []string{termtext.Inert(info.Command), termtext.Inert(info.SpecName), origin, strconv.Itoa(info.Rules)})
 	}
-	fmt.Fprintf(s.out(), "\nUser plugins live in %s\n", completionsSpecsDirDisplay())
-	return nil
+	return table.Render(rows, []table.Align{table.Left, table.Left, table.Left, table.Right}, width)
 }
 
 func (s *Shell) completionsReload() error {

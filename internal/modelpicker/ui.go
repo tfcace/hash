@@ -9,15 +9,24 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
+	"github.com/mattn/go-runewidth"
+
 	"github.com/tfcace/hash/internal/agent"
+	"github.com/tfcace/hash/internal/listui"
+	"github.com/tfcace/hash/internal/prompt"
 	"github.com/tfcace/hash/internal/termtext"
 )
 
 // PickerUI is a single-select TUI listing the agent's available models.
 type PickerUI struct {
-	models    []agent.ModelOption
-	current   string // value of the currently active model
-	cursor    int
+	// Palette colors the picker; the shell sets it to its own.
+	Palette prompt.Palette
+
+	models  []agent.ModelOption
+	current string // value of the currently active model
+	cursor  int
+	done    bool // the picker ended, confirmed or not
+	// confirmed is whether the picker ended on enter.
 	confirmed bool
 	width     int
 	height    int
@@ -34,6 +43,7 @@ func NewPickerUI(models []agent.ModelOption, current string) *PickerUI {
 		}
 	}
 	return &PickerUI{
+		Palette: prompt.DefaultPalette(),
 		models:  models,
 		current: current,
 		cursor:  cursor,
@@ -74,20 +84,25 @@ func (ui *PickerUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyPressMsg:
 		switch msg.String() {
 		case "ctrl+c", "esc", "q":
-			ui.confirmed = false
+			ui.done, ui.confirmed = true, false
 			return ui, tea.Quit
 		case "enter":
-			ui.confirmed = true
+			ui.done, ui.confirmed = true, true
 			return ui, tea.Quit
 		case "up", "k":
-			if ui.cursor > 0 {
-				ui.cursor--
-			}
+			ui.cursor--
 		case "down", "j":
-			if ui.cursor < len(ui.models)-1 {
-				ui.cursor++
-			}
+			ui.cursor++
+		case "pgup":
+			ui.cursor -= listui.Page(ui.height)
+		case "pgdown":
+			ui.cursor += listui.Page(ui.height)
+		case "home":
+			ui.cursor = 0
+		case "end":
+			ui.cursor = len(ui.models) - 1
 		}
+		ui.cursor = max(min(ui.cursor, len(ui.models)-1), 0)
 	case tea.WindowSizeMsg:
 		ui.width = msg.Width
 		ui.height = msg.Height
@@ -95,49 +110,87 @@ func (ui *PickerUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return ui, nil
 }
 
-// View implements tea.Model.
+// pickerKeys are the keys the picker answers to: the foot shows the ones
+// that fit.
+var pickerKeys = []string{"↑/↓", "enter select", "esc cancel"}
+
+// View implements tea.Model. The picker draws inline, on the frame every
+// hash surface shares, and takes its rows with it when it closes.
 func (ui *PickerUI) View() tea.View {
-	var b strings.Builder
+	if ui.done {
+		return tea.NewView("")
+	}
+	return tea.NewView(strings.Join(ui.rows(), "\n"))
+}
 
-	// Palette and row structure mirror the context picker (internal/context/ui.go)
-	// so the two TUIs look identical.
-	headerStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6"))
-	selectedStyle := lipgloss.NewStyle().Background(lipgloss.Color("4")).Foreground(lipgloss.Color("15"))
-	normalStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("7"))
-	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
-	checkStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
+// rows is the open picker: the model in use on the title row, the models
+// with the one in use marked, and the keys.
+func (ui *PickerUI) rows() []string {
+	accent := lipgloss.NewStyle().Foreground(lipgloss.Color(ui.Palette.Primary))
+	dim := lipgloss.NewStyle().Foreground(lipgloss.Color(ui.Palette.Dim))
+	bar := dim.Render("│") + " "
 
-	fmt.Fprintf(&b, "%s\n\n", headerStyle.Render("Select agent model:"))
-
+	// Names and descriptions come from the agent: drawn inert, on one row.
+	labels := make([]string, len(ui.models))
+	labelWidth, inUse := 0, ""
 	for i, m := range ui.models {
-		// Mark the active model with a checkbox, like the context picker.
-		check := "[ ]"
+		labels[i] = termtext.OneLine(m.Name)
+		if labels[i] == "" {
+			labels[i] = termtext.OneLine(m.Value)
+		}
+		labelWidth = max(labelWidth, runewidth.StringWidth(labels[i]))
 		if isCurrent(m, ui.current) {
-			check = checkStyle.Render("[x]")
-		}
-
-		// Names and descriptions come from the agent: drawn inert.
-		label := m.Name
-		if label == "" {
-			label = m.Value
-		}
-		label = termtext.OneLine(label)
-
-		line := fmt.Sprintf("%s %s", check, label)
-		if m.Description != "" {
-			line = fmt.Sprintf("%s %s %s", check, label, dimStyle.Render(termtext.OneLine(m.Description)))
-		}
-
-		if i == ui.cursor {
-			fmt.Fprintf(&b, "> %s\n", selectedStyle.Render(line))
-		} else {
-			fmt.Fprintf(&b, "  %s\n", normalStyle.Render(line))
+			inUse = labels[i]
 		}
 	}
+	// The bar, the cursor and the mark take six columns; the row stops a
+	// column short of the pane.
+	room := max(ui.width-7, 8)
+	labelWidth = min(labelWidth, room)
 
-	fmt.Fprintf(&b, "\n%s", dimStyle.Render("↑↓ to move · enter to select · esc to cancel"))
+	title := dim.Render("┌ ") + accent.Bold(true).Render("model")
+	if inUse != "" {
+		title += dim.Render(" · ") + termtext.Truncate(inUse, max(ui.width-len("┌ model · ")-1, 4), "...")
+	}
 
-	v := tea.NewView(b.String())
-	v.AltScreen = true
-	return v
+	list := make([]string, len(ui.models))
+	for i, m := range ui.models {
+		label := termtext.Truncate(labels[i], labelWidth, "...")
+		mark, circle := "  ", dim.Render("○")
+		if isCurrent(m, ui.current) {
+			circle = accent.Render("●")
+		}
+		desc := ""
+		if left := room - labelWidth - 2; m.Description != "" && left > 3 {
+			label += strings.Repeat(" ", labelWidth-runewidth.StringWidth(label))
+			desc = "  " + dim.Render(termtext.Truncate(termtext.OneLine(m.Description), left, "..."))
+		}
+		if i == ui.cursor {
+			mark, label = accent.Render("›")+" ", lipgloss.NewStyle().Bold(true).Render(label)
+		}
+		list[i] = bar + mark + circle + " " + label + desc
+	}
+
+	rows := []string{title}
+	shown := len(list)
+	if limit := listui.FrameRows(ui.height); limit > 0 {
+		shown = limit - 2
+	}
+	rows = append(rows, listui.Window(list, ui.cursor, shown, func(hidden int, above bool) string {
+		if above {
+			return bar + dim.Render(fmt.Sprintf("↑ %d more", hidden))
+		}
+		return bar + dim.Render(fmt.Sprintf("↓ %d more", hidden))
+	})...)
+	return append(rows, dim.Render(ui.foot()))
+}
+
+// foot is the frame's last row: the keys, as many whole ones as fit.
+func (ui *PickerUI) foot() string {
+	for n := len(pickerKeys); ; n-- {
+		row := "└─ " + strings.Join(pickerKeys[:n], " · ")
+		if n == 1 || runewidth.StringWidth(row) < ui.width {
+			return row
+		}
+	}
 }

@@ -1,6 +1,8 @@
 package markdown
 
 import (
+	"github.com/mattn/go-runewidth"
+
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -58,14 +60,14 @@ func TestWrapper_KeepsLongWordsWhole(t *testing.T) {
 
 // Code is not word-wrapped: a newline hash inserts would become part of
 // the code when copied. Tabs expand from where the code starts, not from
-// the code block's indent.
+// the code block's bar.
 func TestWrapper_LeavesCodeLinesWhole(t *testing.T) {
-	code := codeLinePrefix + "if x { return \"a long string literal\" }" + reset + "\n"
+	code := CodeLinePrefix + "if x { return \"a long string literal\" }" + reset + "\n"
 	if got := wrapAll(12, code); got != code {
 		t.Errorf("code line was wrapped: %q", got)
 	}
-	got := stripAnsi(wrapAll(40, codeLinePrefix+"\tx"+reset+"\n"+codeLinePrefix+"\t\ty"+reset+"\n"))
-	if want := "      x\n          y\n"; got != want {
+	got := stripAnsi(wrapAll(40, CodeLinePrefix+"\tx"+reset+"\n"+CodeLinePrefix+"\t\ty"+reset+"\n"))
+	if want := "│     x\n│         y\n"; got != want {
 		t.Errorf("tabs = %q, want %q", got, want)
 	}
 }
@@ -105,7 +107,7 @@ var wrapCorpus = []string{
 	"aaa bbb ccc ddd eee fff\n",
 	"  \x1b[36m•\x1b[0m one \x1b[1mtwo three\x1b[0m four five six\n",
 	"日本語テキスト 🚀👍🏽 https://example.com/a/very/long/path\n",
-	codeLinePrefix + "\tcode with\ttabs and words" + reset + "\n",
+	CodeLinePrefix + "\tcode with\ttabs and words" + reset + "\n",
 	"\x1b[9", // a lone escape prefix
 	"  plain indented words that wrap\n",
 	"abcdefghijklmnopqrstuvwxyz abc\n",
@@ -136,7 +138,7 @@ func TestWrapper_ChunkSplitInvariant(t *testing.T) {
 // any row and code, which hash leaves for the terminal to wrap.
 func TestWrapper_RowsFitWidth(t *testing.T) {
 	for _, doc := range wrapCorpus {
-		if strings.Contains(doc, codeLinePrefix) {
+		if strings.Contains(doc, CodeLinePrefix) {
 			continue
 		}
 		for _, width := range []int{5, 8, 13, 20} {
@@ -180,7 +182,9 @@ func FuzzWrapper(f *testing.F) {
 }
 
 // wrapWords splits a row where the wrapper may break it: at spaces and tabs.
+// The bar a quote row opens with stays with the word after it.
 func wrapWords(row string) []string {
+	row = strings.TrimPrefix(row, "│ ") // a bar is on every row: it is not a word
 	return strings.FieldsFunc(row, func(r rune) bool { return r == ' ' || r == '\t' })
 }
 
@@ -191,8 +195,13 @@ func TestWrapper_FlushAtLineStartKeepsCodeDetection(t *testing.T) {
 	w := NewWrapper(12)
 	w.Write("text\n")
 	w.Flush()
-	code := codeLinePrefix + "a long code line" + reset + "\n"
+	code := CodeLinePrefix + "a long code line" + reset + "\n"
 	if got := w.Write(code); got != code {
 		t.Fatalf("code line after Flush = %q, want it unwrapped %q", got, code)
 	}
+}
+
+// displayWidth is the number of columns s occupies.
+func displayWidth(s string) int {
+	return runewidth.StringWidth(s)
 }

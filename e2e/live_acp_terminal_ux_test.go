@@ -113,7 +113,7 @@ interactive = []
 		select {
 		case <-transcript.update:
 			plain := stripLiveTerminalANSI(transcript.String())
-			if offset := strings.LastIndex(plain, "Agent wants to run"); offset > permissionAt {
+			if offset := strings.LastIndex(plain, "permission · "); offset > permissionAt {
 				permissionAt = offset
 				time.Sleep(50 * time.Millisecond)
 				if _, err := io.WriteString(terminal, "y\r"); err != nil {

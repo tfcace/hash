@@ -19,8 +19,8 @@ func TestErrorHandler_HandleNotExecutable(t *testing.T) {
 
 	h.HandleNotExecutable("./deploy.sh", "Permission denied")
 
-	for _, want := range []string{"./deploy.sh: Permission denied", "?? to explain"} {
-		if !strings.Contains(out.String(), want) {
+	for _, want := range []string{"✗ ./deploy.sh · Permission denied", "?? to explain"} {
+		if !strings.Contains(stripANSI(out.String()), want) {
 			t.Errorf("output should contain %q, got:\n%s", want, out.String())
 		}
 	}

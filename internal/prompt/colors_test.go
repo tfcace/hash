@@ -86,3 +86,25 @@ func TestPalette_Styles(t *testing.T) {
 		t.Error("PrimaryStyle should render text")
 	}
 }
+
+// A prompt shows no warning color, so the palette carries one of its own.
+func TestDefaultPaletteHasAWarningColor(t *testing.T) {
+	if DefaultPalette().Warning == "" {
+		t.Error("no warning color")
+	}
+	if got := ExtractPaletteFromOutputs("", "").Warning; got != DefaultPalette().Warning {
+		t.Errorf("an extracted palette's warning = %q, want the default", got)
+	}
+}
+
+// Secondary text is the terminal's own gray, so it follows the terminal's
+// theme as the rest of hash's gray does, instead of a fixed color that
+// matches one theme.
+func TestDefaultPaletteDimIsTheTerminalsGray(t *testing.T) {
+	if got := DefaultPalette().Dim; got != "8" {
+		t.Errorf("Dim = %q, want the terminal's bright black (8)", got)
+	}
+	if got := ExtractPaletteFromOutputs("", "").Dim; got != "8" {
+		t.Errorf("an extracted palette's Dim = %q", got)
+	}
+}

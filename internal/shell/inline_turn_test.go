@@ -180,7 +180,7 @@ func TestInlineTurn_ToolPermissionIsDeniedWithANotice(t *testing.T) {
 	if allowed || always {
 		t.Errorf("permission = %v, %v; want denied in an inline turn", allowed, always)
 	}
-	if out := screen.String(); strings.Contains(out, "Agent wants to run") || strings.Contains(out, "agent · running") {
+	if out := screen.String(); strings.Contains(out, permissionTitle) || strings.Contains(out, "agent · running") {
 		t.Errorf("the turn drew over the inline editor: %q", out)
 	}
 	keys.Write([]byte{0x03, 0x03}) // clear the line, then leave it
