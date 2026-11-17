@@ -251,3 +251,47 @@ func TestTextStreamFromEvents_StreamsAPlainFillAsItArrives(t *testing.T) {
 	close(events)
 	close(errs)
 }
+
+// A reply can quote anything, a log full of escape sequences included. None
+// of them may reach the terminal, or the text a later "tab to copy" or
+// "enter to run" takes, however the reply was cut into chunks.
+func TestCollectAgentEventStream_AReplysEscapeSequencesNeverReachTheTerminal(t *testing.T) {
+	chunks := []string{
+		"step 2 FAILED\n\x1b[1A\x1b[2", "Kstep 2 ok\x1b]0;all gr", "een\x07\n",
+		"copy \x1b]52;c;aGk=", "\x07this\r\n", "rm -rf \x1b", "[8m~\x1b[0m\n",
+	}
+	events := make(chan agent.StreamEvent, len(chunks))
+	errCh := make(chan error)
+	for _, c := range chunks {
+		events <- agent.StreamEvent{Type: agent.StreamEventText, Text: c}
+	}
+	close(events)
+	close(errCh)
+
+	var rendered strings.Builder
+	sh := &Shell{}
+	result := sh.collectAgentEventStream(context.Background(), events, errCh, agentStreamCollectionOptions{
+		writeRendered: func(text string) { rendered.WriteString(text) },
+	}, nil)
+
+	want := "step 2 FAILED\nstep 2 ok\ncopy this\nrm -rf ~\n"
+	if result.responseText != want {
+		t.Errorf("responseText = %q, want %q", result.responseText, want)
+	}
+	if got := stripANSI(rendered.String()); got != want {
+		t.Errorf("rendered = %q, want %q", got, want)
+	}
+	for _, live := range []string{"\x1b[1A", "\x1b[2K", "\x1b]", "\x07", "\r", "\x1b[8m"} {
+		if strings.Contains(rendered.String(), live) {
+			t.Errorf("%q reached the terminal: %q", live, rendered.String())
+		}
+	}
+}
+
+// An inline fill becomes part of the command line the user runs: it is
+// text, with no control characters hidden in it.
+func TestTextStreamFromEvents_AnInlineFillCarriesNoEscapeSequences(t *testing.T) {
+	if got, want := ghostFill(t, "--color=\x1b[8", "malways\x1b]0;t", "\x07\r --all\b"), "--color=always --all"; got != want {
+		t.Errorf("fill = %q, want %q", got, want)
+	}
+}

@@ -12,6 +12,7 @@ import (
 	"github.com/tfcace/hash/internal/agent"
 	"github.com/tfcace/hash/internal/editor"
 	"github.com/tfcace/hash/internal/markdown"
+	"github.com/tfcace/hash/internal/termtext"
 	"github.com/tfcace/hash/internal/trace"
 )
 
@@ -140,7 +141,8 @@ func textStreamFromEvents(ctx context.Context, events <-chan agent.StreamEvent, 
 	updates := make(chan editor.GhostStreamUpdate)
 	errCh := make(chan error, 1)
 	go func() {
-		var shown strings.Builder // the fill as the ghost text has it
+		var shown strings.Builder         // the fill as the ghost text has it
+		var replyText termtext.TextFilter // the fill is text: nothing in it may drive the terminal or hide in the line
 		var endErr error
 		defer close(updates)
 		defer close(errCh)
@@ -181,7 +183,7 @@ func textStreamFromEvents(ctx context.Context, events <-chan agent.StreamEvent, 
 					continue
 				}
 				if event.Type == agent.StreamEventText && event.Text != "" {
-					if text := fill.write(event.Text); text != "" && !sendUpdate(editor.GhostStreamUpdate{Text: text}) {
+					if text := fill.write(replyText.Write(event.Text)); text != "" && !sendUpdate(editor.GhostStreamUpdate{Text: text}) {
 						return
 					}
 				} else if event.Type == agent.StreamEventToolCall {
@@ -268,6 +270,9 @@ func (s *Shell) collectAgentEventStream(
 	renderer.Width = opts.wrapWidth
 	renderer.Theme = markdownTheme(s.colorPalette)
 	sanitizer := newLegacyAgentMarkerSanitizer()
+	// A reply is text: what it quotes must not drive the terminal, here or
+	// from the response a later copy or run takes.
+	var replyText termtext.TextFilter
 	wrapper := markdown.NewWrapper(opts.wrapWidth)
 
 	// The turn's trace pairs each raw chunk with what hash drew for it, so a
@@ -336,7 +341,7 @@ func (s *Shell) collectAgentEventStream(
 			}
 			switch event.Type {
 			case agent.StreamEventText:
-				cleanText := sanitizer.Write(event.Text)
+				cleanText := sanitizer.Write(replyText.Write(event.Text))
 				appendResponse(cleanText)
 				chunkRendered.Reset()
 				writeRendered(wrapper.Write(renderer.Write(cleanText) + renderer.Flush()))
