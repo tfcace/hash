@@ -1,7 +1,6 @@
 package shell
 
 import (
-	"bytes"
 	"strings"
 	"sync"
 	"testing"
@@ -51,10 +50,10 @@ func TestSpinner_DrawsNothingOnceTheRowIsTaken(t *testing.T) {
 	var screen lockedBuffer
 	aoc := NewAgentOutputCoordinator(&screen)
 	aoc.ShowState(AgentStateThinking)
-	time.Sleep(100 * time.Millisecond) // a frame
+	waitFor(t, func() bool { return screen.String() != "" }) // a frame
 	aoc.TakeRow()
 	drawn := len(screen.String())
-	time.Sleep(200 * time.Millisecond)
+	time.Sleep(200 * time.Millisecond) // time enough for a late frame
 	if after := screen.String()[drawn:]; after != "" {
 		t.Errorf("the spinner drew %q after its row was taken", after)
 	}
@@ -66,11 +65,9 @@ func TestSpinner_ShowsEachState(t *testing.T) {
 		var buf lockedBuffer
 		aoc := NewAgentOutputCoordinator(&buf)
 		aoc.ShowState(state)
-		time.Sleep(100 * time.Millisecond) // a frame
+		// A frame is drawn on a timer: wait for it, however late it is.
+		waitFor(t, func() bool { return strings.Contains(buf.String(), state.String()) })
 		aoc.TakeRow()
-		if !bytes.Contains([]byte(buf.String()), []byte(state.String())) {
-			t.Errorf("spinner for %v drew %q", state, buf.String())
-		}
 	}
 }
 
@@ -87,7 +84,7 @@ func TestSpinner_CarriesOnWhereItWasAfterARowInterruptsIt(t *testing.T) {
 	aoc.TakeRow()
 	drawn := len(screen.String())
 	aoc.ShowState(AgentStateThinking)
-	time.Sleep(100 * time.Millisecond) // a frame
+	waitFor(t, func() bool { return screen.String()[drawn:] != "" }) // a frame
 	aoc.TakeRow()
 	if after := stripANSI(screen.String()[drawn:]); !strings.Contains(after, " hash agent · thinking") {
 		t.Errorf("the restarted spinner drew %q, want the settled name", after)

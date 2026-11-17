@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/creack/pty"
+	"golang.org/x/term"
 )
 
 // endedProcess runs a shell command and returns how it ended.
@@ -240,6 +241,7 @@ func ptyLine(t *testing.T, line string) (master *os.File, done <-chan struct{}) 
 		t.Skipf("pty unavailable: %v", err)
 	}
 	go io.Copy(io.Discard, outMaster) //nolint:errcheck // drain the terminal
+	typedKeysReachTheLine(t, slave)
 	dup, err := syscall.Dup(int(slave.Fd()))
 	if err != nil {
 		t.Fatalf("dup: %v", err)
@@ -312,6 +314,18 @@ func TestExecute_PTYCommandDyingOfCtrlCEndsTheLine(t *testing.T) {
 	}
 }
 
+// typedKeysReachTheLine makes the test's terminal raw from the start. The
+// executor makes it raw only once the command runs, and a Ctrl+C typed in
+// between meets a cooked terminal: a real one signals the shell, which
+// ends the line, but this one is nobody's controlling terminal, so the key
+// was dropped and the line went on (a failure seen on loaded CI runners).
+func typedKeysReachTheLine(t *testing.T, terminal *os.File) {
+	t.Helper()
+	if _, err := term.MakeRaw(int(terminal.Fd())); err != nil {
+		t.Fatalf("raw terminal: %v", err)
+	}
+}
+
 // waitForPath waits for path to exist, under a deadline.
 func waitForPath(t *testing.T, path string) {
 	t.Helper()
@@ -345,6 +359,7 @@ func TestExecute_PTYCommandDyingOfCtrlCEndsTheLineWithNoSignal(t *testing.T) {
 		t.Skipf("pty unavailable: %v", err)
 	}
 	go io.Copy(io.Discard, outMaster) //nolint:errcheck // drain the terminal
+	typedKeysReachTheLine(t, slave)
 	dup, err := syscall.Dup(int(slave.Fd()))
 	if err != nil {
 		t.Fatalf("dup: %v", err)
