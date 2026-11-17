@@ -75,9 +75,7 @@ func streamSeeds(f *testing.F, add func(doc string)) {
 func FuzzStreamingChunkedFlush(f *testing.F) {
 	streamSeeds(f, func(doc string) { f.Add(doc, []byte{1, 3, 0, 2}) })
 	f.Fuzz(func(t *testing.T, doc string, sizes []byte) {
-		if !utf8.ValidString(doc) {
-			return
-		}
+		doc = replyText(doc)
 		got := streamFlushed(doc, sizes)
 		if want := renderWhole(doc); stripAnsi(got) != stripAnsi(want) {
 			t.Fatalf("chunked text differs for %q\n got: %q\nwant: %q", doc, stripAnsi(got), stripAnsi(want))

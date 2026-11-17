@@ -378,7 +378,7 @@ func (r *StreamingRenderer) tryHeader(line string) string {
 }
 
 // listPrefixRegex matches ordered list items like "1. ", "12. ", etc.
-var listPrefixRegex = regexp.MustCompile(`^(\s*)(\d+)\. (.*)$`)
+var listPrefixRegex = regexp.MustCompile(`^([ \t]*)(\d+)\. (.*)$`)
 
 // tryList checks if line is a list item and returns styled output, or empty string.
 func (r *StreamingRenderer) tryList(line string, complete bool) string {
