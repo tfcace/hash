@@ -30,6 +30,10 @@ type ttySession struct {
 	// leads its session itself.
 	status string
 
+	// read is closed when all the terminal showed has been read: every
+	// process that held the terminal ended.
+	read chan struct{}
+
 	mu  sync.Mutex
 	out bytes.Buffer
 }
@@ -133,7 +137,7 @@ func startTTYOn(t *testing.T, env []string, prog string, args ...string) *ttySes
 		t.Fatal(err)
 	}
 	tty.Close()
-	s := &ttySession{t: t, cmd: cmd, ptmx: ptmx, done: make(chan struct{})}
+	s := &ttySession{t: t, cmd: cmd, ptmx: ptmx, done: make(chan struct{}), read: make(chan struct{})}
 	go s.copyOut()
 	go func() {
 		_ = cmd.Wait()
@@ -150,6 +154,7 @@ func startTTYOn(t *testing.T, env []string, prog string, args ...string) *ttySes
 }
 
 func (s *ttySession) copyOut() {
+	defer close(s.read)
 	buf := make([]byte, 4096)
 	for {
 		n, err := s.ptmx.Read(buf)
@@ -220,6 +225,14 @@ func (s *ttySession) wait(timeout time.Duration) *os.ProcessState {
 	s.t.Helper()
 	select {
 	case <-s.done:
+		// hash's last lines may not have been read yet (seen on a loaded
+		// CI runner: the test judged a terminal missing its last line).
+		// A job that outlives hash keeps the terminal open, so the wait
+		// for its end is short.
+		select {
+		case <-s.read:
+		case <-time.After(time.Second):
+		}
 		return s.cmd.ProcessState
 	case <-time.After(timeout):
 		s.t.Fatalf("hash did not end within %v\nterminal: %q", timeout, s.output())
