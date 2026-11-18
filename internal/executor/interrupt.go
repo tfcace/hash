@@ -18,6 +18,12 @@ import (
 // Ctrl+C typed that soon after a command ended is taken as the command's).
 const lateSIGINT = 100 * time.Millisecond
 
+// sigintArrival bounds the wait for a SIGINT the system says was sent to
+// the shell (foreground.posted): it is on its way through Go's signal
+// delivery, a matter of microseconds, or of far longer on a loaded
+// machine. The bound is for a SIGINT nobody routes after all.
+const sigintArrival = time.Second
+
 // foreground is the external commands the shell waits for, for a SIGINT
 // that reaches a line (InterruptLine). Ctrl+C at a terminal sends SIGINT to
 // the whole foreground process group: the shell and the commands it waits
@@ -30,6 +36,11 @@ type foreground struct {
 	// a command's SIGINT death may have one on its way. Unwatched, none
 	// comes, and nothing waits for it.
 	watched bool
+	// posted reports, and forgets, whether a SIGINT was sent to the shell
+	// since it was last asked: what the system knows before Go has handed
+	// the signal over. Nil where the system cannot say (sigintPosted);
+	// the timing of lateSIGINT is then all there is.
+	posted func() bool
 }
 
 // batch is the foreground commands that run together, one command or the
@@ -74,6 +85,9 @@ func (f *foreground) start() {
 	defer f.mu.Unlock()
 	if f.b.state == batchIdle || f.b.state == batchSettling {
 		f.b = batch{state: batchRunning, arrived: make(chan struct{})}
+		if f.posted != nil {
+			f.posted() // a SIGINT sent before the batch is not its own
+		}
 	}
 	f.b.running++
 }
@@ -82,18 +96,22 @@ func (f *foreground) start() {
 // last command decides: the shell ends when the batch was interrupted and
 // no command of it handled the SIGINT; handled reports that one did. A
 // last command that died of a SIGINT the shell has not taken yet waits a
-// moment for it (lateSIGINT), when the shell's SIGINT is watched.
+// moment for it (lateSIGINT), when the shell's SIGINT is watched. One that
+// ended otherwise, with no SIGINT seen, asks the system whether one was
+// sent (posted): if so the commands handled it, and the line waits for the
+// shell's own to arrive, so that the INT trap it owes runs after this
+// line and not after the next.
 func (f *foreground) end(ps *os.ProcessState) (handled bool) {
 	f.mu.Lock()
 	f.b.note(diedOf(ps, syscall.SIGINT))
-	if f.b.running == 0 && f.b.state == batchSIGINTDeathSeen && f.watched {
-		arrived := f.b.arrived
-		f.mu.Unlock()
-		select {
-		case <-arrived:
-		case <-time.After(lateSIGINT):
+	last := f.b.running == 0 && f.watched
+	switch {
+	case last && f.b.state == batchSIGINTDeathSeen:
+		f.awaitLocked(lateSIGINT)
+	case last && f.b.state == batchRunning && f.posted != nil && f.posted():
+		if f.awaitLocked(sigintArrival) {
+			f.b.caught = true // its commands all ended otherwise
 		}
-		f.mu.Lock()
 	}
 	if f.b.running > 0 { // the batch goes on: a later end decides
 		f.mu.Unlock()
@@ -105,6 +123,21 @@ func (f *foreground) end(ps *os.ProcessState) (handled bool) {
 		end()
 	}
 	return handled
+}
+
+// awaitLocked waits up to wait for the shell's SIGINT to interrupt the
+// batch running, and reports whether it did. Call it with f.mu held; it
+// lets go of it while it waits.
+func (f *foreground) awaitLocked(wait time.Duration) (arrived bool) {
+	b := f.b.arrived
+	f.mu.Unlock()
+	select {
+	case <-b:
+		arrived = true
+	case <-time.After(wait):
+	}
+	f.mu.Lock()
+	return arrived && f.b.arrived == b && f.b.state == batchInterrupted
 }
 
 // note records that one of the batch's commands ended, died of SIGINT or
@@ -160,11 +193,13 @@ func (f *foreground) interrupt(end func()) (taken, handled bool) {
 	return true, false
 }
 
-// watch records that the shell's SIGINT comes to interrupt.
-func (f *foreground) watch() {
+// watch records that the shell's SIGINT comes to interrupt, and posted as
+// the way to ask whether one was sent (nil: there is none).
+func (f *foreground) watch(posted func() bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.watched = true
+	f.posted = posted
 }
 
 // state is where the batch stands, for tests.
@@ -222,5 +257,14 @@ func (e *Executor) endForeground(ps *os.ProcessState) {
 // shell's own SIGINT (lateSIGINT); in an executor whose SIGINT nobody
 // routes it does not.
 func (e *Executor) WatchInterrupts() {
-	e.foreground.watch()
+	sent := sigintPosted()
+	if sent == nil {
+		e.foreground.watch(nil)
+		return
+	}
+	e.foreground.watch(func() bool {
+		// Asked first: it forgets. An ignored SIGINT (trap '' INT) is
+		// never routed, so nothing is on its way.
+		return sent() && !e.IgnoresSignal(syscall.SIGINT)
+	})
 }

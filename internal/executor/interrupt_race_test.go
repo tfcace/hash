@@ -130,3 +130,83 @@ func TestForeground_SIGINTThatLandsJustAfterAHandlerEndedIsItsOwn(t *testing.T) 
 		t.Fatal("a second SIGINT was taken by the ended batch too")
 	}
 }
+
+// Where the system can say that a SIGINT was sent to the shell (posted),
+// a command that handled the Ctrl+C and ended does not leave the shell
+// guessing: the shell's own SIGINT is on its way, and the line waits for
+// it, so the INT trap runs after this command and not after the next. A
+// script under load used to run `echo after $?` first.
+func TestForeground_AHandlersEndWaitsForTheSIGINTTheSystemSaysWasSent(t *testing.T) {
+	handler := endedProcess(t, "exit 3")
+	f := foreground{watched: true, posted: func() bool { return true }}
+	f.start()
+	type result struct{ handled bool }
+	done := make(chan result)
+	go func() { done <- result{f.end(handler.ProcessState)} }()
+
+	select {
+	case <-done:
+		t.Fatal("the line went on before the shell's SIGINT arrived")
+	case <-time.After(50 * time.Millisecond):
+	}
+	ends := 0
+	if taken, _ := f.interrupt(func() { ends++ }); !taken {
+		t.Fatal("the SIGINT found no batch waiting for it")
+	}
+	if r := <-done; !r.handled || ends != 0 {
+		t.Fatalf("handled %v, ends %d; want the INT trap due and the shell going on", r.handled, ends)
+	}
+	if f.state() != batchIdle {
+		t.Fatalf("state %v, want idle: the SIGINT was this batch's", f.state())
+	}
+}
+
+// With no SIGINT sent, nothing waits: a command that just ended costs the
+// line no time.
+func TestForeground_AnEndWithNoSIGINTSentDoesNotWait(t *testing.T) {
+	f := foreground{watched: true, posted: func() bool { return false }}
+	f.start()
+	start := time.Now()
+	if f.end(endedProcess(t, "exit 3").ProcessState) {
+		t.Fatal("a command no SIGINT reached is said to have handled one")
+	}
+	if waited := time.Since(start); waited > sigintArrival/2 {
+		t.Fatalf("end waited %s with no SIGINT on its way", waited)
+	}
+}
+
+// The shell's SIGINT that the system announced but nobody routes (it is
+// ignored, trap ” INT) must not hold the line for good.
+func TestForeground_ASIGINTThatNeverArrivesHoldsTheLineOnlyBriefly(t *testing.T) {
+	f := foreground{watched: true, posted: func() bool { return true }}
+	f.start()
+	ended := endedProcess(t, "exit 0")
+	done := make(chan bool)
+	go func() { done <- f.end(ended.ProcessState) }()
+	select {
+	case handled := <-done:
+		if handled {
+			t.Fatal("a SIGINT that never arrived is said to have been handled")
+		}
+	case <-time.After(sigintArrival + 2*time.Second):
+		t.Fatal("the line waits for good")
+	}
+}
+
+// Only a batch's last command asks: a SIGINT sent while a pipeline runs is
+// for all of it to decide.
+func TestForeground_OnlyTheLastCommandOfABatchAsksWhetherASIGINTWasSent(t *testing.T) {
+	asked := 0
+	f := foreground{watched: true, posted: func() bool { asked++; return false }}
+	f.start()
+	f.start()
+	asked = 0 // the batch's start asked, to forget an earlier SIGINT
+	f.end(endedProcess(t, "exit 0").ProcessState)
+	if asked != 0 {
+		t.Fatalf("asked %d times with a command still running", asked)
+	}
+	f.end(endedProcess(t, "exit 0").ProcessState)
+	if asked != 1 {
+		t.Fatalf("asked %d times at the batch's end, want once", asked)
+	}
+}
