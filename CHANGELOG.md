@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.11.0](https://github.com/tfcace/hash/compare/v0.10.0...v0.11.0) (2026-11-18)
+
+
+### Features
+
+* **ui:** draw every hash surface on one shared frame ([#136](https://github.com/tfcace/hash/issues/136)) ([e2307e9](https://github.com/tfcace/hash/commit/e2307e9ee6ebdf1538772358a6f76157e3f82223))
+
+
+### Bug Fixes
+
+* **agent:** keep escape sequences in a reply from reaching the terminal ([4266f7d](https://github.com/tfcace/hash/commit/4266f7d71b0454262083cbe6a1a1e5f6c73df98c))
+* **executor:** run a script's INT trap right after the command that handled the Ctrl+C ([828362d](https://github.com/tfcace/hash/commit/828362d8c9dfbcb63fab0b9cc7f9e94da1810447))
+* **markdown:** indent a list item by spaces and tabs only ([d5182e0](https://github.com/tfcace/hash/commit/d5182e00d22930de9c7b3d312211082ffad899da))
+
+
+### Dependencies
+
+* bump charm.land/lipgloss/v2 from 2.0.6 to 2.1.0 ([#134](https://github.com/tfcace/hash/issues/134)) ([e7fa08f](https://github.com/tfcace/hash/commit/e7fa08fe05af9810740a768a000fa834ba36ec98))
+* bump github.com/mattn/go-sqlite3 from 1.14.52 to 1.14.53 ([#132](https://github.com/tfcace/hash/issues/132)) ([51d99fe](https://github.com/tfcace/hash/commit/51d99fe3078eea0121a5ee0894074db34d8db942))
+* bump golang.org/x/term from 0.47.0 to 0.48.0 ([#135](https://github.com/tfcace/hash/issues/135)) ([2c6eeda](https://github.com/tfcace/hash/commit/2c6eeda4673204e70bc9ce0e006366a73c918e1c))
+
 ## [0.10.0](https://github.com/tfcace/hash/compare/v0.9.1...v0.10.0) (2026-11-14)
 
 
